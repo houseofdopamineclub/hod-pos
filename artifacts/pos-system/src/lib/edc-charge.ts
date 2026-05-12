@@ -17,6 +17,43 @@ const EDC_CANCEL_URL = `${HOD_FUNCTIONS_BASE}/edcCancelCharge`;
 
 export type EdcVendor = "razorpay" | "pinelabs";
 
+/** Per-night vendor override key — bouncer can flip between vendors mid-shift
+ *  from Door Mode if the venue runs both card machines. Survives a tab
+ *  refresh but is intentionally NOT cross-device-synced (different tablets
+ *  may be paired to different EDCs). */
+const EDC_VENDOR_LS_KEY = "hod.edc.vendor";
+
+/** Build-time default vendor — set `VITE_EDC_VENDOR=pinelabs` to flip the
+ *  default for a venue that runs only Pine Labs. Defaults to Razorpay so
+ *  Phase 1 deployments are unaffected. */
+function getBuildDefaultVendor(): EdcVendor {
+  const raw = String(import.meta.env.VITE_EDC_VENDOR || "razorpay").toLowerCase().trim();
+  return raw === "pinelabs" ? "pinelabs" : "razorpay";
+}
+
+/** Returns the vendor to use for the next charge — runtime localStorage
+ *  override (set by the Door Mode toggle) wins over the build-time default.
+ *  Safe to call during SSR / non-browser contexts. */
+export function getActiveEdcVendor(): EdcVendor {
+  if (typeof window === "undefined") return getBuildDefaultVendor();
+  try {
+    const stored = window.localStorage.getItem(EDC_VENDOR_LS_KEY);
+    if (stored === "razorpay" || stored === "pinelabs") return stored;
+  } catch {}
+  return getBuildDefaultVendor();
+}
+
+/** Persist the bouncer-chosen vendor for this device. */
+export function setActiveEdcVendor(vendor: EdcVendor): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(EDC_VENDOR_LS_KEY, vendor); } catch {}
+}
+
+/** Human-readable vendor label — used in the dialog header and toggle UI. */
+export function edcVendorLabel(vendor: EdcVendor): string {
+  return vendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
+}
+
 export type EdcStatus = "pending" | "success" | "failed" | "cancelled";
 
 export interface EdcTransactionDoc {

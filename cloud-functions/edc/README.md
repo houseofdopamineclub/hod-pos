@@ -9,10 +9,10 @@ All functions are HTTPS, region `asia-south1` (same as the existing `createWalle
 | Function | Trigger | Purpose |
 | --- | --- | --- |
 | `edcChargeRazorpay` | HTTPS POST | Phase 1 — dispatches a charge to the door EDC machine via Razorpay POS Terminal API. Returns `{ txnId }`. Writes `edcTransactions/{txnId}` with `status: "pending"`. |
-| `edcChargePineLabs` | HTTPS POST | Phase 2 placeholder — same contract, routes to Pine Labs Plutus Smart Cloud. Currently returns `{ ok: false, reason: "vendor_disabled" }` until Pine Labs onboarding completes. |
+| `edcChargePineLabs` | HTTPS POST | Same contract as Razorpay — routes to Pine Labs Plutus Smart Cloud (`UploadBilledTransaction`). Returns `{ ok: false, reason: "vendor_disabled" }` only when the venue hasn't set its `PINELABS_*` secrets yet. |
 | `edcCancelCharge` | HTTPS POST | Best-effort cancel of an in-flight charge. Tells the vendor to abort if it can; webhook still authoritative. |
 | `razorpayEdcWebhook` | HTTPS POST | Razorpay POS Terminal callback. HMAC-verifies `X-Razorpay-Signature` against `RAZORPAY_EDC_WEBHOOK_SECRET`, then writes the matching `edcTransactions` doc with `status: "success"` / `"failed"` / `"cancelled"` plus card metadata. |
-| `pineLabsEdcWebhook` | HTTPS POST | Same idea for Pine Labs (Phase 2). |
+| `pineLabsEdcWebhook` | HTTPS POST | Pine Labs Plutus Smart Cloud status callback. HMAC-verifies `X-PineLabs-Signature` (or legacy `X-Plutus-Signature`) against `PINELABS_WEBHOOK_SECRET`, then writes the matching `edcTransactions` doc with status + card metadata. ResponseCode `0` → success, `1` → cancelled, anything else → failed. |
 
 ## Request schema (frontend → function)
 
@@ -72,9 +72,12 @@ Failure:
 | `RAZORPAY_KEY_SECRET` | Same. |
 | `RAZORPAY_EDC_TERMINAL_ID` | Razorpay POS Terminal ID for the door card machine. **Required**. |
 | `RAZORPAY_EDC_WEBHOOK_SECRET` | HMAC secret for `razorpayEdcWebhook` signature verification. **Required**. |
-| `PINELABS_MERCHANT_ID` | Phase 2. |
-| `PINELABS_TERMINAL_ID` | Phase 2. |
-| `PINELABS_WEBHOOK_SECRET` | Phase 2. |
+| `PINELABS_BASE_URL` | Optional — override to `https://www.plutuscloudserviceuat.in:8201` for UAT testing. Defaults to production. |
+| `PINELABS_MERCHANT_ID` | Pine Labs merchant id from the Plutus dashboard. |
+| `PINELABS_STORE_ID` | Pine Labs store id (often the door terminal's pairing id). |
+| `PINELABS_CLIENT_ID` | Pine Labs client / application id. |
+| `PINELABS_SECURITY_TOKEN` | Server-issued security token; rotate via the Plutus dashboard. |
+| `PINELABS_WEBHOOK_SECRET` | HMAC-SHA256 secret for `pineLabsEdcWebhook` signature verification. |
 | `EDC_BOUNCER_PIN_SALT` | Random 32-byte hex string used to hash bouncer PINs server-side. |
 
 ## Security model
@@ -95,16 +98,24 @@ Failure:
 
 ## Deploy checklist
 
-1. Razorpay dashboard → enable POS Terminal API, register the door EDC's
-   Terminal ID, add the webhook URL with the secret above.
-2. Set the secrets above via `firebase functions:secrets:set` (preferred)
+1. **Razorpay** — dashboard → enable POS Terminal API, register the door EDC's
+   Terminal ID, add the webhook URL with `RAZORPAY_EDC_WEBHOOK_SECRET`.
+2. **Pine Labs** (skip if Razorpay-only) — Plutus dashboard → register the
+   door terminal, copy MerchantID / StoreID / ClientID / SecurityToken,
+   set the Status Notification URL to `pineLabsEdcWebhook` with
+   `PINELABS_WEBHOOK_SECRET` configured as the signing secret. Use UAT
+   creds + `PINELABS_BASE_URL=https://www.plutuscloudserviceuat.in:8201`
+   for the first round of testing.
+3. Set the secrets above via `firebase functions:secrets:set` (preferred)
    or `functions:config:set`.
-3. Copy `index.ts` from this folder into `hod-tickets/functions/src/edc/`,
+4. Copy `index.ts` from this folder into `hod-tickets/functions/src/edc/`,
    wire it from `hod-tickets/functions/src/index.ts`, and deploy.
-4. In this repo, set `VITE_EDC=1` for the pos-system build, restart the
-   `artifacts/pos-system: web` workflow, and verify the EDC PIN field
-   appears on the Door Mode "Card" payment selection.
-5. End-to-end test with a ₹1 cover before going live.
+5. In this repo, set `VITE_EDC=1` for the pos-system build (and optionally
+   `VITE_EDC_VENDOR=pinelabs` to default the toggle to Pine Labs), restart
+   the `artifacts/pos-system: web` workflow, and verify the EDC PIN field
+   plus Razorpay/Pine Labs vendor picker appear on the Door Mode "Card"
+   payment selection.
+6. End-to-end test with a ₹1 cover on each enabled vendor before going live.
 
 ## Reference implementation skeleton
 
