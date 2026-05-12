@@ -31,22 +31,43 @@ function getBuildDefaultVendor(): EdcVendor {
   return raw === "pinelabs" ? "pinelabs" : "razorpay";
 }
 
-/** Returns the vendor to use for the next charge — runtime localStorage
- *  override (set by the Door Mode toggle) wins over the build-time default.
+/** Returns true iff this device has a bouncer-chosen vendor override. When
+ *  false, Door Mode should follow the venue-wide Firestore default (and
+ *  fall back to the build-time default if Firestore hasn't loaded yet). */
+export function hasEdcVendorOverride(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const stored = window.localStorage.getItem(EDC_VENDOR_LS_KEY);
+    return stored === "razorpay" || stored === "pinelabs";
+  } catch { return false; }
+}
+
+/** Returns the vendor to use for the next charge — priority is:
+ *    1. per-device localStorage override (bouncer toggle in Door Mode)
+ *    2. venue-wide Firestore default (set in Admin → Settings; passed in here)
+ *    3. build-time `VITE_EDC_VENDOR` (legacy fallback)
  *  Safe to call during SSR / non-browser contexts. */
-export function getActiveEdcVendor(): EdcVendor {
-  if (typeof window === "undefined") return getBuildDefaultVendor();
+export function getActiveEdcVendor(venueDefault?: EdcVendor | null): EdcVendor {
+  if (typeof window === "undefined") return venueDefault || getBuildDefaultVendor();
   try {
     const stored = window.localStorage.getItem(EDC_VENDOR_LS_KEY);
     if (stored === "razorpay" || stored === "pinelabs") return stored;
   } catch {}
-  return getBuildDefaultVendor();
+  return venueDefault || getBuildDefaultVendor();
 }
 
 /** Persist the bouncer-chosen vendor for this device. */
 export function setActiveEdcVendor(vendor: EdcVendor): void {
   if (typeof window === "undefined") return;
   try { window.localStorage.setItem(EDC_VENDOR_LS_KEY, vendor); } catch {}
+}
+
+/** Clear the per-device override so Door Mode falls back to the venue-wide
+ *  default. Useful when a tablet was paired to a specific machine and is
+ *  now shared again. */
+export function clearActiveEdcVendor(): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(EDC_VENDOR_LS_KEY); } catch {}
 }
 
 /** Human-readable vendor label — used in the dialog header and toggle UI. */

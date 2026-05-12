@@ -50,6 +50,7 @@ const HAPPY_HOUR_COL = "posHappyHour";
 const AGG_SETTINGS_COL = "posAggregatorSettings";
 const AGG_ORDERS_COL = "posAggregatorOrders";
 const MENU_OVERRIDES_COL = "posMenuOverrides";
+const VENUE_SETTINGS_COL = "venueSettings";
 
 export function subscribeToTableReservations(
   cb: (data: Record<string, TableReservation>) => void
@@ -356,6 +357,32 @@ export function subscribeToHappyHour(cb: (config: HappyHourConfig | null) => voi
 export async function updateHappyHour(config: Partial<HappyHourConfig>): Promise<void> {
   await setDoc(doc(db, HAPPY_HOUR_COL, "current"), {
     ...config,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
+// ── Venue-wide EDC default vendor ────────────────────────────────────────
+// Owner-managed default card-machine vendor. Stored at
+// `venueSettings/edc.defaultVendor`. Door Mode reads this on load and uses
+// it as the default before the per-device localStorage override applies.
+// Switching here takes effect on the next bouncer who opens Door Mode —
+// no rebuild/redeploy needed.
+export type EdcDefaultVendor = "razorpay" | "pinelabs";
+
+export function subscribeToEdcDefaultVendor(
+  cb: (vendor: EdcDefaultVendor | null) => void,
+): Unsubscribe {
+  return onSnapshot(doc(db, VENUE_SETTINGS_COL, "edc"), (snap) => {
+    if (!snap.exists()) { cb(null); return; }
+    const v = (snap.data() as { defaultVendor?: string }).defaultVendor;
+    cb(v === "pinelabs" || v === "razorpay" ? v : null);
+  }, () => { cb(null); });
+}
+
+export async function setEdcDefaultVendor(vendor: EdcDefaultVendor, updatedBy?: string): Promise<void> {
+  await setDoc(doc(db, VENUE_SETTINGS_COL, "edc"), {
+    defaultVendor: vendor,
+    updatedBy: updatedBy || "",
     updatedAt: serverTimestamp(),
   }, { merge: true });
 }

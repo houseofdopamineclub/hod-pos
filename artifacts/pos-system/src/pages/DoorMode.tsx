@@ -12,6 +12,7 @@ import {
   searchBookingsAndAggregators, type CrossSourceBooking,
   type HodBooking, type HodGuestlistEntry, type HodTableReservation, type HodCover,
 } from "@/lib/firestore-hod";
+import { subscribeToEdcDefaultVendor } from "@/lib/firestore";
 
 // L-A1 — Manager PIN gate for door-side aggregator booking creation when
 // the door agent applies a discount higher than the source's default by more
@@ -29,7 +30,7 @@ import { ALL_TABLES, SECTION_LABELS } from "@/lib/tables-config";
 import { FEATURES } from "@/lib/feature-flags";
 import {
   startEdcCharge, subscribeToEdcTransaction, cancelEdcCharge,
-  getActiveEdcVendor, setActiveEdcVendor, edcVendorLabel,
+  getActiveEdcVendor, setActiveEdcVendor, hasEdcVendorOverride, edcVendorLabel,
   EDC_CLIENT_TIMEOUT_MS,
   type EdcVendor, type EdcTransactionDoc,
 } from "@/lib/edc-charge";
@@ -174,7 +175,21 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   // can be toggled per-device from the picker below — covers the case where
   // a venue runs both card machines and the bouncer picks whichever is free.
   const [edcPin, setEdcPin] = useState("");
-  const [edcVendor, setEdcVendor] = useState<EdcVendor>(getActiveEdcVendor());
+  // Initial value uses build-default + any per-device override; the
+  // venue-wide Firestore default arrives via subscription below and only
+  // overrides state when this device has NOT explicitly picked a vendor.
+  const [venueDefaultVendor, setVenueDefaultVendor] = useState<EdcVendor | null>(null);
+  const [edcVendor, setEdcVendor] = useState<EdcVendor>(() => getActiveEdcVendor(null));
+  useEffect(() => {
+    if (!FEATURES.edc) return;
+    const unsub = subscribeToEdcDefaultVendor((v) => {
+      setVenueDefaultVendor(v);
+      // Only follow the venue default when this device has not explicitly
+      // overridden the vendor — preserves bouncer's mid-shift toggle.
+      if (v && !hasEdcVendorOverride()) setEdcVendor(v);
+    });
+    return () => unsub();
+  }, []);
   // dueAmount = what the EDC machine actually charges (cover − online prepayment).
   // fullAmount = the cover amount to record on activation (covers add-ons + prepaid).
   // We must NOT pass dueAmount to activation, or the wallet under-activates
@@ -470,11 +485,12 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
                   {(["razorpay", "pinelabs"] as const).map((v) => {
                     const sel = edcVendor === v;
+                    const isVenueDefault = venueDefaultVendor === v;
                     return (
                       <button key={v} type="button"
                         onClick={() => { setEdcVendor(v); setActiveEdcVendor(v); }}
                         style={{ padding: "7px 8px", borderRadius: 7, border: `${sel ? 2 : 1}px solid ${sel ? "#A855F7" : "rgba(168,85,247,.3)"}`, background: sel ? "rgba(168,85,247,.18)" : "rgba(255,255,255,.04)", color: sel ? "#fff" : "rgba(255,255,255,.65)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                        {v === "razorpay" ? "Razorpay POS" : "Pine Labs"}
+                        {v === "razorpay" ? "Razorpay POS" : "Pine Labs"}{isVenueDefault ? " ★" : ""}
                       </button>
                     );
                   })}

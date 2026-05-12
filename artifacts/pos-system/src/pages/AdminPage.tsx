@@ -14,7 +14,9 @@ import {
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
   addStaffMember, updateStaffMember, deleteStaffMember,
   logAudit,
+  subscribeToEdcDefaultVendor, setEdcDefaultVendor, type EdcDefaultVendor,
 } from "@/lib/firestore";
+import { FEATURES } from "@/lib/feature-flags";
 import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
@@ -38,7 +40,7 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [happyHour, setHappyHour] = useState<HappyHourConfig | null>(null);
   const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
@@ -47,15 +49,41 @@ export default function AdminPage() {
   const [newStaff, setNewStaff] = useState({ name: "", pin: "", role: "steward" as StaffRole });
   const [editingHH, setEditingHH] = useState(false);
   const [hhForm, setHhForm] = useState({ enabled: false, days: [0,1,2,3,4,5,6], startTime: "12:00", endTime: "20:00", discountPercent: 10 });
+  const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
+  const [edcSaving, setEdcSaving] = useState(false);
+  const [edcSaveMsg, setEdcSaveMsg] = useState("");
 
   useEffect(() => {
     const unsubs = [
       subscribeToHappyHour(setHappyHour),
       subscribeToAggregatorSettings(setAggSettings),
       subscribeToMenuOverrides(setMenuOverridesState),
+      subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
     ];
     return () => unsubs.forEach(u => u());
   }, []);
+
+  // Owner-facing change to the venue-wide default card machine. Door Mode
+  // picks this up live via its own subscription on the next mount; bouncers
+  // who already overrode the vendor on their tablet keep their override.
+  const handleEdcVendorChange = async (vendor: EdcDefaultVendor) => {
+    if (vendor === edcDefaultVendor) return;
+    setEdcSaving(true); setEdcSaveMsg("");
+    try {
+      await setEdcDefaultVendor(vendor, currentStaff?.name || "admin");
+      if (currentStaff) {
+        await logAudit({
+          action: "edc_default_vendor_changed",
+          staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+          details: { from: edcDefaultVendor || "(unset)", to: vendor },
+        });
+      }
+      setEdcSaveMsg(`✅ Default card machine set to ${vendor === "razorpay" ? "Razorpay POS" : "Pine Labs"}.`);
+    } catch (e: any) {
+      setEdcSaveMsg(`❌ Save failed: ${e?.message || e}`);
+    }
+    setEdcSaving(false);
+  };
 
   useEffect(() => {
     if (happyHour) {
@@ -270,10 +298,10 @@ export default function AdminPage() {
       </header>
 
       <div className="flex gap-1 px-4 py-2" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
-        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "staff", "happy-hour", "aggregator", "tablet"] as const).map((t) => (
+        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "staff", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -529,6 +557,38 @@ export default function AdminPage() {
               <div>3. Mixed orders auto-split: e.g. 1 beer + 1 tikka on a Rooftop tablet → beer prints at RT bar, tikka prints in kitchen, no duplication.</div>
               <div>4. Works offline (Firestore SDK queues writes); recovers if a floor PC reboots.</div>
               <div className="pt-2 border-t" style={{ borderColor: "hsl(240 8% 13%)" }}>Full architecture: see <code>replit.md → 🖨 KOT PRINTING ARCHITECTURE</code>.</div>
+            </div>
+          </div>
+        )}
+
+        {tab === "settings" && (
+          <div className="max-w-xl space-y-4">
+            <div className="p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <h3 className="text-sm font-semibold mb-1" style={{ color: "#C9A84C" }}>💳 Default Card Machine</h3>
+              <p className="text-xs mb-3" style={{ color: "hsl(36 29% 60%)" }}>
+                Venue-wide default for Door Mode card swipes. Takes effect on the next bouncer who opens Door Mode — no rebuild needed. Tablets that have been individually paired to a specific machine keep their per-device override.
+                {!FEATURES.edc && <><br /><span style={{ color: "#EF4444" }}>⚠️ EDC feature flag (<code>VITE_EDC</code>) is OFF — this setting is ignored until EDC is enabled in the build.</span></>}
+              </p>
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                {(["razorpay", "pinelabs"] as const).map((v) => {
+                  const sel = edcDefaultVendor === v;
+                  const label = v === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
+                  return (
+                    <button key={v} onClick={() => handleEdcVendorChange(v)} disabled={edcSaving}
+                      className="px-3 py-3 rounded-lg text-sm font-semibold"
+                      style={{ background: sel ? "#C9A84C" : "hsl(240 12% 10%)", color: sel ? "#030305" : "hsl(36 29% 70%)", border: sel ? "2px solid #C9A84C" : "1px solid hsl(240 8% 18%)", cursor: edcSaving ? "wait" : "pointer", opacity: edcSaving ? 0.7 : 1 }}>
+                      {label}{sel ? " ✓" : ""}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-xs p-3 rounded" style={{ background: "hsl(240 12% 3%)", color: edcDefaultVendor ? "#22c55e" : "hsl(36 29% 60%)" }}>
+                {edcSaveMsg
+                  ? edcSaveMsg
+                  : edcDefaultVendor
+                    ? `✅ Venue default: ${edcDefaultVendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus"}.`
+                    : `No venue default set yet — Door Mode falls back to the build-time default (${(import.meta.env.VITE_EDC_VENDOR as string) === "pinelabs" ? "Pine Labs" : "Razorpay POS"}).`}
+              </div>
             </div>
           </div>
         )}
