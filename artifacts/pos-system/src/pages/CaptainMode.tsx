@@ -48,6 +48,23 @@ const SC_WAIVER_PIN_FLOOR = 1500;
 // D3 — at walk-in creation, if customDiscount exceeds the source's implied
 // discount by more than this many percentage points, Manager PIN is required.
 const WALKIN_DISCOUNT_PIN_DELTA = 5;
+// 🔴 2026-05-12 — D4: cap on every captain-typed discount field. Owners
+// asked for a hard ceiling so the bouncer/captain can never exceed 15% on
+// either in-house or aggregator tabs. Aggregator DEFAULTS (e.g. Zomato 30%)
+// still flow through `aggregatorDiscount` from the booking, but a captain
+// hand-typing into a discount input is locked at 15 and must enter the
+// Manager PIN even for the very first 0 → N change.
+const CAPTAIN_DISCOUNT_MAX = 15;
+
+/** Clamp a captain-typed discount to the 15% cap; alert + return null if rejected. */
+function clampCaptainDiscount(raw: number): number | null {
+  const n = Math.max(0, Math.floor(Number(raw) || 0));
+  if (n > CAPTAIN_DISCOUNT_MAX) {
+    alert(`⚠ Captain discount is capped at ${CAPTAIN_DISCOUNT_MAX}%.\nAsk a manager to apply anything higher.`);
+    return null;
+  }
+  return n;
+}
 
 /** Prompt for the Manager PIN and verify against MANAGER_HASH. Returns true on success. */
 async function requireManagerPin(reason: string): Promise<boolean> {
@@ -265,10 +282,14 @@ async function requireAdminPin(reason: string): Promise<boolean> {
 // authentic brand colors for each aggregator). Used in the Source/Discount UI.
 const AGG_BRAND: Record<string, { fg: string; bg: string; border: string }> = {
   inhouse:         { fg: "#F2C744", bg: "rgba(242,199,68,.14)", border: "rgba(242,199,68,.55)" },
-  zomato:          { fg: "#E23744", bg: "rgba(226,55,68,.14)",  border: "rgba(226,55,68,.55)"  },
-  "swiggy-dineout":{ fg: "#FC8019", bg: "rgba(252,128,25,.14)", border: "rgba(252,128,25,.55)" },
-  "swiggy-scenes": { fg: "#FC8019", bg: "rgba(252,128,25,.14)", border: "rgba(252,128,25,.55)" },
-  eazydiner:       { fg: "#F5F5F5", bg: "rgba(245,245,245,.10)",border: "rgba(245,245,245,.45)" },
+  // 🔴 2026-05-12 — Brand palette intentionally collapsed to the venue's
+  // 4 in-house colours (yellow / black / white / red). External brand reds
+  // / oranges removed per owner request; aggregator identity is conveyed
+  // by the label, not by colour.
+  zomato:          { fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
+  "swiggy-dineout":{ fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
+  "swiggy-scenes": { fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
+  eazydiner:       { fg: "#F2C744", bg: "rgba(242,199,68,.10)", border: "rgba(242,199,68,.45)" },
 };
 
 const TABLE_OPTIONS = [
@@ -510,7 +531,7 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
           <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-          <button onClick={save} disabled={saving} style={{ flex: 1, padding: 12, borderRadius: 10, background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+          <button onClick={save} disabled={saving} style={{ flex: 1, padding: 12, borderRadius: 10, background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
             {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
@@ -573,9 +594,9 @@ function ReassignTableModal({ reservation, existingTables, captainName, onClose 
                     <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(t)} disabled={occupied || isCurrent}
                       style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700,
                         cursor: occupied || isCurrent ? "not-allowed" : "pointer",
-                        background: newTable === t ? "rgba(0,200,100,.15)" : isCurrent ? "rgba(239,68,68,.15)" : occupied ? "rgba(239,68,68,.06)" : "rgba(255,255,255,.04)",
-                        border: `1px solid ${newTable === t ? "rgba(0,200,100,.5)" : isCurrent ? "rgba(239,68,68,.4)" : occupied ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.08)"}`,
-                        color: newTable === t ? "#00C864" : isCurrent ? "#EF4444" : occupied ? "rgba(239,68,68,.3)" : "rgba(255,255,255,.5)",
+                        background: newTable === t ? "rgba(242,199,68,.15)" : isCurrent ? "rgba(239,68,68,.15)" : occupied ? "rgba(239,68,68,.06)" : "rgba(255,255,255,.04)",
+                        border: `1px solid ${newTable === t ? "rgba(242,199,68,.5)" : isCurrent ? "rgba(239,68,68,.4)" : occupied ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.08)"}`,
+                        color: newTable === t ? "#F2C744" : isCurrent ? "#EF4444" : occupied ? "rgba(239,68,68,.3)" : "rgba(255,255,255,.5)",
                         opacity: occupied && !isCurrent ? 0.5 : 1 }}>
                       {t}{isCurrent ? " ●" : ""}
                     </button>
@@ -587,14 +608,14 @@ function ReassignTableModal({ reservation, existingTables, captainName, onClose 
         </div>
 
         {newTable && (
-          <div style={{ background: "rgba(0,200,100,.06)", border: "1px solid rgba(0,200,100,.2)", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 12, color: "#00C864" }}>
+          <div style={{ background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.2)", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 12, color: "#F2C744" }}>
             {reservation.tableId} → {newTable} ({TABLE_OPTIONS.find(g => g.tables.includes(newTable))?.label})
           </div>
         )}
 
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
         <button onClick={doReassign} disabled={saving || !newTable}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: newTable ? "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))" : "rgba(255,255,255,.06)", border: "none", color: newTable ? "#fff" : "rgba(255,255,255,.3)", fontSize: 15, fontWeight: 900, cursor: newTable ? "pointer" : "not-allowed", marginBottom: 10 }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: newTable ? "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))" : "rgba(255,255,255,.06)", border: "none", color: newTable ? "#fff" : "rgba(255,255,255,.3)", fontSize: 15, fontWeight: 900, cursor: newTable ? "pointer" : "not-allowed", marginBottom: 10 }}>
           {saving ? "Reassigning..." : "Confirm Reassignment"}
         </button>
         <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
@@ -635,7 +656,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const [splitCard, setSplitCard] = useState<number>(0);
   const [splitUpi, setSplitUpi] = useState<number>(0);
 
-  const discountPct = payMethod === "aggregator" ? aggDiscount : manualDiscount;
+  // 🔴 2026-05-12 — Aggregator bills no longer have the discount baked into
+  // the printed customer bill. The customer already saw the discount on
+  // Zomato/Swiggy/EazyDiner before they walked in; the venue's tablet must
+  // print the FULL invoice (no discount applied) so the receipt matches the
+  // F&B order ledger. The aggregator-side discount is still recorded on the
+  // payment so admin reports can compute "amount actually received from
+  // aggregator" alongside the gross.
+  const discountPct = payMethod === "aggregator" ? 0 : manualDiscount;
   const discountAmt = Math.round(subtotal * discountPct / 100);
   const afterDiscount = subtotal - discountAmt;
   // Scale all item prices by (1 - discount) and re-run computeHodBreakdown so
@@ -651,6 +679,16 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     ? Math.round(discBreakdown.gst)
     : Math.round((discBreakdown.foodSubtotal + discBreakdown.nonAlcSubtotal) * GST_RATE);
   const finalAmount = afterDiscount + scAmt + taxAmt;
+  // 🔴 2026-05-12 — Aggregator-net (what the venue actually nets after the
+  // platform's commission/discount) — used for reports only, NOT for the
+  // customer bill. MUST be computed off `finalAmount` (subtotal + SC + GST),
+  // because the customer pays the aggregator the FULL invoice and the
+  // platform's commission is taken off that full amount — not off the bare
+  // food/drink subtotal. (Earlier version used `subtotal` and underreported
+  // venue-net by ~SC+GST × discount.)
+  const aggregatorNetAmount = payMethod === "aggregator"
+    ? Math.round(finalAmount * (1 - (aggDiscount || 0) / 100))
+    : undefined;
 
   const splitTotal = splitCash + splitCard + splitUpi;
   const splitDiff = finalAmount - splitTotal;
@@ -748,6 +786,10 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         captainName,
         aggregator: payMethod === "aggregator" ? aggName : undefined,
         aggregatorDiscount: payMethod === "aggregator" ? aggDiscount : undefined,
+        // 🔴 Net amount the venue receives from the aggregator after their
+        // platform discount is settled. Reports show this side-by-side with
+        // `amount` so admin can reconcile what was billed vs what was paid.
+        aggregatorNetAmount,
         discountPercent: discountPct || undefined,
         discountAmount: discountAmt || undefined,
         serviceChargeAmount: scAmt || undefined,
@@ -780,8 +822,19 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
           {discountPct > 0 && (
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-              <span style={{ color: "#A855F7" }}>Discount ({discountPct}%{payMethod === "aggregator" ? ` - ${aggName}` : ""})</span>
-              <span style={{ fontWeight: 800, color: "#A855F7" }}>-{formatINR(discountAmt)}</span>
+              <span style={{ color: "#A02820" }}>Discount ({discountPct}%)</span>
+              <span style={{ fontWeight: 800, color: "#A02820" }}>-{formatINR(discountAmt)}</span>
+            </div>
+          )}
+          {/* 🔴 2026-05-12 — Aggregator info-only line. Customer pays the
+              full invoice; admin reports record the platform-net separately. */}
+          {payMethod === "aggregator" && aggDiscount > 0 && (
+            <div style={{ marginTop: 4, padding: "6px 8px", borderRadius: 4,
+              background: "rgba(160,40,32,.10)", border: "1px solid rgba(160,40,32,.35)",
+              fontSize: 10, color: "#FCA5A5", lineHeight: 1.5 }}>
+              ℹ {aggName.toUpperCase()} discount ({aggDiscount}%) is NOT applied
+              to the customer bill — full ₹{formatINR(subtotal)} is billed.
+              Reports will show venue net ≈ {formatINR(aggregatorNetAmount || 0)}.
             </div>
           )}
           {serviceCharge && (
@@ -796,14 +849,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
           <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 8, display: "flex", justifyContent: "space-between", fontSize: 16 }}>
             <span style={{ fontWeight: 900, color: "#fff" }}>Final Amount</span>
-            <span style={{ fontWeight: 900, color: "#00C864" }}>{formatINR(finalAmount)}</span>
+            <span style={{ fontWeight: 900, color: "#F2C744" }}>{formatINR(finalAmount)}</span>
           </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <button onClick={() => setServiceCharge(!serviceCharge)}
             style={{ width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer", position: "relative",
-              background: serviceCharge ? "rgba(0,200,100,.5)" : "rgba(255,255,255,.15)", transition: "background .2s" }}>
+              background: serviceCharge ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.15)", transition: "background .2s" }}>
             <div style={{ width: 16, height: 16, borderRadius: 8, background: "#fff", position: "absolute", top: 3,
               left: serviceCharge ? 21 : 3, transition: "left .2s" }} />
           </button>
@@ -833,9 +886,9 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Payment Method</span>
               <button onClick={() => { setSplitMode(!splitMode); setError(""); if (!splitMode) { setSplitCash(finalAmount); setSplitCard(0); setSplitUpi(0); } }}
                 style={{ padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: "pointer",
-                  background: splitMode ? "rgba(168,85,247,.2)" : "rgba(255,255,255,.04)",
-                  border: `1px solid ${splitMode ? "rgba(168,85,247,.6)" : "rgba(255,255,255,.1)"}`,
-                  color: splitMode ? "#A855F7" : "rgba(255,255,255,.5)" }}>
+                  background: splitMode ? "rgba(239,68,68,.2)" : "rgba(255,255,255,.04)",
+                  border: `1px solid ${splitMode ? "rgba(239,68,68,.6)" : "rgba(255,255,255,.1)"}`,
+                  color: splitMode ? "#EF4444" : "rgba(255,255,255,.5)" }}>
                 {splitMode ? "✓ SPLIT MODE ON" : "🔀 SPLIT PAYMENT"}
               </button>
             </div>
@@ -853,7 +906,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               </div>
             )}
             {splitMode && (
-              <div style={{ marginBottom: 16, padding: 12, borderRadius: 10, background: "rgba(168,85,247,.05)", border: "1px solid rgba(168,85,247,.2)" }}>
+              <div style={{ marginBottom: 16, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.05)", border: "1px solid rgba(239,68,68,.2)" }}>
                 {([
                   { k: "cash", label: "💵 Cash", val: splitCash, set: setSplitCash },
                   { k: "card", label: "💳 Card", val: splitCard, set: setSplitCard },
@@ -867,17 +920,29 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                       style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
                   </div>
                 ))}
-                <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid rgba(168,85,247,.2)", fontSize: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid rgba(239,68,68,.2)", fontSize: 12 }}>
                   <span style={{ color: "rgba(255,255,255,.5)" }}>Split sum</span>
-                  <span style={{ fontWeight: 800, color: splitDiff === 0 ? "#00C864" : "#EF4444" }}>
+                  <span style={{ fontWeight: 800, color: splitDiff === 0 ? "#F2C744" : "#EF4444" }}>
                     ₹{splitTotal} / ₹{finalAmount} {splitDiff !== 0 && `(${splitDiff > 0 ? "short" : "over"} ₹${Math.abs(splitDiff)})`}
                   </span>
                 </div>
               </div>
             )}
             <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 8 }}>Discount %</div>
-            <input type="number" value={manualDiscount || ""} onChange={(e) => setManualDiscount(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
-              placeholder="e.g. 50 for 50% off" min={0} max={100}
+            {/* 🔴 2026-05-12 — D4: input cap is 15%, blur fires the PIN gate. */}
+            <input type="number" value={manualDiscount || ""}
+              onChange={(e) => setManualDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
+              onBlur={async (e) => {
+                const raw = Number(e.target.value) || 0;
+                const clamped = clampCaptainDiscount(raw);
+                if (clamped === null) { setManualDiscount(0); return; }
+                if (clamped !== 0 && clamped !== Number((e.target as HTMLInputElement).defaultValue || 0)) {
+                  const ok = await requireManagerPin(`Apply ${clamped}% manual discount on this bill`);
+                  if (!ok) { setManualDiscount(0); return; }
+                }
+                setManualDiscount(clamped);
+              }}
+              placeholder={`max ${CAPTAIN_DISCOUNT_MAX}%`} min={0} max={CAPTAIN_DISCOUNT_MAX}
               style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
           </>
         )}
@@ -885,7 +950,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
 
         <button onClick={confirm} disabled={saving}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
           {saving ? "Saving..." : "✅ Confirm Payment"}
         </button>
         <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
@@ -977,9 +1042,9 @@ function WalkInModal({ captainName, existingTables, onClose }: {
           </button>
           <button onClick={() => setIsProxy(true)}
             style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-              background: isProxy ? "rgba(168,85,247,.15)" : "rgba(255,255,255,.04)",
-              border: `1px solid ${isProxy ? "rgba(168,85,247,.5)" : "rgba(255,255,255,.08)"}`,
-              color: isProxy ? "#A855F7" : "rgba(255,255,255,.5)" }}>
+              background: isProxy ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${isProxy ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
+              color: isProxy ? "#EF4444" : "rgba(255,255,255,.5)" }}>
             📦 Proxy / Extra
           </button>
         </div>
@@ -1003,18 +1068,18 @@ function WalkInModal({ captainName, existingTables, onClose }: {
 
         {isProxy ? (
           <>
-            <div style={{ background: "rgba(168,85,247,.08)", border: "1px solid rgba(168,85,247,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
+            <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginBottom: 4 }}>Auto-assigned Name</div>
-              <div style={{ fontSize: 20, fontWeight: 900, color: "#A855F7" }}>{proxyName}</div>
+              <div style={{ fontSize: 20, fontWeight: 900, color: "#EF4444" }}>{proxyName}</div>
             </div>
             <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Floor *</div>
             <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
               {TABLE_OPTIONS.map(g => (
                 <button key={g.floor} onClick={() => setProxyFloor(g.floor)}
                   style={{ flex: 1, padding: "8px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
-                    background: proxyFloor === g.floor ? "rgba(168,85,247,.15)" : "rgba(255,255,255,.04)",
-                    border: `1px solid ${proxyFloor === g.floor ? "rgba(168,85,247,.5)" : "rgba(255,255,255,.08)"}`,
-                    color: proxyFloor === g.floor ? "#A855F7" : "rgba(255,255,255,.5)" }}>
+                    background: proxyFloor === g.floor ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
+                    border: `1px solid ${proxyFloor === g.floor ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
+                    color: proxyFloor === g.floor ? "#EF4444" : "rgba(255,255,255,.5)" }}>
                   {g.label}
                 </button>
               ))}
@@ -1053,17 +1118,20 @@ function WalkInModal({ captainName, existingTables, onClose }: {
           {AGGREGATOR_OPTIONS.map((agg) => (
             <button key={agg.value} onClick={() => { setAggValue(agg.value); setCustomDiscount(agg.discount); }}
               style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
-                background: aggValue === agg.value ? "rgba(168,85,247,.15)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${aggValue === agg.value ? "rgba(168,85,247,.5)" : "rgba(255,255,255,.08)"}`,
-                color: aggValue === agg.value ? "#A855F7" : "rgba(255,255,255,.5)" }}>
+                background: aggValue === agg.value ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${aggValue === agg.value ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
+                color: aggValue === agg.value ? "#EF4444" : "rgba(255,255,255,.5)" }}>
               {agg.label}
             </button>
           ))}
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Discount % (editable)</div>
-        <input type="number" value={customDiscount || ""} onChange={(e) => setCustomDiscount(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
-          placeholder="e.g. 50" min={0} max={100}
+        {/* 🔴 2026-05-12 — D4: walk-in custom discount capped at 15%, PIN
+            required before saving any non-zero value. */}
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Discount % (max {CAPTAIN_DISCOUNT_MAX}% — PIN required)</div>
+        <input type="number" value={customDiscount || ""}
+          onChange={(e) => setCustomDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
+          placeholder={`max ${CAPTAIN_DISCOUNT_MAX}`} min={0} max={CAPTAIN_DISCOUNT_MAX}
           style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
 
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
@@ -1083,6 +1151,11 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
 }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("");
+  // 🔴 2026-05-12 — Wallet-style 4-tab layout (FOOD / LIQUOR / NAB / SMOKE)
+  // mirroring rms-diner.digitory.com so captains see the same shape the
+  // customer sees on hodclub.in. Tab is derived from group + isAlcohol.
+  type WalletTab = "food" | "liquor" | "nab" | "smoke";
+  const [tab, setTab] = useState<WalletTab>("food");
   const [cart, setCart] = useState<HodOrderItem[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -1101,7 +1174,38 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
     return m.price;
   };
 
-  const categories = useMemo(() => [...new Set(MENU_ITEMS.map((m) => m.category))], []);
+  // Map every menu item to one of the 4 wallet tabs.
+  // 🔴 2026-05-12 — Defensive against an item slipping through with an
+  // unexpected `group` (e.g. typo or new SKU). Anything that isn't food/
+  // smoke/drink-shaped falls back to its category-prefix as a last resort
+  // so it doesn't silently land on FOOD.
+  const tabOf = (m: { group: string; isAlcohol?: boolean; category?: string }): WalletTab => {
+    const g = (m.group || "").toLowerCase();
+    if (g === "food") return "food";
+    if (g === "smoke" || g === "tobacco") return "smoke";
+    if (g === "beer-wine" || g === "spirits" || g === "cocktails") return "liquor";
+    if (g === "soft" || g === "non-alcoholic" || g === "nab" || g === "mocktails") return "nab";
+    // Fall back to category prefix for any unknown group.
+    const c = (m.category || "").toLowerCase();
+    if (c.startsWith("food-")) return "food";
+    if (c.startsWith("smoke-") || c.startsWith("tobacco")) return "smoke";
+    if (c.startsWith("nab-") || c.startsWith("soft-") || c.startsWith("mock")) return "nab";
+    if (c.startsWith("bar-") || c.startsWith("beer") || c.startsWith("wine") || c.startsWith("spirits") || c.startsWith("liquor") || c.startsWith("cocktail")) return "liquor";
+    // Last resort: alcohol flag wins, else NAB (never silently bleed into FOOD).
+    return m.isAlcohol ? "liquor" : "nab";
+  };
+  // Drop the "food-" / "bar-" prefix that's noise in the wallet view.
+  const prettyCat = (c: string) =>
+    c.replace(/^(food|bar|smoke|nab|liquor)-/i, "").replace(/-/g, " ").toUpperCase();
+
+  // Sub-category pills shown under the active tab.
+  const tabCategories = useMemo(() => {
+    const inTab = MENU_ITEMS.filter((m) => tabOf(m) === tab);
+    return [...new Set(inTab.map((m) => m.category))];
+  }, [tab]);
+
+  // Reset the sub-category pill whenever the user switches the big tab.
+  useEffect(() => { setCategory(""); }, [tab]);
 
   // Fuzzy, typo-tolerant search — same algorithm as BarMode and customer wallet.
   const filtered = useMemo(() => {
@@ -1132,6 +1236,8 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
     };
     // Drop items that admin marked OUT OF STOCK (live-synced via overrides).
     let items = MENU_ITEMS.filter((m) => m.available !== false && !menuOverrides[ovKey(m.name)]?.outOfStock);
+    // Always scope to the active wallet tab first, then optional sub-category.
+    items = items.filter((m) => tabOf(m) === tab);
     if (category) items = items.filter((m) => m.category === category);
     if (search) {
       const q = norm(search);
@@ -1142,7 +1248,7 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
       });
     }
     return items.slice(0, 80);
-  }, [search, category, menuOverrides]);
+  }, [search, category, menuOverrides, tab]);
 
   // Accept any item shape with name+price+category+group — HodMenuItem widens
   // category to `string` while legacy MenuItem narrows it; both flow through
@@ -1193,49 +1299,103 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
         <button onClick={onClose} style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 18, cursor: "pointer" }}>×</button>
       </div>
 
-      <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search menu..."
-          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 }}>
-          <button onClick={() => setCategory("")}
-            style={{ flexShrink: 0, padding: "5px 12px", borderRadius: 20, fontSize: 10, fontWeight: 700, cursor: "pointer",
-              background: !category ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-              border: `1px solid ${!category ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-              color: !category ? "#F2C744" : "rgba(255,255,255,.5)" }}>All</button>
-          {categories.map((c) => (
-            <button key={c} onClick={() => setCategory(c)}
-              style={{ flexShrink: 0, padding: "5px 12px", borderRadius: 20, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
-                background: category === c ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${category === c ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-                color: category === c ? "#F2C744" : "rgba(255,255,255,.5)" }}>{c}</button>
-          ))}
+      {/* 🔴 2026-05-12 — Wallet-style search bar + 4 big tabs (FOOD/LIQUOR/NAB/SMOKE)
+          + red sub-category strip. Mirrors rms-diner.digitory.com so captains
+          see the same shape the customer sees on hodclub.in. */}
+      <div style={{ padding: "10px 16px 0", background: "#0E0B14" }}>
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search"
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "1px solid #F2C744", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 8 }}>
+          {(["food", "liquor", "nab", "smoke"] as const).map((t) => {
+            const active = tab === t;
+            return (
+              <button key={t} onClick={() => setTab(t)}
+                style={{
+                  padding: "14px 6px", borderRadius: 4, fontSize: 12, fontWeight: 800, letterSpacing: 1, cursor: "pointer",
+                  background: active ? "#F2C744" : "#7A1F18",
+                  color: active ? "#1a1410" : "#F4D7A8",
+                  border: "1px solid " + (active ? "#F2C744" : "#5A150F"),
+                  textTransform: "uppercase",
+                }}>{t}</button>
+            );
+          })}
         </div>
+        {tabCategories.length > 1 && (
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setCategory("")}
+              style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+                background: !category ? "transparent" : "transparent",
+                border: `1px solid ${!category ? "#F2C744" : "transparent"}`,
+                color: !category ? "#F2C744" : "rgba(255,255,255,.55)" }}>ALL</button>
+            {tabCategories.map((c) => (
+              <button key={c} onClick={() => setCategory(c)}
+                style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: 0.5,
+                  background: "transparent",
+                  border: `1px solid ${category === c ? "#F2C744" : "transparent"}`,
+                  color: category === c ? "#F2C744" : "rgba(255,255,255,.55)" }}>{prettyCat(c)}</button>
+            ))}
+          </div>
+        )}
+        <div style={{ height: 1, background: "rgba(255,255,255,.05)" }} />
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px" }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px", background: "#0E0B14" }}>
+        {category && (
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#fff", padding: "10px 0", letterSpacing: 0.5 }}>
+            {prettyCat(category)}
+          </div>
+        )}
+        {filtered.length === 0 && (
+          <div style={{ padding: 40, textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 12 }}>
+            No items{search ? ` matching "${search}"` : ""}.
+          </div>
+        )}
         {filtered.map((m) => {
           const ov = menuOverrides[ovKey(m.name)];
           const eff = effectivePrice({ name: m.name, price: m.price || 0 });
           const hasDisc = eff !== (m.price || 0);
+          const showVeg = m.group === "food";
+          // 🔴 2026-05-12 — Composite key: hod-menu.ts has duplicates by name
+          // (e.g. "Kingfisher Ultra" exists in bottle-beer AND can-beer-500ml
+          // categories). Using just `m.name` collapses them via React's key
+          // dedupe; include id + category to keep them distinct.
           return (
-            <div key={m.name} onClick={() => addToCart(m)}
-              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.04)", cursor: "pointer" }}>
-              <div>
-                <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>{m.isVeg ? "🟢" : "🔴"} {m.name}</div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)" }}>
-                  {m.category}{hasDisc && ov?.discountReason ? ` · 💰 ${ov.discountReason}` : ""}
+            <div key={`${m.id || ""}-${m.category}-${m.name}`}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
+              <div style={{ flex: 1, paddingRight: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                  {showVeg && (
+                    <span style={{
+                      display: "inline-block", width: 12, height: 12, border: `1.5px solid ${m.isVeg ? "#22c55e" : "#dc2626"}`,
+                      borderRadius: 2, position: "relative", flexShrink: 0,
+                    }}>
+                      <span style={{
+                        position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)",
+                        width: 5, height: 5, borderRadius: "50%", background: m.isVeg ? "#22c55e" : "#dc2626",
+                      }} />
+                    </span>
+                  )}
+                  {m.name}
+                </div>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4, fontWeight: 600 }}>
+                  {hasDisc ? (
+                    <>
+                      <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{(m.price || 0).toFixed(2)}</span>
+                      <span style={{ color: "#22c55e" }}>₹{eff.toFixed(2)}</span>
+                    </>
+                  ) : (
+                    <>₹{(m.price || 0).toFixed(2)}</>
+                  )}
+                  {hasDisc && ov?.discountReason && (
+                    <span style={{ marginLeft: 6, color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {ov.discountReason}</span>
+                  )}
                 </div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#F2C744", textAlign: "right" }}>
-                {hasDisc ? (
-                  <>
-                    <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", fontSize: 11, fontWeight: 600, marginRight: 6 }}>₹{m.price || 0}</span>
-                    <span style={{ color: "#22c55e" }}>₹{eff}</span>
-                  </>
-                ) : (
-                  <>₹{m.price || 0}</>
-                )}
-              </div>
+              <button onClick={() => addToCart(m)}
+                style={{
+                  padding: "8px 18px", borderRadius: 4, background: "#A02820", border: "none",
+                  color: "#fff", fontSize: 12, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer",
+                }}>ADD +</button>
             </div>
           );
         })}
@@ -1282,7 +1442,7 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
             </div>
           </details>
           <button onClick={submit} disabled={saving}
-            style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
+            style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
             {saving ? "Adding..." : `📝 Add Round · ${formatINR(cartTotal)} (${cart.reduce((s, c) => s + c.qty, 0)} items)`}
           </button>
         </div>
@@ -1346,7 +1506,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
   const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName;
   const isAgg = aggName !== "inhouse";
 
-  const borderColor = billReq ? "rgba(239,68,68,.6)" : pending > 0 ? "rgba(255,200,0,.5)" : "rgba(255,255,255,.08)";
+  const borderColor = billReq ? "rgba(239,68,68,.6)" : pending > 0 ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)";
 
   const handleArrive = async () => {
     if (!confirm(`Mark ${r.customerName || "this guest"} as arrived?`)) return;
@@ -1686,23 +1846,23 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
   return (
     <>
       <div style={{ background: "rgba(255,255,255,.04)", border: `2px solid ${borderColor}`, borderRadius: 16, marginBottom: 14, overflow: "hidden", ...(billReq ? { boxShadow: "0 0 20px rgba(239,68,68,.15)" } : {}) }}>
-        <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: billReq ? "rgba(239,68,68,.08)" : pending > 0 ? "rgba(255,200,0,.05)" : "" }}>
+        <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: billReq ? "rgba(239,68,68,.08)" : pending > 0 ? "rgba(242,199,68,.05)" : "" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
               <span style={{ fontSize: 18, fontWeight: 900, color: "#F2C744" }}>{r.tableId}</span>
               <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>{r.floorLabel || r.floor}</span>
               {r.actualArrivalTime ? (
-                <span style={{ background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>✓ ARRIVED {r.actualArrivalTime}</span>
+                <span style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>✓ ARRIVED {r.actualArrivalTime}</span>
               ) : (
                 <span style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>⏳ NOT ARRIVED</span>
               )}
               {voided && <span title={`Bill voided by ${(r as any).voidedBy || "?"} — ${(r as any).voidReason || ""}${(r as any).voidNotes ? ` (${(r as any).voidNotes})` : ""}`} style={{ background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 10, cursor: "help" }}>🚫 BILL VOIDED · ₹{Math.round((r as any).voidedBillTotal || 0)}</span>}
-              {paid && <span title={orphanPay && r.paymentStatus !== "paid" ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.` : "Marked paid by the captain."} style={{ background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: orphanPay && r.paymentStatus !== "paid" ? "help" : "default" }}>✅ PAID{(() => {
+              {paid && <span title={orphanPay && r.paymentStatus !== "paid" ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.` : "Marked paid by the captain."} style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: orphanPay && r.paymentStatus !== "paid" ? "help" : "default" }}>✅ PAID{(() => {
                 const pm = (r as any).paymentMethod || (orphanPay ? orphanPay.paymentChannel : "");
                 return pm && ["zomato","swiggy","eazydiner","payeazy"].includes(String(pm).toLowerCase()) ? ` · ${String(pm).toUpperCase()}` : "";
               })()}{orphanPay && r.paymentStatus !== "paid" ? " ⚠︎" : ""}</span>}
               {billReq && <span style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🧾 BILL DUE</span>}
-              {pending > 0 && <span style={{ background: "rgba(255,200,0,.12)", border: "1px solid rgba(255,200,0,.3)", color: "#ffc800", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
+              {pending > 0 && <span style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
             </div>
             <div style={{ fontSize: 12, color: "#fff", fontWeight: 700 }}>{r.customerName}</div>
             <div style={{ display: "flex", gap: 12, fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 3 }}>
@@ -1712,23 +1872,29 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
             </div>
             {isAgg && (
               <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 11, fontWeight: 800, padding: "3px 8px", borderRadius: 8, display: "inline-block",
-                  background: "rgba(168,85,247,.1)", border: "1px solid rgba(168,85,247,.3)", color: "#A855F7" }}>
-                  {aggLabel} · {aggDiscount}% discount
+                {/* 🔴 2026-05-12 — Solid-red badge styled to match the menu's
+                    ADD+ button (red fill #A02820 + white text, 4px radius,
+                    Space Grotesk bold uppercase). The discount % is shown
+                    so the captain knows what the aggregator will deduct
+                    when settling — even though the door-printed bill is
+                    the FULL amount. */}
+                <div title={`Aggregator deducts ${aggDiscount}% commission. Door bill prints the FULL invoice; venue nets ${100 - aggDiscount}% after settlement.`}
+                  style={{ fontSize: 10, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
+                    background: "#A02820", border: "1px solid #A02820", color: "#fff",
+                    letterSpacing: ".5px", textTransform: "uppercase",
+                    fontFamily: "'Space Grotesk', sans-serif" }}>
+                  {aggLabel}{aggDiscount > 0 ? ` · ${aggDiscount}%` : ""}
                 </div>
-                {r.discountModifiedByCaptain && aggDiscount !== getAggregatorDiscount(aggName) && (
-                  <div title={`Default for ${aggLabel} is ${getAggregatorDiscount(aggName)}% — a captain edited this tab to ${aggDiscount}%.`}
-                    style={{ fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 8,
-                      background: "rgba(255,200,0,.12)", border: "1px solid rgba(255,200,0,.45)", color: "#ffc800", cursor: "help" }}>
-                    ✎ MODIFIED ({getAggregatorDiscount(aggName)}% → {aggDiscount}%)
-                  </div>
-                )}
               </div>
             )}
+            {/* Captain-modified in-house discount (PIN-gated) gets its own
+                small red pill so the captain knows the bill carries a
+                manual discount that WILL be applied at Mark-Paid. */}
             {!isAgg && aggDiscount > 0 && r.discountModifiedByCaptain && (
-              <div style={{ marginTop: 6, fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 8, display: "inline-block",
-                background: "rgba(255,200,0,.12)", border: "1px solid rgba(255,200,0,.45)", color: "#ffc800" }}>
-                ✎ MODIFIED (in-house · {aggDiscount}% discount)
+              <div style={{ marginTop: 6, fontSize: 10, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
+                background: "#A02820", color: "#fff", letterSpacing: ".5px",
+                fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase" }}>
+                In-House · {aggDiscount}% discount
               </div>
             )}
           </div>
@@ -1737,8 +1903,12 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
               <>
                 <div style={{ fontSize: 18, fontWeight: 900, color: "#F2C744" }}>₹{tabTotal}</div>
                 <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>subtotal · +SC/GST at pay</div>
-                {aggDiscount > 0 && (
-                  <div style={{ fontSize: 10, color: "#A855F7", fontWeight: 700 }}>-{aggDiscount}% = ₹{Math.round(tabTotal * (1 - aggDiscount / 100))}</div>
+                {/* 🔴 2026-05-12 — Discount preview ONLY for non-aggregator
+                    tabs that the captain has explicitly modified. Aggregator
+                    bookings never preview a discount here because the
+                    customer bill is printed at the FULL amount. */}
+                {!isAgg && aggDiscount > 0 && r.discountModifiedByCaptain && (
+                  <div style={{ fontSize: 10, color: "#A02820", fontWeight: 700 }}>-{aggDiscount}% = ₹{Math.round(tabTotal * (1 - aggDiscount / 100))}</div>
                 )}
               </>
             )}
@@ -1751,7 +1921,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
           return (
             <div style={{ padding: "8px 16px 0" }}>
               <button onClick={handleServeAll} disabled={busy === "serve-all"}
-                style={{ width: "100%", padding: 12, borderRadius: 10, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
+                style={{ width: "100%", padding: 12, borderRadius: 10, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
                 {busy === "serve-all" ? "..." : `🖨 PRINT ALL ${pendingCount} PENDING KOTs`}
               </button>
             </div>
@@ -1766,10 +1936,10 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
               const isServed = rd.status === "served";
               const needsAction = isPending || isActivated;
               return (
-                <div key={idx} style={{ borderTop: "1px solid rgba(255,255,255,.06)", padding: "8px 0", ...(needsAction ? { background: isPending ? "rgba(255,200,0,.02)" : "rgba(0,200,100,.02)" } : { opacity: 0.6 }) }}>
+                <div key={idx} style={{ borderTop: "1px solid rgba(255,255,255,.06)", padding: "8px 0", ...(needsAction ? { background: isPending ? "rgba(242,199,68,.02)" : "rgba(242,199,68,.02)" } : { opacity: 0.6 }) }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "#F2C744" }}>Round {rd.roundNum}</span>
-                    <span style={{ fontSize: 11, color: isPending ? "#ffc800" : isActivated ? "#38BDF8" : "#00C864" }}>
+                    <span style={{ fontSize: 11, color: isPending ? "#F2C744" : isActivated ? "#F2C744" : "#F2C744" }}>
                       {isPending ? "🔴 Preparing" : isActivated ? "🔵 Activated — Ready to Serve" : "✅ Served"}
                     </span>
                   </div>
@@ -1782,11 +1952,11 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
                   {needsAction && (
                     <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                       <button onClick={() => setEditRound({ round: rd, index: idx })}
-                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(255,200,0,.08)", border: "1px solid rgba(255,200,0,.3)", color: "#ffc800", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
                         ✏️ Edit Order
                       </button>
                       <button onClick={() => handleServe(idx)} disabled={busy === `serve-${idx}`}
-                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(0,200,100,.1)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
                         {busy === `serve-${idx}` ? "..." : "🖨 Print KOT"}
                       </button>
                     </div>
@@ -1818,84 +1988,31 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
             🔒 Bill #{r.billPrintCount} printed at {new Date(r.lastBillPrintedAt || "").toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} · source LOCKED to {r.billLockedSource || r.aggregator || "inhouse"} ({r.billLockedDiscount ?? r.aggregatorDiscount ?? 0}%)
           </div>
         )}
-        {!paid && (
-          <div style={{ padding: "6px 16px 10px" }}>
-            <button onClick={() => setAggOpen(!aggOpen)}
-              style={{ width: "100%", padding: 10, borderRadius: 10, background: isAgg ? `${AGG_BRAND[aggName]?.bg || "rgba(242,199,68,.08)"}` : "rgba(242,199,68,.06)",
-                border: `1px solid ${isAgg ? (AGG_BRAND[aggName]?.border || "rgba(242,199,68,.3)") : "rgba(242,199,68,.25)"}`,
-                color: isAgg ? (AGG_BRAND[aggName]?.fg || "#F2C744") : "#F2C744",
-                fontSize: 12, fontWeight: 800, cursor: "pointer", marginBottom: 6, letterSpacing: ".3px",
-                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: AGG_BRAND[aggName]?.fg || "#F2C744", boxShadow: `0 0 8px ${AGG_BRAND[aggName]?.fg || "#F2C744"}` }} />
-                {isAgg ? `${aggLabel}` : "Assign Source / Discount"}
-              </span>
-              <span style={{ fontSize: 11, fontWeight: 900, padding: "3px 9px", borderRadius: 6, background: "rgba(0,0,0,.35)", color: AGG_BRAND[aggName]?.fg || "#F2C744" }}>
-                {aggDiscount}% OFF
-              </span>
-            </button>
-            {aggOpen && (
-              <div style={{ background: "linear-gradient(180deg,rgba(0,0,0,.35),rgba(20,18,30,.6))", border: "1px solid rgba(242,199,68,.18)", borderRadius: 12, padding: 12, marginBottom: 8 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(242,199,68,.7)", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 8 }}>
-                  Booking Source
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(110px,1fr))", gap: 6, marginBottom: 12 }}>
-                  {AGGREGATOR_OPTIONS.map((agg) => {
-                    const selected = aggName === agg.value;
-                    const brand = AGG_BRAND[agg.value] || { fg: "#F2C744", bg: "rgba(242,199,68,.10)", border: "rgba(242,199,68,.4)" };
-                    return (
-                      <button key={agg.value} onClick={() => handleAggChange(agg.value)}
-                        style={{ padding: "9px 8px", borderRadius: 9, fontSize: 11, fontWeight: 800, cursor: "pointer",
-                          background: selected ? brand.bg : "rgba(255,255,255,.03)",
-                          border: `1.5px solid ${selected ? brand.border : "rgba(255,255,255,.08)"}`,
-                          color: selected ? brand.fg : "rgba(255,255,255,.55)",
-                          boxShadow: selected ? `0 0 0 1px ${brand.border} inset, 0 2px 8px ${brand.bg}` : "none",
-                          transition: "all .15s", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-                        <span>{agg.label.split(" (")[0]}</span>
-                        <span style={{ fontSize: 9, fontWeight: 700, opacity: .75 }}>{agg.discount}% def.</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div style={{ borderTop: "1px solid rgba(242,199,68,.15)", paddingTop: 10 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(242,199,68,.7)", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 6 }}>
-                    Custom Discount %
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <input type="number" value={customDiscInput} onChange={(e) => setCustomDiscInput(e.target.value)}
-                      placeholder={String(getAggregatorDiscount(aggName))} min={0} max={100}
-                      style={{ flex: 1, padding: "9px 12px", borderRadius: 9, background: "rgba(0,0,0,.45)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 14, fontWeight: 800, outline: "none", textAlign: "center", letterSpacing: "1px" }} />
-                    <button onClick={() => { const v = Math.min(100, Math.max(0, Number(customDiscInput) || 0)); handleAggChange(aggName, v); }}
-                      style={{ padding: "9px 18px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#9C7E2E)", border: "none", color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", boxShadow: "0 2px 8px rgba(242,199,68,.3)" }}>
-                      APPLY
-                    </button>
-                  </div>
-                  {aggDiscount !== getAggregatorDiscount(aggName) && (
-                    <div style={{ fontSize: 10, color: "#ffc800", marginTop: 6, fontWeight: 700 }}>
-                      ✎ Custom — default for {aggLabel} is {getAggregatorDiscount(aggName)}%
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+        {/* 🔴 2026-05-12 — Source/Discount panel removed. Aggregator identity
+            is shown by the small red badge in the card header; non-aggregator
+            tabs default to in-house and discount is set (PIN-gated, max 15%)
+            at Mark-Paid time. Keeps the door tablet UI uncluttered. */}
 
-        <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {/* 🔴 2026-05-12 — All action buttons unified to Space Grotesk
+            uppercase to match the customer menu's typography. Destructive
+            actions (Void Bill, Release Table) use the same solid-red
+            #A02820 + white-text treatment as the aggregator badge so the
+            captain reads "red box = serious action". */}
+        <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap", fontFamily: "'Space Grotesk', sans-serif" }}>
           {!r.actualArrivalTime && (
             <button onClick={handleArrive} disabled={busy === "arrive"}
-              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5 }}>
+              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               {busy === "arrive" ? "..." : "🚶 Guest Arrived"}
             </button>
           )}
           {!paid && (
             <button onClick={() => setShowAddOrder(true)}
-              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               📝 Add Order
             </button>
           )}
           <button onClick={sendWhatsApp}
-            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             📲 Send Menu
           </button>
           {(tabTotal > 0 || (r.tabRounds || []).length > 0) && (() => {
@@ -1911,12 +2028,13 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
             return (
               <button onClick={() => handleThermalBill(paid)} disabled={busy === "printbill"}
                 style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9,
-                  background: stale ? "rgba(239,68,68,.18)" : "rgba(242,199,68,.15)",
-                  border: `1px solid ${stale ? "rgba(239,68,68,.6)" : "rgba(242,199,68,.45)"}`,
-                  color: stale ? "#EF4444" : "#F2C744",
-                  fontSize: 11, fontWeight: 800,
+                  background: stale ? "#A02820" : "rgba(242,199,68,.15)",
+                  border: `1px solid ${stale ? "#A02820" : "rgba(242,199,68,.45)"}`,
+                  color: stale ? "#fff" : "#F2C744",
+                  fontSize: 11, fontWeight: 800, letterSpacing: ".5px",
+                  fontFamily: "inherit", textTransform: "uppercase",
                   cursor: busy === "printbill" ? "wait" : "pointer",
-                  boxShadow: stale ? "0 0 12px rgba(239,68,68,.25)" : "none" }}
+                  boxShadow: stale ? "0 0 12px rgba(160,40,32,.4)" : "none" }}
                 data-testid="button-thermal-bill-captain">
                 {label}
               </button>
@@ -1924,7 +2042,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
           })()}
           {!paid && !voided && (tabTotal > 0 || billReq) && (
             <button onClick={handleOpenMarkPaid}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5 }}>
+              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               💰 Mark Paid
             </button>
           )}
@@ -1936,18 +2054,18 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
               setShowVoidBill(true);
             }}
               title="Use ONLY when bill was printed but customer cannot/will not pay (Manager PIN required)"
-              style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               🚫 Void Bill
             </button>
           )}
           {!paid && !voided && (
             <button onClick={() => setShowReassign(true)}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               🔄 Reassign
             </button>
           )}
           <button onClick={handleRelease} disabled={busy === "release"}
-            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(184,50,39,.10)", border: "1px solid rgba(184,50,39,.4)", color: "#B83227", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             {busy === "release" ? "..." : "🔓 Release Table"}
           </button>
         </div>
@@ -2033,7 +2151,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [showWalkIn, setShowWalkIn] = useState(false);
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
-  const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#00C864", bg: "rgba(0,200,100,.12)" });
+  const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" });
   const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill">("");
   const prevSnapshot = useRef<Record<string, { rounds: number; status: string }>>({});
   const playAlert = useAudioAlert();
@@ -2051,13 +2169,13 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         if (prev) {
           if (curr.rounds > prev.rounds) {
             playAlert(false);
-            setAlertBadge({ text: `🛎 NEW ORDER — ${r.tableId}`, color: "#ffc800", bg: "rgba(255,200,0,.2)" });
-            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#00C864", bg: "rgba(0,200,100,.12)" }), 5000);
+            setAlertBadge({ text: `🛎 NEW ORDER — ${r.tableId}`, color: "#F2C744", bg: "rgba(242,199,68,.2)" });
+            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" }), 5000);
           }
           if (curr.status === "bill_requested" && prev.status !== "bill_requested") {
             playAlert(true);
             setAlertBadge({ text: `🧾 BILL REQUESTED — ${r.tableId}`, color: "#EF4444", bg: "rgba(239,68,68,.3)" });
-            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#00C864", bg: "rgba(0,200,100,.12)" }), 5000);
+            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" }), 5000);
           }
         }
         prevSnapshot.current[r._docId] = curr;
@@ -2122,8 +2240,8 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, padding: "10px 16px" }}>
         {[
           { label: "Tables", value: reservations.length, color: "#F2C744", filter: "" as const },
-          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#00C864", filter: "pending" as const },
-          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#ffc800" : "rgba(255,255,255,.4)", filter: "bill" as const },
+          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#F2C744", filter: "pending" as const },
+          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#F2C744" : "rgba(255,255,255,.4)", filter: "bill" as const },
         ].map((s) => (
           <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
             style={{ background: pendingFilter === s.filter && s.filter ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.04)",
@@ -2137,7 +2255,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       {pendingFilter && (
         <div style={{ padding: "0 16px", marginBottom: 4 }}>
           <button onClick={() => setPendingFilter("")}
-            style={{ fontSize: 11, color: "#ffc800", background: "rgba(255,200,0,.08)", border: "1px solid rgba(255,200,0,.2)", borderRadius: 8, padding: "4px 12px", cursor: "pointer" }}>
+            style={{ fontSize: 11, color: "#F2C744", background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.2)", borderRadius: 8, padding: "4px 12px", cursor: "pointer" }}>
             Showing {pendingFilter === "pending" ? "Pending" : "Bill Due"} only — tap to clear ✕
           </button>
         </div>

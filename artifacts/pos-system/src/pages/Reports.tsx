@@ -74,6 +74,11 @@ interface TableRow {
    *  discount strip if the aggregator absorbed it; for our case Zomato/Swiggy
    *  pay us the post-discount total). Logged separately for reconciliation. */
   aggregatorPaidAmount: number;
+  /** 🔴 2026-05-12 — For aggregator orders the captain prints the FULL bill
+   *  (no discount applied at the door); the aggregator's discount is shown
+   *  here as the net amount the venue actually receives. `total` is what the
+   *  customer was billed; `aggregatorNetAmount` is what the venue nets. */
+  aggregatorNetAmount: number | null;
   /** Reconciliation: actual paid by aggregator MINUS what we expected (post-discount total).
    *  Only populated when we actually matched an `orphanZomatoPayments` row by phone.
    *  Positive = aggregator overpaid (rare), negative = short payment (likely captain over-discount fraud).
@@ -233,6 +238,14 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
     total, amountPaid: Number(r.amountPaid || (r.paymentStatus === "paid" ? total : 0)),
     paymentStatus: r.paymentStatus || "open",
     paymentMethod, aggregatorPaidAmount, aggregatorVariance,
+    // 🔴 2026-05-12 — Either trust the value the captain stamped at Mark
+    // Paid time, or fall back to subtotal*(1-disc) for legacy rows that
+    // pre-date the field.
+    aggregatorNetAmount: (r as any).aggregatorNetAmount ?? (
+      isAggregatorSrc && actDisc > 0 && total > 0
+        ? Math.round(total * (1 - actDisc / 100))
+        : null
+    ),
     billPrintCount, modifiedDiscount, defaultDiscount: defDisc,
     overrideCount: overrides, voidCount: (r.voidLog || []).length, voidValueLost,
     sourceSwapCount: sourceSwapLog.length, hasDowngrade,
@@ -750,6 +763,8 @@ export default function Reports() {
       "Payment Status": r.paymentStatus,
       "Payment Method": r.paymentMethod,
       "Aggregator Paid ₹": r.aggregatorPaidAmount,
+      "Customer-Bill ₹ (full, no discount)": r.total,
+      "Customer-After-Discount Pays ₹": r.aggregatorNetAmount ?? "",
       "Aggregator Variance ₹": r.aggregatorVariance ?? "",
       "Aggregator Variance Flag": r.aggregatorVariance !== null && Math.abs(r.aggregatorVariance) >= 200 ? (r.aggregatorVariance < 0 ? "SHORT-PAID" : "OVER-PAID") : "",
       "Bill Prints": r.billPrintCount,
@@ -1196,14 +1211,14 @@ export default function Reports() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
             <thead>
               <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Total ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
+                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Bill ₹ (Full)", "Net ₹ (After Disc)", "Disc Δ ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
                   <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredTables.length === 0 ? (
-                <tr><td colSpan={18} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No tables match filters.</td></tr>
+                <tr><td colSpan={20} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No tables match filters.</td></tr>
               ) : filteredTables.map((r) => (
                 <tr key={r.reservationId} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
                   <td style={{ padding: "6px 6px" }}>{dot(r.ambiguity)}</td>
@@ -1216,7 +1231,28 @@ export default function Reports() {
                   <td style={{ padding: "6px 6px" }}>{r.partySize || "—"}</td>
                   <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{fmtTime(r.arrival)}</td>
                   <td style={{ padding: "6px 6px", color: r.minutesOnTable > 240 ? ORANGE : "rgba(255,255,255,.7)" }}>{r.minutesOnTable || "—"}</td>
+                  {/* 🔴 2026-05-12 — `Bill ₹` is the FULL printed bill (no
+                      discount applied at the door). `Net ₹` is what the
+                      venue actually nets after the aggregator/captain
+                      discount. `Disc Δ` is the leakage (Bill − Net) and
+                      flips orange when material so admin can spot full-
+                      bill-then-discount cases at a glance. */}
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800 }}>₹{r.total.toLocaleString()}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
+                    color: r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total ? GREEN : "rgba(255,255,255,.7)" }}
+                    title={r.aggregatorNetAmount === null ? "No discount recorded — net == bill"
+                      : `Venue nets ₹${r.aggregatorNetAmount.toLocaleString()} after ${r.discountPct}% ${r.paymentMethod || "discount"}`}>
+                    {r.aggregatorNetAmount !== null ? `₹${r.aggregatorNetAmount.toLocaleString()}` : `₹${r.total.toLocaleString()}`}
+                  </td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
+                    color: r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) >= 200 ? ORANGE
+                      : r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) > 0 ? "rgba(255,255,255,.7)"
+                      : "rgba(255,255,255,.3)" }}
+                    title="Discount leakage = Full bill − Net received">
+                    {r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total
+                      ? `−₹${(r.total - r.aggregatorNetAmount).toLocaleString()}`
+                      : "—"}
+                  </td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: r.modifiedDiscount ? ORANGE : "rgba(255,255,255,.7)" }}>{r.discountPct}%</td>
                   <td style={{ padding: "6px 6px", color: r.paymentStatus === "paid" ? GREEN : r.paymentStatus === "bill_requested" ? ORANGE : "rgba(255,255,255,.6)" }}>
                     {r.paymentStatus === "paid" ? "✅ paid" : r.paymentStatus === "bill_requested" ? "🧾 bill due" : "open"}

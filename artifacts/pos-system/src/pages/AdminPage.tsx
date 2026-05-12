@@ -25,6 +25,7 @@ import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
 import EventsAdmin from "./EventsAdmin";
+import MenuEditor from "./MenuEditor";
 
 // Manager PIN gate for menu changes (OOS toggle, discount set/clear).
 // Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
@@ -40,7 +41,7 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [happyHour, setHappyHour] = useState<HappyHourConfig | null>(null);
   const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
@@ -298,10 +299,10 @@ export default function AdminPage() {
       </header>
 
       <div className="flex gap-1 px-4 py-2" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
-        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "staff", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
+        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "staff", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu" ? "OOS / Discount" : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -338,6 +339,8 @@ export default function AdminPage() {
             />
           </div>
         )}
+
+        {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
 
         {tab === "menu" && (
           <div>

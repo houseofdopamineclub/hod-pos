@@ -1090,6 +1090,12 @@ export async function markTablePaid(
   payment: {
     amount: number; method: string; captainName: string;
     aggregator?: string; aggregatorDiscount?: number;
+    /** 🔴 2026-05-12 — Net amount the venue receives from the aggregator
+     *  after their platform discount/commission. Stored ONLY for reporting:
+     *  `amount` is what the customer was billed (full invoice, no discount
+     *  applied for aggregator orders); `aggregatorNetAmount` is what the
+     *  venue actually nets so admin can reconcile in Reports. */
+    aggregatorNetAmount?: number;
     discountPercent?: number; discountAmount?: number;
     serviceChargeAmount?: number; serviceChargeApplied?: boolean;
     taxAmount?: number;
@@ -1117,6 +1123,7 @@ export async function markTablePaid(
   }
   if (payment.aggregator) upd.aggregator = payment.aggregator;
   if (payment.aggregatorDiscount) upd.aggregatorDiscount = payment.aggregatorDiscount;
+  if (payment.aggregatorNetAmount !== undefined) upd.aggregatorNetAmount = payment.aggregatorNetAmount;
   if (payment.discountPercent) upd.discountPercent = payment.discountPercent;
   if (payment.discountAmount) upd.discountAmount = payment.discountAmount;
   if (payment.serviceChargeAmount !== undefined) upd.serviceChargeAmount = payment.serviceChargeAmount;

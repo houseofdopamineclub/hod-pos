@@ -34,6 +34,7 @@ import type {
   WastageRecord, HappyHourConfig, AggregatorSettings, AggregatorOrder,
   MenuOverride,
 } from "./types";
+import type { VenueMenuTab, VenueMenuTabId } from "./venue-menu";
 import { nanoid } from "./utils-pos";
 
 const ORDERS_COL = "posOrders";
@@ -51,6 +52,7 @@ const AGG_SETTINGS_COL = "posAggregatorSettings";
 const AGG_ORDERS_COL = "posAggregatorOrders";
 const MENU_OVERRIDES_COL = "posMenuOverrides";
 const VENUE_SETTINGS_COL = "venueSettings";
+const VENUE_MENU_COL = "venueMenu";
 
 export function subscribeToTableReservations(
   cb: (data: Record<string, TableReservation>) => void
@@ -385,6 +387,41 @@ export async function setEdcDefaultVendor(vendor: EdcDefaultVendor, updatedBy?: 
     updatedBy: updatedBy || "",
     updatedAt: serverTimestamp(),
   }, { merge: true });
+}
+
+// ── Editable customer menu (per-tab) ─────────────────────────────────────
+// Backs the "📋 Menu Editor" admin tab and the hodclub.in customer wallet.
+// One Firestore doc per tab at `venueMenu/{tabId}` keeps reads cheap and
+// avoids a collection query on the wallet's hot path.
+export function subscribeToVenueMenuTab(
+  tabId: VenueMenuTabId,
+  cb: (tab: VenueMenuTab | null) => void,
+): Unsubscribe {
+  return onSnapshot(doc(db, VENUE_MENU_COL, tabId), (snap) => {
+    if (!snap.exists()) { cb(null); return; }
+    cb({ tabId, ...(snap.data() as Omit<VenueMenuTab, "tabId">) });
+  }, () => { cb(null); });
+}
+
+export async function getVenueMenuTab(tabId: VenueMenuTabId): Promise<VenueMenuTab | null> {
+  const snap = await getDoc(doc(db, VENUE_MENU_COL, tabId));
+  if (!snap.exists()) return null;
+  return { tabId, ...(snap.data() as Omit<VenueMenuTab, "tabId">) };
+}
+
+export async function saveVenueMenuTab(
+  tabId: VenueMenuTabId,
+  categories: VenueMenuTab["categories"],
+  updatedBy?: string,
+): Promise<void> {
+  // Full replace (not merge) — the editor sends the entire categories array
+  // every save, so a stale `categories` field on the doc would shadow deletes.
+  await setDoc(doc(db, VENUE_MENU_COL, tabId), {
+    tabId,
+    categories,
+    updatedBy: updatedBy || "",
+    updatedAt: serverTimestamp(),
+  });
 }
 
 export function subscribeToAggregatorSettings(
