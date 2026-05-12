@@ -505,6 +505,12 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
 }
 
 const TODAY_STR = () => getOperationalNightStr();
+// Calendar date in IST (not shifted). Before noon IST this differs from TODAY_STR,
+// because getOperationalNightStr subtracts 12h so it still returns yesterday.
+// Bookings from hodclub.in use ev.date (calendar date), so we must match both.
+const CALENDAR_TODAY_STR = () =>
+  new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+const TODAY_DATE_SET = () => new Set([TODAY_STR(), CALENDAR_TODAY_STR()]);
 
 function matchQuery(q: string, ...fields: Array<string | undefined | null>): boolean {
   if (!q) return true;
@@ -752,7 +758,8 @@ function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentNam
   }, []);
 
   const today = TODAY_STR();
-  let todayBookings = bookings.filter((b) => (b.date || "").startsWith(today));
+  const todayDates = TODAY_DATE_SET();
+  let todayBookings = bookings.filter((b) => todayDates.has((b.date || "").slice(0, 10)));
   // ── BUGFIX 2026-05-08: route guestlist-typed bookings out of Tickets tab.
   // hodclub.in customer flow writes to `bookings` for ALL paths; the dual-write
   // to `guestlist` may be blocked by Firestore rules or by browser/CDN cache
@@ -903,17 +910,18 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   const today = TODAY_STR();
   // Today only: entry must have joinedAt OR entryTime stamped today.
   // If neither field exists (very old/legacy entry), exclude from door view.
+  const todayDates = TODAY_DATE_SET();
   let todayGuests = guests.filter((g) => {
     const ja = (g.joinedAt || "").slice(0, 10);
     const et = (g.entryTime || "").slice(0, 10);
-    return ja === today || et === today;
+    return todayDates.has(ja) || todayDates.has(et);
   });
   // Pull guestlist-typed bookings (entryType starts with "guestlist_") that
   // live in the `bookings` collection and adapt them to HodGuestlistEntry.
   const guestIds = new Set(todayGuests.map((g) => g.id));
   const adaptedFromBookings: HodGuestlistEntry[] = bookings
     .filter((b) => ((b as any).entryType || "").startsWith("guestlist_"))
-    .filter((b) => (b.date || "").startsWith(today) || ((b as any).bookedAt || "").slice(0, 10) === today)
+    .filter((b) => todayDates.has((b.date || "").slice(0, 10)) || todayDates.has(((b as any).bookedAt || "").slice(0, 10)))
     .filter((b) => !guestIds.has(b.id))
     .map((b) => ({
       // 🔴 BUGFIX 2026-05-09 — use public ref (HOD-XXX) as the id so the
@@ -1142,17 +1150,35 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
   const [arrBusy, setArrBusy] = useState("");
   const [cancelBusy, setCancelBusy] = useState("");
   const today = TODAY_STR();
+  const calToday = CALENDAR_TODAY_STR();
 
   useEffect(() => {
-    const unsub = subscribeToHodReservations(today, setReservations);
-    return unsub;
-  }, [today]);
+    // Subscribe to both the operational night date AND the calendar today date.
+    // Before noon IST they differ: operational night = yesterday, calendar = today.
+    // hodclub.in table reservations are written with the calendar date, so we
+    // must merge both snapshots to avoid showing zero reservations before noon.
+    const seen = new Map<string, HodTableReservation>();
+    const merge = () => setReservations(Array.from(seen.values()));
+    const unsub1 = subscribeToHodReservations(today, (rows) => {
+      rows.forEach((r) => seen.set(r._docId || r.bookingRef || Math.random().toString(), r));
+      // Remove any that belong to today's date range and were removed from snapshot
+      for (const [k, v] of seen) { if ((v.date || "") === today && !rows.find((r) => (r._docId || r.bookingRef) === k)) seen.delete(k); }
+      merge();
+    });
+    if (calToday === today) return unsub1;
+    const unsub2 = subscribeToHodReservations(calToday, (rows) => {
+      rows.forEach((r) => seen.set(r._docId || r.bookingRef || Math.random().toString(), r));
+      for (const [k, v] of seen) { if ((v.date || "") === calToday && !rows.find((r) => (r._docId || r.bookingRef) === k)) seen.delete(k); }
+      merge();
+    });
+    return () => { unsub1(); unsub2(); };
+  }, [today, calToday]);
 
   const activeAll = reservations.filter((r) => (r as any).status !== "cancelled");
   // Tables are physical assets, not per-event — door staff need to see EVERY
   // reservation arriving tonight regardless of which event chip is selected.
-  // The date filter (subscribeToHodReservations(today, …)) already constrains
-  // to tonight, so we deliberately ignore the eventId filter here. (Reports
+  // The dual-date subscription above already constrains to tonight's window,
+  // so we deliberately ignore the eventId filter here. (Reports
   // also ignores event when listing tables for the same reason.)
   void eventId;
   const active = activeAll;
