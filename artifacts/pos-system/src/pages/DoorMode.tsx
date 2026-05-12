@@ -1330,8 +1330,19 @@ function isGroupBooking(b: HodBooking) {
   return false;
 }
 function isOnlyEntryBooking(b: HodBooking) {
+  // Source of truth: the customer wallet (separate `hodclub.in` repo) writes
+  // `entryType: "entryonly"` (no underscore, lowercase) on the booking doc
+  // when a guest buys a Door Entry pass. The value is the option `id` from
+  // the wallet's entry-type picker (the `entryonly` row in the booking modal's
+  // entry options table) and is persisted as `entryType: String(d.entryType||'')`
+  // on the Razorpay/booking payload. If hodclub.in ever changes that id, this
+  // predicate must be updated to match.
+  // The Tickets tab uses `!isOnlyEntryBooking(b)` to exclude these rows, so
+  // both filters stay in sync via this single predicate.
+  // Legacy tolerance: older POS walk-ins minted `"only_entry"` / `"entry_only"`,
+  // so we still accept those to keep historical bookings classified correctly.
   const et = String((b as any).entryType || "").toLowerCase();
-  return et === "only_entry" || et === "entry_only" || et === "entryonly" || et.includes("only_entry");
+  return et === "entryonly" || et === "only_entry" || et === "entry_only";
 }
 // True if this booking represents a table reservation (so it belongs in the
 // Tables tab, not the generic Tickets list). Bookings created via the

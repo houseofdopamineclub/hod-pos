@@ -2065,9 +2065,11 @@ export async function createWalkInTicketBooking(input: {
 
   // entryType discriminator — mirrors hodclub.in conventions so the existing
   // tab predicates (`isOnlyEntryBooking`, `isGroupBooking`, etc.) classify
-  // these correctly.
+  // these correctly. Canonical "entryonly" (no underscore) matches the value
+  // hodclub.in writes from its booking payload — see the comment on
+  // `isOnlyEntryBooking` in `DoorMode.tsx` for the source-of-truth reference.
   let entryType: string | undefined;
-  if (kind === "onlyentry") entryType = "only_entry";
+  if (kind === "onlyentry") entryType = "entryonly";
   else if (kind === "group") entryType = "group_booking";
   // cover flow leaves entryType undefined (goes to the Tickets tab).
 
