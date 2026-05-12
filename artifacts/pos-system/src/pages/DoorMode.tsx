@@ -411,7 +411,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               </button>
             )}
             <button onClick={() => sendWhatsApp(existing)}
-              style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.35)", color: "#25D366", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
+              style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
               📲 Send WhatsApp Wallet Link
             </button>
           </>
@@ -1260,7 +1260,7 @@ function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentNam
               💰
             </button>
             <button onClick={() => sendBookingWhatsApp(b, onShowQr)} title="Re-send WhatsApp wallet/QR link"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.35)", color: "#25D366", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               📲
             </button>
             {/* 2026-05-10 (Khushi) — direct QR button. Same fallback flow as
@@ -1424,7 +1424,7 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
               💰
             </button>
             <button onClick={() => sendGuestlistWhatsApp(g, onShowQr)} title="Re-send WhatsApp guest-list link"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.35)", color: "#25D366", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               📲
             </button>
             {/* 2026-05-10 (Khushi) — direct QR button. Skips WhatsApp so the
@@ -1910,7 +1910,7 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
                 📞 Call
               </button>
               <button onClick={() => handleWhatsapp(r)}
-                style={{ padding: "9px 4px", borderRadius: 9, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.35)", color: "#25D366", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+                style={{ padding: "9px 4px", borderRadius: 9, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
                 📲 WA
               </button>
               <button onClick={() => handleCancel(r)} disabled={cancelBusy === r._docId}

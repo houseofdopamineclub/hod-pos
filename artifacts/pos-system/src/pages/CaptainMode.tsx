@@ -1895,7 +1895,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
             </button>
           )}
           <button onClick={sendWhatsApp}
-            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.3)", color: "#25D366", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
             📲 Send Menu
           </button>
           {(tabTotal > 0 || (r.tabRounds || []).length > 0) && (() => {
@@ -1942,12 +1942,12 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
           )}
           {!paid && !voided && (
             <button onClick={() => setShowReassign(true)}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(56,189,248,.1)", border: "1px solid rgba(56,189,248,.3)", color: "#38BDF8", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
               🔄 Reassign
             </button>
           )}
           <button onClick={handleRelease} disabled={busy === "release"}
-            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(168,85,247,.1)", border: "1px solid rgba(168,85,247,.3)", color: "#A855F7", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(184,50,39,.10)", border: "1px solid rgba(184,50,39,.4)", color: "#B83227", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
             {busy === "release" ? "..." : "🔓 Release Table"}
           </button>
         </div>
