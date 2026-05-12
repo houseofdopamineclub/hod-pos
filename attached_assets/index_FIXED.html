@@ -4501,14 +4501,8 @@ function renderWalletPage(bookingRef){
       +'.hod-wallet-v2 .wv-subchip.on{border-color:#F2C744;color:#F2C744;background:rgba(242,199,68,.04);}'
       // Section title above item list (e.g. "MANGO MANIA")
       +'.hod-wallet-v2 .wv-sectiontitle{font-family:var(--fp);font-size:24px;font-weight:900;color:#F5F1E8;letter-spacing:1.2px;text-transform:uppercase;margin:18px 4px 14px;}'
-      // Bottom fixed View Cart footer (red strip)
-      +'.hod-wallet-v2 .wv-cartfooter{position:fixed;left:0;right:0;bottom:0;z-index:200;background:#B83227;padding:0;font-family:var(--fs);box-shadow:0 -8px 24px rgba(0,0,0,.5);display:none;}'
-      +'.hod-wallet-v2 .wv-cartfooter.show{display:block;}'
-      +'.hod-wallet-v2 .wv-cartfooter .wv-cf-tax{text-align:center;background:#0A0A0A;color:rgba(245,241,232,.55);font-size:11px;padding:7px 12px;letter-spacing:.4px;font-style:italic;}'
-      +'.hod-wallet-v2 .wv-cartfooter .wv-cf-btn{width:100%;padding:16px;background:#B83227;color:#F2C744;font-size:15px;font-weight:900;letter-spacing:1.4px;text-transform:uppercase;border:none;cursor:pointer;font-family:var(--fs);display:flex;align-items:center;justify-content:center;gap:10px;}'
-      +'.hod-wallet-v2 .wv-cartfooter .wv-cf-btn .wv-cf-amt{background:#0A0A0A;color:#F2C744;padding:5px 10px;border-radius:6px;font-family:var(--fp);font-size:14px;font-weight:900;letter-spacing:.5px;}'
-      // Reserve bottom space so the fixed footer never covers content
-      +'.hod-wallet-v2{padding-bottom:90px;}';
+      // (View Cart bottom strip removed — Place Order button is the single primary CTA now)
+      +'.hod-wallet-v2{padding-bottom:24px;}';
     document.head.appendChild(st);
   }
 
@@ -5458,36 +5452,10 @@ function renderWalletPage(bookingRef){
 
     buildMenu(currentMenuData());
 
-    // ── DIGITORY V3: bottom fixed View Cart footer (red strip + tax line)
-    var cartFooter=wrap.querySelector('.wv-cartfooter');
-    if(!cartFooter){
-      cartFooter=document.createElement('div');
-      cartFooter.className='wv-cartfooter';
-      cartFooter.innerHTML='<button class="wv-cf-btn" type="button">'
-        +'<span id="wv-cf-label">View Cart</span>'
-        +'<span class="wv-cf-amt" id="wv-cf-amt">\u20b90</span>'
-        +'</button>'
-        +'<div class="wv-cf-tax">Government taxes as applicable.</div>';
-      cartFooter.querySelector('button').onclick=function(){
-        var pb=document.getElementById('tab-place-btn');
-        if(pb) pb.scrollIntoView({behavior:'smooth',block:'center'});
-      };
-      wrap.appendChild(cartFooter);
-    }
-    function updateCartFooter(){
-      var n=Object.values(cart).reduce(function(a,it){return a+it.qty;},0);
-      var amtEl=document.getElementById('wv-cf-amt');
-      var lblEl=document.getElementById('wv-cf-label');
-      if(!amtEl||!lblEl||!cartFooter) return;
-      if(n<=0){cartFooter.classList.remove('show');return;}
-      cartFooter.classList.add('show');
-      lblEl.textContent='View Cart \u00b7 '+n+' item'+(n>1?'s':'');
-      amtEl.textContent='\u20b9'+getCartTotal().toLocaleString('en-IN');
-    }
-    // Patch updateCartBar so the bottom footer always stays in sync.
-    var _origUpdateCartBar=updateCartBar;
-    updateCartBar=function(){_origUpdateCartBar();updateCartFooter();};
-    updateCartFooter();
+    // (Bottom "View Cart" strip removed per user request — single Place Order CTA is enough.)
+    // Strip any leftover footer node from previous render so it never reappears.
+    var _stale=wrap.querySelector('.wv-cartfooter');
+    if(_stale) _stale.remove();
 
     // Populate red header ref (#REF) once cv is known
     var refEl=document.getElementById('wv-hd2-ref');
