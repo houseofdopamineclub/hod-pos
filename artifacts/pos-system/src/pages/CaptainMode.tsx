@@ -1884,7 +1884,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
         <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap" }}>
           {!r.actualArrivalTime && (
             <button onClick={handleArrive} disabled={busy === "arrive"}
-              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#00C864,#00A050)", border: "none", color: "#fff", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5 }}>
               {busy === "arrive" ? "..." : "🚶 Guest Arrived"}
             </button>
           )}
@@ -1924,7 +1924,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
           })()}
           {!paid && !voided && (tabTotal > 0 || billReq) && (
             <button onClick={handleOpenMarkPaid}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(0,200,100,.1)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5 }}>
               💰 Mark Paid
             </button>
           )}
