@@ -28,26 +28,17 @@ type MetaErrorShape = {
   error_data?: { details?: string };
 };
 
-async function callMeta(
+type MetaCallResult =
+  | { ok: true; messageId?: string }
+  | { ok: false; status: number; code?: number; message: string };
+
+async function postToMeta(
   req: Request,
-  res: Response,
   body: Record<string, unknown>,
-): Promise<void> {
-  const token = process.env.META_WHATSAPP_TOKEN;
-  const phoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID;
-  const version = process.env.META_WHATSAPP_API_VERSION || DEFAULT_API_VERSION;
-
-  if (!token || !phoneId) {
-    req.log.warn(
-      { hasToken: !!token, hasPhoneId: !!phoneId },
-      "[wa] WhatsApp not configured",
-    );
-    res
-      .status(503)
-      .json({ ok: false, error: "WhatsApp not configured" });
-    return;
-  }
-
+  token: string,
+  phoneId: string,
+  version: string,
+): Promise<MetaCallResult> {
   const url = `https://graph.facebook.com/${version}/${encodeURIComponent(phoneId)}/messages`;
 
   let upstream: globalThis.Response;
@@ -62,11 +53,11 @@ async function callMeta(
     });
   } catch (err) {
     req.log.error({ err }, "[wa] Meta request failed (network)");
-    res.status(200).json({
+    return {
       ok: false,
-      error: err instanceof Error ? err.message : "Network error",
-    });
-    return;
+      status: 0,
+      message: err instanceof Error ? err.message : "Network error",
+    };
   }
 
   const text = await upstream.text();
@@ -90,21 +81,72 @@ async function callMeta(
       { status: upstream.status, code: errObj?.code, message },
       "[wa] Meta returned error",
     );
-    res.status(200).json({
+    return {
       ok: false,
-      error: message,
-      ...(typeof errObj?.code === "number" ? { code: errObj.code } : {}),
-    });
-    return;
+      status: upstream.status,
+      code: typeof errObj?.code === "number" ? errObj.code : undefined,
+      message,
+    };
   }
 
   const messageId =
     (parsed as { messages?: Array<{ id?: string }> } | null)?.messages?.[0]?.id;
   req.log.info({ messageId }, "[wa] Meta send ok");
+  return { ok: true, messageId };
+}
+
+async function callMeta(
+  req: Request,
+  res: Response,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const token = process.env.META_WHATSAPP_TOKEN;
+  const phoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID;
+  const version = process.env.META_WHATSAPP_API_VERSION || DEFAULT_API_VERSION;
+
+  if (!token || !phoneId) {
+    req.log.warn(
+      { hasToken: !!token, hasPhoneId: !!phoneId },
+      "[wa] WhatsApp not configured",
+    );
+    res
+      .status(503)
+      .json({ ok: false, error: "WhatsApp not configured" });
+    return;
+  }
+
+  const result = await postToMeta(req, body, token, phoneId, version);
+  if (result.ok) {
+    res.status(200).json({
+      ok: true,
+      ...(result.messageId ? { messageId: result.messageId } : {}),
+    });
+    return;
+  }
   res.status(200).json({
-    ok: true,
-    ...(messageId ? { messageId } : {}),
+    ok: false,
+    error: result.message,
+    ...(typeof result.code === "number" ? { code: result.code } : {}),
   });
+}
+
+// Meta error 132001 = "Template name does not exist in the translation".
+// Templates are registered against a specific locale (en_US, en_IN, etc.)
+// and Meta rejects sends that name a locale the template wasn't approved
+// in — even if the template name itself exists. Door/Captain/Bar all pass
+// language="en" today; we transparently retry common English variants so
+// staff don't have to know which locale the admin used in Meta Manager.
+// Order: caller's choice → en_US → en_IN → en_GB → en. Skip duplicates.
+function templateLanguageFallbacks(initial: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const code of [initial, "en_US", "en_IN", "en_GB", "en"]) {
+    const c = (code || "").trim();
+    if (!c || seen.has(c)) continue;
+    seen.add(c);
+    out.push(c);
+  }
+  return out;
 }
 
 router.post("/whatsapp/send-template", async (req, res) => {
@@ -133,15 +175,61 @@ router.post("/whatsapp/send-template", async (req, res) => {
         ]
       : undefined;
 
-  await callMeta(req, res, {
-    messaging_product: "whatsapp",
-    to: phone,
-    type: "template",
-    template: {
-      name: template,
-      language: { code: language || "en" },
-      ...(components ? { components } : {}),
-    },
+  const token = process.env.META_WHATSAPP_TOKEN;
+  const phoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID;
+  const version = process.env.META_WHATSAPP_API_VERSION || DEFAULT_API_VERSION;
+  if (!token || !phoneId) {
+    req.log.warn(
+      { hasToken: !!token, hasPhoneId: !!phoneId },
+      "[wa] WhatsApp not configured",
+    );
+    res.status(503).json({ ok: false, error: "WhatsApp not configured" });
+    return;
+  }
+
+  const languages = templateLanguageFallbacks(language || "en");
+  let lastError: { message: string; code?: number } | null = null;
+  for (const code of languages) {
+    const result = await postToMeta(
+      req,
+      {
+        messaging_product: "whatsapp",
+        to: phone,
+        type: "template",
+        template: {
+          name: template,
+          language: { code },
+          ...(components ? { components } : {}),
+        },
+      },
+      token,
+      phoneId,
+      version,
+    );
+    if (result.ok) {
+      if (code !== languages[0]) {
+        req.log.info(
+          { template, requested: languages[0], delivered: code },
+          "[wa] template language fallback succeeded",
+        );
+      }
+      res.status(200).json({
+        ok: true,
+        ...(result.messageId ? { messageId: result.messageId } : {}),
+      });
+      return;
+    }
+    lastError = { message: result.message, code: result.code };
+    // Only iterate on the locale-mismatch error (132001). For anything else
+    // (rate limit, auth, recipient block, template paused, etc.) the next
+    // attempt will fail identically — break and surface the real error.
+    if (result.code !== 132001) break;
+  }
+
+  res.status(200).json({
+    ok: false,
+    error: lastError?.message || "Template send failed",
+    ...(typeof lastError?.code === "number" ? { code: lastError.code } : {}),
   });
 });
 

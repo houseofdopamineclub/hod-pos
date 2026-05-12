@@ -97,6 +97,7 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
   );
 }
 import { subscribeToMenuOverrides } from "@/lib/firestore";
+import { QrScanner } from "@/components/QrScanner";
 
 // Min gap between two wallet-bill prints. Below this, bartender gets a confirm
 // prompt — prevents double-print fraud / paper waste from accidental re-tap.
@@ -203,63 +204,6 @@ function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
 
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginTop: 12 }}>{error}</div>}
       </div>
-    </div>
-  );
-}
-
-function QrScanner({ onResult, onClose }: { onResult: (data: string) => void; onClose: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scanRef = useRef(true);
-
-  useEffect(() => {
-    let raf = 0;
-    const start = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-
-        if ("BarcodeDetector" in window) {
-          const detector = new (window as any).BarcodeDetector({ formats: ["qr_code"] });
-          const scan = async () => {
-            if (!scanRef.current || !videoRef.current) return;
-            try {
-              const codes = await detector.detect(videoRef.current);
-              if (codes.length > 0) {
-                scanRef.current = false;
-                onResult(codes[0].rawValue);
-                return;
-              }
-            } catch {}
-            raf = requestAnimationFrame(scan);
-          };
-          scan();
-        }
-      } catch {}
-    };
-    start();
-    return () => {
-      scanRef.current = false;
-      cancelAnimationFrame(raf);
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-    };
-  }, [onResult]);
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.95)", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(242,199,68,.4)" }}>
-        <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted />
-        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(242,199,68,.6)", borderRadius: 16, pointerEvents: "none" }} />
-      </div>
-      <div style={{ color: "rgba(255,255,255,.5)", fontSize: 13, marginTop: 16 }}>Point camera at QR code</div>
-      <button onClick={onClose}
-        style={{ marginTop: 20, padding: "12px 28px", borderRadius: 12, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-        Close Scanner
-      </button>
     </div>
   );
 }
@@ -1510,7 +1454,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
       <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(242,199,68,.25)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
-            style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
+            style={{ padding: "8px 12px", borderRadius: 10, background: "#F2C744", border: "1.5px solid #F2C744", color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
             ← POS
           </Link>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 900, color: "#F2C744", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 BAR</div>

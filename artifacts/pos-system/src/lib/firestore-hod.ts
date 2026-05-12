@@ -629,6 +629,23 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     }).catch(() => {});
   }
 
+  // 2026-05-12 — also mirror checkedIn onto the booking doc itself so the
+  // Door Mode tabs (which filter on `booking.checkedIn`) move the row out
+  // of PENDING and into CHECKED-IN counters live. Without this mirror,
+  // activating a cover only marked the cover doc, leaving the booking row
+  // stuck in the pending list.
+  if (!booking._isGuestList && !booking._isTable) {
+    const targetCol = BOOKINGS_COL;
+    const targetId = booking.id || booking.ref;
+    if (targetId) {
+      await updateDoc(doc(db, targetCol, targetId), {
+        checkedIn: true,
+        checkedInAt: new Date().toISOString(),
+        checkedInBy: staffName,
+      }).catch(() => {});
+    }
+  }
+
   return { id: docId, cover: { id: docId, ...cover } as HodCover };
 }
 
@@ -2008,6 +2025,119 @@ export function subscribeToWalletScan(bookingRef: string, cb: (openedAt: any) =>
     const data = snap.data();
     if (data && data["walletOpenedAt"]) cb(data["walletOpenedAt"]);
   });
+}
+
+// ─── Door-side walk-in booking helpers ─────────────────────────────────────
+// 2026-05-12 (Khushi spec) — door tablet creates in-house walk-in bookings
+// without round-tripping through hodclub.in. Mirrors the shape the customer
+// site writes so they show up in the existing tabs/tickets/guestlist UI
+// (and CaptainMode/BarMode) without any decoder changes.
+//
+// Walk-in marker: `isWalkIn: true` + ref prefix `WI-…`. Pay-at-venue cash
+// flows set `paymentMethod: "cash_door"` and `paymentId: "cash_<ref>"` so
+// the existing PaidBadge renders as paid (not pending Razorpay).
+type WalkInBookingKind = "cover" | "onlyentry" | "group";
+
+export async function createWalkInTicketBooking(input: {
+  kind: WalkInBookingKind;
+  name: string;
+  email?: string;
+  phone: string;
+  guests: number;
+  total: number;             // ₹ collected at the door (0 = comp)
+  tier?: string;             // e.g. "Stag", "Couple", "Ladies"
+  type?: string;             // mirrors customer-site `type` field
+  eventId?: string;
+  eventTitle?: string;
+  partySize?: number;        // for group/VIP table flows
+  tableType?: string;        // "VIP", "Standard" etc — group flow only
+  notes?: string;
+  staffName: string;
+}): Promise<{ ref: string }> {
+  const { kind, name, email, phone, guests, total, tier, type, eventId, eventTitle,
+    partySize, tableType, notes, staffName } = input;
+  if (!name?.trim()) throw new Error("Enter customer name");
+  if (!phone?.trim()) throw new Error("Enter phone number");
+
+  const ref = `WI-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const date = getOperationalNightStr();
+  const cleanPhone = phone.replace(/\D/g, "").slice(-10);
+
+  // entryType discriminator — mirrors hodclub.in conventions so the existing
+  // tab predicates (`isOnlyEntryBooking`, `isGroupBooking`, etc.) classify
+  // these correctly.
+  let entryType: string | undefined;
+  if (kind === "onlyentry") entryType = "only_entry";
+  else if (kind === "group") entryType = "group_booking";
+  // cover flow leaves entryType undefined (goes to the Tickets tab).
+
+  const docPayload: Record<string, any> = {
+    ref,
+    name: name.trim(),
+    email: (email || "").trim(),
+    phone: cleanPhone,
+    guests: guests || 1,
+    total: Math.max(0, Math.round(total || 0)),
+    date,
+    tier: tier || "",
+    type: type || "",
+    eventId: eventId || "",
+    eventTitle: eventTitle || "",
+    paymentMethod: total > 0 ? "cash_door" : "comp_door",
+    paymentId: total > 0 ? `cash_${ref}` : `comp_${ref}`,
+    paidAt: new Date().toISOString(),
+    bookedAt: new Date().toISOString(),
+    createdAt: serverTimestamp(),
+    isWalkIn: true,
+    walkInBy: staffName,
+    source: "walkin",
+    notes: notes || "",
+    status: "confirmed",
+  };
+  if (entryType) docPayload.entryType = entryType;
+  if (kind === "group") {
+    docPayload.bookMode = "group";
+    if (tableType) docPayload.tableType = tableType;
+    if (partySize) docPayload.partySize = partySize;
+  }
+
+  await setDoc(doc(db, BOOKINGS_COL, ref), docPayload);
+  return { ref };
+}
+
+export async function createWalkInGuestlistEntry(input: {
+  name: string;
+  email?: string;
+  phone: string;
+  eventId?: string;
+  eventTitle?: string;
+  type?: string;            // "stag" | "couple" | "ladies" — mirrors hodclub.in
+  staffName: string;
+}): Promise<{ ref: string }> {
+  const { name, email, phone, eventId, eventTitle, type, staffName } = input;
+  if (!name?.trim()) throw new Error("Enter guest name");
+  if (!phone?.trim()) throw new Error("Enter phone number");
+
+  const ref = `GL-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const cleanPhone = phone.replace(/\D/g, "").slice(-10);
+  const entryType = type ? `guestlist_${type}` : "guestlist_stag";
+
+  await setDoc(doc(db, GUESTLIST_COL, ref), {
+    ref,
+    name: name.trim(),
+    email: (email || "").trim(),
+    phone: cleanPhone,
+    eventId: eventId || "",
+    eventTitle: eventTitle || "",
+    type: type || "stag",
+    entryType,
+    joinedAt: new Date().toISOString(),
+    createdAt: serverTimestamp(),
+    isWalkIn: true,
+    walkInBy: staffName,
+    source: "walkin",
+  });
+  return { ref };
 }
 
 export async function createAggregatorTableBooking(input: {

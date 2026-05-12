@@ -7,6 +7,7 @@ import {
   subscribeToHodEvents, type HodEvent,
   getCoverForBooking, activateCoverForBooking, editCoverAmount,
   ensureCoverForAggregatorArrival, createAggregatorTableBooking,
+  createWalkInTicketBooking, createWalkInGuestlistEntry,
   AGGREGATOR_OPTIONS, getAggregatorDiscount, recordWalkInDiscountOverride,
   logNotificationOutcome, subscribeToWalletScan,
   searchBookingsAndAggregators, type CrossSourceBooking,
@@ -38,6 +39,7 @@ import { getOperationalNightStr } from "@/lib/utils-pos";
 import { unmarkGuestArrived, markGuestArrived } from "@/lib/firestore-hod";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
+import { QrScanner } from "@/components/QrScanner";
 
 const DOOR_HASH = "f3deb7cb025897c8b29bc9c0603c35909616f8d6a0c32ddb774683accf394cb9";
 
@@ -95,54 +97,6 @@ function DoorLogin({ onLogin }: { onLogin: (name: string) => void }) {
           Enter
         </button>
       </div>
-    </div>
-  );
-}
-
-function QrScanner({ onResult, onClose }: { onResult: (data: string) => void; onClose: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scanRef = useRef(true);
-
-  useEffect(() => {
-    let raf = 0;
-    const start = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-        if ("BarcodeDetector" in window) {
-          const detector = new (window as any).BarcodeDetector({ formats: ["qr_code"] });
-          const scan = async () => {
-            if (!scanRef.current || !videoRef.current) return;
-            try {
-              const codes = await detector.detect(videoRef.current);
-              if (codes.length > 0) { scanRef.current = false; onResult(codes[0].rawValue); return; }
-            } catch {}
-            raf = requestAnimationFrame(scan);
-          };
-          scan();
-        }
-      } catch {}
-    };
-    start();
-    return () => { scanRef.current = false; cancelAnimationFrame(raf); streamRef.current?.getTracks().forEach((t) => t.stop()); };
-  }, [onResult]);
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.95)", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(242,199,68,.4)" }}>
-        <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted />
-        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(242,199,68,.6)", borderRadius: 16, pointerEvents: "none" }} />
-      </div>
-      <div style={{ color: "rgba(255,255,255,.5)", fontSize: 13, marginTop: 16 }}>Point camera at QR code</div>
-      <button onClick={onClose}
-        style={{ marginTop: 20, padding: "12px 28px", borderRadius: 12, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-        Close Scanner
-      </button>
     </div>
   );
 }
@@ -1107,6 +1061,35 @@ async function sendWhatsAppViaMeta(opts: {
 
 // Booking 📲: try Meta template `wallet_ready` → text → QR popup. Tablets have
 // no SIM so wa.me is removed entirely. Outcome is logged to covers/{ref}.
+//
+// 2026-05-12 (Khushi spec) — template params and fallback text now match the
+// "previous format" the venue had approved:
+//   Hi {name}, your HOD cover is booked! 🎟️
+//   🎉 Event: {event}
+//   📅 Date: {date}
+//   🚪 Entry: {entry}
+//   …
+//   View ticket: {link}
+// Order = [name, eventTitle, dateNice, entryType, link]. The Meta template
+// body must already be updated in Business Manager — we just feed it the
+// 5 params it expects. Location appended to the fallback text only (Meta
+// template body doesn't include a location placeholder yet).
+const HOD_LOCATION_URL = "https://maps.app.goo.gl/eEEHkqGAqr1ozYU2A";
+function formatBookingDateNice(raw?: string): string {
+  if (!raw) return "Tonight";
+  // Accept YYYY-MM-DD; fall back to the raw string otherwise.
+  const d = new Date(raw.length === 10 ? `${raw}T00:00:00` : raw);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+function bookingEntryLabel(b: HodBooking): string {
+  const tier = (b.tier || "").trim();
+  const type = (b.type || "").trim();
+  const guests = b.guests || 1;
+  if (tier) return tier.toUpperCase();
+  if (type) return type.toUpperCase();
+  return guests > 1 ? `${guests} GUESTS` : "STAG";
+}
 async function sendBookingWhatsApp(
   b: HodBooking,
   onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void,
@@ -1115,9 +1098,18 @@ async function sendBookingWhatsApp(
   const ref = b.ref || b.id;
   const link = `https://hodclub.in/?wallet=${encodeURIComponent(ref)}`;
   const customerName = b.name || "Guest";
-  const eventTitle = b.eventTitle || "tonight";
-  const guests = String(b.guests || 1);
-  const fallbackText = `Hi ${customerName}! 🎉\n\nYour HOD ${b._isGuestList ? "guest list pass" : "ticket"} for ${eventTitle} is confirmed.\n\n🎫 Ref: ${ref}\n👥 Guests: ${guests}\n\n📲 Show this at the door:\n${link}\n\nHouse of Dopamine | Koramangala 🎵`;
+  const eventTitle = b.eventTitle || "Tonight at H.O.D";
+  const dateNice = formatBookingDateNice(b.date);
+  const entryLabel = bookingEntryLabel(b);
+  const fallbackText =
+    `Hi ${customerName}, your HOD cover is booked! 🎟️\n\n` +
+    `🎉 Event: ${eventTitle}\n` +
+    `📅 Date: ${dateNice}\n` +
+    `🚪 Entry: ${entryLabel}\n\n` +
+    `Show your QR at the door — your wallet activates when you arrive at HOD.\n\n` +
+    `View ticket: ${link}\n\n` +
+    `See you tonight!\n\n` +
+    `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
   if (phone.length !== 10) {
     if (ref) await logNotificationOutcome(ref, { status: "no_phone" });
     onShowQr({ bookingRef: ref, walletUrl: link, customerName,
@@ -1126,7 +1118,7 @@ async function sendBookingWhatsApp(
   }
   const result = await sendWhatsAppViaMeta({
     phone,
-    template: { name: "wallet_ready", params: [customerName, eventTitle, ref, guests, link] },
+    template: { name: "wallet_ready", params: [customerName, eventTitle, dateNice, entryLabel, link] },
     fallbackText,
   });
   if (result.ok) {
@@ -1161,8 +1153,17 @@ async function sendGuestlistWhatsApp(
   const glRef = (g as any).ref || g.id;
   const link = `https://hodclub.in/?wallet=${encodeURIComponent(glRef)}`;
   const customerName = g.name || "Guest";
-  const eventTitle = g.eventTitle || "tonight";
-  const fallbackText = `Hi ${customerName}! 🎉\n\nYou're on tonight's HOD guest list${g.eventTitle ? ` for ${g.eventTitle}` : ""}.\n\n📋 Free entry · just show this at the door\n${link}\n\nHouse of Dopamine | Koramangala 🎵`;
+  const eventTitle = g.eventTitle || "Tonight at H.O.D";
+  const dateNice = formatBookingDateNice((g as any).date);
+  const fallbackText =
+    `Hi ${customerName}, you're on the HOD guest list! 🎟️\n\n` +
+    `🎉 Event: ${eventTitle}\n` +
+    `📅 Date: ${dateNice}\n` +
+    `🚪 Entry: FREE (Guest List)\n\n` +
+    `Show your QR at the door — entry is complimentary.\n\n` +
+    `View pass: ${link}\n\n` +
+    `See you tonight!\n\n` +
+    `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
   if (phone.length !== 10) {
     await logNotificationOutcome(g.id, { status: "no_phone" });
     onShowQr({ bookingRef: g.id, walletUrl: link, customerName,
@@ -1191,106 +1192,249 @@ async function sendGuestlistWhatsApp(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-05-12 Door Mode redesign — shared row + customer-detail modal.
+// Slim row keeps name/phone/ref + Call. All operational actions (Check-In,
+// Activate Cover, WhatsApp, QR) live in the modal so the door tablet can fit
+// 5 tabs of dense lists without a wall of buttons per row.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PaidBadge({ booking }: { booking: HodBooking }) {
+  // Per Khushi spec: only two states. Anything paid through the customer
+  // site's online checkout (Razorpay) is "Paid online"; everything else —
+  // walk-ins (cash_*), guestlist comps, aggregator bookings, zero-total
+  // entries — falls into "Pay at venue" so door staff knows to confirm
+  // the cover/entry charge at the door.
+  const pid = booking.paymentId || "";
+  const paidOnline = pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
+  if (paidOnline) {
+    return <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.45)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>✓ Paid online</span>;
+  }
+  return <span style={{ background: "rgba(242,199,68,.18)", border: "1px solid rgba(242,199,68,.55)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>₹ Pay at venue</span>;
+}
+
+function BookingRow({ booking, onOpen }: { booking: HodBooking; onOpen: (b: HodBooking) => void }) {
+  const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
+  return (
+    <div onClick={() => onOpen(booking)}
+      style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 14px", borderRadius: 12,
+        background: booking.checkedIn ? "rgba(0,200,100,.05)" : "rgba(255,255,255,.035)",
+        border: `1px solid ${booking.checkedIn ? "rgba(0,200,100,.25)" : "rgba(255,255,255,.07)"}`,
+        marginBottom: 8, cursor: "pointer", transition: "background .12s" }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ fontFamily: "'Inter',system-ui,sans-serif", fontSize: 15, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.1 }}>
+            {booking.name || "Guest"}
+          </div>
+          {booking.checkedIn && <span style={{ color: "#00C864", fontSize: 12, fontWeight: 900 }}>✓</span>}
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
+        </div>
+      </div>
+      <PaidBadge booking={booking} />
+      {phoneClean && (
+        <a href={`tel:${phoneClean}`} onClick={(e) => e.stopPropagation()} title="Call guest"
+          style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(37,211,102,.12)", border: "1px solid rgba(37,211,102,.4)", color: "#25D366", fontSize: 16, textDecoration: "none" }}>
+          📞
+        </a>
+      )}
+    </div>
+  );
+}
+
+function BookingDetailModal({
+  booking, agentName, onClose, onCover, onShowQr, onSendWhatsApp,
+}: {
+  booking: HodBooking;
+  agentName: string;
+  onClose: () => void;
+  onCover: (b: HodBooking) => void;
+  onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void;
+  onSendWhatsApp?: (b: HodBooking) => void;
+}) {
+  const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#111", border: "1px solid rgba(242,199,68,.35)", borderRadius: 18, padding: 18, boxShadow: "0 24px 48px rgba(0,0,0,.6)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 8 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.3 }}>
+              {booking.name || "Guest"}
+            </div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4 }}>
+              {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
+            </div>
+          </div>
+          <PaidBadge booking={booking} />
+        </div>
+
+        <LookupResult booking={booking} agentName={agentName} onDone={onClose} />
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
+          {!booking._isGuestList && (
+            <button onClick={() => { onCover(booking); onClose(); }}
+              style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.45)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              💰 Activate Cover
+            </button>
+          )}
+          {onSendWhatsApp && (
+            <button onClick={() => onSendWhatsApp(booking)}
+              style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              📲 WhatsApp Link
+            </button>
+          )}
+          <button onClick={() => onShowQr({
+            bookingRef: booking.ref || booking.id,
+            walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent(booking.ref || booking.id)}`,
+            customerName: booking.name || "Guest",
+            reason: "Show this QR — guest scans to open their wallet & menu instantly.",
+          })}
+            style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+            📱 Show QR
+          </button>
+          {phoneClean && (
+            <a href={`tel:${phoneClean}`}
+              style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(37,211,102,.12)", border: "1px solid rgba(37,211,102,.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
+              📞 Call
+            </a>
+          )}
+        </div>
+
+        <button onClick={onClose}
+          style={{ marginTop: 12, width: "100%", padding: 12, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Predicate helpers — keep filter logic in one spot so the 5 tabs stay in sync.
+function isGuestlistBooking(b: HodBooking) {
+  return ((b as any).entryType || "").startsWith("guestlist_");
+}
+function isGroupBooking(b: HodBooking) {
+  // True group bookings only. Recognised signals:
+  //   - explicit `bookMode: "group"` (customer site + door walk-in)
+  //   - explicit `entryType: "group_booking"` (door walk-in)
+  //   - `tableType` containing "group" (e.g. "group", "group_table") — this
+  //     keeps standard table reservations (tableType "Standard"/"VIP"/etc)
+  //     out of the Group tab while catching the explicit group marker.
+  if ((b as any).bookMode === "group") return true;
+  if ((b as any).entryType === "group_booking") return true;
+  const tt = String((b as any).tableType || "").toLowerCase();
+  if (tt && tt.includes("group")) return true;
+  return false;
+}
+function isOnlyEntryBooking(b: HodBooking) {
+  const et = String((b as any).entryType || "").toLowerCase();
+  return et === "only_entry" || et === "entry_only" || et === "entryonly" || et.includes("only_entry");
+}
+// True if this booking represents a table reservation (so it belongs in the
+// Tables tab, not the generic Tickets list). Bookings created via the
+// customer site's "book a table" flow carry a `tableType` field; the
+// adapter that surfaces table reservations into the bookings stream sets
+// `_isTable`. Either signal disqualifies it from Tickets.
+function isTableBooking(b: HodBooking) {
+  if ((b as any)._isTable) return true;
+  const tt = String((b as any).tableType || "").trim();
+  return !!tt;
+}
+
 function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentName: string; query: string; eventId: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
+  return <BookingsListTab kind="tickets" agentName={agentName} query={query} eventId={eventId} onCover={onCover} onShowQr={onShowQr} />;
+}
+
+function GroupBookingsTab({ agentName, query, eventId, onCover, onShowQr }: { agentName: string; query: string; eventId: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
+  return <BookingsListTab kind="group" agentName={agentName} query={query} eventId={eventId} onCover={onCover} onShowQr={onShowQr} />;
+}
+
+function OnlyEntryTab({ agentName, query, eventId, onCover, onShowQr }: { agentName: string; query: string; eventId: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
+  return <BookingsListTab kind="onlyentry" agentName={agentName} query={query} eventId={eventId} onCover={onCover} onShowQr={onShowQr} />;
+}
+
+function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }: {
+  kind: "tickets" | "group" | "onlyentry";
+  agentName: string; query: string; eventId: string;
+  onCover: (b: HodBooking) => void;
+  onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void;
+}) {
   const [bookings, setBookings] = useState<HodBooking[]>([]);
-  const [lookupResult, setLookupResult] = useState<HodBooking | null>(null);
+  const [detail, setDetail] = useState<HodBooking | null>(null);
   const [showOnlyCheckedIn, setShowOnlyCheckedIn] = useState(false);
+
+  // Tab-specific copy
+  const COPY = kind === "group"
+    ? { all: "Group Bookings", empty: "No group bookings for today" }
+    : kind === "onlyentry"
+    ? { all: "Only-Entry Bookings", empty: "No only-entry bookings for today" }
+    : { all: "Today's Bookings", empty: "No bookings for today" };
+
 
   useEffect(() => {
     const unsub = subscribeToBookings((all) => setBookings(all));
     return unsub;
   }, []);
 
-  const today = TODAY_STR();
   const todayDates = TODAY_DATE_SET();
   let todayBookings = bookings.filter((b) => todayDates.has((b.date || "").slice(0, 10)));
-  // ── BUGFIX 2026-05-08: route guestlist-typed bookings out of Tickets tab.
-  // hodclub.in customer flow writes to `bookings` for ALL paths; the dual-write
-  // to `guestlist` may be blocked by Firestore rules or by browser/CDN cache
-  // serving the pre-fix HTML. Door-side filter here is the source-of-truth so
-  // the operational tab assignment never depends on customer-site state.
-  todayBookings = todayBookings.filter((b) => !((b as any).entryType || "").startsWith("guestlist_"));
-  // 🛡 BUGFIX 2026-05-08: TABLE FOR 4 / VVIP TABLE FOR 6 bookings dual-write to
-  // both `bookings` and `tableReservations`. Tables tab is the operational view
-  // for these (shows floor, Reassign, party size); hide them from Tickets to
-  // avoid double-entry. Detect via tableType field (set by saveBooking) or
-  // bookMode==='group' (legacy fallback).
-  todayBookings = todayBookings.filter((b) => {
-    const tt = (b as any).tableType;
-    const bm = (b as any).bookMode;
-    return !tt && bm !== "group";
-  });
-  // Event filter is permissive: keep entries that match the selected event OR have no eventId
-  // (aggregator bookings and legacy entries without eventId should always be visible for today)
+  // Always exclude guestlist-typed bookings — they live under the Guest List tab.
+  todayBookings = todayBookings.filter((b) => !isGuestlistBooking(b));
+  // Then narrow to this tab's segment.
+  if (kind === "tickets") {
+    todayBookings = todayBookings.filter((b) => !isGroupBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b));
+  } else if (kind === "group") {
+    todayBookings = todayBookings.filter((b) => isGroupBooking(b));
+  } else if (kind === "onlyentry") {
+    todayBookings = todayBookings.filter((b) => isOnlyEntryBooking(b));
+  }
   if (eventId !== "all") todayBookings = todayBookings.filter((b) => !b.eventId || b.eventId === eventId);
   const checked = todayBookings.filter((b) => b.checkedIn).length;
-  const visibleBookings = showOnlyCheckedIn ? todayBookings.filter((b) => b.checkedIn) : todayBookings;
+  // Hide checked-in / activated rows from the default view; surface them via the toggle.
+  const visibleBookings = showOnlyCheckedIn ? todayBookings.filter((b) => b.checkedIn) : todayBookings.filter((b) => !b.checkedIn);
   const filtered = visibleBookings.filter((b) => matchQuery(query, b.name, b.phone, b.ref));
 
   return (
     <div>
-      {lookupResult && <LookupResult booking={lookupResult} agentName={agentName} onDone={() => setLookupResult(null)} />}
+      {detail && (
+        <BookingDetailModal
+          booking={detail}
+          agentName={agentName}
+          onClose={() => setDetail(null)}
+          onCover={onCover}
+          onShowQr={onShowQr}
+          onSendWhatsApp={(b) => sendBookingWhatsApp(b, onShowQr)}
+        />
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
         <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.5)" : "transparent"}`,
-            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#F2C744" }}>{todayBookings.length}</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Today's Bookings {!showOnlyCheckedIn ? "•" : ""}</div>
+          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.14)" : "rgba(255,255,255,.04)",
+            border: `1.5px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.55)" : "transparent"}`,
+            borderRadius: 12, padding: 14, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayBookings.length}</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 6, fontWeight: 700, letterSpacing: .8 }}>{COPY.all.toUpperCase()} {!showOnlyCheckedIn ? "•" : ""}</div>
         </div>
         <div onClick={() => setShowOnlyCheckedIn(true)}
-          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,.15)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${showOnlyCheckedIn ? "rgba(0,200,100,.5)" : "transparent"}`,
-            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#00C864" }}>{checked}</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Checked In {showOnlyCheckedIn ? "•" : ""}</div>
+          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,.16)" : "rgba(255,255,255,.04)",
+            border: `1.5px solid ${showOnlyCheckedIn ? "rgba(0,200,100,.55)" : "transparent"}`,
+            borderRadius: 12, padding: 14, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checked}</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 6, fontWeight: 700, letterSpacing: .8 }}>CHECKED IN {showOnlyCheckedIn ? "•" : ""}</div>
         </div>
       </div>
 
       {filtered.map((b) => (
-        <div key={b.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.06)", gap: 8 }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.ref} · {b.phone || ""} · {b.type || ""}{b.tier ? ` · ${b.tier}` : ""}</div>
-          </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-            <button onClick={() => onCover(b)} title="Cover wallet"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              💰
-            </button>
-            <button onClick={() => sendBookingWhatsApp(b, onShowQr)} title="Re-send WhatsApp wallet/QR link"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              📲
-            </button>
-            {/* 2026-05-10 (Khushi) — direct QR button. Same fallback flow as
-                Tables tab: bypasses WhatsApp entirely so guest can scan
-                instantly when Meta is flaky / phone missing / card cold. */}
-            <button onClick={() => onShowQr({
-              bookingRef: b.ref || b.id,
-              walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent(b.ref || b.id)}`,
-              customerName: b.name || "Guest",
-              reason: "Show this QR — guest scans to open their wallet & menu instantly.",
-            })} title="Show QR for guest to scan (skip WhatsApp)"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              📱
-            </button>
-            {b.checkedIn ? (
-              <span style={{ fontSize: 11, color: "#00C864", fontWeight: 800 }}>✅</span>
-            ) : (
-              <button onClick={() => setLookupResult(b)}
-                style={{ padding: "6px 12px", borderRadius: 8, background: "rgba(0,200,100,.1)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
-                Check In
-              </button>
-            )}
-          </div>
-        </div>
+        <BookingRow key={b.id} booking={b} onOpen={setDetail} />
       ))}
       {filtered.length === 0 && (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.3)", fontSize: 13 }}>
-          {query ? `No matches for "${query}" in today's bookings`
-            : showOnlyCheckedIn ? "No one checked in yet — tap the gold tile to see all bookings"
-            : "No bookings for today"}
+        <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,.35)", fontSize: 13 }}>
+          {query ? `No matches for "${query}"`
+            : showOnlyCheckedIn ? "No one checked in yet — tap PENDING to see remaining guests"
+            : COPY.empty}
         </div>
       )}
     </div>
@@ -1302,6 +1446,7 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [busyId, setBusyId] = useState("");
   const [showOnlyCheckedIn, setShowOnlyCheckedIn] = useState(false);
+  const [detail, setDetail] = useState<HodBooking | null>(null);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -1388,118 +1533,146 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   // Permissive: keep entries with no eventId (legacy / unscoped guest list adds)
   if (eventId !== "all") todayGuests = todayGuests.filter((g) => !g.eventId || g.eventId === eventId);
   const checkedIn = todayGuests.filter((g) => g.checkedIn).length;
-  const visibleGuests = showOnlyCheckedIn ? todayGuests.filter((g) => g.checkedIn) : todayGuests;
+  // Hide checked-in / activated rows from the default view; surface them via the toggle.
+  const visibleGuests = showOnlyCheckedIn
+    ? todayGuests.filter((g) => g.checkedIn)
+    : todayGuests.filter((g) => !g.checkedIn);
   const filtered = visibleGuests.filter((g) => matchQuery(query, g.name, g.phone));
+  // Find the underlying guestlist entry for the open detail modal so we can
+  // wire the per-row free-entry / cover / WA flows through the modal.
+  const detailGuest = detail ? todayGuests.find((g) => g.id === detail.id) || null : null;
+  // Adapt guest to HodBooking-shape so the shared row + detail modal can render it.
+  const adapt = (g: HodGuestlistEntry): HodBooking => ({
+    id: g.id,
+    ref: (g as any).ref || g.id,
+    name: g.name,
+    phone: g.phone,
+    eventId: g.eventId,
+    eventTitle: g.eventTitle,
+    type: g.type as any,
+    total: 0,
+    checkedIn: !!g.checkedIn,
+    _isGuestList: true,
+    _glDocId: (g as any)._bookingDocId || g.id,
+    date: (g.joinedAt || g.entryTime || "").slice(0, 10),
+  } as any);
+
+  const handleFreeEntry = async (g: HodGuestlistEntry) => {
+    if (busyId === g.id) return;
+    setBusyId(g.id);
+    try {
+      const _source: "booking" | "guestlist" = (g as any)._source === "booking" ? "booking" : "guestlist";
+      await ensureZeroBalanceCoverForGuest({
+        bookingRef: g.id, sourceDocId: g.id, name: g.name || "Guest", phone: g.phone || "",
+        source: _source, eventId: g.eventId || "", eventTitle: g.eventTitle || "", staffName: agentName,
+      });
+      await checkInGuest(g.id, _source, agentName).catch(() => {});
+      toast({
+        title: `🎁 Free entry: ${g.name || "Guest"}`,
+        description: "₹0 wallet activated · checked in. Customer can top up at bar or via hodclub.in.",
+        duration: 6000,
+      });
+      setDetail(null);
+    } catch (e: any) {
+      toast({ title: "Free entry failed", description: e?.message || "Try again", variant: "destructive" });
+    }
+    setBusyId("");
+  };
 
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+      {detail && detailGuest && (
+        <div onClick={() => setDetail(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#111", border: "1px solid rgba(242,199,68,.35)", borderRadius: 18, padding: 18, boxShadow: "0 24px 48px rgba(0,0,0,.6)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 8 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.3 }}>
+                  {detailGuest.name || "Guest"}
+                </div>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4 }}>
+                  {detailGuest.phone || "no phone"} · 📋 Guest list{detailGuest.type ? ` · ${detailGuest.type}` : ""}
+                </div>
+              </div>
+              <PaidBadge booking={adapt(detailGuest)} />
+            </div>
+
+            {detailGuest.checkedIn ? (
+              <div style={{ background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.35)", color: "#00C864", padding: 14, borderRadius: 12, fontSize: 13, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>
+                ✅ Checked in
+              </div>
+            ) : (
+              <button onClick={() => handleToggle(detailGuest)} disabled={busyId === detailGuest.id}
+                style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+                {busyId === detailGuest.id ? "Checking…" : "✅ Check In Guest"}
+              </button>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <button onClick={() => { onCover(adapt(detailGuest)); setDetail(null); }}
+                style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.45)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                💰 Activate Cover
+              </button>
+              <button onClick={() => sendGuestlistWhatsApp(detailGuest, onShowQr)}
+                style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(37,211,102,.1)", border: "1px solid rgba(37,211,102,.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                📲 WhatsApp Link
+              </button>
+              <button onClick={() => onShowQr({
+                bookingRef: detailGuest.id,
+                walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent((detailGuest as any).ref || detailGuest.id)}`,
+                customerName: detailGuest.name || "Guest",
+                reason: "Show this QR — guest scans to open their guest-list pass instantly.",
+              })}
+                style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                📱 Show QR
+              </button>
+              {!detailGuest.checkedIn && (
+                <button onClick={() => handleFreeEntry(detailGuest)} disabled={busyId === detailGuest.id}
+                  style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(96,165,250,.12)", border: "1px solid rgba(96,165,250,.45)", color: "#60A5FA", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                  {busyId === detailGuest.id ? "…" : "🎁 Free Entry"}
+                </button>
+              )}
+              {detailGuest.phone && (
+                <a href={`tel:${(detailGuest.phone || "").replace(/[^\d+]/g, "")}`}
+                  style={{ padding: "12px 10px", borderRadius: 12, background: "rgba(37,211,102,.12)", border: "1px solid rgba(37,211,102,.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
+                  📞 Call
+                </a>
+              )}
+            </div>
+
+            <button onClick={() => setDetail(null)}
+              style={{ marginTop: 12, width: "100%", padding: 12, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
         <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.5)" : "transparent"}`,
-            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#F2C744" }}>{todayGuests.length}</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Today's Guests {!showOnlyCheckedIn ? "•" : ""}</div>
+          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.14)" : "rgba(255,255,255,.04)",
+            border: `1.5px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.55)" : "transparent"}`,
+            borderRadius: 12, padding: 14, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayGuests.length}</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 6, fontWeight: 700, letterSpacing: .8 }}>TONIGHT'S GUEST LIST {!showOnlyCheckedIn ? "•" : ""}</div>
         </div>
         <div onClick={() => setShowOnlyCheckedIn(true)}
-          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,.15)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${showOnlyCheckedIn ? "rgba(0,200,100,.5)" : "transparent"}`,
-            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#00C864" }}>{checkedIn}</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Checked In {showOnlyCheckedIn ? "•" : ""}</div>
+          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,.16)" : "rgba(255,255,255,.04)",
+            border: `1.5px solid ${showOnlyCheckedIn ? "rgba(0,200,100,.55)" : "transparent"}`,
+            borderRadius: 12, padding: 14, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checkedIn}</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 6, fontWeight: 700, letterSpacing: .8 }}>CHECKED IN {showOnlyCheckedIn ? "•" : ""}</div>
         </div>
       </div>
 
       {filtered.map((g) => (
-        <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{g.name}</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>
-              {g.phone || ""} {g.type ? `· ${g.type}` : ""} {g.eventTitle ? `· ${g.eventTitle}` : ""}
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-            <button onClick={() => onCover({ id: g.id, ref: g.id, name: g.name, phone: g.phone, eventId: g.eventId, eventTitle: g.eventTitle, _isGuestList: true, _glDocId: g.id } as any)} title="Cover wallet"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              💰
-            </button>
-            <button onClick={() => sendGuestlistWhatsApp(g, onShowQr)} title="Re-send WhatsApp guest-list link"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              📲
-            </button>
-            {/* 2026-05-10 (Khushi) — direct QR button. Skips WhatsApp so the
-                door staff can show the guestlist link instantly even when
-                Meta is flaky, the guest's phone is dead, or no number on file. */}
-            <button onClick={() => onShowQr({
-              bookingRef: g.id,
-              // 🔴 BUGFIX 2026-05-10 — `?wallet=` is the only param hodclub.in
-              // handles. `?gl=` opened a blank page. See sendGuestlistWhatsApp.
-              walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent((g as any).ref || g.id)}`,
-              customerName: g.name || "Guest",
-              reason: "Show this QR — guest scans to open their guest-list pass instantly.",
-            })} title="Show QR for guest to scan (skip WhatsApp)"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-              📱
-            </button>
-            {/* 🎁 BUGFIX 2026-05-08: Door staff comps regulars in WITHOUT activating a paid
-                cover. One tap: mints a ₹0 wallet (so Bar can serve & top up later) AND
-                checks the guest in. Customer can self-recharge via hodclub.in/?topup=<ref>
-                or bartender tops up in person. Hidden once already in. */}
-            {!g.checkedIn && (
-              <button onClick={async () => {
-                if (busyId === g.id) return;
-                setBusyId(g.id);
-                try {
-                  const _source: "booking" | "guestlist" = (g as any)._source === "booking" ? "booking" : "guestlist";
-                  // Wallet first (atomic + idempotent), then check-in. If wallet
-                  // creation fails (rules / network), abort BEFORE check-in so
-                  // door doesn't see "checked in" without a usable wallet.
-                  await ensureZeroBalanceCoverForGuest({
-                    bookingRef: g.id,
-                    sourceDocId: g.id,
-                    name: g.name || "Guest",
-                    phone: g.phone || "",
-                    source: _source,
-                    eventId: g.eventId || "",
-                    eventTitle: g.eventTitle || "",
-                    staffName: agentName,
-                  });
-                  // ensureZero already mirrors checkedIn back to source — but call
-                  // checkInGuest too to write the canonical checkedInAt/checkedInBy
-                  // audit fields (mirror sets only checkedIn flag).
-                  await checkInGuest(g.id, _source, agentName).catch(() => {});
-                  toast({
-                    title: `🎁 Free entry: ${g.name || "Guest"}`,
-                    description: "₹0 wallet activated · checked in. Customer can top up at bar or via hodclub.in.",
-                    duration: 6000,
-                  });
-                } catch (e: any) {
-                  toast({ title: "Free entry failed", description: e?.message || "Try again", variant: "destructive" });
-                }
-                setBusyId("");
-              }}
-                disabled={busyId === g.id}
-                title="Free entry — creates ₹0 cover wallet + checks in"
-                style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(96,165,250,.12)", border: "1px solid rgba(96,165,250,.4)", color: "#60A5FA", fontSize: 11, fontWeight: 800, cursor: busyId === g.id ? "default" : "pointer", whiteSpace: "nowrap" }}>
-                {busyId === g.id ? "…" : "🎁 FREE"}
-              </button>
-            )}
-            <button onClick={() => handleToggle(g)} disabled={busyId === g.id || g.checkedIn}
-              style={{ padding: "6px 14px", borderRadius: 8, fontSize: 11, fontWeight: 700,
-                cursor: g.checkedIn ? "default" : "pointer",
-                background: g.checkedIn ? "rgba(0,200,100,.12)" : "rgba(255,255,255,.06)",
-                border: `1px solid ${g.checkedIn ? "rgba(0,200,100,.3)" : "rgba(255,255,255,.1)"}`,
-                color: g.checkedIn ? "#00C864" : "rgba(255,255,255,.5)" }}
-              title={g.checkedIn ? "Already checked in — manager required to reverse" : ""}>
-              {busyId === g.id ? "Checking…" : g.checkedIn ? "✅ In" : "Check In"}
-            </button>
-          </div>
-        </div>
+        <BookingRow key={g.id} booking={adapt(g)} onOpen={(b) => setDetail(b)} />
       ))}
       {filtered.length === 0 && (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.3)", fontSize: 13 }}>
+        <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,.35)", fontSize: 13 }}>
           {query ? `No matches for "${query}" in today's guest list`
-            : showOnlyCheckedIn ? "No one checked in yet — tap the gold tile to see all guests"
+            : showOnlyCheckedIn ? "No one checked in yet — tap PENDING to see remaining guests"
             : "No guests for today"}
         </div>
       )}
@@ -1936,47 +2109,373 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
 
 const HOD_SITE = "https://hodclub.in";
 
-function NewWalkInModal({ agentName, onClose }: { agentName: string; onClose: () => void }) {
-  const [aggOpen, setAggOpen] = useState(false);
+// 2026-05-12 (Khushi spec) — full walk-in redesign. 5 boxes, yellow/black
+// palette, in-house form modals (no more bouncing to hodclub.in). Each
+// non-aggregator flow collects name/email/phone + flow-specific fields and
+// writes directly to Firestore via createWalkIn{Ticket,Guestlist} so the
+// new bookings appear in tonight's tabs immediately.
+type WalkInChoice = "guestlist" | "cover" | "onlyentry" | "group" | "agg";
 
-  const openHod = (mode: "guestlist" | "cover" | "table") => {
-    const params = new URLSearchParams({
-      staff: agentName, mode: "walkin", type: mode, ts: String(Date.now()),
+// 2026-05-12 (Khushi): rebuilt to mirror the hodclub.in customer modal
+// (see screenshot in chat). One unified sheet: 2×2 category grid at top
+// acts as a tab switcher, ENTRY TYPE pricing cards in the middle, then
+// "ENTER YOUR DETAILS" form, ticket stepper, total summary, single CTA.
+// Switching categories preserves name/email/phone. Aggregator stays
+// reachable via a small link below the CTA (kept out of the 2×2 grid
+// because the customer-facing modal only shows 4 cards).
+function NewWalkInModal({ agentName, onClose }: { agentName: string; onClose: () => void }) {
+  const [showAgg, setShowAgg] = useState(false);
+  if (showAgg) {
+    return <AddAggregatorBookingModal agentName={agentName} onClose={onClose} onBack={() => setShowAgg(false)} />;
+  }
+  return <UnifiedWalkInModal agentName={agentName} onClose={onClose} onAggregator={() => setShowAgg(true)} />;
+}
+
+type WalkInKind = "guestlist" | "onlyentry" | "cover" | "group";
+
+// Tier presets mirror the hodclub.in modal exactly.
+const TIER_PRICES: Record<"Stag" | "Couple" | "Ladies", { price: number; label: string; sub: string }> = {
+  Stag:   { price: 500, label: "STAG",   sub: "1 Person · Cover Redeemable" },
+  Couple: { price: 999, label: "COUPLE", sub: "2 Persons · Cover Redeemable" },
+  Ladies: { price: 0,   label: "LADIES", sub: "Complimentary Entry" },
+};
+
+function UnifiedWalkInModal({
+  agentName, onClose, onAggregator,
+}: { agentName: string; onClose: () => void; onAggregator: () => void }) {
+  // Default tab = Buy Covers (matches the screenshot's active state).
+  const [kind, setKind] = useState<WalkInKind>("cover");
+
+  // Shared identity fields persist across tab switches.
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const [tier, setTier] = useState<"Stag" | "Couple" | "Ladies">("Stag");
+  const [tickets, setTickets] = useState(1);
+
+  // Entry-Only flat price (₹500 default) and Group min-spend.
+  const [entryPrice, setEntryPrice] = useState(500);
+  const [partySize, setPartySize] = useState(4);
+  const [tableType, setTableType] = useState<"Standard" | "VIP">("Standard");
+  const [groupMinSpend, setGroupMinSpend] = useState(15000);
+
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState<{ ref: string } | null>(null);
+
+  const [events, setEvents] = useState<HodEvent[]>([]);
+  const [eventId, setEventId] = useState<string>("");
+  useEffect(() => {
+    const unsub = subscribeToHodEvents((all) => {
+      setEvents(all);
+      const today = TODAY_STR();
+      const tonight = all.filter((e) => (e.date || "") === today);
+      if (tonight.length === 1) setEventId(tonight[0].id);
     });
-    window.open(`${HOD_SITE}/?${params.toString()}`, "_blank", "noopener");
-    onClose();
+    return unsub;
+  }, []);
+
+  // ── Derived totals ────────────────────────────────────────────────────────
+  // Buy Covers: tier price × tickets (Ladies always free regardless of qty).
+  // Entry Only: entryPrice × tickets.
+  // Guest List: free.
+  // Group: min spend / deposit (single line item).
+  const unit =
+    kind === "cover" ? TIER_PRICES[tier].price :
+    kind === "onlyentry" ? entryPrice :
+    kind === "group" ? groupMinSpend : 0;
+  const qty = kind === "group" ? 1 : tickets;
+  const total = Math.max(0, unit * qty);
+  const eventTitle = events.find((e) => e.id === eventId)?.title || "";
+
+  const guestsForFlow =
+    kind === "cover" ? (tier === "Couple" ? tickets * 2 : tickets) :
+    kind === "group" ? partySize :
+    tickets;
+
+  const submit = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("Enter guest name"); return; }
+    const cleanPhone = phone.replace(/\D/g, "");
+    if (cleanPhone.length < 10) { setErr("Enter a 10-digit phone number"); return; }
+    setBusy(true);
+    try {
+      if (kind === "guestlist") {
+        const r = await createWalkInGuestlistEntry({
+          name, email, phone, eventId, eventTitle,
+          type: tier.toLowerCase(),
+          staffName: agentName,
+        });
+        setDone({ ref: r.ref });
+      } else {
+        const r = await createWalkInTicketBooking({
+          kind: kind === "group" ? "group" : kind === "onlyentry" ? "onlyentry" : "cover",
+          name, email, phone,
+          guests: guestsForFlow,
+          total,
+          tier: kind === "cover" ? tier : "",
+          type: kind === "cover" ? tier.toLowerCase() : kind,
+          eventId, eventTitle,
+          partySize: kind === "group" ? partySize : undefined,
+          tableType: kind === "group" ? tableType : undefined,
+          notes: "",
+          staffName: agentName,
+        });
+        setDone({ ref: r.ref });
+      }
+    } catch (e: any) {
+      setErr(e?.message || "Could not save booking");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (aggOpen) {
-    return <AddAggregatorBookingModal agentName={agentName} onClose={onClose} onBack={() => setAggOpen(false)} />;
+  const ctaLabel =
+    kind === "guestlist" ? "✓ Add to Guest List" :
+    total === 0 ? "✓ Confirm (No Charge)" :
+    `💵 Collect ₹${total.toLocaleString("en-IN")} & Confirm`;
+
+  // ── Reusable styles ──────────────────────────────────────────────────────
+  const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 800, color: "rgba(242,199,68,.85)", letterSpacing: 1.2, marginBottom: 8 };
+  const inp: React.CSSProperties = { width: "100%", padding: "13px 14px", borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box", fontFamily: "inherit" };
+
+  // Big 2×2 category card — yellow filled when active, dark+border when not.
+  const catCard = (active: boolean, mini = false): React.CSSProperties => ({
+    padding: mini ? "12px 10px" : "16px 12px",
+    borderRadius: 12,
+    border: active ? "2px solid #F2C744" : "1.5px solid rgba(255,255,255,.1)",
+    background: active ? "linear-gradient(160deg,rgba(242,199,68,.18),rgba(242,199,68,.06))" : "rgba(255,255,255,.025)",
+    cursor: "pointer", color: "#fff", fontFamily: "inherit",
+    textAlign: "center", transition: "transform .12s, border-color .12s",
+  });
+
+  // Done screen (success confirmation, unchanged).
+  if (done) {
+    return (
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid #F2C744", borderRadius: 22, padding: 28, width: "100%", maxWidth: 380, textAlign: "center" }}>
+          <div style={{ fontSize: 64, marginBottom: 10 }}>✅</div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 24, fontWeight: 900, color: "#F2C744", marginBottom: 6 }}>Booking Confirmed</div>
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginBottom: 4 }}>{name}</div>
+          <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,.5)", marginBottom: 18 }}>{done.ref}</div>
+          <button onClick={onClose} style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#F2C744,#E0B030)", border: "none", color: "#0a0a0a", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>Done</button>
+        </div>
+      </div>
+    );
   }
 
-  const cards: Array<{ key: "guestlist" | "cover" | "table" | "agg"; emoji: string; title: string; sub: string; tint: string }> = [
-    { key: "guestlist", emoji: "📋", title: "Guest List", sub: "Free entry — name + phone only", tint: "rgba(96,165,250,.15)" },
-    { key: "cover",     emoji: "💰", title: "Cover Booking", sub: "Pre-paid cover (₹) for tonight", tint: "rgba(168,85,247,.15)" },
-    { key: "table",     emoji: "🪑", title: "Table Booking", sub: "Live floor map · pick available table", tint: "rgba(242,199,68,.18)" },
-    { key: "agg",       emoji: "📲", title: "Aggregator Booking", sub: "Missed sync from Zomato / Swiggy / EazyDiner — add manually", tint: "rgba(231,60,126,.15)" },
-  ];
-
+  // ── Main sheet ────────────────────────────────────────────────────────────
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflow: "auto" }}>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>➕ New Walk-in</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 18 }}>
-          Booking by <b style={{ color: "#fff" }}>{agentName}</b> · auto-tagged in admin
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid rgba(242,199,68,.45)", borderRadius: 22, padding: 18, width: "100%", maxWidth: 440, marginTop: 24, marginBottom: 24, boxShadow: "0 24px 48px rgba(0,0,0,.7)" }}>
+        {/* Close button (top-right only — no title bar; the cards ARE the title) */}
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "rgba(255,255,255,.55)", fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 4 }}>✕</button>
         </div>
-        {cards.map((c) => (
-          <button key={c.key} onClick={() => c.key === "agg" ? setAggOpen(true) : openHod(c.key)}
-            style={{ display: "block", width: "100%", textAlign: "left", padding: 14, borderRadius: 14, background: c.tint, border: "1px solid rgba(255,255,255,.08)", marginBottom: 10, cursor: "pointer", color: "#fff", fontFamily: "inherit" }}>
-            <div style={{ fontSize: 22, marginBottom: 4 }}>{c.emoji}</div>
-            <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 2 }}>{c.title}</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)" }}>{c.sub}</div>
+
+        {/* 2×2 CATEGORY GRID — matches hodclub.in modal exactly */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist")}>
+            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "guestlist" ? "#F2C744" : "rgba(255,255,255,.85)" }}>GUEST LIST</div>
+            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(252,165,165,.85)", fontWeight: 700, letterSpacing: .8 }}>CLOSED · 8PM</div>
           </button>
-        ))}
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", textAlign: "center", marginTop: 12, lineHeight: 1.5 }}>
-          Guest List / Cover / Table cards open hodclub.in. Aggregator card stays here — for entries that didn't sync.
+          <button onClick={() => setKind("onlyentry")} style={catCard(kind === "onlyentry")}>
+            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "onlyentry" ? "#F2C744" : "rgba(255,255,255,.85)" }}>ENTRY ONLY</div>
+            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(255,255,255,.5)", fontWeight: 700, letterSpacing: .8 }}>ENTRY AFTER 11:30PM</div>
+          </button>
+          <button onClick={() => setKind("cover")} style={catCard(kind === "cover")}>
+            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "cover" ? "#F2C744" : "rgba(255,255,255,.85)" }}>BUY COVERS</div>
+            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(255,255,255,.5)", fontWeight: 700, letterSpacing: .8 }}>REDEEMABLE F&amp;B</div>
+          </button>
+          <button onClick={() => setKind("group")} style={catCard(kind === "group")}>
+            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "group" ? "#F2C744" : "rgba(255,255,255,.85)" }}>VIP TABLES / GROUP</div>
+            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(255,255,255,.5)", fontWeight: 700, letterSpacing: .8 }}>FULLY REDEEMABLE</div>
+          </button>
         </div>
-        <button onClick={onClose} style={{ width: "100%", marginTop: 12, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+
+        {/* Reassuring caption */}
+        <div style={{ fontSize: 11.5, color: "rgba(0,200,100,.95)", marginBottom: 16, fontWeight: 600 }}>
+          ✅ Skip the queue · Cover charge 100% redeemable on F&amp;B
+        </div>
+
+        {/* Optional event picker (door-only, not in customer modal) */}
+        {events.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={lbl}>EVENT</div>
+            <select value={eventId} onChange={(e) => setEventId(e.target.value)} style={inp}>
+              <option value="">— No event —</option>
+              {events.slice(0, 12).map((e) => (
+                <option key={e.id} value={e.id}>{e.title}{e.date ? ` · ${e.date}` : ""}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* ENTRY TYPE — three pricing cards (cover + guestlist) */}
+        {(kind === "cover" || kind === "guestlist") && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={lbl}>ENTRY TYPE</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              {(["Stag", "Couple", "Ladies"] as const).map((t) => {
+                const active = tier === t;
+                const tp = TIER_PRICES[t];
+                const isFree = tp.price === 0 || kind === "guestlist";
+                return (
+                  <button key={t} onClick={() => setTier(t)} style={{
+                    padding: "12px 8px", borderRadius: 10,
+                    border: active ? "2px solid #F2C744" : "1.5px solid rgba(255,255,255,.1)",
+                    background: active ? "linear-gradient(160deg,rgba(242,199,68,.16),rgba(242,199,68,.04))" : "rgba(255,255,255,.025)",
+                    cursor: "pointer", color: "#fff", fontFamily: "inherit", textAlign: "center",
+                  }}>
+                    <div style={{ fontWeight: 900, fontSize: 12, color: active ? "#F2C744" : "#fff", letterSpacing: .6 }}>{tp.label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 900, color: isFree ? "#00C864" : "#F2C744", marginTop: 4 }}>
+                      {isFree ? "FREE" : `₹${tp.price}`}
+                    </div>
+                    <div style={{ fontSize: 8.5, color: "rgba(255,255,255,.5)", marginTop: 3, lineHeight: 1.3 }}>
+                      {kind === "guestlist" ? "Complimentary entry" : tp.sub}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Entry-Only price + Group fields */}
+        {kind === "onlyentry" && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={lbl}>PRICE PER ENTRY (₹)</div>
+            <input type="number" min={0} step={50} value={entryPrice}
+              onChange={(e) => setEntryPrice(Math.max(0, parseInt(e.target.value || "0")))} style={inp} />
+          </div>
+        )}
+        {kind === "group" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+              <div>
+                <div style={lbl}>PARTY SIZE</div>
+                <input type="number" min={2} max={50} value={partySize}
+                  onChange={(e) => setPartySize(Math.max(2, parseInt(e.target.value || "2")))} style={inp} />
+              </div>
+              <div>
+                <div style={lbl}>TABLE</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  {(["Standard", "VIP"] as const).map((t) => {
+                    const active = tableType === t;
+                    return (
+                      <button key={t} onClick={() => setTableType(t)} style={{
+                        padding: "13px 8px", borderRadius: 10, fontSize: 12, fontWeight: 800, cursor: "pointer",
+                        border: active ? "2px solid #F2C744" : "1px solid rgba(255,255,255,.12)",
+                        background: active ? "linear-gradient(135deg,#F2C744,#E0B030)" : "rgba(255,255,255,.04)",
+                        color: active ? "#0a0a0a" : "rgba(255,255,255,.75)",
+                      }}>{t}</button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={lbl}>MIN SPEND / DEPOSIT (₹)</div>
+              <input type="number" min={0} step={500} value={groupMinSpend}
+                onChange={(e) => setGroupMinSpend(Math.max(0, parseInt(e.target.value || "0")))} style={inp} />
+            </div>
+          </>
+        )}
+
+        {/* ── ENTER YOUR DETAILS ─────────────────────────────────────────── */}
+        <div style={lbl}>ENTER YOUR DETAILS</div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>FULL NAME</div>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" style={inp} autoFocus />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>EMAIL ADDRESS</div>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" type="email" style={inp} />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>PHONE NUMBER</div>
+          <div style={{ display: "flex", alignItems: "stretch" }}>
+            <div style={{
+              padding: "13px 12px", borderRadius: "10px 0 0 10px",
+              background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)", borderRight: "none",
+              color: "rgba(255,255,255,.6)", fontSize: 14, fontWeight: 700,
+            }}>+91</div>
+            <input value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+              placeholder="XXXXX XXXXX" type="tel" inputMode="numeric"
+              style={{ ...inp, borderRadius: "0 10px 10px 0" }} />
+          </div>
+        </div>
+
+        {/* ── NUMBER OF TICKETS stepper (hidden for Group) ────────────────── */}
+        {kind !== "group" && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
+              NUMBER OF {kind === "cover" ? "TICKETS" : kind === "onlyentry" ? "PASSES" : "GUESTS"}
+            </div>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "8px 8px", borderRadius: 10,
+              background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)",
+            }}>
+              <button onClick={() => setTickets(Math.max(1, tickets - 1))} style={{
+                width: 38, height: 38, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)",
+                background: "rgba(255,255,255,.04)", color: "#fff", fontSize: 18, cursor: "pointer",
+              }}>−</button>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff" }}>{tickets}</div>
+              <button onClick={() => setTickets(Math.min(20, tickets + 1))} style={{
+                width: 38, height: 38, borderRadius: 8, border: "1px solid rgba(242,199,68,.4)",
+                background: "rgba(242,199,68,.12)", color: "#F2C744", fontSize: 18, fontWeight: 900, cursor: "pointer",
+              }}>+</button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Total Amount summary (hidden when total = 0) ─────────────────── */}
+        {total > 0 && (
+          <div style={{
+            background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)",
+            borderRadius: 10, padding: "12px 14px", marginBottom: 14,
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.85)", fontWeight: 700 }}>Total Amount</div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginTop: 2 }}>
+                {kind === "group" ? "Min spend / deposit" : `${qty} × ₹${unit.toLocaleString("en-IN")}`}
+              </div>
+            </div>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744" }}>
+              ₹{total.toLocaleString("en-IN")}
+            </div>
+          </div>
+        )}
+
+        {err && <div style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#FCA5A5", padding: 10, borderRadius: 10, fontSize: 12, marginBottom: 12 }}>{err}</div>}
+
+        {/* CTA — single full-width yellow button */}
+        <button onClick={submit} disabled={busy} style={{
+          width: "100%", padding: 16, borderRadius: 12,
+          background: busy ? "rgba(242,199,68,.4)" : "linear-gradient(135deg,#F2C744,#E0B030)",
+          border: "none", color: "#0a0a0a", fontSize: 14, fontWeight: 900,
+          cursor: busy ? "wait" : "pointer", letterSpacing: .3,
+          boxShadow: busy ? "none" : "0 6px 18px rgba(242,199,68,.35)",
+        }}>
+          {busy ? "Saving…" : ctaLabel}
+        </button>
+
+        {/* Door-only escape hatch to the aggregator manual-entry flow */}
+        <button onClick={onAggregator} style={{
+          marginTop: 12, width: "100%", padding: 10, borderRadius: 10,
+          background: "transparent", border: "1px dashed rgba(255,255,255,.18)",
+          color: "rgba(255,255,255,.55)", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: .5,
+        }}>
+          📲 Aggregator booking (Zomato · Swiggy · EazyDiner) →
+        </button>
+
+        <div style={{ marginTop: 12, textAlign: "center", fontSize: 10, color: "rgba(255,255,255,.35)" }}>
+          Logged by <b style={{ color: "rgba(242,199,68,.7)" }}>{agentName}</b> · {getOperationalNightStr()}
+        </div>
       </div>
     </div>
   );
@@ -2189,7 +2688,7 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
 }
 
 function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: () => void }) {
-  const [tab, setTab] = useState<"tickets" | "guestlist" | "tables">("tickets");
+  const [tab, setTab] = useState<"tickets" | "guestlist" | "tables" | "group" | "onlyentry">("tickets");
   const [qrModal, setQrModal] = useState<{ bookingRef: string; walletUrl: string; customerName: string; reason: string } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -2242,6 +2741,11 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events.length]);
 
+  // 2026-05-12 (Khushi spec) — QR scans now open the full BookingDetailModal
+  // (Check-In · Activate Cover · WhatsApp · Show QR · Call) instead of the
+  // inline LookupResult, matching the row-tap behaviour everywhere else in
+  // Door Mode.
+  const [scanDetail, setScanDetail] = useState<HodBooking | null>(null);
   const handleQrResult = async (data: string) => {
     setScanning(false);
     let ref = data;
@@ -2250,32 +2754,36 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     try { const url = new URL(data); ref = url.searchParams.get("verify") || url.searchParams.get("ref") || url.searchParams.get("wallet") || url.searchParams.get("id") || data; } catch {}
     try {
       const b = await lookupBooking(ref);
-      if (b) setLookupResult(b);
+      if (b) setScanDetail(b);
       else alert("No booking found for this QR code");
     } catch { alert("Lookup failed"); }
   };
 
   const tabs = [
-    { key: "tickets" as const, label: "🎫 Tickets" },
-    { key: "guestlist" as const, label: "📋 Guest List" },
-    { key: "tables" as const, label: "🪑 Tables" },
+    { key: "tickets" as const,   label: "Tickets",        icon: "🎫" },
+    { key: "guestlist" as const, label: "Guest List",     icon: "📋" },
+    { key: "tables" as const,    label: "Tables",         icon: "🪑" },
+    { key: "group" as const,     label: "Group Bookings", icon: "👥" },
+    { key: "onlyentry" as const, label: "Only Entry",     icon: "🎟" },
   ];
 
   return (
     <div style={{ minHeight: "100vh", background: "#0A0A0A", color: "#fff" }}>
-      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(242,199,68,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+      <div style={{ background: "#0A0A0A", borderBottom: "1.5px solid #F2C744", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
           <Link href="/"
-            style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
+            style={{ padding: "8px 12px", borderRadius: 10, background: "#F2C744", border: "1.5px solid #F2C744", color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
             ← POS
           </Link>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 900, color: "#F2C744", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🚪 Door</div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.5 }}>
+            Door
+          </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>👤 {agentName}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <span style={{ fontFamily: "'Inter',system-ui,sans-serif", fontSize: 12, color: "rgba(255,255,255,.55)", fontWeight: 600 }}>{agentName}</span>
           <button onClick={onLogout}
-            style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-            Logout
+            style={{ padding: "8px 12px", borderRadius: 10, background: "transparent", border: "1.5px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 11, fontWeight: 800, cursor: "pointer", letterSpacing: .3 }}>
+            LOGOUT
           </button>
         </div>
       </div>
@@ -2305,7 +2813,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             📷 Scan QR
           </button>
           <button onClick={() => setWalkInOpen(true)}
-            style={{ padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.2),rgba(0,200,100,.06))", border: "1.5px solid rgba(0,200,100,.4)", color: "#00C864", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>
+            style={{ padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#F2C744,#E0B030)", border: "1.5px solid #F2C744", color: "#0a0a0a", fontSize: 13, fontWeight: 900, cursor: "pointer", boxShadow: "0 4px 14px rgba(242,199,68,.25)" }}>
             ➕ New Walk-in
           </button>
         </div>
@@ -2390,24 +2898,40 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           </div>
         )}
 
-        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-          {tabs.map((t) => (
-            <button key={t.key} onClick={() => setTab(t.key)}
-              style={{ flex: 1, padding: "10px 8px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                background: tab === t.key ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${tab === t.key ? "rgba(242,199,68,.4)" : "rgba(255,255,255,.08)"}`,
-                color: tab === t.key ? "#F2C744" : "rgba(255,255,255,.5)" }}>
-              {t.label}
-            </button>
-          ))}
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
+          {tabs.map((t) => {
+            const on = tab === t.key;
+            return (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                style={{ flexShrink: 0, padding: "10px 14px", borderRadius: 10, fontSize: 12, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
+                  fontFamily: "'Inter',system-ui,sans-serif", letterSpacing: .2,
+                  background: on ? "#F2C744" : "transparent",
+                  border: `1.5px solid ${on ? "#F2C744" : "rgba(255,255,255,.12)"}`,
+                  color: on ? "#0A0A0A" : "rgba(255,255,255,.65)" }}>
+                <span style={{ marginRight: 6 }}>{t.icon}</span>{t.label}
+              </button>
+            );
+          })}
         </div>
 
-        {tab === "tickets" && <TicketsTab agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "guestlist" && <GuestlistTab agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "tables" && <TablesTab agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} />}
+        {tab === "tickets"   && <TicketsTab        agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} />}
+        {tab === "group"     && <GroupBookingsTab  agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
       </div>
 
       {scanning && <QrScanner onResult={handleQrResult} onClose={() => setScanning(false)} />}
+      {scanDetail && (
+        <BookingDetailModal
+          booking={scanDetail}
+          agentName={agentName}
+          onClose={() => setScanDetail(null)}
+          onCover={(b) => setCoverFor(b)}
+          onShowQr={setQrModal}
+          onSendWhatsApp={(b) => sendBookingWhatsApp(b, setQrModal)}
+        />
+      )}
       {walkInOpen && <NewWalkInModal agentName={agentName} onClose={() => setWalkInOpen(false)} />}
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
       {qrModal && (

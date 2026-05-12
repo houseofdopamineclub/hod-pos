@@ -1790,7 +1790,13 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
     const customerName = r.customerName || "Guest";
     const tableLabel = r.tableId;
     const floorLabel = r.floorLabel || r.floor || "";
-    const fallbackMessage = `🪩 *Your Table is Ready at HOD!*\n\nHi *${customerName}*!\n\n📍 *${tableLabel} · ${floorLabel}*\n🕐 Arrives *${r.arrivalTime || ""}*\n\n🍷 Browse our menu & pre-order:\n${url}\n\nYour captain will be with you shortly. Enjoy your evening! 🌟`;
+    const fallbackMessage =
+      `Hi ${customerName}, your table at HOD is ready! 🪩\n\n` +
+      `📍 Table: ${tableLabel} · ${floorLabel}\n` +
+      `🕐 Arrival: ${r.arrivalTime || "Tonight"}\n\n` +
+      `Browse the menu & pre-order:\n${url}\n\n` +
+      `Your captain will be with you shortly. See you tonight!\n\n` +
+      `📍 House of Dopamine, Koramangala\nhttps://maps.app.goo.gl/eEEHkqGAqr1ozYU2A`;
     setBusy("wa");
     try {
       // 1) Try approved template first (works outside 24h customer service window)
@@ -2214,7 +2220,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(242,199,68,.25)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10, gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
-            style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
+            style={{ padding: "8px 12px", borderRadius: 10, background: "#F2C744", border: "1.5px solid #F2C744", color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
             ← POS
           </Link>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 900, color: "#F2C744", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🪩 CAPTAIN</div>
