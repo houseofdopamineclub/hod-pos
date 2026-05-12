@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "8Q347n6jq1RN7s0ZWmM_5"
+uri = "file://attached_assets/index_FIXED.html.gz"
+type = "unspecified"
+title = "hodclub.in — Fixed index.html (extract and replace on your server)"
