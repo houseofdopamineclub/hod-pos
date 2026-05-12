@@ -8,3 +8,26 @@
 export interface HealthStatus {
   status: string;
 }
+
+export interface WhatsappSendTemplateRequest {
+  /** Recipient phone (digits only, country-code optional; defaults to +91 if missing) */
+  to: string;
+  /** Approved Meta template name */
+  template: string;
+  /** Template language code (e.g. en, en_US) */
+  language?: string;
+  /** Body parameter values for the template */
+  params?: string[];
+}
+
+export interface WhatsappSendTextRequest {
+  to: string;
+  message: string;
+}
+
+export interface WhatsappSendResponse {
+  ok: boolean;
+  messageId?: string;
+  error?: string;
+  code?: number;
+}

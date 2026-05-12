@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: whatsapp
+    description: WhatsApp Cloud API send operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,66 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /whatsapp/send-template:
+    post:
+      operationId: whatsappSendTemplate
+      tags: [whatsapp]
+      summary: Send a WhatsApp template message via Meta Cloud API
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WhatsappSendTemplateRequest"
+      responses:
+        "200":
+          description: Send result (success or upstream-meta failure, both as JSON)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
+        "503":
+          description: WhatsApp not configured on the server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
+  /whatsapp/send:
+    post:
+      operationId: whatsappSendText
+      tags: [whatsapp]
+      summary: Send a WhatsApp free-form text message via Meta Cloud API
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WhatsappSendTextRequest"
+      responses:
+        "200":
+          description: Send result (success or upstream-meta failure, both as JSON)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
+        "503":
+          description: WhatsApp not configured on the server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappSendResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +95,47 @@ components:
           type: string
       required:
         - status
-
+    WhatsappSendTemplateRequest:
+      type: object
+      properties:
+        to:
+          type: string
+          description: Recipient phone (digits only, country-code optional; defaults to +91 if missing)
+        template:
+          type: string
+          description: Approved Meta template name
+        language:
+          type: string
+          description: Template language code (e.g. en, en_US)
+          default: en
+        params:
+          type: array
+          items:
+            type: string
+          description: Body parameter values for the template
+      required:
+        - to
+        - template
+    WhatsappSendTextRequest:
+      type: object
+      properties:
+        to:
+          type: string
+        message:
+          type: string
+      required:
+        - to
+        - message
+    WhatsappSendResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        messageId:
+          type: string
+        error:
+          type: string
+        code:
+          type: number
+      required:
+        - ok

@@ -629,6 +629,23 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     }).catch(() => {});
   }
 
+  // 2026-05-12 — also mirror checkedIn onto the booking doc itself so the
+  // Door Mode tabs (which filter on `booking.checkedIn`) move the row out
+  // of PENDING and into CHECKED-IN counters live. Without this mirror,
+  // activating a cover only marked the cover doc, leaving the booking row
+  // stuck in the pending list.
+  if (!booking._isGuestList && !booking._isTable) {
+    const targetCol = BOOKINGS_COL;
+    const targetId = booking.id || booking.ref;
+    if (targetId) {
+      await updateDoc(doc(db, targetCol, targetId), {
+        checkedIn: true,
+        checkedInAt: new Date().toISOString(),
+        checkedInBy: staffName,
+      }).catch(() => {});
+    }
+  }
+
   return { id: docId, cover: { id: docId, ...cover } as HodCover };
 }
 
@@ -1090,6 +1107,12 @@ export async function markTablePaid(
   payment: {
     amount: number; method: string; captainName: string;
     aggregator?: string; aggregatorDiscount?: number;
+    /** 🔴 2026-05-12 — Net amount the venue receives from the aggregator
+     *  after their platform discount/commission. Stored ONLY for reporting:
+     *  `amount` is what the customer was billed (full invoice, no discount
+     *  applied for aggregator orders); `aggregatorNetAmount` is what the
+     *  venue actually nets so admin can reconcile in Reports. */
+    aggregatorNetAmount?: number;
     discountPercent?: number; discountAmount?: number;
     serviceChargeAmount?: number; serviceChargeApplied?: boolean;
     taxAmount?: number;
@@ -1117,6 +1140,7 @@ export async function markTablePaid(
   }
   if (payment.aggregator) upd.aggregator = payment.aggregator;
   if (payment.aggregatorDiscount) upd.aggregatorDiscount = payment.aggregatorDiscount;
+  if (payment.aggregatorNetAmount !== undefined) upd.aggregatorNetAmount = payment.aggregatorNetAmount;
   if (payment.discountPercent) upd.discountPercent = payment.discountPercent;
   if (payment.discountAmount) upd.discountAmount = payment.discountAmount;
   if (payment.serviceChargeAmount !== undefined) upd.serviceChargeAmount = payment.serviceChargeAmount;
@@ -2003,6 +2027,121 @@ export function subscribeToWalletScan(bookingRef: string, cb: (openedAt: any) =>
   });
 }
 
+// ─── Door-side walk-in booking helpers ─────────────────────────────────────
+// 2026-05-12 (Khushi spec) — door tablet creates in-house walk-in bookings
+// without round-tripping through hodclub.in. Mirrors the shape the customer
+// site writes so they show up in the existing tabs/tickets/guestlist UI
+// (and CaptainMode/BarMode) without any decoder changes.
+//
+// Walk-in marker: `isWalkIn: true` + ref prefix `WI-…`. Pay-at-venue cash
+// flows set `paymentMethod: "cash_door"` and `paymentId: "cash_<ref>"` so
+// the existing PaidBadge renders as paid (not pending Razorpay).
+type WalkInBookingKind = "cover" | "onlyentry" | "group";
+
+export async function createWalkInTicketBooking(input: {
+  kind: WalkInBookingKind;
+  name: string;
+  email?: string;
+  phone: string;
+  guests: number;
+  total: number;             // ₹ collected at the door (0 = comp)
+  tier?: string;             // e.g. "Stag", "Couple", "Ladies"
+  type?: string;             // mirrors customer-site `type` field
+  eventId?: string;
+  eventTitle?: string;
+  partySize?: number;        // for group/VIP table flows
+  tableType?: string;        // "VIP", "Standard" etc — group flow only
+  notes?: string;
+  staffName: string;
+}): Promise<{ ref: string }> {
+  const { kind, name, email, phone, guests, total, tier, type, eventId, eventTitle,
+    partySize, tableType, notes, staffName } = input;
+  if (!name?.trim()) throw new Error("Enter customer name");
+  if (!phone?.trim()) throw new Error("Enter phone number");
+
+  const ref = `WI-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const date = getOperationalNightStr();
+  const cleanPhone = phone.replace(/\D/g, "").slice(-10);
+
+  // entryType discriminator — mirrors hodclub.in conventions so the existing
+  // tab predicates (`isOnlyEntryBooking`, `isGroupBooking`, etc.) classify
+  // these correctly. Canonical "entryonly" (no underscore) matches the value
+  // hodclub.in writes from its booking payload — see the comment on
+  // `isOnlyEntryBooking` in `DoorMode.tsx` for the source-of-truth reference.
+  let entryType: string | undefined;
+  if (kind === "onlyentry") entryType = "entryonly";
+  else if (kind === "group") entryType = "group_booking";
+  // cover flow leaves entryType undefined (goes to the Tickets tab).
+
+  const docPayload: Record<string, any> = {
+    ref,
+    name: name.trim(),
+    email: (email || "").trim(),
+    phone: cleanPhone,
+    guests: guests || 1,
+    total: Math.max(0, Math.round(total || 0)),
+    date,
+    tier: tier || "",
+    type: type || "",
+    eventId: eventId || "",
+    eventTitle: eventTitle || "",
+    paymentMethod: total > 0 ? "cash_door" : "comp_door",
+    paymentId: total > 0 ? `cash_${ref}` : `comp_${ref}`,
+    paidAt: new Date().toISOString(),
+    bookedAt: new Date().toISOString(),
+    createdAt: serverTimestamp(),
+    isWalkIn: true,
+    walkInBy: staffName,
+    source: "walkin",
+    notes: notes || "",
+    status: "confirmed",
+  };
+  if (entryType) docPayload.entryType = entryType;
+  if (kind === "group") {
+    docPayload.bookMode = "group";
+    if (tableType) docPayload.tableType = tableType;
+    if (partySize) docPayload.partySize = partySize;
+  }
+
+  await setDoc(doc(db, BOOKINGS_COL, ref), docPayload);
+  return { ref };
+}
+
+export async function createWalkInGuestlistEntry(input: {
+  name: string;
+  email?: string;
+  phone: string;
+  eventId?: string;
+  eventTitle?: string;
+  type?: string;            // "stag" | "couple" | "ladies" — mirrors hodclub.in
+  staffName: string;
+}): Promise<{ ref: string }> {
+  const { name, email, phone, eventId, eventTitle, type, staffName } = input;
+  if (!name?.trim()) throw new Error("Enter guest name");
+  if (!phone?.trim()) throw new Error("Enter phone number");
+
+  const ref = `GL-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const cleanPhone = phone.replace(/\D/g, "").slice(-10);
+  const entryType = type ? `guestlist_${type}` : "guestlist_stag";
+
+  await setDoc(doc(db, GUESTLIST_COL, ref), {
+    ref,
+    name: name.trim(),
+    email: (email || "").trim(),
+    phone: cleanPhone,
+    eventId: eventId || "",
+    eventTitle: eventTitle || "",
+    type: type || "stag",
+    entryType,
+    joinedAt: new Date().toISOString(),
+    createdAt: serverTimestamp(),
+    isWalkIn: true,
+    walkInBy: staffName,
+    source: "walkin",
+  });
+  return { ref };
+}
+
 export async function createAggregatorTableBooking(input: {
   aggregator: string;          // "zomato" | "swiggy-dineout" | "swiggy-scenes" | "eazydiner"
   discountPercent?: number;    // override aggregator default if door staff agrees a different %
@@ -2690,4 +2829,88 @@ export async function syncMenuAvailability(menuItemId: string, outOfStock: boole
   await setDoc(doc(db, MENU_OVERRIDES_COL, menuItemId), {
     menuItemId, outOfStock, updatedBy: staffName || "system", updatedAt: serverTimestamp(),
   }, { merge: true });
+}
+
+// ───────────────────────────────────────────────────────────────────
+// 🛎 Waiter Calls (customer wallet → captain/bar live notification)
+// Customer hits "Call Waiter" on hodclub.in/?wallet=… → writes a doc
+// to `waiterCalls/{auto}` with {coverRef, name, tableId?, status:'pending', createdAt}.
+// CaptainMode + BarMode subscribe via subscribeActiveWaiterCalls →
+// play a beep + show a red banner with an Acknowledge button.
+// Acknowledged calls (ack'd within last 90s) auto-clear from the banner.
+// ───────────────────────────────────────────────────────────────────
+export interface WaiterCall {
+  id: string;
+  coverRef: string;
+  customerName: string;
+  tableId?: string | null;
+  floorLabel?: string | null;
+  status: "pending" | "acknowledged" | "cancelled";
+  createdAt?: { seconds: number; nanoseconds: number } | null;
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
+}
+
+const WAITER_CALLS_COL = "waiterCalls";
+
+export async function createWaiterCall(input: {
+  coverRef: string;
+  customerName: string;
+  tableId?: string | null;
+  floorLabel?: string | null;
+}): Promise<string> {
+  await authReady;
+  const ref = await addDoc(collection(db, WAITER_CALLS_COL), {
+    coverRef: input.coverRef,
+    customerName: input.customerName || "Guest",
+    tableId: input.tableId || null,
+    floorLabel: input.floorLabel || null,
+    status: "pending",
+    createdAt: serverTimestamp(),
+    acknowledgedAt: null,
+    acknowledgedBy: null,
+  });
+  return ref.id;
+}
+
+export function subscribeActiveWaiterCalls(cb: (calls: WaiterCall[]) => void): Unsubscribe {
+  // Pending OR recently-acknowledged (< 90 s) — surfaces a brief "✓ ack'd by X" tail
+  // so two staff don't both run to the same table thinking nobody answered.
+  const q = query(collection(db, WAITER_CALLS_COL), orderBy("createdAt", "desc"), limit(20));
+  return onSnapshot(q, (snap) => {
+    const now = Date.now();
+    const out: WaiterCall[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as Record<string, unknown>;
+      const status = (data.status as WaiterCall["status"]) || "pending";
+      if (status === "cancelled") return;
+      if (status === "acknowledged") {
+        const ackAt = data.acknowledgedAt ? new Date(String(data.acknowledgedAt)).getTime() : 0;
+        if (!ackAt || now - ackAt > 90_000) return;
+      }
+      out.push({
+        id: d.id,
+        coverRef: String(data.coverRef || ""),
+        customerName: String(data.customerName || "Guest"),
+        tableId: (data.tableId as string | null) || null,
+        floorLabel: (data.floorLabel as string | null) || null,
+        status,
+        createdAt: (data.createdAt as WaiterCall["createdAt"]) || null,
+        acknowledgedAt: (data.acknowledgedAt as string | null) || null,
+        acknowledgedBy: (data.acknowledgedBy as string | null) || null,
+      });
+    });
+    cb(out);
+  }, (e) => {
+    console.error("[subscribeActiveWaiterCalls] failed", e);
+  });
+}
+
+export async function acknowledgeWaiterCall(id: string, staffName: string): Promise<void> {
+  await authReady;
+  await updateDoc(doc(db, WAITER_CALLS_COL, id), {
+    status: "acknowledged",
+    acknowledgedAt: new Date().toISOString(),
+    acknowledgedBy: staffName || "Staff",
+  });
 }

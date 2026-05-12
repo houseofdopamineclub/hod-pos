@@ -25,6 +25,9 @@ app.use(
     },
   }),
 );
+// CORS: keep the permissive default for read-only routes (health, preview),
+// but the WhatsApp send routes layer their own origin pin in `whatsappGuard`
+// so cross-origin abuse cannot trigger paid Meta sends regardless of CORS.
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

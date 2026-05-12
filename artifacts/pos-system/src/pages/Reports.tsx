@@ -30,10 +30,15 @@ import {
   type HodTableReservation, type HodBooking, type HodGuestlistEntry, type HodCover,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
+import { refundEdcCharge } from "@/lib/edc-charge";
 import {
   buildAllTallyRows, aggregateCaptainLeakage,
   type PosKotDoc, type TallyRow,
 } from "@/lib/kot-bill-tally";
+import {
+  parseSettlementCsv, reconcile,
+  type ReconResult, type SettlementVendor,
+} from "@/lib/settlement-recon";
 
 const GOLD = "#C9A84C";
 const RED = "#ef4444";
@@ -69,6 +74,11 @@ interface TableRow {
    *  discount strip if the aggregator absorbed it; for our case Zomato/Swiggy
    *  pay us the post-discount total). Logged separately for reconciliation. */
   aggregatorPaidAmount: number;
+  /** 🔴 2026-05-12 — For aggregator orders the captain prints the FULL bill
+   *  (no discount applied at the door); the aggregator's discount is shown
+   *  here as the net amount the venue actually receives. `total` is what the
+   *  customer was billed; `aggregatorNetAmount` is what the venue nets. */
+  aggregatorNetAmount: number | null;
   /** Reconciliation: actual paid by aggregator MINUS what we expected (post-discount total).
    *  Only populated when we actually matched an `orphanZomatoPayments` row by phone.
    *  Positive = aggregator overpaid (rare), negative = short payment (likely captain over-discount fraud).
@@ -228,6 +238,14 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
     total, amountPaid: Number(r.amountPaid || (r.paymentStatus === "paid" ? total : 0)),
     paymentStatus: r.paymentStatus || "open",
     paymentMethod, aggregatorPaidAmount, aggregatorVariance,
+    // 🔴 2026-05-12 — Either trust the value the captain stamped at Mark
+    // Paid time, or fall back to subtotal*(1-disc) for legacy rows that
+    // pre-date the field.
+    aggregatorNetAmount: (r as any).aggregatorNetAmount ?? (
+      isAggregatorSrc && actDisc > 0 && total > 0
+        ? Math.round(total * (1 - actDisc / 100))
+        : null
+    ),
     billPrintCount, modifiedDiscount, defaultDiscount: defDisc,
     overrideCount: overrides, voidCount: (r.voidLog || []).length, voidValueLost,
     sourceSwapCount: sourceSwapLog.length, hasDowngrade,
@@ -344,7 +362,27 @@ export default function Reports() {
   const [guestlist, setGuestlist] = useState<HodGuestlistEntry[]>([]);
   const [covers, setCovers] = useState<Array<HodCover & { id: string }>>([]);
   const [orphans, setOrphans] = useState<any[]>([]);
-  const [view, setView] = useState<"tables" | "wallets" | "tally">("tables");
+  const [view, setView] = useState<"tables" | "wallets" | "tally" | "edc" | "settlement">("tables");
+  // Settlement reconciliation: lazily populated when the accountant uploads
+  // a Pine Labs (or Razorpay) settlement export. Lives in component state
+  // because the file is local — never round-tripped to Firestore.
+  const [reconVendor, setReconVendor] = useState<SettlementVendor>("pinelabs");
+  const [reconResult, setReconResult] = useState<ReconResult | null>(null);
+  const [reconFileName, setReconFileName] = useState<string>("");
+  const [reconError, setReconError] = useState<string>("");
+  // ── EDC Cloud transactions (Razorpay POS / Pine Labs) for the selected night.
+  // Read-only ledger of every card-swipe pushed from Door Mode → EDC machine.
+  // Each row is one charge attempt: pending / success / failed / cancelled,
+  // with amount, vendor, card last-4, and EDC reference for reconciliation.
+  // Pulled from Firestore `edcTransactions` collection (written by the cloud
+  // function on dispatch + webhook). Falls back silently if collection absent.
+  const [edcTxns, setEdcTxns] = useState<Array<{ id: string; [k: string]: any }>>([]);
+  const [edcStatusFilter, setEdcStatusFilter] = useState<"all" | "success" | "failed" | "cancelled" | "pending" | "refunded" | "refund_failed">("all");
+  // Per-row spinner so multiple refund buttons can't double-fire while one
+  // is in flight. Keyed by edcTransactions doc id.
+  const [edcRefunding, setEdcRefunding] = useState<Record<string, boolean>>({});
+  const [edcVendorFilter, setEdcVendorFilter] = useState<string>("all");
+  const [edcBouncerFilter, setEdcBouncerFilter] = useState<string>("all");
   // "mismatched" = combined leakage + phantom + minor (Khushi-requested merge —
   // 3 separate buttons confused her; the per-row chip still shows the actual
   // verdict so the underlying anti-fraud signal is never lost).
@@ -442,6 +480,31 @@ export default function Reports() {
       }, (e) => { console.warn("[Reports] posKOTs tally subscribe failed", e); setTallyKots([]); setTallyKotsStatus("error"); });
       return unsub;
     } catch (e) { console.warn("[Reports] posKOTs tally setup failed", e); setTallyKotsStatus("error"); return; }
+  }, [today]);
+
+  // 4c-pre) When the operator switches nights, the previously-loaded
+  //         settlement reconciliation no longer applies (edcTxns is about
+  //         to be repopulated for the new date). Clear it so the UI doesn't
+  //         show stale matches against a different night's transactions.
+  useEffect(() => {
+    setReconResult(null);
+    setReconFileName("");
+    setReconError("");
+  }, [today]);
+
+  // 4c) EDC transactions for the selected night. Filter by `date` field
+  //     (operational night string) so we don't pull weeks of history. The
+  //     cloud function stamps `date` at dispatch time using the same
+  //     getOperationalNightStr() the rest of the POS uses, so a charge made
+  //     at 2am Sunday morning is correctly grouped with Saturday's night.
+  useEffect(() => {
+    try {
+      const q = query(collection(db, "edcTransactions"), where("date", "==", today));
+      const unsub = onSnapshot(q,
+        (snap) => setEdcTxns(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))),
+        (e) => { console.warn("[Reports] edcTransactions subscribe failed", e); setEdcTxns([]); });
+      return unsub;
+    } catch { setEdcTxns([]); return; }
   }, [today]);
 
   // 5) Orphan Zomato payments (read-only enrichment) — narrow to today's night
@@ -700,6 +763,8 @@ export default function Reports() {
       "Payment Status": r.paymentStatus,
       "Payment Method": r.paymentMethod,
       "Aggregator Paid ₹": r.aggregatorPaidAmount,
+      "Customer-Bill ₹ (full, no discount)": r.total,
+      "Customer-After-Discount Pays ₹": r.aggregatorNetAmount ?? "",
       "Aggregator Variance ₹": r.aggregatorVariance ?? "",
       "Aggregator Variance Flag": r.aggregatorVariance !== null && Math.abs(r.aggregatorVariance) >= 200 ? (r.aggregatorVariance < 0 ? "SHORT-PAID" : "OVER-PAID") : "",
       "Bill Prints": r.billPrintCount,
@@ -821,6 +886,91 @@ export default function Reports() {
     downloadCSV(`HOD_KOT_vs_Bill_${today}.csv`, rows);
   };
 
+  // 💳 EDC Cloud transactions export — every card-machine charge attempt
+  // tonight (success / failed / cancelled / pending). Source of truth for
+  // door card payments — accountant reconciles Razorpay settlement report
+  // against this CSV instead of trusting hand-written cash sheets.
+  const exportEdc = () => {
+    const rows = edcTxns.map((t) => ({
+      Date: t.date || today,
+      "Created At": fmtTime(t.createdAt || ""),
+      "Updated At": fmtTime(t.updatedAt || ""),
+      Vendor: t.vendor || "",
+      "Terminal ID": t.terminalId || "",
+      Status: String(t.status || "").toUpperCase(),
+      "Booking Ref": t.bookingRef || "",
+      "Cover Ref": t.coverRef || "",
+      "Amount ₹": Number(t.amount || 0),
+      "Card Network": t.cardNetwork || "",
+      "Card Last 4": t.last4 || "",
+      "EDC Ref / Slip": t.edcRef || "",
+      "Razorpay Payment ID": t.razorpayPaymentId || "",
+      "Razorpay Intent ID": t.razorpayIntentId || "",
+      "Pine Labs Ref": t.pineLabsRef || "",
+      "Bouncer": t.bouncerName || "",
+      "Bouncer PIN Hash": t.bouncerPin || "",
+      "Failure Reason": t.errorReason || "",
+      // Refund columns — populated when a manager has refunded the charge
+      // from the Reports row. Status above already encodes refunded /
+      // refund_failed; these add the audit trail the accountant needs to
+      // reconcile against the vendor refund report.
+      "Refund Amount ₹": Number(t.refundAmount || 0),
+      "Refund ID": t.razorpayRefundId || "",
+      "Refunded At": fmtTime(t.refundedAt || ""),
+      "Refunded By": t.refundedBy || "",
+      "Refund Error": t.refundError || "",
+      "Txn ID": t.id,
+    }));
+    downloadCSV(`HOD_EDC_Card_${today}.csv`, rows);
+  };
+
+  // 🧮 Settlement reconciliation export — only the ISSUES (matched rows are
+  // expected and noisy). Accountant pastes this into the morning standup
+  // sheet so the operations lead can chase Pine Labs / Razorpay support
+  // for missed webhooks and short-settlements.
+  const exportReconIssues = () => {
+    if (!reconResult) { alert("Upload a settlement file first."); return; }
+    const rows = reconResult.issues.map((i) => ({
+      Date: today,
+      Vendor: reconResult.vendor,
+      Issue: i.kind.replace(/_/g, " ").toUpperCase(),
+      Ref: i.ref,
+      "Settlement ₹": i.settlementAmount,
+      "Firestore ₹": i.firestoreAmount,
+      "Δ ₹": Math.round(i.firestoreAmount - i.settlementAmount),
+      "Booking Ref": i.txn?.bookingRef || "",
+      "Cover Ref": i.txn?.coverRef || "",
+      "Card Last 4": i.txn?.last4 || i.settlement?.last4 || "",
+      "Bouncer": i.txn?.bouncerName || "",
+      "Txn ID": i.txn?.id || "",
+      "Settled At (vendor)": i.settlement?.when || "",
+      Detail: i.detail,
+    }));
+    downloadCSV(`HOD_Settlement_Issues_${reconResult.vendor}_${today}.csv`, rows);
+  };
+
+  // 🧮 Run the recon — wired to the file-input onChange below. Reads the
+  // uploaded CSV as text, parses it leniently, and matches against the
+  // current night's `edcTransactions` for the selected vendor.
+  const handleSettlementFile = async (file: File) => {
+    setReconError("");
+    try {
+      const text = await file.text();
+      const { rows: parsed, unparsed } = parseSettlementCsv(text);
+      if (parsed.length === 0) {
+        setReconError(`Couldn't parse any rows from "${file.name}". Make sure the file has a header row with at least an RRN / Approval Code column and an Amount column.`);
+        setReconResult(null);
+        return;
+      }
+      const result = reconcile({ vendor: reconVendor, settlement: parsed, txns: edcTxns, unparsed });
+      setReconResult(result);
+      setReconFileName(file.name);
+    } catch (e: any) {
+      setReconError(`Failed to read file: ${e?.message || e}`);
+      setReconResult(null);
+    }
+  };
+
   const ambColor = (a: Ambiguity) => a === "red" ? RED : a === "orange" ? ORANGE : GREEN;
   const dot = (a: Ambiguity) => (
     <span title={a.toUpperCase()} style={{ display: "inline-block", width: 10, height: 10, borderRadius: 5, background: ambColor(a), boxShadow: `0 0 6px ${ambColor(a)}aa` }} />
@@ -860,6 +1010,19 @@ export default function Reports() {
               boxShadow: tallyTotals.leakageTables > 0 && view !== "tally" ? `0 0 0 2px ${RED}88` : "none" }}>
             🧾 KOT vs Bill ({tallyRows.length})
             {tallyTotals.leakageTables > 0 && <span style={{ marginLeft: 6, color: view === "tally" ? RED : RED, fontWeight: 900 }}>· 🔴 {tallyTotals.leakageTables}</span>}
+          </button>
+          <button onClick={() => setView("edc")}
+            title="Card-machine charges pushed from Door Mode tonight. Source of truth for cover card payments — no manual reconciliation needed."
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
+              background: view === "edc" ? GOLD : "rgba(255,255,255,.06)", color: view === "edc" ? "#030305" : "#fff" }}>
+            💳 EDC Card ({edcTxns.length})
+          </button>
+          <button onClick={() => setView("settlement")}
+            title="Upload tonight's vendor settlement file (Pine Labs / Razorpay) to auto-match against EDC card swipes. Catches missed webhooks and short-settled txns."
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
+              background: view === "settlement" ? GOLD : "rgba(255,255,255,.06)", color: view === "settlement" ? "#030305" : "#fff",
+              boxShadow: reconResult && reconResult.totals.issueCount > 0 && view !== "settlement" ? `0 0 0 2px ${RED}88` : "none" }}>
+            🧮 Settlement{reconResult ? ` (${reconResult.totals.issueCount} issue${reconResult.totals.issueCount === 1 ? "" : "s"})` : ""}
           </button>
         </div>
       </div>
@@ -931,9 +1094,10 @@ export default function Reports() {
             background: showFilters ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.06)", color: showFilters ? GOLD : "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
           ⚙ Filter & Sort {(filter !== "all" || sourceFilter !== "all") ? "•" : ""}
         </button>
-        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : exportTally}
-          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
-          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : filteredTally.length} rows)
+        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : view === "edc" ? exportEdc : view === "settlement" ? exportReconIssues : exportTally}
+          disabled={view === "settlement" && !reconResult}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer", opacity: (view === "settlement" && !reconResult) ? 0.4 : 1 }}>
+          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : view === "edc" ? edcTxns.length : view === "settlement" ? (reconResult?.totals.issueCount || 0) : filteredTally.length} rows)
         </button>
         {view === "tables" && (
           <button onClick={exportItemsForDigiPos}
@@ -1047,14 +1211,14 @@ export default function Reports() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
             <thead>
               <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Total ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
+                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Bill ₹ (Full)", "Net ₹ (After Disc)", "Disc Δ ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
                   <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredTables.length === 0 ? (
-                <tr><td colSpan={18} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No tables match filters.</td></tr>
+                <tr><td colSpan={20} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No tables match filters.</td></tr>
               ) : filteredTables.map((r) => (
                 <tr key={r.reservationId} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
                   <td style={{ padding: "6px 6px" }}>{dot(r.ambiguity)}</td>
@@ -1067,7 +1231,28 @@ export default function Reports() {
                   <td style={{ padding: "6px 6px" }}>{r.partySize || "—"}</td>
                   <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{fmtTime(r.arrival)}</td>
                   <td style={{ padding: "6px 6px", color: r.minutesOnTable > 240 ? ORANGE : "rgba(255,255,255,.7)" }}>{r.minutesOnTable || "—"}</td>
+                  {/* 🔴 2026-05-12 — `Bill ₹` is the FULL printed bill (no
+                      discount applied at the door). `Net ₹` is what the
+                      venue actually nets after the aggregator/captain
+                      discount. `Disc Δ` is the leakage (Bill − Net) and
+                      flips orange when material so admin can spot full-
+                      bill-then-discount cases at a glance. */}
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800 }}>₹{r.total.toLocaleString()}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
+                    color: r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total ? GREEN : "rgba(255,255,255,.7)" }}
+                    title={r.aggregatorNetAmount === null ? "No discount recorded — net == bill"
+                      : `Venue nets ₹${r.aggregatorNetAmount.toLocaleString()} after ${r.discountPct}% ${r.paymentMethod || "discount"}`}>
+                    {r.aggregatorNetAmount !== null ? `₹${r.aggregatorNetAmount.toLocaleString()}` : `₹${r.total.toLocaleString()}`}
+                  </td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
+                    color: r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) >= 200 ? ORANGE
+                      : r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) > 0 ? "rgba(255,255,255,.7)"
+                      : "rgba(255,255,255,.3)" }}
+                    title="Discount leakage = Full bill − Net received">
+                    {r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total
+                      ? `−₹${(r.total - r.aggregatorNetAmount).toLocaleString()}`
+                      : "—"}
+                  </td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: r.modifiedDiscount ? ORANGE : "rgba(255,255,255,.7)" }}>{r.discountPct}%</td>
                   <td style={{ padding: "6px 6px", color: r.paymentStatus === "paid" ? GREEN : r.paymentStatus === "bill_requested" ? ORANGE : "rgba(255,255,255,.6)" }}>
                     {r.paymentStatus === "paid" ? "✅ paid" : r.paymentStatus === "bill_requested" ? "🧾 bill due" : "open"}
@@ -1178,6 +1363,315 @@ export default function Reports() {
           </table>
         </div>
       )}
+
+      {/* EDC CARD VIEW — every cloud-card-machine charge attempt tonight */}
+      {view === "edc" && (() => {
+        const sorted = [...edcTxns].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+        // Filters: status / vendor / bouncer (Khushi-requested 12 May 2026 —
+        // when she's reconciling at 3am she wants to isolate just the failed
+        // ones, or just one bouncer's shift, before exporting to CSV).
+        const filtered = sorted.filter(t => {
+          if (edcStatusFilter !== "all" && t.status !== edcStatusFilter) return false;
+          if (edcVendorFilter !== "all" && t.vendor !== edcVendorFilter) return false;
+          if (edcBouncerFilter !== "all" && (t.bouncerName || "—") !== edcBouncerFilter) return false;
+          if (search.trim() && !`${t.bookingRef} ${t.coverRef} ${t.bouncerName} ${t.last4} ${t.edcRef} ${t.razorpayPaymentId} ${t.pineLabsRef}`.toLowerCase().includes(search.toLowerCase())) return false;
+          return true;
+        });
+        const successCount = sorted.filter(t => t.status === "success").length;
+        const failCount = sorted.filter(t => t.status === "failed").length;
+        const cancelCount = sorted.filter(t => t.status === "cancelled").length;
+        const pendingCount = sorted.filter(t => t.status === "pending").length;
+        const refundedCount = sorted.filter(t => t.status === "refunded").length;
+        const refundFailedCount = sorted.filter(t => t.status === "refund_failed").length;
+        // Success rate excludes still-pending charges (denominator = settled
+        // attempts only). 0 attempts → "—" so we don't render NaN%. Note:
+        // a refunded txn was originally captured successfully so it counts
+        // as success here — the refund nets it out in `successAmt` below.
+        const settled = successCount + failCount + cancelCount + refundedCount + refundFailedCount;
+        const successishCount = successCount + refundedCount + refundFailedCount;
+        const successRate = settled === 0 ? null : Math.round((successishCount / settled) * 100);
+        // Net card revenue = captured ₹ minus refunded ₹. refund_failed leaves
+        // the original capture standing, so still counts towards revenue.
+        const successAmt = sorted
+          .filter(t => t.status === "success" || t.status === "refund_failed")
+          .reduce((s, t) => s + Number(t.amount || 0), 0);
+        const refundedAmt = sorted
+          .filter(t => t.status === "refunded")
+          .reduce((s, t) => s + Number(t.refundAmount || t.amount || 0), 0);
+        const vendors = Array.from(new Set(sorted.map(t => t.vendor).filter(Boolean))) as string[];
+        const bouncers = Array.from(new Set(sorted.map(t => t.bouncerName || "—"))).sort();
+        const statusColor = (s: string) =>
+          s === "success" ? GREEN
+          : s === "failed" ? RED
+          : s === "cancelled" ? "rgba(255,255,255,.5)"
+          : s === "refunded" ? "#A855F7"
+          : s === "refund_failed" ? "#EC4899"
+          : ORANGE;
+        const rateColor = successRate == null ? "rgba(255,255,255,.5)" : successRate >= 90 ? GREEN : successRate >= 70 ? ORANGE : RED;
+        return (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+              <Tile label="Charges tonight" value={String(sorted.length)} color={GOLD} />
+              <Tile label="✅ Successful" value={String(successCount)} color={GREEN} />
+              <Tile label="❌ Declined" value={String(failCount)} color={RED} />
+              <Tile label="🚫 Cancelled" value={String(cancelCount)} color="rgba(255,255,255,.5)" />
+              <Tile label="⏳ Pending" value={String(pendingCount)} color={ORANGE} />
+              <Tile label="↩ Refunded" value={String(refundedCount)} color="#A855F7" />
+              <Tile label="Success rate" value={successRate == null ? "—" : `${successRate}%`} color={rateColor} />
+              <Tile label="Card revenue ₹" value={`₹${(successAmt - refundedAmt).toLocaleString()}`} color={GOLD} />
+              {refundedAmt > 0 && (
+                <Tile label="Refunded ₹" value={`₹${refundedAmt.toLocaleString()}`} color="#A855F7" />
+              )}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12, alignItems: "center" }}>
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px" }}>STATUS:</span>
+              {(["all", "success", "failed", "cancelled", "pending", "refunded", "refund_failed"] as const).map(s => (
+                <button key={s} onClick={() => setEdcStatusFilter(s)}
+                  style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "1px solid rgba(255,255,255,.1)",
+                    background: edcStatusFilter === s ? GOLD : "rgba(255,255,255,.06)", color: edcStatusFilter === s ? "#030305" : "rgba(255,255,255,.85)" }}>
+                  {s.toUpperCase()}
+                </button>
+              ))}
+              {vendors.length > 1 && (<>
+                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>VENDOR:</span>
+                <select value={edcVendorFilter} onChange={e => setEdcVendorFilter(e.target.value)}
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  <option value="all">All vendors</option>
+                  {vendors.map(v => <option key={v} value={v}>{v.toUpperCase()}</option>)}
+                </select>
+              </>)}
+              {bouncers.length > 1 && (<>
+                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>BOUNCER:</span>
+                <select value={edcBouncerFilter} onChange={e => setEdcBouncerFilter(e.target.value)}
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  <option value="all">All bouncers</option>
+                  {bouncers.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </>)}
+            </div>
+            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(168,85,247,.06)", border: "1px solid rgba(168,85,247,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+              <strong style={{ color: "#A855F7" }}>💳 EDC CLOUD:</strong> Bouncer-tapped Card payments dispatched to the door card machine via Razorpay POS Terminal API (or Pine Labs Plutus Cloud). Source of truth for door card revenue — the accountant should reconcile this against the vendor settlement report each morning, not the cash sheet.
+            </div>
+            <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+                <thead>
+                  <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                    {["When", "Status", "Vendor", "Amount", "Booking Ref", "Card", "EDC Ref", "Bouncer", "Reason", "Refund"].map((h) => (
+                      <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 ? (
+                    <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
+                      {sorted.length === 0
+                        ? "No card-machine charges yet for this night. Once Door Mode pushes a card payment, it'll appear here in real time."
+                        : "No charges match this search."}
+                    </td></tr>
+                  ) : filtered.map((t) => {
+                    const c = statusColor(String(t.status || ""));
+                    return (
+                      <tr key={t.id} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", whiteSpace: "nowrap" }}>{fmtTime(t.createdAt || "")}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
+                            {String(t.status || "").toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.85)" }}>{t.vendor || "—"}</td>
+                        <td style={{ padding: "6px 6px", textAlign: "right", color: GOLD, fontWeight: 800 }}>₹{Number(t.amount || 0).toLocaleString()}</td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontFamily: "monospace", fontSize: 10 }}>{t.bookingRef || "—"}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          {t.last4 ? <span>{t.cardNetwork || "CARD"} ••••{t.last4}</span> : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>
+                          {t.edcRef || t.razorpayPaymentId || t.pineLabsRef || "—"}
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{t.bouncerName || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: t.errorReason || t.refundError ? RED : "rgba(255,255,255,.4)", fontSize: 10 }}>{t.errorReason || t.refundError || "—"}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          {/* Refund column — only successful captures are
+                              refundable. Already-refunded txns surface the
+                              refund id so reconciliation has a hard reference
+                              against the vendor settlement report. */}
+                          {t.status === "success" ? (
+                            <button
+                              onClick={async () => {
+                                const pin = window.prompt(
+                                  `🔒 Refund ₹${Number(t.amount || 0).toLocaleString()} to ${t.cardNetwork || "card"}${t.last4 ? ` ••••${t.last4}` : ""}?\n\nBooking: ${t.bookingRef || "—"}\n\nEnter Manager PIN to authorise:`,
+                                );
+                                if (!pin) return;
+                                if (!/^\d{4,6}$/.test(pin.trim())) { alert("❌ Manager PIN must be 4–6 digits."); return; }
+                                setEdcRefunding(prev => ({ ...prev, [t.id]: true }));
+                                const r = await refundEdcCharge({ txnId: t.id, managerPin: pin.trim() });
+                                setEdcRefunding(prev => { const n = { ...prev }; delete n[t.id]; return n; });
+                                if (r.ok) {
+                                  alert(`✅ Refund dispatched${r.refundId ? ` · ref ${r.refundId}` : ""}. Live status will update in a moment.`);
+                                } else {
+                                  const reasonMap: Record<string, string> = {
+                                    bad_pin: "Manager PIN rejected.",
+                                    not_refundable: "This charge can't be refunded (not in success state).",
+                                    unknown_txn: "Transaction not found server-side.",
+                                    vendor_error: r.errorMessage || "Vendor rejected the refund.",
+                                    error: r.errorMessage || "Unexpected error.",
+                                  };
+                                  alert(`❌ Refund failed: ${reasonMap[r.reason || "error"] || r.errorMessage || r.reason || "error"}`);
+                                }
+                              }}
+                              disabled={!!edcRefunding[t.id]}
+                              style={{ padding: "4px 9px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: edcRefunding[t.id] ? "wait" : "pointer", border: "1px solid rgba(168,85,247,.4)", background: "rgba(168,85,247,.12)", color: "#A855F7" }}>
+                              {edcRefunding[t.id] ? "…" : "↩ Refund"}
+                            </button>
+                          ) : t.status === "refunded" ? (
+                            <span style={{ fontSize: 10, color: "#A855F7", fontFamily: "monospace" }}>
+                              {t.razorpayRefundId || "refunded"}
+                            </span>
+                          ) : t.status === "refund_failed" ? (
+                            <span style={{ fontSize: 10, color: "#EC4899" }}>
+                              refund failed
+                            </span>
+                          ) : (
+                            <span style={{ color: "rgba(255,255,255,.3)", fontSize: 10 }}>—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        );
+      })()}
+
+      {/* SETTLEMENT RECONCILIATION VIEW */}
+      {view === "settlement" && (() => {
+        const r = reconResult;
+        const issueColor = (k: string) => k === "amount_mismatch" ? ORANGE : k === "settled_not_in_firestore" ? RED : AMBER;
+        const issueLabel = (k: string) =>
+          k === "amount_mismatch" ? "💰 AMOUNT DRIFT"
+          : k === "settled_not_in_firestore" ? "🟥 MISSED WEBHOOK"
+          : "🟧 NOT YET SETTLED";
+        return (
+          <>
+            <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+              <strong style={{ color: GREEN }}>🧮 SETTLEMENT RECONCILIATION:</strong> Upload tonight's settlement file (Pine Labs Plutus dashboard → Reports → Daily Settlement, or Razorpay Dashboard → Settlements → Export). Each row is matched against this night's <code style={{ color: GOLD }}>edcTransactions</code> by RRN / Approval Code. Mismatches surface below — fix at standup, not month-end.
+            </div>
+
+            {/* Upload bar */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12, padding: 12, borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.2)" }}>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 800, letterSpacing: ".5px" }}>VENDOR:</span>
+              <select value={reconVendor} onChange={(e) => { setReconVendor(e.target.value as SettlementVendor); setReconResult(null); setReconFileName(""); }}
+                style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                <option value="pinelabs">Pine Labs (Plutus Smart Cloud)</option>
+                <option value="razorpay">Razorpay (POS Settlement)</option>
+              </select>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: 8, background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
+                📂 {reconFileName ? "Replace settlement file" : "Upload settlement file (.csv)"}
+                <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) handleSettlementFile(f); e.target.value = ""; }} />
+              </label>
+              {reconFileName && (
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)" }}>
+                  📄 {reconFileName} · matched against <strong style={{ color: GOLD }}>{edcTxns.filter(t => (t.vendor || "").toLowerCase() === reconVendor).length}</strong> {reconVendor} txn(s) for {today}
+                </span>
+              )}
+              {reconResult && (
+                <button onClick={() => { setReconResult(null); setReconFileName(""); setReconError(""); }}
+                  style={{ padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.7)", cursor: "pointer" }}>
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {reconError && (
+              <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(239,68,68,.08)", border: `1px solid ${RED}55`, color: RED, fontSize: 12 }}>
+                ⚠️ {reconError}
+              </div>
+            )}
+
+            {!r && !reconError && (
+              <div style={{ padding: 32, textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 12, border: "1px dashed rgba(255,255,255,.1)", borderRadius: 10 }}>
+                No settlement file loaded yet. Pick a vendor above and upload its daily CSV to begin.
+              </div>
+            )}
+
+            {r && (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+                  <Tile label="Settlement rows" value={String(r.totals.settlementCount)} color={GOLD} />
+                  <Tile label="Settlement ₹" value={`₹${Math.round(r.totals.settlementAmount).toLocaleString()}`} color={GOLD} />
+                  <Tile label="✅ Matched clean" value={String(r.totals.matchedCount)} color={GREEN} />
+                  <Tile label="Matched ₹" value={`₹${Math.round(r.totals.matchedAmount).toLocaleString()}`} color={GREEN} />
+                  <Tile label="⚠ Issues" value={String(r.totals.issueCount)} color={r.totals.issueCount > 0 ? RED : GREEN} />
+                  <Tile label="Unparsed lines" value={String(r.unparsed.length)} color={r.unparsed.length > 0 ? ORANGE : "rgba(255,255,255,.5)"} />
+                </div>
+
+                <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+                    <thead>
+                      <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                        {["Issue", "Ref (RRN / Auth)", "Vendor ₹", "Firestore ₹", "Δ ₹", "Booking", "Card", "Bouncer", "What happened"].map((h) => (
+                          <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {r.issues.length === 0 ? (
+                        <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: GREEN }}>
+                          🎉 Clean reconciliation — every {r.vendor} settlement row matches Firestore on amount.
+                        </td></tr>
+                      ) : r.issues.map((i, idx) => {
+                        const c = issueColor(i.kind);
+                        const drift = Math.round(i.firestoreAmount - i.settlementAmount);
+                        return (
+                          <tr key={`${i.kind}-${i.ref}-${idx}`} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                            <td style={{ padding: "6px 6px" }}>
+                              <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
+                                {issueLabel(i.kind)}
+                              </span>
+                            </td>
+                            <td style={{ padding: "6px 6px", fontFamily: "monospace", fontSize: 10, color: "rgba(255,255,255,.85)" }}>{i.ref}</td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.settlementAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                              {i.settlementAmount > 0 ? `₹${i.settlementAmount.toLocaleString()}` : "—"}
+                            </td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.firestoreAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                              {i.firestoreAmount > 0 ? `₹${i.firestoreAmount.toLocaleString()}` : "—"}
+                            </td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: drift === 0 ? "rgba(255,255,255,.4)" : drift > 0 ? ORANGE : RED, fontWeight: 800 }}>
+                              {drift === 0 ? "—" : `${drift > 0 ? "+" : ""}₹${drift.toLocaleString()}`}
+                            </td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>{i.txn?.bookingRef || "—"}</td>
+                            <td style={{ padding: "6px 6px" }}>
+                              {(i.txn?.last4 || i.settlement?.last4)
+                                ? <span>••••{i.txn?.last4 || i.settlement?.last4}</span>
+                                : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                            </td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{i.txn?.bouncerName || "—"}</td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontSize: 10 }}>{i.detail}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {r.unparsed.length > 0 && (
+                  <details style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(245,158,11,.06)", border: `1px solid ${ORANGE}33` }}>
+                    <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 800, color: ORANGE }}>
+                      ⚠ {r.unparsed.length} line(s) couldn't be parsed (no RRN / reference column found) — click to inspect
+                    </summary>
+                    <pre style={{ marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.6)", maxHeight: 200, overflow: "auto" }}>
+                      {r.unparsed.slice(0, 20).map((u, i) => `${i + 1}. ${JSON.stringify(u)}`).join("\n")}
+                      {r.unparsed.length > 20 ? `\n… and ${r.unparsed.length - 20} more` : ""}
+                    </pre>
+                  </details>
+                )}
+              </>
+            )}
+          </>
+        );
+      })()}
 
       {/* TALLY VIEW */}
       {view === "tally" && (

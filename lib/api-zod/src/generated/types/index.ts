@@ -7,3 +7,6 @@
  */
 
 export * from "./healthStatus";
+export * from "./whatsappSendResponse";
+export * from "./whatsappSendTemplateRequest";
+export * from "./whatsappSendTextRequest";

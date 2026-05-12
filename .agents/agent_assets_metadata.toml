@@ -6,3 +6,15 @@ id = "8Q347n6jq1RN7s0ZWmM_5"
 uri = "file://attached_assets/index_FIXED.html.gz"
 type = "unspecified"
 title = "hodclub.in — Fixed index.html (extract and replace on your server)"
+
+[[outputs]]
+id = "CdLvtE92uVS7THF-M2D80"
+uri = "file://attached_assets/hodclub_in_FIXED.tar.gz"
+type = "unspecified"
+title = "Fixed booking site (extract to get index.html)"
+
+[[outputs]]
+id = "GhcER7tftojnd_49580Cp"
+uri = "file://attached_assets/hod-wallet-v3-PREVIEW.tar.gz"
+type = "unspecified"
+title = "hod-wallet-v3-PREVIEW.html (extract → upload to Netlify as index.html)"

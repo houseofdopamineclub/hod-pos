@@ -38,6 +38,18 @@ export const FEATURES = {
   // Phase 3 — inventory / recipes (not built yet)
   inventory: PHASE >= 3,
   recipes: PHASE >= 3,
+
+  // ── EDC Cloud (Razorpay POS Terminal API + Pine Labs Plutus Smart Cloud) ──
+  // Pushes cover-charge bill amounts straight to a card-swipe machine over the
+  // internet so customer taps card → POS auto-detects success → cover marked
+  // paid. Closes the cash-fudging fraud hole on door card payments.
+  // OFF by default. Flip on in this build (or via VITE_EDC=1) ONLY once vendor
+  // (Razorpay or Pine Labs) has enabled POS Terminal API on the merchant
+  // account AND the live Terminal ID is wired in `cloud-functions/edc/`.
+  // See `replit.md` → "EDC Cloud Integration" for rollout checklist.
+  edc:
+    String(import.meta.env.VITE_EDC || "").toLowerCase() === "1" ||
+    String(import.meta.env.VITE_EDC || "").toLowerCase() === "true",
 } as const;
 
 export const IS_PHASE_1_ONLY = PHASE === 1;
