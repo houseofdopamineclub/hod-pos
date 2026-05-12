@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useStaff } from "@/lib/staff-context";
 import { seedDefaultStaff, seedDefaultAggregatorSettings } from "@/lib/firestore";
+import { FEATURES } from "@/lib/feature-flags";
 
 export default function LoginPage() {
   const { login, allStaff } = useStaff();
@@ -152,10 +153,10 @@ export default function LoginPage() {
 
       <div className="mt-12 flex gap-4">
         {[
-          { href: "/captain", label: "Captain Mode", icon: "🪩" },
-          { href: "/bar", label: "Bar Mode", icon: "🍸" },
-          { href: "/door", label: "Door Mode", icon: "🚪" },
-        ].map((m) => (
+          FEATURES.captainMode && { href: "/captain", label: "Captain Mode", icon: "🪩" },
+          FEATURES.barMode && { href: "/bar", label: "Bar Mode", icon: "🍸" },
+          FEATURES.doorMode && { href: "/door", label: "Door Mode", icon: "🚪" },
+        ].filter(Boolean).map((m: any) => (
           <a
             key={m.href}
             href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}${m.href}`}

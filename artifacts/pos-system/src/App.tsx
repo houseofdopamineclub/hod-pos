@@ -17,6 +17,9 @@ import CaptainMode from "@/pages/CaptainMode";
 import BarMode from "@/pages/BarMode";
 import DoorMode from "@/pages/DoorMode";
 import NotFound from "@/pages/not-found";
+import { FEATURES, IS_PHASE_1_ONLY } from "@/lib/feature-flags";
+import { useEffect } from "react";
+import { useLocation } from "wouter";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,17 +34,25 @@ function AuthGate() {
 }
 
 function POSRouter() {
+  // In Phase 1 venues, FloorView/TablePOS/BillView/KOT/Shift/Reports/Audit are hidden.
+  // Root path "/" redirects to /door so a Phase 1 venue lands directly on Door Mode.
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    if (IS_PHASE_1_ONLY && window.location.pathname.replace(import.meta.env.BASE_URL.replace(/\/$/, ""), "") === "/") {
+      setLocation("/door");
+    }
+  }, [setLocation]);
   return (
     <Switch>
-      <Route path="/" component={FloorView} />
-      <Route path="/table/:tableId" component={TablePOS} />
-      <Route path="/bill/:tableId" component={BillView} />
-      <Route path="/reports" component={Reports} />
-      <Route path="/kot" component={KOTView} />
-      <Route path="/shift" component={ShiftView} />
-      <Route path="/admin" component={AdminPage} />
-      <Route path="/audit" component={AuditPage} />
-      <Route path="/aggregator" component={AggregatorPage} />
+      {FEATURES.floorView && <Route path="/" component={FloorView} />}
+      {FEATURES.tablePos && <Route path="/table/:tableId" component={TablePOS} />}
+      {FEATURES.billing && <Route path="/bill/:tableId" component={BillView} />}
+      {FEATURES.reports && <Route path="/reports" component={Reports} />}
+      {FEATURES.kot && <Route path="/kot" component={KOTView} />}
+      {FEATURES.shift && <Route path="/shift" component={ShiftView} />}
+      {FEATURES.admin && <Route path="/admin" component={AdminPage} />}
+      {FEATURES.audit && <Route path="/audit" component={AuditPage} />}
+      {FEATURES.aggregatorSync && <Route path="/aggregator" component={AggregatorPage} />}
       <Route component={NotFound} />
     </Switch>
   );
@@ -50,9 +61,9 @@ function POSRouter() {
 function AppRoutes() {
   return (
     <Switch>
-      <Route path="/captain" component={CaptainMode} />
-      <Route path="/bar" component={BarMode} />
-      <Route path="/door" component={DoorMode} />
+      {FEATURES.captainMode && <Route path="/captain" component={CaptainMode} />}
+      {FEATURES.barMode && <Route path="/bar" component={BarMode} />}
+      {FEATURES.doorMode && <Route path="/door" component={DoorMode} />}
       <Route><AuthGate /></Route>
     </Switch>
   );
