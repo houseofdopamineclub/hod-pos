@@ -5,18 +5,26 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { HealthStatus } from "./api.schemas";
+import type {
+  HealthStatus,
+  WhatsappSendResponse,
+  WhatsappSendTemplateRequest,
+  WhatsappSendTextRequest,
+} from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -99,3 +107,176 @@ export function useHealthCheck<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Send a WhatsApp template message via Meta Cloud API
+ */
+export const getWhatsappSendTemplateUrl = () => {
+  return `/api/whatsapp/send-template`;
+};
+
+export const whatsappSendTemplate = async (
+  whatsappSendTemplateRequest: WhatsappSendTemplateRequest,
+  options?: RequestInit,
+): Promise<WhatsappSendResponse> => {
+  return customFetch<WhatsappSendResponse>(getWhatsappSendTemplateUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(whatsappSendTemplateRequest),
+  });
+};
+
+export const getWhatsappSendTemplateMutationOptions = <
+  TError = ErrorType<WhatsappSendResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof whatsappSendTemplate>>,
+    TError,
+    { data: BodyType<WhatsappSendTemplateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof whatsappSendTemplate>>,
+  TError,
+  { data: BodyType<WhatsappSendTemplateRequest> },
+  TContext
+> => {
+  const mutationKey = ["whatsappSendTemplate"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof whatsappSendTemplate>>,
+    { data: BodyType<WhatsappSendTemplateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return whatsappSendTemplate(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type WhatsappSendTemplateMutationResult = NonNullable<
+  Awaited<ReturnType<typeof whatsappSendTemplate>>
+>;
+export type WhatsappSendTemplateMutationBody =
+  BodyType<WhatsappSendTemplateRequest>;
+export type WhatsappSendTemplateMutationError = ErrorType<WhatsappSendResponse>;
+
+/**
+ * @summary Send a WhatsApp template message via Meta Cloud API
+ */
+export const useWhatsappSendTemplate = <
+  TError = ErrorType<WhatsappSendResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof whatsappSendTemplate>>,
+    TError,
+    { data: BodyType<WhatsappSendTemplateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof whatsappSendTemplate>>,
+  TError,
+  { data: BodyType<WhatsappSendTemplateRequest> },
+  TContext
+> => {
+  return useMutation(getWhatsappSendTemplateMutationOptions(options));
+};
+
+/**
+ * @summary Send a WhatsApp free-form text message via Meta Cloud API
+ */
+export const getWhatsappSendTextUrl = () => {
+  return `/api/whatsapp/send`;
+};
+
+export const whatsappSendText = async (
+  whatsappSendTextRequest: WhatsappSendTextRequest,
+  options?: RequestInit,
+): Promise<WhatsappSendResponse> => {
+  return customFetch<WhatsappSendResponse>(getWhatsappSendTextUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(whatsappSendTextRequest),
+  });
+};
+
+export const getWhatsappSendTextMutationOptions = <
+  TError = ErrorType<WhatsappSendResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof whatsappSendText>>,
+    TError,
+    { data: BodyType<WhatsappSendTextRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof whatsappSendText>>,
+  TError,
+  { data: BodyType<WhatsappSendTextRequest> },
+  TContext
+> => {
+  const mutationKey = ["whatsappSendText"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof whatsappSendText>>,
+    { data: BodyType<WhatsappSendTextRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return whatsappSendText(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type WhatsappSendTextMutationResult = NonNullable<
+  Awaited<ReturnType<typeof whatsappSendText>>
+>;
+export type WhatsappSendTextMutationBody = BodyType<WhatsappSendTextRequest>;
+export type WhatsappSendTextMutationError = ErrorType<WhatsappSendResponse>;
+
+/**
+ * @summary Send a WhatsApp free-form text message via Meta Cloud API
+ */
+export const useWhatsappSendText = <
+  TError = ErrorType<WhatsappSendResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof whatsappSendText>>,
+    TError,
+    { data: BodyType<WhatsappSendTextRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof whatsappSendText>>,
+  TError,
+  { data: BodyType<WhatsappSendTextRequest> },
+  TContext
+> => {
+  return useMutation(getWhatsappSendTextMutationOptions(options));
+};

@@ -5,9 +5,6 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-export interface HealthStatus {
-  status: string;
-}
 
 export interface WhatsappSendTemplateRequest {
   /** Recipient phone (digits only, country-code optional; defaults to +91 if missing) */
@@ -18,16 +15,4 @@ export interface WhatsappSendTemplateRequest {
   language?: string;
   /** Body parameter values for the template */
   params?: string[];
-}
-
-export interface WhatsappSendTextRequest {
-  to: string;
-  message: string;
-}
-
-export interface WhatsappSendResponse {
-  ok: boolean;
-  messageId?: string;
-  error?: string;
-  code?: number;
 }

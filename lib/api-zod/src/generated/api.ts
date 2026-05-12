@@ -14,3 +14,47 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * @summary Send a WhatsApp template message via Meta Cloud API
+ */
+export const whatsappSendTemplateBodyLanguageDefault = `en`;
+
+export const WhatsappSendTemplateBody = zod.object({
+  to: zod
+    .string()
+    .describe(
+      "Recipient phone (digits only, country-code optional; defaults to +91 if missing)",
+    ),
+  template: zod.string().describe("Approved Meta template name"),
+  language: zod
+    .string()
+    .default(whatsappSendTemplateBodyLanguageDefault)
+    .describe("Template language code (e.g. en, en_US)"),
+  params: zod
+    .array(zod.string())
+    .optional()
+    .describe("Body parameter values for the template"),
+});
+
+export const WhatsappSendTemplateResponse = zod.object({
+  ok: zod.boolean(),
+  messageId: zod.string().optional(),
+  error: zod.string().optional(),
+  code: zod.number().optional(),
+});
+
+/**
+ * @summary Send a WhatsApp free-form text message via Meta Cloud API
+ */
+export const WhatsappSendTextBody = zod.object({
+  to: zod.string(),
+  message: zod.string(),
+});
+
+export const WhatsappSendTextResponse = zod.object({
+  ok: zod.boolean(),
+  messageId: zod.string().optional(),
+  error: zod.string().optional(),
+  code: zod.number().optional(),
+});

@@ -1051,6 +1051,21 @@ function WalletQrModal({
 // Try Meta WhatsApp Cloud API (template → text → fail). Returns true if Meta accepted
 // the send. Caller decides whether to fall back to wa.me on `false`.
 // Mirrors the proven pattern from CaptainMode.sendWhatsApp.
+// Read response as text first, then attempt JSON.parse. Empty/non-JSON bodies
+// (e.g. a 404 from a missing route) used to throw "Unexpected end of JSON input"
+// which surfaced as a cryptic alert. Now they fall through to a clean reason.
+async function readJsonSafe(r: Response): Promise<{ data: any; parseError?: string }> {
+  const text = await r.text();
+  if (!text) {
+    return { data: null, parseError: `Server returned an empty/invalid response (HTTP ${r.status})` };
+  }
+  try {
+    return { data: JSON.parse(text) };
+  } catch {
+    return { data: null, parseError: `Server returned an empty/invalid response (HTTP ${r.status})` };
+  }
+}
+
 async function sendWhatsAppViaMeta(opts: {
   phone: string;
   template?: { name: string; params: string[]; language?: string };
@@ -1069,9 +1084,9 @@ async function sendWhatsAppViaMeta(opts: {
           language: opts.template.language || "en", params: opts.template.params,
         }),
       });
-      const data = await r.json();
-      if (r.ok && data.ok) return { ok: true, via: "template" };
-      console.warn("[door][wa] template send failed, trying text:", data);
+      const { data, parseError } = await readJsonSafe(r);
+      if (r.ok && data?.ok) return { ok: true, via: "template" };
+      console.warn("[door][wa] template send failed, trying text:", parseError || data);
     } catch (e) { console.warn("[door][wa] template request error", e); }
   }
 
@@ -1081,9 +1096,10 @@ async function sendWhatsAppViaMeta(opts: {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to: digits, message: opts.fallbackText }),
     });
-    const data = await r.json();
-    if (r.ok && data.ok) return { ok: true, via: "text" };
-    return { ok: false, error: data.error || "Send failed", code: data.code };
+    const { data, parseError } = await readJsonSafe(r);
+    if (r.ok && data?.ok) return { ok: true, via: "text" };
+    if (parseError) return { ok: false, error: parseError };
+    return { ok: false, error: data?.error || "Send failed", code: data?.code };
   } catch (e: any) {
     return { ok: false, error: e?.message || "Network error" };
   }
