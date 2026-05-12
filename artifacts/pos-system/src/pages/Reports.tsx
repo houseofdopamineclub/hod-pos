@@ -34,6 +34,10 @@ import {
   buildAllTallyRows, aggregateCaptainLeakage,
   type PosKotDoc, type TallyRow,
 } from "@/lib/kot-bill-tally";
+import {
+  parseSettlementCsv, reconcile,
+  type ReconResult, type SettlementVendor,
+} from "@/lib/settlement-recon";
 
 const GOLD = "#C9A84C";
 const RED = "#ef4444";
@@ -344,7 +348,14 @@ export default function Reports() {
   const [guestlist, setGuestlist] = useState<HodGuestlistEntry[]>([]);
   const [covers, setCovers] = useState<Array<HodCover & { id: string }>>([]);
   const [orphans, setOrphans] = useState<any[]>([]);
-  const [view, setView] = useState<"tables" | "wallets" | "tally" | "edc">("tables");
+  const [view, setView] = useState<"tables" | "wallets" | "tally" | "edc" | "settlement">("tables");
+  // Settlement reconciliation: lazily populated when the accountant uploads
+  // a Pine Labs (or Razorpay) settlement export. Lives in component state
+  // because the file is local — never round-tripped to Firestore.
+  const [reconVendor, setReconVendor] = useState<SettlementVendor>("pinelabs");
+  const [reconResult, setReconResult] = useState<ReconResult | null>(null);
+  const [reconFileName, setReconFileName] = useState<string>("");
+  const [reconError, setReconError] = useState<string>("");
   // ── EDC Cloud transactions (Razorpay POS / Pine Labs) for the selected night.
   // Read-only ledger of every card-swipe pushed from Door Mode → EDC machine.
   // Each row is one charge attempt: pending / success / failed / cancelled,
@@ -452,6 +463,16 @@ export default function Reports() {
       }, (e) => { console.warn("[Reports] posKOTs tally subscribe failed", e); setTallyKots([]); setTallyKotsStatus("error"); });
       return unsub;
     } catch (e) { console.warn("[Reports] posKOTs tally setup failed", e); setTallyKotsStatus("error"); return; }
+  }, [today]);
+
+  // 4c-pre) When the operator switches nights, the previously-loaded
+  //         settlement reconciliation no longer applies (edcTxns is about
+  //         to be repopulated for the new date). Clear it so the UI doesn't
+  //         show stale matches against a different night's transactions.
+  useEffect(() => {
+    setReconResult(null);
+    setReconFileName("");
+    setReconError("");
   }, [today]);
 
   // 4c) EDC transactions for the selected night. Filter by `date` field
@@ -875,6 +896,53 @@ export default function Reports() {
     downloadCSV(`HOD_EDC_Card_${today}.csv`, rows);
   };
 
+  // 🧮 Settlement reconciliation export — only the ISSUES (matched rows are
+  // expected and noisy). Accountant pastes this into the morning standup
+  // sheet so the operations lead can chase Pine Labs / Razorpay support
+  // for missed webhooks and short-settlements.
+  const exportReconIssues = () => {
+    if (!reconResult) { alert("Upload a settlement file first."); return; }
+    const rows = reconResult.issues.map((i) => ({
+      Date: today,
+      Vendor: reconResult.vendor,
+      Issue: i.kind.replace(/_/g, " ").toUpperCase(),
+      Ref: i.ref,
+      "Settlement ₹": i.settlementAmount,
+      "Firestore ₹": i.firestoreAmount,
+      "Δ ₹": Math.round(i.firestoreAmount - i.settlementAmount),
+      "Booking Ref": i.txn?.bookingRef || "",
+      "Cover Ref": i.txn?.coverRef || "",
+      "Card Last 4": i.txn?.last4 || i.settlement?.last4 || "",
+      "Bouncer": i.txn?.bouncerName || "",
+      "Txn ID": i.txn?.id || "",
+      "Settled At (vendor)": i.settlement?.when || "",
+      Detail: i.detail,
+    }));
+    downloadCSV(`HOD_Settlement_Issues_${reconResult.vendor}_${today}.csv`, rows);
+  };
+
+  // 🧮 Run the recon — wired to the file-input onChange below. Reads the
+  // uploaded CSV as text, parses it leniently, and matches against the
+  // current night's `edcTransactions` for the selected vendor.
+  const handleSettlementFile = async (file: File) => {
+    setReconError("");
+    try {
+      const text = await file.text();
+      const { rows: parsed, unparsed } = parseSettlementCsv(text);
+      if (parsed.length === 0) {
+        setReconError(`Couldn't parse any rows from "${file.name}". Make sure the file has a header row with at least an RRN / Approval Code column and an Amount column.`);
+        setReconResult(null);
+        return;
+      }
+      const result = reconcile({ vendor: reconVendor, settlement: parsed, txns: edcTxns, unparsed });
+      setReconResult(result);
+      setReconFileName(file.name);
+    } catch (e: any) {
+      setReconError(`Failed to read file: ${e?.message || e}`);
+      setReconResult(null);
+    }
+  };
+
   const ambColor = (a: Ambiguity) => a === "red" ? RED : a === "orange" ? ORANGE : GREEN;
   const dot = (a: Ambiguity) => (
     <span title={a.toUpperCase()} style={{ display: "inline-block", width: 10, height: 10, borderRadius: 5, background: ambColor(a), boxShadow: `0 0 6px ${ambColor(a)}aa` }} />
@@ -920,6 +988,13 @@ export default function Reports() {
             style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
               background: view === "edc" ? GOLD : "rgba(255,255,255,.06)", color: view === "edc" ? "#030305" : "#fff" }}>
             💳 EDC Card ({edcTxns.length})
+          </button>
+          <button onClick={() => setView("settlement")}
+            title="Upload tonight's vendor settlement file (Pine Labs / Razorpay) to auto-match against EDC card swipes. Catches missed webhooks and short-settled txns."
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
+              background: view === "settlement" ? GOLD : "rgba(255,255,255,.06)", color: view === "settlement" ? "#030305" : "#fff",
+              boxShadow: reconResult && reconResult.totals.issueCount > 0 && view !== "settlement" ? `0 0 0 2px ${RED}88` : "none" }}>
+            🧮 Settlement{reconResult ? ` (${reconResult.totals.issueCount} issue${reconResult.totals.issueCount === 1 ? "" : "s"})` : ""}
           </button>
         </div>
       </div>
@@ -991,9 +1066,10 @@ export default function Reports() {
             background: showFilters ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.06)", color: showFilters ? GOLD : "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
           ⚙ Filter & Sort {(filter !== "all" || sourceFilter !== "all") ? "•" : ""}
         </button>
-        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : view === "edc" ? exportEdc : exportTally}
-          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
-          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : view === "edc" ? edcTxns.length : filteredTally.length} rows)
+        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : view === "edc" ? exportEdc : view === "settlement" ? exportReconIssues : exportTally}
+          disabled={view === "settlement" && !reconResult}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer", opacity: (view === "settlement" && !reconResult) ? 0.4 : 1 }}>
+          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : view === "edc" ? edcTxns.length : view === "settlement" ? (reconResult?.totals.issueCount || 0) : filteredTally.length} rows)
         </button>
         {view === "tables" && (
           <button onClick={exportItemsForDigiPos}
@@ -1348,6 +1424,135 @@ export default function Reports() {
                 </tbody>
               </table>
             </div>
+          </>
+        );
+      })()}
+
+      {/* SETTLEMENT RECONCILIATION VIEW */}
+      {view === "settlement" && (() => {
+        const r = reconResult;
+        const issueColor = (k: string) => k === "amount_mismatch" ? ORANGE : k === "settled_not_in_firestore" ? RED : AMBER;
+        const issueLabel = (k: string) =>
+          k === "amount_mismatch" ? "💰 AMOUNT DRIFT"
+          : k === "settled_not_in_firestore" ? "🟥 MISSED WEBHOOK"
+          : "🟧 NOT YET SETTLED";
+        return (
+          <>
+            <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+              <strong style={{ color: GREEN }}>🧮 SETTLEMENT RECONCILIATION:</strong> Upload tonight's settlement file (Pine Labs Plutus dashboard → Reports → Daily Settlement, or Razorpay Dashboard → Settlements → Export). Each row is matched against this night's <code style={{ color: GOLD }}>edcTransactions</code> by RRN / Approval Code. Mismatches surface below — fix at standup, not month-end.
+            </div>
+
+            {/* Upload bar */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12, padding: 12, borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.2)" }}>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 800, letterSpacing: ".5px" }}>VENDOR:</span>
+              <select value={reconVendor} onChange={(e) => { setReconVendor(e.target.value as SettlementVendor); setReconResult(null); setReconFileName(""); }}
+                style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                <option value="pinelabs">Pine Labs (Plutus Smart Cloud)</option>
+                <option value="razorpay">Razorpay (POS Settlement)</option>
+              </select>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: 8, background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
+                📂 {reconFileName ? "Replace settlement file" : "Upload settlement file (.csv)"}
+                <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) handleSettlementFile(f); e.target.value = ""; }} />
+              </label>
+              {reconFileName && (
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)" }}>
+                  📄 {reconFileName} · matched against <strong style={{ color: GOLD }}>{edcTxns.filter(t => (t.vendor || "").toLowerCase() === reconVendor).length}</strong> {reconVendor} txn(s) for {today}
+                </span>
+              )}
+              {reconResult && (
+                <button onClick={() => { setReconResult(null); setReconFileName(""); setReconError(""); }}
+                  style={{ padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.7)", cursor: "pointer" }}>
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {reconError && (
+              <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(239,68,68,.08)", border: `1px solid ${RED}55`, color: RED, fontSize: 12 }}>
+                ⚠️ {reconError}
+              </div>
+            )}
+
+            {!r && !reconError && (
+              <div style={{ padding: 32, textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 12, border: "1px dashed rgba(255,255,255,.1)", borderRadius: 10 }}>
+                No settlement file loaded yet. Pick a vendor above and upload its daily CSV to begin.
+              </div>
+            )}
+
+            {r && (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+                  <Tile label="Settlement rows" value={String(r.totals.settlementCount)} color={GOLD} />
+                  <Tile label="Settlement ₹" value={`₹${Math.round(r.totals.settlementAmount).toLocaleString()}`} color={GOLD} />
+                  <Tile label="✅ Matched clean" value={String(r.totals.matchedCount)} color={GREEN} />
+                  <Tile label="Matched ₹" value={`₹${Math.round(r.totals.matchedAmount).toLocaleString()}`} color={GREEN} />
+                  <Tile label="⚠ Issues" value={String(r.totals.issueCount)} color={r.totals.issueCount > 0 ? RED : GREEN} />
+                  <Tile label="Unparsed lines" value={String(r.unparsed.length)} color={r.unparsed.length > 0 ? ORANGE : "rgba(255,255,255,.5)"} />
+                </div>
+
+                <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+                    <thead>
+                      <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                        {["Issue", "Ref (RRN / Auth)", "Vendor ₹", "Firestore ₹", "Δ ₹", "Booking", "Card", "Bouncer", "What happened"].map((h) => (
+                          <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {r.issues.length === 0 ? (
+                        <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: GREEN }}>
+                          🎉 Clean reconciliation — every {r.vendor} settlement row matches Firestore on amount.
+                        </td></tr>
+                      ) : r.issues.map((i, idx) => {
+                        const c = issueColor(i.kind);
+                        const drift = Math.round(i.firestoreAmount - i.settlementAmount);
+                        return (
+                          <tr key={`${i.kind}-${i.ref}-${idx}`} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                            <td style={{ padding: "6px 6px" }}>
+                              <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
+                                {issueLabel(i.kind)}
+                              </span>
+                            </td>
+                            <td style={{ padding: "6px 6px", fontFamily: "monospace", fontSize: 10, color: "rgba(255,255,255,.85)" }}>{i.ref}</td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.settlementAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                              {i.settlementAmount > 0 ? `₹${i.settlementAmount.toLocaleString()}` : "—"}
+                            </td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.firestoreAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                              {i.firestoreAmount > 0 ? `₹${i.firestoreAmount.toLocaleString()}` : "—"}
+                            </td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: drift === 0 ? "rgba(255,255,255,.4)" : drift > 0 ? ORANGE : RED, fontWeight: 800 }}>
+                              {drift === 0 ? "—" : `${drift > 0 ? "+" : ""}₹${drift.toLocaleString()}`}
+                            </td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>{i.txn?.bookingRef || "—"}</td>
+                            <td style={{ padding: "6px 6px" }}>
+                              {(i.txn?.last4 || i.settlement?.last4)
+                                ? <span>••••{i.txn?.last4 || i.settlement?.last4}</span>
+                                : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                            </td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{i.txn?.bouncerName || "—"}</td>
+                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontSize: 10 }}>{i.detail}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {r.unparsed.length > 0 && (
+                  <details style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(245,158,11,.06)", border: `1px solid ${ORANGE}33` }}>
+                    <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 800, color: ORANGE }}>
+                      ⚠ {r.unparsed.length} line(s) couldn't be parsed (no RRN / reference column found) — click to inspect
+                    </summary>
+                    <pre style={{ marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.6)", maxHeight: 200, overflow: "auto" }}>
+                      {r.unparsed.slice(0, 20).map((u, i) => `${i + 1}. ${JSON.stringify(u)}`).join("\n")}
+                      {r.unparsed.length > 20 ? `\n… and ${r.unparsed.length - 20} more` : ""}
+                    </pre>
+                  </details>
+                )}
+              </>
+            )}
           </>
         );
       })()}
