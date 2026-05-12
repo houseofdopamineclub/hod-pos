@@ -4396,71 +4396,14 @@ function _showTableConfirm(bk, table){
 // ══════════════════════════════════════════════════════
 function renderWalletPage(bookingRef){
   var wrap=document.createElement('div');
-  wrap.className='hod-wallet-v2';
-  wrap.style.cssText='min-height:100vh;background:#0A0A0A;color:#F5F1E8;font-family:var(--fs);padding-bottom:90px;';
+  wrap.style.cssText='min-height:100vh;background:#080812;color:var(--text);font-family:var(--fs);';
 
-  // ── Inject scoped Digitory-style theme (red+yellow+black). Re-themes the
-  //    entire wallet page in one place via CSS-var overrides + targeted
-  //    overrides for the most common gold/dark inline styles. Scoped to
-  //    .hod-wallet-v2 so the public site's gold theme is untouched.
-  if(!document.getElementById('hod-wallet-v2-css')){
-    var st=document.createElement('style');st.id='hod-wallet-v2-css';
-    st.textContent=
-      '.hod-wallet-v2{--gold:#F2C744;--goldg:linear-gradient(135deg,#F2C744,#B8941F);--text:#F5F1E8;--muted:#9A9A9A;--card:#141414;--surface:#1F1F1F;--border:rgba(242,199,68,.18);--red:#B83227;--red-deep:#8C2419;}'
-      // Lift hardcoded dark-blue panels (#0C0C18 etc.) and rgba(255,255,255,.03) into proper Digitory blacks
-      +'.hod-wallet-v2 input,.hod-wallet-v2 button,.hod-wallet-v2 select,.hod-wallet-v2 textarea{font-family:var(--fs);}'
-      +'.hod-wallet-v2 input::placeholder{color:#777;}'
-      // QR wrap → white card for crisp scan
-      +'.hod-wallet-v2 #wallet-qr-wrap,.hod-wallet-v2 #wallet-qr-wait,.hod-wallet-v2 #conf-qr-wrap{background:#fff !important;width:180px !important;height:180px !important;border:6px solid #fff !important;border-radius:14px !important;box-shadow:0 4px 22px rgba(242,199,68,.18);}'
-      // Item row dividers — thin red dotted (Digitory)
-      +'.hod-wallet-v2 .wv-row{border-bottom:1px dashed rgba(184,50,39,.22) !important;padding:14px 4px !important;}'
-      // ADD button — bold red with yellow text
-      +'.hod-wallet-v2 .wv-add{padding:9px 22px !important;border-radius:10px !important;background:#B83227 !important;border:1px solid #B83227 !important;color:#F2C744 !important;font-size:13px !important;font-weight:900 !important;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;font-family:var(--fs);box-shadow:0 2px 10px rgba(184,50,39,.35);transition:transform .15s,box-shadow .15s;}'
-      +'.hod-wallet-v2 .wv-add:active{transform:scale(.96);}'
-      +'.hod-wallet-v2 .wv-add:hover{background:#F2C744 !important;color:#0A0A0A !important;border-color:#F2C744 !important;}'
-      // Qty stepper buttons
-      +'.hod-wallet-v2 .wv-qbtn{width:32px !important;height:32px !important;border-radius:8px !important;background:#1F1F1F !important;border:1.5px solid #B83227 !important;color:#F2C744 !important;font-size:16px !important;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:var(--fs);}'
-      +'.hod-wallet-v2 .wv-qbtn:hover{background:#B83227 !important;}'
-      +'.hod-wallet-v2 .wv-qty{font-family:var(--fs);font-size:15px;font-weight:900;color:#F2C744;min-width:22px;text-align:center;}'
-      // Category accordion header — bold black panel with yellow underline
-      +'.hod-wallet-v2 .wv-cat{background:#141414 !important;border:1px solid rgba(242,199,68,.22) !important;border-left:4px solid #B83227 !important;border-radius:8px !important;padding:14px 16px !important;cursor:pointer;}'
-      +'.hod-wallet-v2 .wv-cat .wv-cat-name{font-size:13px !important;font-weight:900 !important;color:#F2C744 !important;letter-spacing:1.6px !important;text-transform:uppercase;}'
-      +'.hod-wallet-v2 .wv-cat .wv-cat-count{font-size:11px;color:#9A9A9A;font-weight:700;letter-spacing:.5px;}'
-      // Tab buttons — yellow solid active, deep-red outlined inactive
-      +'.hod-wallet-v2 .wv-tab{flex:1;padding:18px 8px !important;border-radius:12px !important;font-size:13px !important;font-weight:900 !important;letter-spacing:1.4px;text-transform:uppercase;cursor:pointer;font-family:var(--fs);border:2px solid !important;transition:all .15s;}'
-      +'.hod-wallet-v2 .wv-tab.on{background:#F2C744 !important;border-color:#F2C744 !important;color:#0A0A0A !important;box-shadow:0 4px 16px rgba(242,199,68,.3);}'
-      +'.hod-wallet-v2 .wv-tab.off{background:transparent !important;border-color:#B83227 !important;color:#F5F1E8 !important;}'
-      +'.hod-wallet-v2 .wv-tab.off:hover{background:rgba(184,50,39,.18) !important;}'
-      // Sticky bottom View Cart bar — Digitory red
-      +'.hod-wallet-v2 .wv-stickycart{position:fixed;left:0;right:0;bottom:0;z-index:200;background:#B83227;color:#F2C744;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;font-family:var(--fs);font-weight:900;font-size:15px;letter-spacing:.4px;box-shadow:0 -8px 24px rgba(0,0,0,.5);cursor:pointer;}'
-      +'.hod-wallet-v2 .wv-stickycart .wv-sc-amt{font-family:var(--fp);font-size:20px;color:#fff;}'
-      // Search input — yellow outline on black
-      +'.hod-wallet-v2 .wv-search{width:100%;padding:14px 16px !important;border-radius:12px !important;background:#0A0A0A !important;border:2px solid rgba(242,199,68,.45) !important;color:#F5F1E8 !important;font-size:14px !important;font-weight:600;font-family:var(--fs);outline:none;box-sizing:border-box;letter-spacing:.3px;}'
-      +'.hod-wallet-v2 .wv-search:focus{border-color:#F2C744 !important;box-shadow:0 0 0 3px rgba(242,199,68,.12);}'
-      // Header strip
-      +'.hod-wallet-v2 .wv-hdr{background:#000 !important;border-bottom:2px solid #B83227 !important;padding:14px 18px !important;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}'
-      +'.hod-wallet-v2 .wv-hdr-brand{font-family:var(--fp);font-size:24px;font-weight:900;color:#F2C744;letter-spacing:3px;}'
-      +'.hod-wallet-v2 .wv-hdr-pill{display:inline-block;padding:7px 14px;border-radius:999px;background:#B83227;color:#F2C744;font-size:11px;font-weight:900;letter-spacing:1.2px;text-transform:uppercase;border:none;cursor:pointer;font-family:var(--fs);}'
-      // Wallet hero card — red-to-black with yellow balance
-      +'.hod-wallet-v2 .wv-wcard{background:linear-gradient(135deg,#B83227 0%,#7a1f17 60%,#1a0a08 100%) !important;border:1.5px solid #F2C744 !important;border-radius:18px !important;padding:24px !important;margin-bottom:18px;color:#fff;box-shadow:0 8px 32px rgba(184,50,39,.25);}'
-      +'.hod-wallet-v2 .wv-wcard .wv-bal{font-family:var(--fp);font-size:44px;font-weight:900;color:#F2C744;line-height:1;letter-spacing:-1px;}'
-      +'.hod-wallet-v2 .wv-wcard .wv-bal.zero{color:#fff;opacity:.6;}'
-      // Place order primary button — yellow solid
-      +'.hod-wallet-v2 .wv-place{width:100%;padding:18px !important;border-radius:14px !important;background:#F2C744 !important;border:2px solid #F2C744 !important;color:#0A0A0A !important;font-size:15px !important;font-weight:900 !important;letter-spacing:1.2px !important;text-transform:uppercase;cursor:pointer;font-family:var(--fs);box-shadow:0 6px 22px rgba(242,199,68,.32);}'
-      +'.hod-wallet-v2 .wv-place:disabled,.hod-wallet-v2 .wv-place[style*="opacity:.45"]{opacity:.4;}'
-      // Veg dot crisp
-      +'.hod-wallet-v2 .wv-vegdot{width:11px !important;height:11px !important;border-radius:2px !important;border:1.5px solid currentColor;display:inline-flex;align-items:center;justify-content:center;margin-right:8px;}'
-      +'.hod-wallet-v2 .wv-vegdot::after{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;display:block;}'
-      // Force gold→yellow for any remaining var(--gold) references inside QR-bg circles etc.
-      +'.hod-wallet-v2{color-scheme:dark;}';
-    document.head.appendChild(st);
-  }
-
-  // Header — Digitory black strip with HOD wordmark + Call Waiter pill
+  // Header
   var hdr=document.createElement('div');
-  hdr.className='wv-hdr';
-  hdr.innerHTML='<div class="wv-hdr-brand">HOD</div>'
-    +'<button class="wv-hdr-pill" onclick="window.location.href=\'tel:+918882222900\'">📞 Call Waiter</button>';
+  hdr.style.cssText='background:rgba(3,3,5,.98);border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;';
+  hdr.innerHTML='<div style="font-family:var(--fp);font-size:20px;font-weight:900;color:var(--gold);">HOD</div>'
+    +'<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">Cover Wallet</div>'
+    +'<div style="width:40px;"></div>';
   wrap.appendChild(hdr);
 
   var inner=document.createElement('div');
@@ -4470,7 +4413,7 @@ function renderWalletPage(bookingRef){
   // Loading state
   var loadDiv=document.createElement('div');
   loadDiv.style.cssText='text-align:center;padding:60px 20px;color:var(--muted);';
-  loadDiv.innerHTML='<div style="border:2px solid rgba(242,199,68,.2);border-top-color:var(--gold);border-radius:50%;width:28px;height:28px;animation:spin .7s linear infinite;margin:0 auto 14px;"></div>Loading your wallet...';
+  loadDiv.innerHTML='<div style="border:2px solid rgba(201,168,76,.2);border-top-color:var(--gold);border-radius:50%;width:28px;height:28px;animation:spin .7s linear infinite;margin:0 auto 14px;"></div>Loading your wallet...';
   inner.appendChild(loadDiv);
 
   // Cart state
@@ -4490,17 +4433,16 @@ function renderWalletPage(bookingRef){
     // Wallet card
     if(!cv.isTableBooking){
     var wCard=document.createElement('div');
-    wCard.className='wv-wcard';
+    wCard.style.cssText='background:linear-gradient(135deg,rgba(201,168,76,.15),rgba(201,168,76,.05));border:1px solid rgba(201,168,76,.3);border-radius:20px;padding:24px;margin-bottom:20px;';
     var pct=activated>0?Math.round((used/activated)*100):0;
-    wCard.innerHTML='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;">'
-      +'<div><div style="font-size:11px;font-weight:800;color:#F2C744;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;opacity:.85;">Cover Wallet</div>'
-      +'<div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:-.3px;">'+sanitize(name)+'</div>'
-      +'<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px;letter-spacing:.5px;">'+sanitize(cv.eventTitle||'HOD · Tonight')+'</div></div>'
-      +'<div style="text-align:right;"><div style="font-size:10px;color:rgba(255,255,255,.7);margin-bottom:4px;letter-spacing:1.2px;text-transform:uppercase;">Available</div>'
-      +'<div class="wv-bal'+(bal<=0?' zero':'')+'">\u20b9'+bal.toLocaleString('en-IN')+'</div></div></div>'
-      +'<div style="background:rgba(0,0,0,.45);border-radius:6px;overflow:hidden;height:8px;margin-bottom:8px;">'
-      +'<div style="height:100%;background:linear-gradient(90deg,#F2C744,#fff);width:'+Math.max(0,100-pct)+'%;transition:width .5s;border-radius:6px;box-shadow:0 0 8px rgba(242,199,68,.5);"></div></div>'
-      +'<div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,.7);font-weight:600;letter-spacing:.3px;">'
+    wCard.innerHTML='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">'
+      +'<div><div style="font-size:18px;font-weight:900;color:var(--text);">'+sanitize(name)+'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-top:2px;">'+sanitize(cv.eventTitle||'HOD Cover')+'</div></div>'
+      +'<div style="text-align:right;"><div style="font-size:11px;color:var(--muted);margin-bottom:2px;">Available Balance</div>'
+      +'<div style="font-family:var(--fp);font-size:36px;font-weight:900;color:'+(bal>0?'#00C864':'#EF4444')+';line-height:1;">\u20b9'+bal.toLocaleString('en-IN')+'</div></div></div>'
+      +'<div style="background:rgba(0,0,0,.3);border-radius:8px;overflow:hidden;height:6px;margin-bottom:10px;">'
+      +'<div style="height:100%;background:linear-gradient(90deg,rgba(0,200,100,.8),rgba(201,168,76,.6));width:'+Math.max(0,100-pct)+'%;transition:width .5s;border-radius:8px;"></div></div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);">'
       +'<span>\u20b9'+used.toLocaleString('en-IN')+' used</span><span>\u20b9'+activated.toLocaleString('en-IN')+' total</span></div>';
     inner.appendChild(wCard);
     } // end if(!isTableBooking)
@@ -4508,7 +4450,7 @@ function renderWalletPage(bookingRef){
     // Table booking info banner
     if(cv.isTableBooking){
       var tbBanner=document.createElement('div');
-      tbBanner.style.cssText='background:rgba(242,199,68,.08);border:1px solid rgba(242,199,68,.2);border-radius:14px;padding:14px 16px;margin-bottom:14px;';
+      tbBanner.style.cssText='background:rgba(201,168,76,.08);border:1px solid rgba(201,168,76,.2);border-radius:14px;padding:14px 16px;margin-bottom:14px;';
       tbBanner.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">🪑 Table Reservation · Pre-Order Menu</div>'
         +'<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);">'
         +'<span>📍 <b style="color:var(--text);">'+sanitize(cv.tableId||'')+'</b> · '+sanitize(cv.floorLabel||'')+'</span>'
@@ -4516,7 +4458,7 @@ function renderWalletPage(bookingRef){
         +'<span>🕐 <b style="color:var(--text);">'+sanitize(cv.arrivalTime||'')+'</b></span>'
         +'<span>👥 <b style="color:var(--text);">'+sanitize(String(cv.partySize||0))+'</b> guests</span>'
         +'</div>'
-        +(bal<=0?'<div style="margin-top:8px;font-size:11px;color:rgba(242,199,68,.7);">💰 Pre-order below — pay via cash, card or UPI at your table.</div>':'')
+        +(bal<=0?'<div style="margin-top:8px;font-size:11px;color:rgba(201,168,76,.7);">💰 Pre-order below — pay via cash, card or UPI at your table.</div>':'')
         ;
       inner.appendChild(tbBanner);
     }
@@ -4551,7 +4493,7 @@ function renderWalletPage(bookingRef){
       generateLocalQR('wallet-qr-wait','https://hodclub.in/?verify='+encodeURIComponent(cv.ref||cv.bookingId||cv.id||''));
       // Waiting message
       var waitMsg=document.createElement('div');
-      waitMsg.style.cssText='background:rgba(242,199,68,.06);border:1.5px solid rgba(242,199,68,.25);border-radius:16px;padding:24px 20px;text-align:center;margin-bottom:16px;';
+      waitMsg.style.cssText='background:rgba(201,168,76,.06);border:1.5px solid rgba(201,168,76,.25);border-radius:16px;padding:24px 20px;text-align:center;margin-bottom:16px;';
       waitMsg.innerHTML='<div style="font-size:40px;margin-bottom:12px;">🪑</div>'
         +'<div style="font-size:18px;font-weight:900;color:var(--gold);margin-bottom:8px;">We\'re preparing your table!</div>'
         +(cv.tableId?'<div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:16px;">Your table <strong style="color:var(--text);">'+sanitize(cv.tableId)+'</strong>'+(cv.floorLabel?' on <strong style="color:var(--text);">'+sanitize(cv.floorLabel)+'</strong>':'')+' is being set up for you.</div>':'<div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:16px;">Your table is being set up. Show your reservation QR to your captain on arrival.</div>')
@@ -4643,13 +4585,13 @@ function renderWalletPage(bookingRef){
 
     // QR code for customer
     var qrSec=document.createElement('div');
-    qrSec.style.cssText='background:#141414;border:1.5px solid rgba(242,199,68,.22);border-radius:16px;padding:24px 16px;margin-bottom:18px;text-align:center;';
+    qrSec.style.cssText='background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px 16px;margin-bottom:16px;text-align:center;';
     var qrWrap=document.createElement('div');qrWrap.id='wallet-qr-wrap';
-    qrWrap.style.cssText='width:180px;height:180px;margin:0 auto 14px;background:#fff;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden;';
+    qrWrap.style.cssText='width:120px;height:120px;margin:0 auto 12px;background:#0C0C18;border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;';
     var qrInfo2=document.createElement('div');
     var _isActivated=cv.checkedIn||cv.coverActivated>0;
     var _qrSub=cv.isTableBooking?'Show to your captain to activate orders.':(_isActivated?'Show this QR to the bartender to order.':'Show this at the entrance to check in.');
-    var _walletNote=cv.isTableBooking?'':(!_isActivated?'<div style="font-size:11px;background:rgba(242,199,68,.08);border:1px solid rgba(242,199,68,.2);border-radius:8px;padding:6px 10px;margin-top:8px;color:rgba(242,199,68,.8);">⏳ Your wallet activates when you arrive at HOD</div>':'');
+    var _walletNote=cv.isTableBooking?'':(!_isActivated?'<div style="font-size:11px;background:rgba(201,168,76,.08);border:1px solid rgba(201,168,76,.2);border-radius:8px;padding:6px 10px;margin-top:8px;color:rgba(201,168,76,.8);">⏳ Your wallet activates when you arrive at HOD</div>':'');
     qrInfo2.innerHTML='<div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px;">Your HOD QR Code</div>'
       +'<div style="font-size:11px;color:var(--muted);line-height:1.5;">'+_qrSub+'</div>'
       +_walletNote
@@ -4660,7 +4602,7 @@ function renderWalletPage(bookingRef){
     // For event tickets — show bartender instruction then the menu below
     if(!cv.isTableBooking){
       var evInfo=document.createElement('div');
-      evInfo.style.cssText='background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.2);border-radius:14px;padding:18px 20px;margin-bottom:16px;text-align:center;';
+      evInfo.style.cssText='background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.2);border-radius:14px;padding:18px 20px;margin-bottom:16px;text-align:center;';
       if(bal>0){
         evInfo.innerHTML='<div style="font-size:24px;margin-bottom:10px;">🥃</div>'
           +'<div style="font-size:14px;font-weight:800;color:var(--gold);margin-bottom:6px;">Show your QR to the bartender</div>'
@@ -4684,7 +4626,7 @@ function renderWalletPage(bookingRef){
     // Cart summary (sticky)
     var cartBar=document.createElement('div');
     cartBar.id='wallet-cart-bar';
-    cartBar.style.cssText='position:sticky;top:62px;z-index:99;background:rgba(184,50,39,.95);border-bottom:2px solid #F2C744;padding:12px 16px;margin:0 -20px 16px;display:none;backdrop-filter:blur(8px);color:#F2C744;font-weight:900;';
+    cartBar.style.cssText='position:sticky;top:57px;z-index:99;background:rgba(8,8,18,.95);border-bottom:1px solid var(--border);padding:10px 0;margin-bottom:16px;display:none;backdrop-filter:blur(8px);';
     inner.appendChild(cartBar);
 
     function updateCartBar(){
@@ -4703,9 +4645,9 @@ function renderWalletPage(bookingRef){
         +'<div style="display:flex;justify-content:space-between;padding:2px 0;color:var(--muted);"><span>SGST (2.5%)</span><span>'+_fmt(_bd.sgst)+'</span></div>';
       if(Math.abs(_bd.roundOff)>=0.01)_bdRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;color:var(--muted);"><span>Round Off</span><span>'+(_bd.roundOff>=0?'+':'')+_fmt(_bd.roundOff)+'</span></div>';
       cartBar.innerHTML='<div style="padding:8px 4px 4px;">'
-        +'<div style="font-size:12px;color:rgba(242,199,68,.9);line-height:1.9;margin-bottom:8px;">'+_lines+'</div>'
+        +'<div style="font-size:12px;color:rgba(201,168,76,.9);line-height:1.9;margin-bottom:8px;">'+_lines+'</div>'
         +'<details style="border-top:1px solid rgba(255,255,255,.08);padding-top:6px;margin-bottom:6px;">'
-        +'<summary style="display:flex;justify-content:space-between;align-items:center;list-style:none;cursor:pointer;font-size:11px;color:rgba(242,199,68,.7);font-style:italic;">'
+        +'<summary style="display:flex;justify-content:space-between;align-items:center;list-style:none;cursor:pointer;font-size:11px;color:rgba(201,168,76,.7);font-style:italic;">'
         +'<span>Inclusive of all taxes <span style="opacity:.6;font-size:9px;">\u25be view breakdown</span></span>'
         +'<span style="font-size:18px;font-weight:900;color:var(--gold);font-style:normal;">\u20b9'+total.toLocaleString('en-IN')+'</span>'
         +'</summary>'
@@ -4759,8 +4701,8 @@ function renderWalletPage(bookingRef){
     menuSearchWrap.style.cssText='margin-bottom:10px;position:relative;';
     var menuSearchInp=document.createElement('input');
     menuSearchInp.type='search';
-    menuSearchInp.placeholder='\ud83d\udd0d Search menu — food, drinks, brands…';
-    menuSearchInp.className='wv-search';
+    menuSearchInp.placeholder='\ud83d\udd0d Search menu (food, drinks, brands)...';
+    menuSearchInp.style.cssText='width:100%;padding:11px 14px;border-radius:11px;background:rgba(255,255,255,.05);border:1px solid rgba(201,168,76,.18);color:#fff;font-size:13px;font-family:var(--fs);outline:none;box-sizing:border-box;';
     menuSearchInp.oninput=function(){
       menuQuery=menuSearchInp.value;
       menuContent.innerHTML='';
@@ -4776,15 +4718,16 @@ function renderWalletPage(bookingRef){
     // Tab switcher: Food / Drinks
     var tabState={active:'bar'};
     var tabBar2=document.createElement('div');
-    tabBar2.style.cssText='display:flex;gap:8px;margin-bottom:18px;';
+    tabBar2.style.cssText='display:flex;gap:6px;margin-bottom:16px;';
     var tBtns={};
-    [['bar','🥃 Liquor & Drinks'],['food','🍽 Food']].forEach(function(t){
+    [['bar','🥃 Drinks'],['food','🍽 Food']].forEach(function(t){
       var btn=document.createElement('button');
-      btn.className='wv-tab '+(t[0]==='bar'?'on':'off');
+      btn.style.cssText='flex:1;padding:10px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--fs);transition:all .2s;border:1px solid;'
+        +(t[0]==='bar'?'background:rgba(201,168,76,.12);border-color:rgba(201,168,76,.4);color:var(--gold);':'background:var(--surface);border-color:rgba(255,255,255,.08);color:var(--muted);');
       btn.textContent=t[1];tBtns[t[0]]=btn;
       btn.onclick=function(){
         tabState.active=t[0];
-        Object.keys(tBtns).forEach(function(k){tBtns[k].className='wv-tab '+(k===t[0]?'on':'off');});
+        Object.keys(tBtns).forEach(function(k){var on=k===t[0];tBtns[k].style.background=on?'rgba(201,168,76,.12)':'var(--surface)';tBtns[k].style.borderColor=on?'rgba(201,168,76,.4)':'rgba(255,255,255,.08)';tBtns[k].style.color=on?'var(--gold)':'var(--muted)';});
         menuQuery='';menuSearchInp.value='';menuContent.innerHTML='';buildMenu(t[0]==='bar'?HOD_BAR_MENU:HOD_FOOD_MENU);
       };
       tabBar2.appendChild(btn);
@@ -4801,10 +4744,9 @@ function renderWalletPage(bookingRef){
         if(visible.length===0) return;
         var catDiv=document.createElement('div');catDiv.style.cssText='margin-bottom:8px;';
         var catHdr=document.createElement('div');
-        catHdr.className='wv-cat';
-        catHdr.style.cssText='display:flex;justify-content:space-between;align-items:center;';
-        catHdr.innerHTML='<div class="wv-cat-name">'+sanitize(catObj.cat)+'</div>'
-          +'<div class="wv-cat-count">'+visible.length+' items \u25be</div>';
+        catHdr.style.cssText='background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.12);border-radius:10px;padding:10px 14px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;';
+        catHdr.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--gold);letter-spacing:1px;text-transform:uppercase;">'+sanitize(catObj.cat)+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);">'+visible.length+' items \u25be</div>';
         var itemsDiv=document.createElement('div');itemsDiv.style.cssText='display:none;padding:4px 0;';
         catHdr.onclick=function(){itemsDiv.style.display=itemsDiv.style.display==='none'?'block':'none';};
         catDiv.appendChild(catHdr);
@@ -4815,23 +4757,22 @@ function renderWalletPage(bookingRef){
           var eff=_effPrice(item.n, item.p);
           var hasDisc = eff !== item.p;
           var row=document.createElement('div');
-          row.className='wv-row';
-          row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:10px;';
+          row.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid rgba(255,255,255,.04);';
           var isVeg=item.v===true;
-          var vegDot=typeof item.v!=='undefined'?'<span class="wv-vegdot" style="color:'+(isVeg?'#00C864':'#EF4444')+';"></span>':'';
+          var vegDot=typeof item.v!=='undefined'?'<span style="width:8px;height:8px;border-radius:50%;background:'+(isVeg?'#00C864':'#EF4444')+';display:inline-block;margin-right:6px;flex-shrink:0;"></span>':'';
           var priceHtml = hasDisc
-            ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;font-weight:600;">\u20b9'+item.p+'</span>'
-              +'<span style="color:#F2C744;font-weight:900;">\u20b9'+eff+'</span>'
-              +(ov && ov.discountReason ? '<span style="color:rgba(242,199,68,.75);font-size:10px;margin-left:6px;font-weight:600;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
-            : '<span style="color:#F2C744;font-weight:900;">\u20b9'+item.p+'</span>';
-          row.innerHTML='<div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;font-size:14px;font-weight:700;color:#F5F1E8;letter-spacing:.2px;">'+vegDot+'<span style="text-transform:uppercase;letter-spacing:.4px;">'+sanitize(item.n)+'</span></div>'
-            +'<div style="font-size:13px;font-family:var(--fp);margin-top:4px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
-          var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:10px;flex-shrink:0;';
+            ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;">\u20b9'+item.p+'</span>'
+              +'<span style="color:#00C864;font-weight:800;">\u20b9'+eff+'</span>'
+              +(ov && ov.discountReason ? '<span style="color:rgba(0,200,100,.75);font-size:10px;margin-left:6px;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
+            : '\u20b9'+item.p;
+          row.innerHTML='<div style="flex:1;"><div style="display:flex;align-items:center;font-size:13px;font-weight:600;color:var(--text);">'+vegDot+sanitize(item.n)+'</div>'
+            +'<div style="font-size:12px;color:var(--gold);margin-top:2px;">'+priceHtml+'</div></div>';
+          var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:8px;flex-shrink:0;';
           var qty=cart[key]?cart[key].qty:0;
           if(qty===0){
             var addBtn=document.createElement('button');
-            addBtn.className='wv-add';
-            addBtn.textContent='Add +';
+            addBtn.style.cssText='padding:6px 16px;border-radius:8px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.4);color:var(--gold);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--fs);';
+            addBtn.textContent='Add';
             addBtn.onclick=function(){
               // Lock in admin's discounted price at add-to-cart.
               cart[key]={n:item.n,p:_effPrice(item.n,item.p),cat:catObj.cat,qty:1,t:item.t||'drink',alc:item.alc===false?false:(item.t==='food'?false:true)};
@@ -4839,14 +4780,14 @@ function renderWalletPage(bookingRef){
             };
             ctrl.appendChild(addBtn);
           } else {
-            var minB=document.createElement('button');minB.className='wv-qbtn';
+            var minB=document.createElement('button');minB.style.cssText='width:28px;height:28px;border-radius:7px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;';
             minB.textContent='\u2212';
             minB.onclick=function(){
               if(cart[key].qty>1)cart[key].qty--;else delete cart[key];
               updateCartBar();updateTabFooter();buildMenu2(catObj,itemsDiv);
             };
-            var qtySpan=document.createElement('span');qtySpan.className='wv-qty';qtySpan.textContent=qty;
-            var plusB=document.createElement('button');plusB.className='wv-qbtn';plusB.textContent='+';
+            var qtySpan=document.createElement('span');qtySpan.style.cssText='font-size:14px;font-weight:900;color:var(--gold);min-width:16px;text-align:center;';qtySpan.textContent=qty;
+            var plusB=document.createElement('button');plusB.style.cssText=minB.style.cssText;plusB.textContent='+';
             plusB.onclick=function(){
               if(!cart[key])cart[key]={n:item.n,p:_effPrice(item.n,item.p),cat:catObj.cat,qty:0,t:item.t||'drink',alc:item.alc===false?false:(item.t==='food'?false:true)};
               cart[key].qty++;updateCartBar();updateTabFooter();buildMenu2(catObj,itemsDiv);
@@ -4862,7 +4803,7 @@ function renderWalletPage(bookingRef){
       // ══ RUNNING TAB FOOTER ══
       var submitCard=document.createElement('div');
       submitCard.id='wallet-tab-footer';
-      submitCard.style.cssText='background:rgba(10,10,10,.97);backdrop-filter:blur(14px);padding:18px 0 28px;margin-top:24px;border-top:2px solid rgba(242,199,68,.22);';
+      submitCard.style.cssText='background:rgba(6,6,16,.97);backdrop-filter:blur(14px);padding:14px 0 28px;margin-top:24px;border-top:1px solid rgba(255,255,255,.07);';
 
       var totalRow=document.createElement('div');
       totalRow.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;';
@@ -4873,7 +4814,7 @@ function renderWalletPage(bookingRef){
       var tabRow=document.createElement('div');
       tabRow.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;';
       tabRow.innerHTML='<span style="font-size:11px;color:var(--muted);">Running Tab</span>'
-        +'<span id="tab-running-total" style="font-size:13px;font-weight:700;color:rgba(242,199,68,.7);">₹0</span>';
+        +'<span id="tab-running-total" style="font-size:13px;font-weight:700;color:rgba(201,168,76,.7);">₹0</span>';
       submitCard.appendChild(tabRow);
 
       var itemLine=document.createElement('div');
@@ -4932,8 +4873,7 @@ function renderWalletPage(bookingRef){
 
       var placeBtn=document.createElement('button');
       placeBtn.id='tab-place-btn';
-      placeBtn.className='wv-place';
-      placeBtn.style.cssText='margin-bottom:10px;opacity:.45;';
+      placeBtn.style.cssText='width:100%;padding:15px;border-radius:14px;background:linear-gradient(135deg,rgba(201,168,76,.95),rgba(160,120,48,.8));border:none;color:#000;font-size:15px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:10px;letter-spacing:.3px;opacity:.45;';
       placeBtn.textContent=cv.isTableBooking?'🍽️  Place Order':'🍹 Place Order';
       submitCard.appendChild(placeBtn);
 
@@ -4954,14 +4894,14 @@ function renderWalletPage(bookingRef){
       var _isDiningOrRooftop = cv.isTableBooking && (cv.floor === 'dining' || cv.floor === 'rooftop' || _isAgg);
       if(!_isDiningOrRooftop){
         var songCard=document.createElement('div');
-        songCard.style.cssText='background:linear-gradient(135deg,rgba(255,51,102,.15),rgba(242,199,68,.12));border:2px solid rgba(255,51,102,.35);border-radius:16px;padding:20px;margin:20px 0;cursor:pointer;transition:all .2s;box-shadow:0 0 20px rgba(255,51,102,.08);';
+        songCard.style.cssText='background:linear-gradient(135deg,rgba(255,51,102,.15),rgba(201,168,76,.12));border:2px solid rgba(255,51,102,.35);border-radius:16px;padding:20px;margin:20px 0;cursor:pointer;transition:all .2s;box-shadow:0 0 20px rgba(255,51,102,.08);';
         songCard.innerHTML='<div style="text-align:center;margin-bottom:12px;"><span style="font-size:32px;">🎵</span></div>'
           +'<div style="text-align:center;font-size:18px;font-weight:900;color:#fff;margin-bottom:6px;letter-spacing:-.3px;">Request a Song</div>'
           +'<div style="text-align:center;font-size:13px;color:rgba(255,255,255,.6);margin-bottom:16px;line-height:1.4;">Search any song in the world — we\'ll play it for you tonight!</div>'
           +'<div style="text-align:center;"><div style="display:inline-flex;gap:8px;align-items:center;padding:10px 24px;background:linear-gradient(135deg,#ff3366,#cc2952);border-radius:10px;font-size:14px;font-weight:700;color:#fff;">Pick Your Song →</div></div>'
           +'<div style="display:flex;justify-content:center;gap:16px;margin-top:14px;">'
           +'<div style="font-size:10px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:1px;">Free</div>'
-          +'<div style="font-size:10px;color:rgba(242,199,68,.6);text-transform:uppercase;letter-spacing:1px;">Priority ₹99</div>'
+          +'<div style="font-size:10px;color:rgba(201,168,76,.6);text-transform:uppercase;letter-spacing:1px;">Priority ₹99</div>'
           +'<div style="font-size:10px;color:rgba(255,51,102,.6);text-transform:uppercase;letter-spacing:1px;">VIP ₹299</div>'
           +'</div>';
         songCard.onclick=function(){
@@ -5144,7 +5084,7 @@ function renderWalletPage(bookingRef){
               +'<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">Your order:</div>'
               +'<div style="font-size:13px;color:var(--gold);font-weight:700;margin-bottom:4px;">'+sanitize(placedItems)+'</div>'
               +'<div style="font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;">₹'+ct.toLocaleString('en-IN')+'</div>'
-              +'<div style="font-size:11px;color:var(--muted);background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.15);border-radius:8px;padding:8px 12px;margin-bottom:16px;line-height:1.6;">Your bartender will scan this, confirm your order, and your wallet will be deducted automatically.</div>';
+              +'<div style="font-size:11px;color:var(--muted);background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.15);border-radius:8px;padding:8px 12px;margin-bottom:16px;line-height:1.6;">Your bartender will scan this, confirm your order, and your wallet will be deducted automatically.</div>';
             var closeBtn=document.createElement('button');
             closeBtn.style.cssText='width:100%;padding:12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:var(--text);font-size:14px;font-weight:700;cursor:pointer;font-family:var(--fs);';
             closeBtn.textContent='Got it ✓';
@@ -5191,7 +5131,7 @@ function renderWalletPage(bookingRef){
         var tt=getTabTotal();
         if(!tabRounds.length)return;
         var hdr=document.createElement('div');
-        hdr.style.cssText='background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.15);border-radius:14px;padding:14px 16px;';
+        hdr.style.cssText='background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.15);border-radius:14px;padding:14px 16px;';
         var statusC={'preparing':'#ffc800','activated':'#00C864','served':'#00C864','paid':'#00C864'};
         var statusL={'preparing':'🟡 Ordered','activated':'🔵 Preparing','served':'✅ Served','paid':'💳 Paid'};
         var rows=tabRounds.map(function(r){
@@ -5216,7 +5156,7 @@ function renderWalletPage(bookingRef){
         var overlay=document.createElement('div');
         overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:flex-end;justify-content:center;';
         var sheet=document.createElement('div');
-        sheet.style.cssText='background:linear-gradient(135deg,rgba(12,8,22,.99),rgba(18,8,30,.99));border:1px solid rgba(242,199,68,.25);border-radius:24px 24px 0 0;padding:28px 24px 48px;width:100%;max-width:480px;max-height:88vh;overflow-y:auto;';
+        sheet.style.cssText='background:linear-gradient(135deg,rgba(12,8,22,.99),rgba(18,8,30,.99));border:1px solid rgba(201,168,76,.25);border-radius:24px 24px 0 0;padding:28px 24px 48px;width:100%;max-width:480px;max-height:88vh;overflow-y:auto;';
 
         var bHtml='<div style="text-align:center;margin-bottom:20px;">'
           +'<div style="font-size:13px;font-weight:800;color:var(--gold);letter-spacing:2px;margin-bottom:4px;">HOUSE OF DOPAMINE</div>'
@@ -5237,13 +5177,13 @@ function renderWalletPage(bookingRef){
         });
 
         bHtml+='</div>'
-          +'<div style="display:flex;justify-content:space-between;border-top:2px solid rgba(242,199,68,.3);padding-top:14px;margin-bottom:24px;">'
+          +'<div style="display:flex;justify-content:space-between;border-top:2px solid rgba(201,168,76,.3);padding-top:14px;margin-bottom:24px;">'
           +'<span style="font-size:16px;font-weight:900;">TOTAL</span>'
           +'<span style="font-size:22px;font-weight:900;color:var(--gold);">₹'+tt+'</span></div>';
         sheet.innerHTML=bHtml;
 
         var poBtn=document.createElement('button');
-        poBtn.style.cssText='width:100%;padding:16px;border-radius:14px;background:linear-gradient(135deg,#F2C744,#B8941F);border:none;color:#000;font-size:15px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:10px;';
+        poBtn.style.cssText='width:100%;padding:16px;border-radius:14px;background:linear-gradient(135deg,#C9A84C,#a07830);border:none;color:#000;font-size:15px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:10px;';
         poBtn.innerHTML='💳  Pay Online  —  ₹'+tt;
         poBtn.onclick=function(){
           if(poBtn.disabled)return;
@@ -5253,7 +5193,7 @@ function renderWalletPage(bookingRef){
             name:'HOD — House of Dopamine',
             description:'Table Tab — '+(cv.tableId||cv.ref||''),
             prefill:{name:sanitize(cv.name||''),contact:sanitize(cv.phone||'')},
-            theme:{color:'#F2C744'},
+            theme:{color:'#C9A84C'},
             handler:function(resp){
               overlay.remove();
               submitOrder(cv,bal,{mode:'online',paymentId:resp.razorpay_payment_id,amount:tt,rounds:tabRounds});
@@ -5304,36 +5244,35 @@ function renderWalletPage(bookingRef){
         var eff=_effPrice(item.n, item.p);
         var hasDisc = eff !== item.p;
         var row=document.createElement('div');
-        row.className='wv-row';
-        row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:10px;';
+        row.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid rgba(255,255,255,.04);';
         var isVeg=item.v===true;
-        var vegDot=typeof item.v!=='undefined'?'<span class="wv-vegdot" style="color:'+(isVeg?'#00C864':'#EF4444')+';"></span>':'';
+        var vegDot=typeof item.v!=='undefined'?'<span style="width:8px;height:8px;border-radius:50%;background:'+(isVeg?'#00C864':'#EF4444')+';display:inline-block;margin-right:6px;flex-shrink:0;"></span>':'';
         var priceHtml = hasDisc
-          ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;font-weight:600;">\u20b9'+item.p+'</span>'
-            +'<span style="color:#F2C744;font-weight:900;">\u20b9'+eff+'</span>'
-            +(ov && ov.discountReason ? '<span style="color:rgba(242,199,68,.75);font-size:10px;margin-left:6px;font-weight:600;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
-          : '<span style="color:#F2C744;font-weight:900;">\u20b9'+item.p+'</span>';
-        row.innerHTML='<div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;font-size:14px;font-weight:700;color:#F5F1E8;letter-spacing:.2px;">'+vegDot+'<span style="text-transform:uppercase;letter-spacing:.4px;">'+sanitize(item.n)+'</span></div>'
-          +'<div style="font-size:13px;font-family:var(--fp);margin-top:4px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
-        var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:10px;flex-shrink:0;';
+          ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;">\u20b9'+item.p+'</span>'
+            +'<span style="color:#00C864;font-weight:800;">\u20b9'+eff+'</span>'
+            +(ov && ov.discountReason ? '<span style="color:rgba(0,200,100,.75);font-size:10px;margin-left:6px;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
+          : '\u20b9'+item.p;
+        row.innerHTML='<div style="flex:1;"><div style="display:flex;align-items:center;font-size:13px;font-weight:600;color:var(--text);">'+vegDot+sanitize(item.n)+'</div>'
+          +'<div style="font-size:12px;color:var(--gold);margin-top:2px;">'+priceHtml+'</div></div>';
+        var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:8px;flex-shrink:0;';
         var qty=cart[key]?cart[key].qty:0;
         if(qty===0){
           var addBtn=document.createElement('button');
-          addBtn.className='wv-add';
-          addBtn.textContent='Add +';
+          addBtn.style.cssText='padding:6px 16px;border-radius:8px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.4);color:var(--gold);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--fs);';
+          addBtn.textContent='Add';
           addBtn.onclick=(function(k,it,cat2){return function(){
             cart[k]={n:it.n,p:_effPrice(it.n,it.p),cat:cat2,qty:1,t:it.t||'drink',alc:it.alc===false?false:(it.t==='food'?false:true)};updateCartBar();updateTabFooter();buildMenu2(catObj,itemsDiv);
           };})(key,item,catObj.cat);
           ctrl.appendChild(addBtn);
         } else {
-          var minB=document.createElement('button');minB.className='wv-qbtn';
+          var minB=document.createElement('button');minB.style.cssText='width:28px;height:28px;border-radius:7px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;';
           minB.textContent='\u2212';
           minB.onclick=(function(k){return function(){
             if(cart[k].qty>1)cart[k].qty--;else delete cart[k];
             updateCartBar();updateTabFooter();buildMenu2(catObj,itemsDiv);
           };})(key);
-          var qtySpan=document.createElement('span');qtySpan.className='wv-qty';qtySpan.textContent=qty;
-          var plusB=document.createElement('button');plusB.className='wv-qbtn';plusB.textContent='+';
+          var qtySpan=document.createElement('span');qtySpan.style.cssText='font-size:14px;font-weight:900;color:var(--gold);min-width:16px;text-align:center;';qtySpan.textContent=qty;
+          var plusB=document.createElement('button');plusB.style.cssText=minB.style.cssText;plusB.textContent='+';
           plusB.onclick=(function(k,it,cat2){return function(){
             if(!cart[k])cart[k]={n:it.n,p:_effPrice(it.n,it.p),cat:cat2,qty:0,t:it.t||'drink',alc:it.alc===false?false:(it.t==='food'?false:true)};
             cart[k].qty++;updateCartBar();updateTabFooter();buildMenu2(catObj,itemsDiv);
@@ -5359,7 +5298,7 @@ function renderWalletPage(bookingRef){
       +'<div style="font-family:var(--fp);font-size:22px;font-weight:900;color:var(--gold);">Your Bill</div>'
       +'<div style="font-size:12px;color:var(--muted);margin-top:4px;">'+sanitize(cv.name||'')+(cv.tableId?' · '+sanitize(cv.tableId):'')+' </div></div>';
     var billDiv=document.createElement('div');
-    billDiv.style.cssText='background:rgba(255,255,255,.03);border:1px solid rgba(242,199,68,.15);border-radius:16px;padding:16px;margin-bottom:20px;';
+    billDiv.style.cssText='background:rgba(255,255,255,.03);border:1px solid rgba(201,168,76,.15);border-radius:16px;padding:16px;margin-bottom:20px;';
     tabRounds.forEach(function(rd,i){
       var rh=document.createElement('div');
       rh.style.cssText='font-size:10px;font-weight:800;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;padding:6px 0 4px;'+(i>0?'border-top:1px solid rgba(255,255,255,.06);margin-top:6px;':'');
@@ -5376,11 +5315,11 @@ function renderWalletPage(bookingRef){
       billDiv.appendChild(rs);
     });
     var gtDiv=document.createElement('div');
-    gtDiv.style.cssText='display:flex;justify-content:space-between;border-top:1.5px solid rgba(242,199,68,.3);margin-top:10px;padding-top:12px;font-size:18px;font-weight:900;';
+    gtDiv.style.cssText='display:flex;justify-content:space-between;border-top:1.5px solid rgba(201,168,76,.3);margin-top:10px;padding-top:12px;font-size:18px;font-weight:900;';
     gtDiv.innerHTML='<span>Total</span><span style="color:var(--gold);">Rs '+tabRunningTotal+'</span>';
     billDiv.appendChild(gtDiv);sheet.appendChild(billDiv);
     var payBtn=document.createElement('button');
-    payBtn.style.cssText='width:100%;padding:16px;border-radius:14px;background:linear-gradient(135deg,#F2C744,#B8941F);border:none;color:#000;font-size:15px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:10px;';
+    payBtn.style.cssText='width:100%;padding:16px;border-radius:14px;background:linear-gradient(135deg,#C9A84C,#a07830);border:none;color:#000;font-size:15px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:10px;';
     payBtn.textContent='Pay Online — Rs '+tabRunningTotal;
     payBtn.onclick=function(){
       if(payBtn.disabled)return;
@@ -5389,7 +5328,7 @@ function renderWalletPage(bookingRef){
         key:RAZORPAY_KEY,amount:tabRunningTotal*100,currency:'INR',
         name:'HOD — House of Dopamine',description:'Bill — '+(cv.tableId||cv.ref||''),
         prefill:{name:sanitize(cv.name||''),contact:sanitize(cv.phone||'')},
-        theme:{color:'#F2C744'},
+        theme:{color:'#C9A84C'},
         handler:function(resp){ovr.remove();submitOrder(cv,bal,{mode:'online',paymentId:resp.razorpay_payment_id,amount:tabRunningTotal,rounds:tabRounds});},
         modal:{ondismiss:function(){payBtn.disabled=false;payBtn.textContent='Pay Online — Rs '+tabRunningTotal;}}
       });
@@ -5459,7 +5398,7 @@ function renderWalletPage(bookingRef){
         var _isOnline=_pay&&_pay.mode==='online';
         conf.innerHTML='<div style="font-size:48px;margin-bottom:12px;">'+(_isOnline?'💳':'🙋')+'</div>'
           +'<div style="font-family:var(--fp);font-size:24px;font-weight:900;color:var(--gold);margin-bottom:8px;">'+(_isOnline?'Payment Done!':'Order Placed!')+'</div>'
-          +'<div style="background:rgba(242,199,68,.08);border:1px solid rgba(242,199,68,.2);border-radius:12px;padding:12px 16px;margin-bottom:14px;font-size:13px;">'
+          +'<div style="background:rgba(201,168,76,.08);border:1px solid rgba(201,168,76,.2);border-radius:12px;padding:12px 16px;margin-bottom:14px;font-size:13px;">'
           +(_isOnline?'✅ ₹'+orderData.total+' paid online · ID: '+(_pay.paymentId||'').slice(-8):'💵 Pay ₹'+orderData.total+' to your waiter on arrival')+'</div>'
           +'<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Show QR below to your waiter</div>'
           +'<div id="conf-qr-wrap" style="width:120px;height:120px;background:#0C0C18;border-radius:12px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;"></div>'
@@ -5592,7 +5531,7 @@ function renderWalletPage(bookingRef){
                   '</div>';
                 // Wallet activation message
                 ticketDiv.innerHTML+=
-                  '<div style="background:rgba(242,199,68,.06);border:1.5px solid rgba(242,199,68,.25);border-radius:14px;padding:18px 20px;text-align:center;">'+
+                  '<div style="background:rgba(201,168,76,.06);border:1.5px solid rgba(201,168,76,.25);border-radius:14px;padding:18px 20px;text-align:center;">'+
                     '<div style="font-size:24px;margin-bottom:10px;">⏳</div>'+
                     '<div style="font-size:14px;font-weight:800;color:var(--gold);margin-bottom:6px;">Your wallet activates at HOD</div>'+
                     '<div style="font-size:12px;color:var(--muted);line-height:1.7;">When you arrive, show your QR at the entrance. Our door staff will check you in and activate your cover wallet.<br><br>Your cover balance will be loaded and you can start ordering drinks & food!</div>'+
@@ -5644,17 +5583,12 @@ function renderWalletPage(bookingRef){
 
 
 // ── LOCAL QR FOR MY BOOKINGS
-// Size auto-adapts to its container so legacy 140x140 wrappers (#order-qr-popup,
-// #ticket-qr-wrap, #gl-qr-wrap) and the new 180x180 wallet wrap both render
-// without cropping. Falls back to 140 if container measurement isn't ready.
 function generateLocalQR(elId,data){
   setTimeout(function(){
     var qEl=document.getElementById(elId);
     if(qEl&&typeof QRCode!=='undefined'&&!qEl.hasAttribute('data-qr')){
       qEl.setAttribute('data-qr','1');
-      var w=qEl.clientWidth||140, h=qEl.clientHeight||140;
-      var sz=Math.max(96,Math.min(w,h)-8); // small inner margin so QR never touches edge
-      new QRCode(qEl,{text:data,width:sz,height:sz,colorDark:'#000000',colorLight:'#FFFFFF',correctLevel:QRCode.CorrectLevel.M});
+      new QRCode(qEl,{text:data,width:110,height:110,colorDark:'#C9A84C',colorLight:'#0C0C18',correctLevel:QRCode.CorrectLevel.M});
     }
   },500);
 }
