@@ -2691,3 +2691,87 @@ export async function syncMenuAvailability(menuItemId: string, outOfStock: boole
     menuItemId, outOfStock, updatedBy: staffName || "system", updatedAt: serverTimestamp(),
   }, { merge: true });
 }
+
+// ───────────────────────────────────────────────────────────────────
+// 🛎 Waiter Calls (customer wallet → captain/bar live notification)
+// Customer hits "Call Waiter" on hodclub.in/?wallet=… → writes a doc
+// to `waiterCalls/{auto}` with {coverRef, name, tableId?, status:'pending', createdAt}.
+// CaptainMode + BarMode subscribe via subscribeActiveWaiterCalls →
+// play a beep + show a red banner with an Acknowledge button.
+// Acknowledged calls (ack'd within last 90s) auto-clear from the banner.
+// ───────────────────────────────────────────────────────────────────
+export interface WaiterCall {
+  id: string;
+  coverRef: string;
+  customerName: string;
+  tableId?: string | null;
+  floorLabel?: string | null;
+  status: "pending" | "acknowledged" | "cancelled";
+  createdAt?: { seconds: number; nanoseconds: number } | null;
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
+}
+
+const WAITER_CALLS_COL = "waiterCalls";
+
+export async function createWaiterCall(input: {
+  coverRef: string;
+  customerName: string;
+  tableId?: string | null;
+  floorLabel?: string | null;
+}): Promise<string> {
+  await authReady;
+  const ref = await addDoc(collection(db, WAITER_CALLS_COL), {
+    coverRef: input.coverRef,
+    customerName: input.customerName || "Guest",
+    tableId: input.tableId || null,
+    floorLabel: input.floorLabel || null,
+    status: "pending",
+    createdAt: serverTimestamp(),
+    acknowledgedAt: null,
+    acknowledgedBy: null,
+  });
+  return ref.id;
+}
+
+export function subscribeActiveWaiterCalls(cb: (calls: WaiterCall[]) => void): Unsubscribe {
+  // Pending OR recently-acknowledged (< 90 s) — surfaces a brief "✓ ack'd by X" tail
+  // so two staff don't both run to the same table thinking nobody answered.
+  const q = query(collection(db, WAITER_CALLS_COL), orderBy("createdAt", "desc"), limit(20));
+  return onSnapshot(q, (snap) => {
+    const now = Date.now();
+    const out: WaiterCall[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as Record<string, unknown>;
+      const status = (data.status as WaiterCall["status"]) || "pending";
+      if (status === "cancelled") return;
+      if (status === "acknowledged") {
+        const ackAt = data.acknowledgedAt ? new Date(String(data.acknowledgedAt)).getTime() : 0;
+        if (!ackAt || now - ackAt > 90_000) return;
+      }
+      out.push({
+        id: d.id,
+        coverRef: String(data.coverRef || ""),
+        customerName: String(data.customerName || "Guest"),
+        tableId: (data.tableId as string | null) || null,
+        floorLabel: (data.floorLabel as string | null) || null,
+        status,
+        createdAt: (data.createdAt as WaiterCall["createdAt"]) || null,
+        acknowledgedAt: (data.acknowledgedAt as string | null) || null,
+        acknowledgedBy: (data.acknowledgedBy as string | null) || null,
+      });
+    });
+    cb(out);
+  }, (e) => {
+    console.error("[subscribeActiveWaiterCalls] failed", e);
+  });
+}
+
+export async function acknowledgeWaiterCall(id: string, staffName: string): Promise<void> {
+  await authReady;
+  await updateDoc(doc(db, WAITER_CALLS_COL, id), {
+    status: "acknowledged",
+    acknowledgedAt: new Date().toISOString(),
+    acknowledgedBy: staffName || "Staff",
+  });
+}

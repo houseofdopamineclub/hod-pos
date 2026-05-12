@@ -8,6 +8,7 @@ import {
   type HodCover, type HodOrderItem, type TabletFloor, type HodGuestSearchHit, type HodTransaction,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
+import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 
 // V3 2026-05-11 — Manager PIN hash (sha256('8888')). Same constant as CaptainMode.
 // Kept inline (not imported) so BarMode stays self-contained — rotating this
@@ -53,14 +54,14 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
   };
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#0a0a0c", border: "2px solid rgba(239,68,68,.5)", borderRadius: 14, padding: 20, color: "#fff" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#0A0A0A", border: "2px solid rgba(239,68,68,.5)", borderRadius: 14, padding: 20, color: "#fff" }}>
         <div style={{ fontSize: 17, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID WALLET BILL</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginBottom: 10 }}>
           Refunds every activated round back into the customer's wallet. Use ONLY when the bill must be undone (refused / wrong drink / quality / printer mistake). Audit trail captured.
         </div>
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 10, padding: 12, marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>WALLET / CUSTOMER</div>
-          <div style={{ fontSize: 14, fontWeight: 800, color: "#C9A84C", marginBottom: 8 }}>{tableId || "WALLET"} · {customerName || "—"}</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: "#F2C744", marginBottom: 8 }}>{tableId || "WALLET"} · {customerName || "—"}</div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>₹ TO REFUND BACK INTO WALLET</div>
           <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444" }}>+ ₹{Math.round(refundAmount).toLocaleString("en-IN")}</div>
           <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 4 }}>Wallet balance after refund: ₹{Math.round(walletBalance + refundAmount).toLocaleString("en-IN")}</div>
@@ -68,7 +69,7 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
         <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>REASON</label>
         <select value={reason} onChange={(e) => setReason(e.target.value)}
           style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, marginBottom: 12, boxSizing: "border-box" }}>
-          {BAR_BILL_VOID_REASONS.map((r) => <option key={r} value={r} style={{ background: "#0a0a0c" }}>{r}</option>)}
+          {BAR_BILL_VOID_REASONS.map((r) => <option key={r} value={r} style={{ background: "#0A0A0A" }}>{r}</option>)}
         </select>
         <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>
           NOTES {reason === "OTHER" ? "(REQUIRED)" : "(OPTIONAL)"}
@@ -171,10 +172,10 @@ function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#030305", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, padding: "32px 24px", width: "100%", maxWidth: 340, textAlign: "center" }}>
         <div style={{ fontSize: 32, marginBottom: 8 }}>🍸</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#C9A84C", marginBottom: 4 }}>Bar Mode</div>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>Bar Mode</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 20 }}>HOD — House of Dopamine</div>
 
         <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginBottom: 8, textAlign: "left" }}>Staff</div>
@@ -182,9 +183,9 @@ function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
           {BAR_STAFF.map((s) => (
             <button key={s} onClick={() => setStaff(s)}
               style={{ padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                background: staff === s ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${staff === s ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.08)"}`,
-                color: staff === s ? "#C9A84C" : "rgba(255,255,255,.5)" }}>
+                background: staff === s ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${staff === s ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
+                color: staff === s ? "#F2C744" : "rgba(255,255,255,.5)" }}>
               {s}
             </button>
           ))}
@@ -196,7 +197,7 @@ function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
           style={{ width: "100%", padding: "12px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
 
         <button onClick={tryLogin}
-          style={{ width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #C9A84C, #8B7530)", color: "#030305", fontSize: 15, fontWeight: 800, cursor: "pointer", letterSpacing: 1 }}>
+          style={{ width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #F2C744, #B8951F)", color: "#0A0A0A", fontSize: 15, fontWeight: 800, cursor: "pointer", letterSpacing: 1 }}>
           Enter
         </button>
 
@@ -250,9 +251,9 @@ function QrScanner({ onResult, onClose }: { onResult: (data: string) => void; on
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.95)", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(201,168,76,.4)" }}>
+      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(242,199,68,.4)" }}>
         <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted />
-        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(201,168,76,.6)", borderRadius: 16, pointerEvents: "none" }} />
+        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(242,199,68,.6)", borderRadius: 16, pointerEvents: "none" }} />
       </div>
       <div style={{ color: "rgba(255,255,255,.5)", fontSize: 13, marginTop: 16 }}>Point camera at QR code</div>
       <button onClick={onClose}
@@ -755,10 +756,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
   };
 
   if (billDone) {
-    const goldBg = billDone.isDuplicate ? "rgba(239,68,68,.5)" : "rgba(201,168,76,.5)";
-    const goldFg = billDone.isDuplicate ? "#EF4444" : "#C9A84C";
+    const goldBg = billDone.isDuplicate ? "rgba(239,68,68,.5)" : "rgba(242,199,68,.5)";
+    const goldFg = billDone.isDuplicate ? "#EF4444" : "#F2C744";
     return (
-      <div style={{ position: "fixed", inset: 0, background: "#030305", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ position: "fixed", inset: 0, background: "#0A0A0A", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ background: "rgba(255,255,255,.04)", border: `2px solid ${goldBg}`, borderRadius: 24, padding: "36px 28px", width: "100%", maxWidth: 380, textAlign: "center", boxShadow: `0 8px 40px ${goldBg}` }}>
           <div style={{ fontSize: 56, marginBottom: 12 }}>{billDone.isDuplicate ? "⚠️" : "🖨"}</div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: goldFg, marginBottom: 6 }}>
@@ -795,7 +796,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
 
   if (actDone && actResult) {
     return (
-      <div style={{ position: "fixed", inset: 0, background: "#030305", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ position: "fixed", inset: 0, background: "#0A0A0A", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ background: "rgba(255,255,255,.04)", border: "2px solid rgba(0,200,100,.4)", borderRadius: 24, padding: "36px 28px", width: "100%", maxWidth: 380, textAlign: "center", boxShadow: "0 8px 40px rgba(0,200,100,.15)" }}>
           <div style={{ fontSize: 56, marginBottom: 16 }}>✅</div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 24, fontWeight: 900, color: "#00C864", marginBottom: 8 }}>KOT Printed!</div>
@@ -865,14 +866,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const categories = [...new Set(filteredItems.map((m) => m.category))];
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "#030305", zIndex: 9998, display: "flex", flexDirection: "column", color: "#fff" }}>
+    <div style={{ position: "fixed", inset: 0, background: "#0A0A0A", zIndex: 9998, display: "flex", flexDirection: "column", color: "#fff" }}>
       {toast && (
-        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(20,18,30,.98)", border: "1px solid rgba(201,168,76,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#C9A84C", zIndex: 99999, maxWidth: 320 }}>{toast}</div>
+        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(20,18,30,.98)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#F2C744", zIndex: 99999, maxWidth: 320 }}>{toast}</div>
       )}
 
-      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(201,168,76,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(242,199,68,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 900, color: "#C9A84C" }}>{cv.name}</div>
+          <div style={{ fontSize: 15, fontWeight: 900, color: "#F2C744" }}>{cv.name}</div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>{cv.ref} · {cv.tier || "Standard"}{isExpired ? " · EXPIRED" : ""}</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -934,7 +935,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   <button onClick={() => adjust(1)} disabled={editBusy}
                     style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: editBusy ? "not-allowed" : "pointer" }}>+</button>
                 </div>
-                <div style={{ minWidth: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#C9A84C" }}>₹{it.p * it.qty}</div>
+                <div style={{ minWidth: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#F2C744" }}>₹{it.p * it.qty}</div>
                 <button onClick={remove} disabled={editBusy} title="Out of stock — remove"
                   style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 12, cursor: editBusy ? "not-allowed" : "pointer" }}>🗑</button>
               </div>
@@ -950,7 +951,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
         <div style={{ padding: "10px 16px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <button onClick={() => setMenuOpen(!menuOpen)}
-              style={{ padding: "6px 14px", borderRadius: 8, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.3)", color: "#C9A84C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              style={{ padding: "6px 14px", borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
               {menuOpen ? "▾ Menu" : "▸ Menu"}
             </button>
             <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search menu..."
@@ -964,9 +965,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   {menuGroups.map((g) => (
                     <button key={g} onClick={() => setActiveGroup(g)}
                       style={{ padding: "7px 14px", borderRadius: 10, whiteSpace: "nowrap", fontSize: 12, fontWeight: 700, cursor: "pointer",
-                        background: activeGroup === g ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.04)",
-                        border: `1px solid ${activeGroup === g ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.08)"}`,
-                        color: activeGroup === g ? "#C9A84C" : "rgba(255,255,255,.5)" }}>
+                        background: activeGroup === g ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
+                        border: `1px solid ${activeGroup === g ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
+                        color: activeGroup === g ? "#F2C744" : "rgba(255,255,255,.5)" }}>
                       {GROUP_LABELS[g] || g}
                     </button>
                   ))}
@@ -978,7 +979,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 const catLabel = cat.split("-").slice(1).join(" ").replace(/\b\w/g, (c) => c.toUpperCase()) || cat;
                 return (
                   <div key={cat} style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(201,168,76,.7)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{catLabel}</div>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.7)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{catLabel}</div>
                     {catItems.map((item) => {
                       const inCart = cart[item.id];
                       const qty = inCart?.qty || 0;
@@ -992,7 +993,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                               <span style={{ width: 8, height: 8, borderRadius: 2, border: `2px solid ${item.isVeg ? "#22C55E" : "#EF4444"}`, display: "inline-block" }} />
                               <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{item.name}</span>
                             </div>
-                            <div style={{ fontSize: 12, color: "#C9A84C", marginTop: 2 }}>
+                            <div style={{ fontSize: 12, color: "#F2C744", marginTop: 2 }}>
                               {hasDisc ? (
                                 <>
                                   <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{item.price}</span>
@@ -1008,14 +1009,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
                           </div>
                           {qty === 0 ? (
                             <button onClick={() => addToCart(item)}
-                              style={{ padding: "6px 16px", borderRadius: 8, background: "rgba(201,168,76,.12)", border: "1px solid rgba(201,168,76,.4)", color: "#C9A84C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                              style={{ padding: "6px 16px", borderRadius: 8, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                               Add
                             </button>
                           ) : (
                             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                               <button onClick={() => updateCartQty(item.id, -1)}
                                 style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>−</button>
-                              <span style={{ fontSize: 14, fontWeight: 900, color: "#C9A84C", minWidth: 16, textAlign: "center" }}>{qty}</span>
+                              <span style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", minWidth: 16, textAlign: "center" }}>{qty}</span>
                               <button onClick={() => updateCartQty(item.id, 1)}
                                 style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+</button>
                             </div>
@@ -1038,8 +1039,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
         {Object.keys(cart).length > 0 && (() => {
           const fmt = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
           return (
-            <div style={{ background: "rgba(201,168,76,.06)", borderRadius: 12, padding: "8px 12px", marginBottom: 10 }}>
-              <div style={{ fontSize: 11, color: "rgba(201,168,76,.8)", lineHeight: 1.6, wordBreak: "break-word" }}>
+            <div style={{ background: "rgba(242,199,68,.06)", borderRadius: 12, padding: "8px 12px", marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: "rgba(242,199,68,.8)", lineHeight: 1.6, wordBreak: "break-word" }}>
                 {Object.values(cart).map((it) => `${it.qty}x ${it.n} ₹${it.p * it.qty}`).join(" · ")}
               </div>
               <details style={{ borderTop: "1px solid rgba(255,255,255,.07)", paddingTop: 5, marginTop: 5 }}>
@@ -1074,7 +1075,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
           );
         })()}
 
-        <div ref={rechargeRowRef} style={{ background: "linear-gradient(135deg, rgba(201,168,76,.10), rgba(0,0,0,.55))", border: "1px solid rgba(201,168,76,.35)", borderRadius: 14, padding: 14, marginBottom: 10 }}>
+        <div ref={rechargeRowRef} style={{ background: "linear-gradient(135deg, rgba(242,199,68,.10), rgba(0,0,0,.55))", border: "1px solid rgba(242,199,68,.35)", borderRadius: 14, padding: 14, marginBottom: 10 }}>
           {/* V3 2026-05-11 — deficit hint banner. Surfaces the EXACT shortfall
               (and the auto-rounded ₹50 recharge suggestion) so the bartender
               can just hit ➕ Recharge. Pulses gold to grab attention. */}
@@ -1082,16 +1083,16 @@ function WalletOverlay({ cover, staffName, onClose }: {
             <div style={{ background: "rgba(239,68,68,.10)", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, fontSize: 12, fontWeight: 800, color: "#EF4444", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
               <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · pre-filled ₹{suggestedRecharge.toLocaleString("en-IN")}</span>
               <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
-                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(201,168,76,.15)", border: "1px solid rgba(201,168,76,.4)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
                 ↻ RESET
               </button>
             </div>
           )}
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="Recharge amount"
-              style={{ flex: 1, background: "rgba(0,0,0,.55)", border: `1px solid ${deficit > 0 ? "rgba(239,68,68,.5)" : "rgba(201,168,76,.35)"}`, borderRadius: 8, padding: "10px 12px", color: "#fff", fontSize: 15, outline: "none", fontWeight: deficit > 0 ? 800 : 400 }} />
+              style={{ flex: 1, background: "rgba(0,0,0,.55)", border: `1px solid ${deficit > 0 ? "rgba(239,68,68,.5)" : "rgba(242,199,68,.35)"}`, borderRadius: 8, padding: "10px 12px", color: "#fff", fontSize: 15, outline: "none", fontWeight: deficit > 0 ? 800 : 400 }} />
             <button onClick={doRecharge} disabled={rcBusy}
-              style={{ padding: "10px 16px", borderRadius: 8, background: "linear-gradient(135deg,#C9A84C,#A07F2E)", border: "1px solid rgba(201,168,76,.6)", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap", boxShadow: "0 2px 12px rgba(201,168,76,.3)" }}>
+              style={{ padding: "10px 16px", borderRadius: 8, background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap", boxShadow: "0 2px 12px rgba(242,199,68,.3)" }}>
               {rcBusy ? "..." : "➕ Recharge"}
             </button>
           </div>
@@ -1122,9 +1123,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 <button key={m} onClick={handleClick}
                   title={isCardDisabled ? "Pine Labs Plutus machine integration in progress — use UPI or Cash for now" : undefined}
                   style={{ flex: 1, padding: 8, borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: isCardDisabled ? "not-allowed" : "pointer",
-                    background: isCardDisabled ? "rgba(255,255,255,.02)" : (rcMethod === m ? "rgba(201,168,76,.12)" : "rgba(255,255,255,.06)"),
-                    border: `1px solid ${isCardDisabled ? "rgba(255,255,255,.04)" : (rcMethod === m ? "rgba(201,168,76,.4)" : "rgba(255,255,255,.08)")}`,
-                    color: isCardDisabled ? "rgba(255,255,255,.25)" : (rcMethod === m ? "#C9A84C" : "rgba(255,255,255,.5)"),
+                    background: isCardDisabled ? "rgba(255,255,255,.02)" : (rcMethod === m ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.06)"),
+                    border: `1px solid ${isCardDisabled ? "rgba(255,255,255,.04)" : (rcMethod === m ? "rgba(242,199,68,.4)" : "rgba(255,255,255,.08)")}`,
+                    color: isCardDisabled ? "rgba(255,255,255,.25)" : (rcMethod === m ? "#F2C744" : "rgba(255,255,255,.5)"),
                     opacity: isCardDisabled ? 0.55 : 1,
                     position: "relative" }}>
                   {m === "cash" ? "💵 Cash" : m === "upi" ? "📱 UPI" : m === "card" ? "💳 Card · soon" : "🔀 Split"}
@@ -1140,7 +1141,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                     {k === "cash" ? "💵 Cash" : k === "upi" ? "📱 UPI" : "💳 Card"}
                   </div>
                   <input type="number" value={rcSplit[k]} onChange={(e) => setRcSplit(s => ({ ...s, [k]: e.target.value }))} placeholder="0"
-                    style={{ width: "100%", boxSizing: "border-box", background: "rgba(0,0,0,.55)", border: "1px solid rgba(201,168,76,.3)", borderRadius: 7, padding: "7px 8px", color: "#fff", fontSize: 13, textAlign: "center", outline: "none" }} />
+                    style={{ width: "100%", boxSizing: "border-box", background: "rgba(0,0,0,.55)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 7, padding: "7px 8px", color: "#fff", fontSize: 13, textAlign: "center", outline: "none" }} />
                 </div>
               ))}
               {(() => {
@@ -1177,10 +1178,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
           else if (printedCount > 0) label = `⚠ REPRINT BILL (will mark DUPLICATE) — #${printedCount + 1}`;
           else label = `🖨 PRINT BILL — ₹${billTotal.toLocaleString("en-IN")}`;
           const style = !canBill
-            ? { background: "rgba(201,168,76,.06)", border: "1px solid rgba(201,168,76,.18)", color: "rgba(201,168,76,.4)", cursor: "not-allowed" as const }
+            ? { background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.18)", color: "rgba(242,199,68,.4)", cursor: "not-allowed" as const }
             : dimAfterPrint
               ? { background: "rgba(239,68,68,.08)", border: "1.5px dashed rgba(239,68,68,.55)", color: "#EF4444", cursor: "pointer" as const }
-              : { background: "linear-gradient(135deg,#C9A84C,#A07F2E)", border: "1px solid rgba(201,168,76,.6)", color: "#000", cursor: "pointer" as const, boxShadow: "0 3px 18px rgba(201,168,76,.28)" };
+              : { background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", cursor: "pointer" as const, boxShadow: "0 3px 18px rgba(242,199,68,.28)" };
           return (
             <button onClick={canBill ? handleThermalBill : undefined} disabled={!canBill}
               style={{ width: "100%", padding: 14, marginBottom: 10, borderRadius: 12, fontSize: 14, fontWeight: 900, transition: "all .2s", ...style }}>
@@ -1237,9 +1238,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
         {pendingOnlineTopUp && (
           <div style={{
             marginBottom: 10, padding: "10px 12px", borderRadius: 10,
-            background: pendingTickStillBlocking ? "rgba(201,168,76,.10)" : "rgba(245,158,11,.12)",
-            border: `1.5px solid ${pendingTickStillBlocking ? "rgba(201,168,76,.5)" : "rgba(245,158,11,.55)"}`,
-            color: pendingTickStillBlocking ? "#C9A84C" : "#F59E0B",
+            background: pendingTickStillBlocking ? "rgba(242,199,68,.10)" : "rgba(245,158,11,.12)",
+            border: `1.5px solid ${pendingTickStillBlocking ? "rgba(242,199,68,.5)" : "rgba(245,158,11,.55)"}`,
+            color: pendingTickStillBlocking ? "#F2C744" : "#F59E0B",
             fontSize: 12, fontWeight: 800, textAlign: "center", lineHeight: 1.5,
           }}>
             {pendingTickStillBlocking ? (
@@ -1265,7 +1266,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
             ...(canActivateFinal
               ? { background: "linear-gradient(135deg,rgba(0,200,100,.95),rgba(0,200,100,.65))", border: "none", color: "#000", cursor: "pointer", boxShadow: "0 4px 24px rgba(0,200,100,.3)" }
               : tickGateBlocked
-                ? { background: "rgba(201,168,76,.10)", border: "1.5px solid rgba(201,168,76,.4)", color: "#C9A84C", cursor: "not-allowed" }
+                ? { background: "rgba(242,199,68,.10)", border: "1.5px solid rgba(242,199,68,.4)", color: "#F2C744", cursor: "not-allowed" }
                 : { background: "rgba(107,107,138,.15)", border: "1px solid rgba(107,107,138,.3)", color: "rgba(107,107,138,.6)", cursor: "not-allowed" }) }}>
           {actBusy ? "Printing KOT..." :
             blocked ? "✅ KOT Printed — Rescan to refresh" :
@@ -1499,18 +1500,20 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#030305", color: "#fff" }}>
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", color: "#fff", fontFamily: "'Space Grotesk', sans-serif" }}>
       {toast && (
-        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(20,18,30,.98)", border: "1px solid rgba(201,168,76,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#C9A84C", zIndex: 99999 }}>{toast}</div>
+        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(10,10,10,.98)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#F2C744", zIndex: 99999, fontFamily: "'Space Grotesk', sans-serif" }}>{toast}</div>
       )}
 
-      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(201,168,76,.2)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+      <WaiterCallBanner staffName={staffName} role="bar" />
+
+      <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(242,199,68,.25)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
             style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
             ← POS
           </Link>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 900, color: "#C9A84C", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 Bar</div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 900, color: "#F2C744", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 BAR</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>👤 {staffName}</span>
@@ -1523,7 +1526,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
 
       <div style={{ padding: 16 }}>
         <button onClick={() => setScanning(true)}
-          style={{ width: "100%", padding: 20, borderRadius: 16, background: "linear-gradient(135deg,rgba(201,168,76,.15),rgba(201,168,76,.05))", border: "2px solid rgba(201,168,76,.4)", color: "#C9A84C", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 16 }}>
+          style={{ width: "100%", padding: 20, borderRadius: 16, background: "linear-gradient(135deg,rgba(242,199,68,.15),rgba(242,199,68,.05))", border: "2px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 16 }}>
           📷 Scan Customer QR
         </button>
 
@@ -1532,7 +1535,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             onKeyDown={(e) => e.key === "Enter" && handleSearch()}
             style={{ flex: 1, padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none" }} />
           <button onClick={handleSearch} disabled={searching}
-            style={{ padding: "12px 18px", borderRadius: 10, background: "rgba(201,168,76,.12)", border: "1px solid rgba(201,168,76,.3)", color: "#C9A84C", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+            style={{ padding: "12px 18px", borderRadius: 10, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
             {searching ? "..." : "Search"}
           </button>
         </div>
@@ -1574,7 +1577,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
                       {g.ref} · {g.phone || "no phone"} · {g.eventTitle || (g.type ? g.type.toUpperCase() : "")}
                     </div>
                   </div>
-                  <span style={{ fontSize: 10, fontWeight: 800, padding: "4px 8px", borderRadius: 6, background: g.source === "guestlist" ? "rgba(96,165,250,.15)" : "rgba(201,168,76,.12)", color: g.source === "guestlist" ? "#60A5FA" : "#C9A84C", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, padding: "4px 8px", borderRadius: 6, background: g.source === "guestlist" ? "rgba(96,165,250,.15)" : "rgba(242,199,68,.12)", color: g.source === "guestlist" ? "#60A5FA" : "#F2C744", whiteSpace: "nowrap" }}>
                     {g.source === "guestlist" ? "📋 GUESTLIST" : "🎫 TICKET"}
                   </span>
                 </div>

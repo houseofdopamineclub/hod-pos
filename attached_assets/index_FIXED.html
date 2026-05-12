@@ -4514,10 +4514,65 @@ function renderWalletPage(bookingRef){
   // Build header lazily after we know cv — start with just brand.
   hdr.innerHTML='<div><div class="wv-hd2-brand">House of Dopamine</div>'
     +'<div class="wv-hd2-otp" id="wv-hd2-ref">&nbsp;</div></div>'
-    +'<button class="wv-hd2-call" onclick="window.location.href=\'tel:+918882222900\'">'
-      +'<span>Call Waiter</span><span class="wv-hd2-avatar">&#9742;</span>'
+    +'<button class="wv-hd2-call" id="wv-hd2-call-btn" type="button">'
+      +'<span id="wv-hd2-call-label">Call Waiter</span><span class="wv-hd2-avatar">&#9742;</span>'
     +'</button>';
   wrap.appendChild(hdr);
+
+  // 🛎 Call Waiter — writes a doc to Firestore `waiterCalls` so the live
+  // banner on Captain/Bar tablets beeps + shows "🛎 CALL WAITER · {name} · {table}".
+  // Replaces the legacy `tel:+918882222900` dialer (door staff number) which
+  // was useless mid-set when the venue was at 110dB. We re-look-up the cover
+  // at click time (cv is loaded async below; the button can be tapped before
+  // we'd otherwise have a closure-stable reference). Cooldown: 60 s per
+  // booking ref so a panic-tap doesn't flood the staff banner.
+  (function(){
+    var btn=document.getElementById('wv-hd2-call-btn');
+    if(!btn) return;
+    btn.onclick=function(){
+      var label=document.getElementById('wv-hd2-call-label');
+      var ref=bookingRef||'';
+      if(!ref){ if(label){label.textContent='No ref';} return; }
+      // Per-ref cooldown (60s) — friendly to repeat-tappers, prevents spam.
+      var ckKey='hod_waitercall_'+ref;
+      var last=parseInt(sessionStorage.getItem(ckKey)||'0',10);
+      if(Date.now()-last<60000){
+        if(label){label.textContent='Sent ✓'; setTimeout(function(){label.textContent='Call Waiter';},2500);}
+        return;
+      }
+      btn.disabled=true;
+      if(label) label.textContent='Calling…';
+      // One-shot lookup so we can include name/table in the staff banner.
+      firestore.collection('covers').where('ref','==',ref).limit(1).get()
+        .then(function(snap){
+          var name='Guest', tableId=null, floorLabel=null;
+          if(!snap.empty){
+            var d=snap.docs[0].data();
+            name=d.name||'Guest'; tableId=d.tableId||null; floorLabel=d.floorLabel||null;
+          }
+          return firestore.collection('waiterCalls').add({
+            coverRef:ref,
+            customerName:name,
+            tableId:tableId,
+            floorLabel:floorLabel,
+            status:'pending',
+            createdAt:firebase.firestore.FieldValue.serverTimestamp(),
+            acknowledgedAt:null,
+            acknowledgedBy:null
+          });
+        })
+        .then(function(){
+          sessionStorage.setItem(ckKey,String(Date.now()));
+          if(label) label.textContent='Sent ✓';
+          setTimeout(function(){if(label)label.textContent='Call Waiter';btn.disabled=false;},2500);
+        })
+        .catch(function(e){
+          console.error('[CallWaiter] failed',e);
+          if(label) label.textContent='Try again';
+          setTimeout(function(){if(label)label.textContent='Call Waiter';btn.disabled=false;},2500);
+        });
+    };
+  })();
 
   var inner=document.createElement('div');
   inner.style.cssText='padding:20px;max-width:480px;margin:0 auto;';

@@ -79,10 +79,10 @@ function DoorLogin({ onLogin }: { onLogin: (name: string) => void }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#030305", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, padding: "32px 28px", width: "100%", maxWidth: 360, textAlign: "center" }}>
         <div style={{ fontSize: 32, marginBottom: 12 }}>🚪</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#C9A84C", marginBottom: 6 }}>Door Agent Login</div>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 6 }}>Door Agent Login</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 24 }}>HOD — House of Dopamine</div>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"
           style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 10, boxSizing: "border-box" }} />
@@ -91,7 +91,7 @@ function DoorLogin({ onLogin }: { onLogin: (name: string) => void }) {
           style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
         <button onClick={tryLogin}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(201,168,76,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
           Enter
         </button>
       </div>
@@ -134,9 +134,9 @@ function QrScanner({ onResult, onClose }: { onResult: (data: string) => void; on
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.95)", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(201,168,76,.4)" }}>
+      <div style={{ position: "relative", width: "100%", maxWidth: 360, aspectRatio: "1", borderRadius: 20, overflow: "hidden", border: "3px solid rgba(242,199,68,.4)" }}>
         <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted />
-        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(201,168,76,.6)", borderRadius: 16, pointerEvents: "none" }} />
+        <div style={{ position: "absolute", inset: "20%", border: "3px solid rgba(242,199,68,.6)", borderRadius: 16, pointerEvents: "none" }} />
       </div>
       <div style={{ color: "rgba(255,255,255,.5)", fontSize: 13, marginTop: 16 }}>Point camera at QR code</div>
       <button onClick={onClose}
@@ -357,8 +357,8 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(201,168,76,.3)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 10 }}>💰 COVER CHARGE</div>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(242,199,68,.3)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#F2C744", letterSpacing: 1.5, marginBottom: 10 }}>💰 COVER CHARGE</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>{booking.name || "Guest"}</div>
         <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>
           {booking.eventTitle || ""}{booking._isGuestList ? " · Guest List" : paidOnline > 0 ? ` · Paid online ₹${paidOnline}` : isCash ? ` · 💵 Pay at venue ₹${booking.total || 0}` : ""}
@@ -377,7 +377,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, textAlign: "center" }}>
                 <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 8 }}>
                   <div style={{ fontSize: 9, color: "rgba(255,255,255,.5)" }}>ACTIVATED</div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#C9A84C" }}>₹{(existing.coverActivated || 0).toLocaleString("en-IN")}</div>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744" }}>₹{(existing.coverActivated || 0).toLocaleString("en-IN")}</div>
                 </div>
                 <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 8 }}>
                   <div style={{ fontSize: 9, color: "rgba(255,255,255,.5)" }}>USED</div>
@@ -525,7 +525,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
             )}
 
             <button onClick={handleActivate} disabled={busy}
-              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#C9A84C,#A07830)", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", marginBottom: 8 }}>
+              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#F2C744,#A07830)", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", marginBottom: 8 }}>
               {busy ? "Activating…" : "⚡ Activate Cover Wallet"}
             </button>
           </>
@@ -883,7 +883,7 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
   };
 
   return (
-    <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.3)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
+    <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, gap: 8 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 16, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{booking.name || "Guest"}</div>
@@ -897,8 +897,8 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-        {booking.type && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Type: <span style={{ color: "#C9A84C", fontWeight: 700 }}>{booking.type}</span></div>}
-        {booking.tier && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Tier: <span style={{ color: "#C9A84C", fontWeight: 700 }}>{booking.tier}</span></div>}
+        {booking.type && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Type: <span style={{ color: "#F2C744", fontWeight: 700 }}>{booking.type}</span></div>}
+        {booking.tier && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Tier: <span style={{ color: "#F2C744", fontWeight: 700 }}>{booking.tier}</span></div>}
         {booking.guests && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Guests: <span style={{ color: "#fff", fontWeight: 700 }}>{booking.guests}</span></div>}
         {booking.eventTitle && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Event: <span style={{ color: "#fff", fontWeight: 700 }}>{booking.eventTitle}</span></div>}
         {isGuestList ? (
@@ -998,7 +998,7 @@ function WalletQrModal({
     <div onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ background: "linear-gradient(180deg,#0e0e14,#070710)", border: "1.5px solid rgba(201,168,76,.3)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 380, color: "#fff", textAlign: "center" }}>
+        style={{ background: "linear-gradient(180deg,#0e0e14,#070710)", border: "1.5px solid rgba(242,199,68,.3)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 380, color: "#fff", textAlign: "center" }}>
 
         {scanned ? (
           <>
@@ -1010,7 +1010,7 @@ function WalletQrModal({
           <>
             <div style={{ fontSize: 11, fontWeight: 800, color: "#FCA5A5", letterSpacing: 1, marginBottom: 4 }}>📵 WHATSAPP COULDN'T BE SENT</div>
             <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 14, lineHeight: 1.4 }}>{reason}</div>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 800, color: "#C9A84C", marginBottom: 6 }}>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 800, color: "#F2C744", marginBottom: 6 }}>
               Show this QR to {customerName}
             </div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginBottom: 14 }}>
@@ -1217,10 +1217,10 @@ function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentNam
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
         <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(201,168,76,.12)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${!showOnlyCheckedIn ? "rgba(201,168,76,.5)" : "transparent"}`,
+          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
+            border: `1px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.5)" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#C9A84C" }}>{todayBookings.length}</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#F2C744" }}>{todayBookings.length}</div>
           <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Today's Bookings {!showOnlyCheckedIn ? "•" : ""}</div>
         </div>
         <div onClick={() => setShowOnlyCheckedIn(true)}
@@ -1240,7 +1240,7 @@ function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentNam
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
             <button onClick={() => onCover(b)} title="Cover wallet"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               💰
             </button>
             <button onClick={() => sendBookingWhatsApp(b, onShowQr)} title="Re-send WhatsApp wallet/QR link"
@@ -1256,7 +1256,7 @@ function TicketsTab({ agentName, query, eventId, onCover, onShowQr }: { agentNam
               customerName: b.name || "Guest",
               reason: "Show this QR — guest scans to open their wallet & menu instantly.",
             })} title="Show QR for guest to scan (skip WhatsApp)"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               📱
             </button>
             {b.checkedIn ? (
@@ -1379,10 +1379,10 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
         <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(201,168,76,.12)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${!showOnlyCheckedIn ? "rgba(201,168,76,.5)" : "transparent"}`,
+          style={{ background: !showOnlyCheckedIn ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
+            border: `1px solid ${!showOnlyCheckedIn ? "rgba(242,199,68,.5)" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#C9A84C" }}>{todayGuests.length}</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#F2C744" }}>{todayGuests.length}</div>
           <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Today's Guests {!showOnlyCheckedIn ? "•" : ""}</div>
         </div>
         <div onClick={() => setShowOnlyCheckedIn(true)}
@@ -1404,7 +1404,7 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
             <button onClick={() => onCover({ id: g.id, ref: g.id, name: g.name, phone: g.phone, eventId: g.eventId, eventTitle: g.eventTitle, _isGuestList: true, _glDocId: g.id } as any)} title="Cover wallet"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               💰
             </button>
             <button onClick={() => sendGuestlistWhatsApp(g, onShowQr)} title="Re-send WhatsApp guest-list link"
@@ -1422,7 +1422,7 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
               customerName: g.name || "Guest",
               reason: "Show this QR — guest scans to open their guest-list pass instantly.",
             })} title="Show QR for guest to scan (skip WhatsApp)"
-              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+              style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
               📱
             </button>
             {/* 🎁 BUGFIX 2026-05-08: Door staff comps regulars in WITHOUT activating a paid
@@ -1523,8 +1523,8 @@ function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(201,168,76,.35)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 420, maxHeight: "85vh", overflow: "auto" }}>
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#C9A84C", marginBottom: 4 }}>🔄 Reassign Table</div>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(242,199,68,.35)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 420, maxHeight: "85vh", overflow: "auto" }}>
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>🔄 Reassign Table</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
           {reservation.customerName || "Guest"} · Currently: <b style={{ color: "#fff" }}>{reservation.tableId || "—"}</b>
         </div>
@@ -1552,7 +1552,7 @@ function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
             Cancel
           </button>
           <button onClick={submit} disabled={busy || !picked}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: picked ? "linear-gradient(135deg,#C9A84C,#8B6914)" : "rgba(201,168,76,.2)", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: picked ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
+            style={{ flex: 1, padding: 12, borderRadius: 10, background: picked ? "linear-gradient(135deg,#F2C744,#8B6914)" : "rgba(242,199,68,.2)", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: picked ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
             {busy ? "Reassigning..." : "Reassign"}
           </button>
         </div>
@@ -1799,10 +1799,10 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
       {/* Stats — first two tiles toggle the arrival filter */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
         <div onClick={() => setShowOnlyArrived(false)}
-          style={{ background: !showOnlyArrived ? "rgba(201,168,76,.12)" : "rgba(255,255,255,.04)",
-            border: `1px solid ${!showOnlyArrived ? "rgba(201,168,76,.5)" : "transparent"}`,
+          style={{ background: !showOnlyArrived ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
+            border: `1px solid ${!showOnlyArrived ? "rgba(242,199,68,.5)" : "transparent"}`,
             borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 20, fontWeight: 900, color: "#C9A84C" }}>{active.length}</div>
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#F2C744" }}>{active.length}</div>
           <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>Tables {!showOnlyArrived ? "•" : ""}</div>
         </div>
         <div onClick={() => setShowOnlyArrived(true)}
@@ -1827,9 +1827,9 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
             <button key={f.key} onClick={() => setAggFilter(f.key)}
               style={{
                 padding: "6px 12px", borderRadius: 14, fontSize: 10, fontWeight: 800, letterSpacing: ".5px", cursor: "pointer",
-                background: on ? (ss ? ss.bg : "rgba(201,168,76,.18)") : "rgba(255,255,255,.04)",
-                border: `1px solid ${on ? (ss ? ss.border : "rgba(201,168,76,.4)") : "rgba(255,255,255,.1)"}`,
-                color: on ? (ss ? ss.color : "#C9A84C") : "rgba(255,255,255,.55)",
+                background: on ? (ss ? ss.bg : "rgba(242,199,68,.18)") : "rgba(255,255,255,.04)",
+                border: `1px solid ${on ? (ss ? ss.border : "rgba(242,199,68,.4)") : "rgba(255,255,255,.1)"}`,
+                color: on ? (ss ? ss.color : "#F2C744") : "rgba(255,255,255,.55)",
               }}>
               {f.label}
             </button>
@@ -1850,7 +1850,7 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
             {/* Header row */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, gap: 8 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 900, color: "#C9A84C", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   {tableLabel}
                   <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: ".8px", padding: "2px 6px", borderRadius: 5, background: ss.bg, border: `1px solid ${ss.border}`, color: ss.color }}>{ss.label}</span>
                 </div>
@@ -1886,7 +1886,7 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
                 </button>
               )}
               <button onClick={() => setReassignFor(r)}
-                style={{ padding: "9px 4px", borderRadius: 9, background: "rgba(201,168,76,.1)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+                style={{ padding: "9px 4px", borderRadius: 9, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.35)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
                 🔄 Reassign
               </button>
               <button onClick={() => handleCall(r)}
@@ -1938,14 +1938,14 @@ function NewWalkInModal({ agentName, onClose }: { agentName: string; onClose: ()
   const cards: Array<{ key: "guestlist" | "cover" | "table" | "agg"; emoji: string; title: string; sub: string; tint: string }> = [
     { key: "guestlist", emoji: "📋", title: "Guest List", sub: "Free entry — name + phone only", tint: "rgba(96,165,250,.15)" },
     { key: "cover",     emoji: "💰", title: "Cover Booking", sub: "Pre-paid cover (₹) for tonight", tint: "rgba(168,85,247,.15)" },
-    { key: "table",     emoji: "🪑", title: "Table Booking", sub: "Live floor map · pick available table", tint: "rgba(201,168,76,.18)" },
+    { key: "table",     emoji: "🪑", title: "Table Booking", sub: "Live floor map · pick available table", tint: "rgba(242,199,68,.18)" },
     { key: "agg",       emoji: "📲", title: "Aggregator Booking", sub: "Missed sync from Zomato / Swiggy / EazyDiner — add manually", tint: "rgba(231,60,126,.15)" },
   ];
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(201,168,76,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflow: "auto" }}>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#C9A84C", marginBottom: 4 }}>➕ New Walk-in</div>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflow: "auto" }}>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>➕ New Walk-in</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 18 }}>
           Booking by <b style={{ color: "#fff" }}>{agentName}</b> · auto-tagged in admin
         </div>
@@ -2073,10 +2073,10 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(201,168,76,.35)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 440, maxHeight: "90vh", overflow: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(242,199,68,.35)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 440, maxHeight: "90vh", overflow: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
           <button onClick={onBack} style={{ background: "transparent", border: "none", color: "rgba(255,255,255,.5)", fontSize: 18, cursor: "pointer", padding: 0 }}>←</button>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900, color: "#C9A84C" }}>📲 Add Aggregator Booking</div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900, color: "#F2C744" }}>📲 Add Aggregator Booking</div>
         </div>
         <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>
           Use this when a Zomato / Swiggy / EazyDiner booking didn't appear automatically. Transcribe from the aggregator's confirmation.
@@ -2163,7 +2163,7 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
         {err && <div style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#FCA5A5", padding: 10, borderRadius: 8, fontSize: 12, marginBottom: 10 }}>{err}</div>}
 
         <button onClick={submit} disabled={busy}
-          style={{ width: "100%", padding: 14, borderRadius: 11, background: busy ? "rgba(201,168,76,.3)" : "linear-gradient(135deg,#C9A84C,#A88838)", border: "none", color: "#0C0816", fontSize: 14, fontWeight: 900, cursor: busy ? "wait" : "pointer", letterSpacing: ".5px" }}>
+          style={{ width: "100%", padding: 14, borderRadius: 11, background: busy ? "rgba(242,199,68,.3)" : "linear-gradient(135deg,#F2C744,#A88838)", border: "none", color: "#0C0816", fontSize: 14, fontWeight: 900, cursor: busy ? "wait" : "pointer", letterSpacing: ".5px" }}>
           {busy ? "Adding..." : "✓ Add Booking"}
         </button>
         <button onClick={onClose} style={{ width: "100%", marginTop: 8, padding: 11, borderRadius: 9, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 12, cursor: "pointer" }}>Cancel</button>
@@ -2246,14 +2246,14 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: "#030305", color: "#fff" }}>
-      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(201,168,76,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", color: "#fff" }}>
+      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(242,199,68,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
             style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap" }}>
             ← POS
           </Link>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 900, color: "#C9A84C", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🚪 Door</div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 15, fontWeight: 900, color: "#F2C744", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🚪 Door</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>👤 {agentName}</span>
@@ -2285,7 +2285,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         {/* Action row: Scan + New Walk-in */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
           <button onClick={() => setScanning(true)}
-            style={{ padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(201,168,76,.18),rgba(201,168,76,.06))", border: "1.5px solid rgba(201,168,76,.4)", color: "#C9A84C", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>
+            style={{ padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(242,199,68,.06))", border: "1.5px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>
             📷 Scan QR
           </button>
           <button onClick={() => setWalkInOpen(true)}
@@ -2303,7 +2303,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.4)", letterSpacing: 1, marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span>🔎 FIND BOOKING (ALL DATES)</span>
-              {crossLoading && <span style={{ color: "rgba(201,168,76,.7)", fontWeight: 600 }}>searching…</span>}
+              {crossLoading && <span style={{ color: "rgba(242,199,68,.7)", fontWeight: 600 }}>searching…</span>}
             </div>
             {!crossLoading && crossResults.length === 0 && (
               <div style={{ background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.08)", borderRadius: 10, padding: 10, fontSize: 11, color: "rgba(255,255,255,.45)" }}>
@@ -2349,9 +2349,9 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
               <button onClick={() => setSelectedEventId("all")}
                 style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 18, fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
-                  background: selectedEventId === "all" ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.04)",
-                  border: `1px solid ${selectedEventId === "all" ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.1)"}`,
-                  color: selectedEventId === "all" ? "#C9A84C" : "rgba(255,255,255,.5)" }}>
+                  background: selectedEventId === "all" ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
+                  border: `1px solid ${selectedEventId === "all" ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.1)"}`,
+                  color: selectedEventId === "all" ? "#F2C744" : "rgba(255,255,255,.5)" }}>
                 ALL
               </button>
               {eventChips.map((ev) => {
@@ -2363,9 +2363,9 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                 return (
                   <button key={ev.id} onClick={() => setSelectedEventId(ev.id)}
                     style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 18, fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
-                      background: on ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.04)",
-                      border: `1px solid ${on ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.1)"}`,
-                      color: on ? "#C9A84C" : "rgba(255,255,255,.55)" }}>
+                      background: on ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
+                      border: `1px solid ${on ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.1)"}`,
+                      color: on ? "#F2C744" : "rgba(255,255,255,.55)" }}>
                     {title}<span style={{ opacity: .55, marginLeft: 6, fontWeight: 500 }}>· {dateLabel}</span>
                   </button>
                 );
@@ -2378,9 +2378,9 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           {tabs.map((t) => (
             <button key={t.key} onClick={() => setTab(t.key)}
               style={{ flex: 1, padding: "10px 8px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                background: tab === t.key ? "rgba(201,168,76,.12)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${tab === t.key ? "rgba(201,168,76,.4)" : "rgba(255,255,255,.08)"}`,
-                color: tab === t.key ? "#C9A84C" : "rgba(255,255,255,.5)" }}>
+                background: tab === t.key ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${tab === t.key ? "rgba(242,199,68,.4)" : "rgba(255,255,255,.08)"}`,
+                color: tab === t.key ? "#F2C744" : "rgba(255,255,255,.5)" }}>
               {t.label}
             </button>
           ))}
