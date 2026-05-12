@@ -30,6 +30,7 @@ import {
   type HodTableReservation, type HodBooking, type HodGuestlistEntry, type HodCover,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
+import { refundEdcCharge } from "@/lib/edc-charge";
 import {
   buildAllTallyRows, aggregateCaptainLeakage,
   type PosKotDoc, type TallyRow,
@@ -363,7 +364,10 @@ export default function Reports() {
   // Pulled from Firestore `edcTransactions` collection (written by the cloud
   // function on dispatch + webhook). Falls back silently if collection absent.
   const [edcTxns, setEdcTxns] = useState<Array<{ id: string; [k: string]: any }>>([]);
-  const [edcStatusFilter, setEdcStatusFilter] = useState<"all" | "success" | "failed" | "cancelled" | "pending">("all");
+  const [edcStatusFilter, setEdcStatusFilter] = useState<"all" | "success" | "failed" | "cancelled" | "pending" | "refunded" | "refund_failed">("all");
+  // Per-row spinner so multiple refund buttons can't double-fire while one
+  // is in flight. Keyed by edcTransactions doc id.
+  const [edcRefunding, setEdcRefunding] = useState<Record<string, boolean>>({});
   const [edcVendorFilter, setEdcVendorFilter] = useState<string>("all");
   const [edcBouncerFilter, setEdcBouncerFilter] = useState<string>("all");
   // "mismatched" = combined leakage + phantom + minor (Khushi-requested merge —
@@ -891,6 +895,15 @@ export default function Reports() {
       "Bouncer": t.bouncerName || "",
       "Bouncer PIN Hash": t.bouncerPin || "",
       "Failure Reason": t.errorReason || "",
+      // Refund columns — populated when a manager has refunded the charge
+      // from the Reports row. Status above already encodes refunded /
+      // refund_failed; these add the audit trail the accountant needs to
+      // reconcile against the vendor refund report.
+      "Refund Amount ₹": Number(t.refundAmount || 0),
+      "Refund ID": t.razorpayRefundId || "",
+      "Refunded At": fmtTime(t.refundedAt || ""),
+      "Refunded By": t.refundedBy || "",
+      "Refund Error": t.refundError || "",
       "Txn ID": t.id,
     }));
     downloadCSV(`HOD_EDC_Card_${today}.csv`, rows);
@@ -1332,14 +1345,32 @@ export default function Reports() {
         const failCount = sorted.filter(t => t.status === "failed").length;
         const cancelCount = sorted.filter(t => t.status === "cancelled").length;
         const pendingCount = sorted.filter(t => t.status === "pending").length;
+        const refundedCount = sorted.filter(t => t.status === "refunded").length;
+        const refundFailedCount = sorted.filter(t => t.status === "refund_failed").length;
         // Success rate excludes still-pending charges (denominator = settled
-        // attempts only). 0 attempts → "—" so we don't render NaN%.
-        const settled = successCount + failCount + cancelCount;
-        const successRate = settled === 0 ? null : Math.round((successCount / settled) * 100);
-        const successAmt = sorted.filter(t => t.status === "success").reduce((s, t) => s + Number(t.amount || 0), 0);
+        // attempts only). 0 attempts → "—" so we don't render NaN%. Note:
+        // a refunded txn was originally captured successfully so it counts
+        // as success here — the refund nets it out in `successAmt` below.
+        const settled = successCount + failCount + cancelCount + refundedCount + refundFailedCount;
+        const successishCount = successCount + refundedCount + refundFailedCount;
+        const successRate = settled === 0 ? null : Math.round((successishCount / settled) * 100);
+        // Net card revenue = captured ₹ minus refunded ₹. refund_failed leaves
+        // the original capture standing, so still counts towards revenue.
+        const successAmt = sorted
+          .filter(t => t.status === "success" || t.status === "refund_failed")
+          .reduce((s, t) => s + Number(t.amount || 0), 0);
+        const refundedAmt = sorted
+          .filter(t => t.status === "refunded")
+          .reduce((s, t) => s + Number(t.refundAmount || t.amount || 0), 0);
         const vendors = Array.from(new Set(sorted.map(t => t.vendor).filter(Boolean))) as string[];
         const bouncers = Array.from(new Set(sorted.map(t => t.bouncerName || "—"))).sort();
-        const statusColor = (s: string) => s === "success" ? GREEN : s === "failed" ? RED : s === "cancelled" ? "rgba(255,255,255,.5)" : ORANGE;
+        const statusColor = (s: string) =>
+          s === "success" ? GREEN
+          : s === "failed" ? RED
+          : s === "cancelled" ? "rgba(255,255,255,.5)"
+          : s === "refunded" ? "#A855F7"
+          : s === "refund_failed" ? "#EC4899"
+          : ORANGE;
         const rateColor = successRate == null ? "rgba(255,255,255,.5)" : successRate >= 90 ? GREEN : successRate >= 70 ? ORANGE : RED;
         return (
           <>
@@ -1349,12 +1380,16 @@ export default function Reports() {
               <Tile label="❌ Declined" value={String(failCount)} color={RED} />
               <Tile label="🚫 Cancelled" value={String(cancelCount)} color="rgba(255,255,255,.5)" />
               <Tile label="⏳ Pending" value={String(pendingCount)} color={ORANGE} />
+              <Tile label="↩ Refunded" value={String(refundedCount)} color="#A855F7" />
               <Tile label="Success rate" value={successRate == null ? "—" : `${successRate}%`} color={rateColor} />
-              <Tile label="Card revenue ₹" value={`₹${successAmt.toLocaleString()}`} color={GOLD} />
+              <Tile label="Card revenue ₹" value={`₹${(successAmt - refundedAmt).toLocaleString()}`} color={GOLD} />
+              {refundedAmt > 0 && (
+                <Tile label="Refunded ₹" value={`₹${refundedAmt.toLocaleString()}`} color="#A855F7" />
+              )}
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12, alignItems: "center" }}>
               <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px" }}>STATUS:</span>
-              {(["all", "success", "failed", "cancelled", "pending"] as const).map(s => (
+              {(["all", "success", "failed", "cancelled", "pending", "refunded", "refund_failed"] as const).map(s => (
                 <button key={s} onClick={() => setEdcStatusFilter(s)}
                   style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "1px solid rgba(255,255,255,.1)",
                     background: edcStatusFilter === s ? GOLD : "rgba(255,255,255,.06)", color: edcStatusFilter === s ? "#030305" : "rgba(255,255,255,.85)" }}>
@@ -1385,14 +1420,14 @@ export default function Reports() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
                 <thead>
                   <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                    {["When", "Status", "Vendor", "Amount", "Booking Ref", "Card", "EDC Ref", "Bouncer", "Reason"].map((h) => (
+                    {["When", "Status", "Vendor", "Amount", "Booking Ref", "Card", "EDC Ref", "Bouncer", "Reason", "Refund"].map((h) => (
                       <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.length === 0 ? (
-                    <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
+                    <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
                       {sorted.length === 0
                         ? "No card-machine charges yet for this night. Once Door Mode pushes a card payment, it'll appear here in real time."
                         : "No charges match this search."}
@@ -1417,7 +1452,52 @@ export default function Reports() {
                           {t.edcRef || t.razorpayPaymentId || t.pineLabsRef || "—"}
                         </td>
                         <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{t.bouncerName || "—"}</td>
-                        <td style={{ padding: "6px 6px", color: t.errorReason ? RED : "rgba(255,255,255,.4)", fontSize: 10 }}>{t.errorReason || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: t.errorReason || t.refundError ? RED : "rgba(255,255,255,.4)", fontSize: 10 }}>{t.errorReason || t.refundError || "—"}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          {/* Refund column — only successful captures are
+                              refundable. Already-refunded txns surface the
+                              refund id so reconciliation has a hard reference
+                              against the vendor settlement report. */}
+                          {t.status === "success" ? (
+                            <button
+                              onClick={async () => {
+                                const pin = window.prompt(
+                                  `🔒 Refund ₹${Number(t.amount || 0).toLocaleString()} to ${t.cardNetwork || "card"}${t.last4 ? ` ••••${t.last4}` : ""}?\n\nBooking: ${t.bookingRef || "—"}\n\nEnter Manager PIN to authorise:`,
+                                );
+                                if (!pin) return;
+                                if (!/^\d{4,6}$/.test(pin.trim())) { alert("❌ Manager PIN must be 4–6 digits."); return; }
+                                setEdcRefunding(prev => ({ ...prev, [t.id]: true }));
+                                const r = await refundEdcCharge({ txnId: t.id, managerPin: pin.trim() });
+                                setEdcRefunding(prev => { const n = { ...prev }; delete n[t.id]; return n; });
+                                if (r.ok) {
+                                  alert(`✅ Refund dispatched${r.refundId ? ` · ref ${r.refundId}` : ""}. Live status will update in a moment.`);
+                                } else {
+                                  const reasonMap: Record<string, string> = {
+                                    bad_pin: "Manager PIN rejected.",
+                                    not_refundable: "This charge can't be refunded (not in success state).",
+                                    unknown_txn: "Transaction not found server-side.",
+                                    vendor_error: r.errorMessage || "Vendor rejected the refund.",
+                                    error: r.errorMessage || "Unexpected error.",
+                                  };
+                                  alert(`❌ Refund failed: ${reasonMap[r.reason || "error"] || r.errorMessage || r.reason || "error"}`);
+                                }
+                              }}
+                              disabled={!!edcRefunding[t.id]}
+                              style={{ padding: "4px 9px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: edcRefunding[t.id] ? "wait" : "pointer", border: "1px solid rgba(168,85,247,.4)", background: "rgba(168,85,247,.12)", color: "#A855F7" }}>
+                              {edcRefunding[t.id] ? "…" : "↩ Refund"}
+                            </button>
+                          ) : t.status === "refunded" ? (
+                            <span style={{ fontSize: 10, color: "#A855F7", fontFamily: "monospace" }}>
+                              {t.razorpayRefundId || "refunded"}
+                            </span>
+                          ) : t.status === "refund_failed" ? (
+                            <span style={{ fontSize: 10, color: "#EC4899" }}>
+                              refund failed
+                            </span>
+                          ) : (
+                            <span style={{ color: "rgba(255,255,255,.3)", fontSize: 10 }}>—</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}

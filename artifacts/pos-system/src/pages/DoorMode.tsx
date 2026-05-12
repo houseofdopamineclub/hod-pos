@@ -195,6 +195,15 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   // We must NOT pass dueAmount to activation, or the wallet under-activates
   // for partially prepaid bookings.
   const [edcTxn, setEdcTxn] = useState<{ txnId: string; vendor: EdcVendor; dueAmount: number; fullAmount: number } | null>(null);
+  // Snapshot of the inputs that produced `edcTxn`, kept so the "Retry on
+  // machine" button on the failed/cancelled dialog can re-dispatch with the
+  // same booking + bouncer + amount without forcing the operator to retype
+  // the PIN. Cleared on success/cancel/close to avoid stale-state replays.
+  const [edcRetryArgs, setEdcRetryArgs] = useState<{
+    bookingId: string; bookingRef: string; coverRef: string; vendor: EdcVendor;
+    bouncerPin: string; bouncerName: string; expectedAmount: number;
+    dueAmount: number; fullAmount: number;
+  } | null>(null);
 
   // Edit existing state
   const [editMode, setEditMode] = useState(false);
@@ -308,6 +317,16 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
         return;
       }
       setEdcTxn({ txnId: dispatch.txnId, vendor: edcVendor, dueAmount: quoteAmt, fullAmount: amt });
+      // Snapshot dispatch args so the "Retry on machine" button on the EDC
+      // dialog can re-dispatch with retry:true without re-prompting the
+      // bouncer. Vendor is captured from the per-device toggle at dispatch
+      // time so a mid-shift vendor flip doesn't retry on the wrong machine.
+      setEdcRetryArgs({
+        bookingId, bookingRef, coverRef, vendor: edcVendor,
+        bouncerPin: edcPin, bouncerName: agentName,
+        expectedAmount: amt - paidOnline > 0 ? amt - paidOnline : amt,
+        dueAmount: quoteAmt, fullAmount: amt,
+      });
       return; // dialog drives the rest
     }
 
@@ -526,12 +545,37 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           vendor={edcTxn.vendor}
           amount={edcTxn.dueAmount}
           customerName={booking.name || "Guest"}
+          // "Retry on machine" — only enabled when we still have the input
+          // snapshot from the original dispatch. Re-runs startEdcCharge with
+          // retry:true so the cloud function bypasses the same-minute
+          // idempotency guard and produces a fresh txnId. The dialog then
+          // rebinds its Firestore subscription to the new doc.
+          canRetry={!!edcRetryArgs}
+          onRetry={async () => {
+            if (!edcRetryArgs) return { ok: false, errorMessage: "Retry context lost — close and run again." };
+            const r = await startEdcCharge({
+              bookingId: edcRetryArgs.bookingId,
+              bookingRef: edcRetryArgs.bookingRef,
+              coverRef: edcRetryArgs.coverRef,
+              vendor: edcRetryArgs.vendor,
+              bouncerPin: edcRetryArgs.bouncerPin,
+              bouncerName: edcRetryArgs.bouncerName,
+              expectedAmount: edcRetryArgs.expectedAmount,
+              retry: true,
+            });
+            if (r.ok && r.txnId) {
+              setEdcTxn({ txnId: r.txnId, vendor: edcRetryArgs.vendor, dueAmount: edcRetryArgs.dueAmount, fullAmount: edcRetryArgs.fullAmount });
+              return { ok: true };
+            }
+            return { ok: false, errorMessage: r.errorMessage || `EDC retry failed (${r.reason || "error"})` };
+          }}
           onSuccess={async (txn) => {
             // Record FULL cover amount on activation (so coverActivated
             // reflects the whole cover incl. any prepaid online portion);
             // the EDC machine only charged the dueAmount.
             const full = edcTxn.fullAmount;
             setEdcTxn(null);
+            setEdcRetryArgs(null);
             setBusy(true);
             try {
               await finalizeActivation(full, "card", undefined, txn.edcRef || txn.razorpayPaymentId || txn.pineLabsRef);
@@ -542,10 +586,12 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           }}
           onFailed={(reason) => {
             setEdcTxn(null);
+            setEdcRetryArgs(null);
             setErr(`💳 EDC charge failed: ${reason}. Try cash/UPI or run the card again.`);
           }}
           onCancelled={() => {
             setEdcTxn(null);
+            setEdcRetryArgs(null);
             setErr("Card charge cancelled.");
           }}
         />
@@ -567,12 +613,18 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
 // no way to forge a "success" by tampering with the browser.
 function EDCPaymentDialog({
   txnId, vendor, amount, customerName,
+  canRetry, onRetry,
   onSuccess, onFailed, onCancelled,
 }: {
   txnId: string;
   vendor: EdcVendor;
   amount: number;
   customerName: string;
+  /** When true, the failed/cancelled screens show a "Retry on machine"
+   *  button. The parent owns the retry semantics; the dialog just calls
+   *  onRetry() and lets the parent re-bind the dialog to the new txnId. */
+  canRetry?: boolean;
+  onRetry?: () => Promise<{ ok: boolean; errorMessage?: string }>;
   onSuccess: (txn: EdcTransactionDoc) => void;
   onFailed: (reason: string) => void;
   onCancelled: () => void;
@@ -580,12 +632,29 @@ function EDCPaymentDialog({
   const [txn, setTxn] = useState<EdcTransactionDoc | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryErr, setRetryErr] = useState("");
+  // Local pseudo-status for the client-side timeout — the server may still
+  // settle the txn later via webhook, but visually we promote to a failed
+  // screen so the operator can use the new Retry button instead of being
+  // stranded on the spinning "Tap card" view.
+  const [timedOut, setTimedOut] = useState(false);
   const startRef = useRef(Date.now());
   // Guard so the success/failure callback only fires once even if Firestore
-  // sends a duplicate snapshot (e.g. metadata-only updates).
+  // sends a duplicate snapshot (e.g. metadata-only updates). Reset on retry
+  // so the new txn's terminal status fires onSuccess/onFailed normally.
   const settledRef = useRef(false);
 
   useEffect(() => {
+    // Re-arm the settled guard whenever the parent re-binds us to a new
+    // txnId (i.e. operator clicked Retry). Without this the second swipe's
+    // success snapshot would be dropped because settledRef stayed true.
+    settledRef.current = false;
+    setTxn(null);
+    setElapsedMs(0);
+    setRetryErr("");
+    setTimedOut(false);
+    startRef.current = Date.now();
     const unsub = subscribeToEdcTransaction(txnId, (latest) => {
       if (!latest) return;
       setTxn(latest);
@@ -595,13 +664,13 @@ function EDCPaymentDialog({
       if (latest.status === "success") {
         settledRef.current = true;
         setTimeout(() => onSuccess(latest), 2000);
-      } else if (latest.status === "failed") {
-        settledRef.current = true;
-        setTimeout(() => onFailed(latest.errorReason || "DECLINED"), 1500);
-      } else if (latest.status === "cancelled") {
-        settledRef.current = true;
-        setTimeout(() => onCancelled(), 1500);
       }
+      // Note: failed / cancelled deliberately do NOT auto-fire the parent
+      // callback. The new "Retry on machine" UX needs the dialog to stay
+      // open so the operator can either tap Retry (which re-binds us to a
+      // fresh txnId) or tap Close (which fires onFailed/onCancelled
+      // explicitly). Auto-closing here would unmount the dialog mid-tap and
+      // make retry unusable in practice.
     });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -615,8 +684,20 @@ function EDCPaymentDialog({
       const e = Date.now() - startRef.current;
       setElapsedMs(e);
       if (e >= EDC_CLIENT_TIMEOUT_MS && !settledRef.current) {
+        // Only promote to TIMEOUT if the server hasn't already reported a
+        // terminal status. Otherwise a genuine decline left on screen would
+        // get its errorReason overwritten with "TIMEOUT — customer didn't
+        // tap in time" the moment the timer crossed 60s.
+        const serverStatus = txn?.status;
+        if (serverStatus && serverStatus !== "pending") return;
+        // Settle locally and best-effort cancel vendor side, but DO NOT
+        // unmount the dialog — operator should see the timeout and decide
+        // whether to retry or close. The server still owns the source of
+        // truth: if a webhook later reports success, the admin reconciliation
+        // job will activate the cover.
         settledRef.current = true;
-        cancelEdcCharge(txnId).finally(() => onFailed("TIMEOUT — customer didn't tap in time"));
+        setTimedOut(true);
+        cancelEdcCharge(txnId).catch(() => {});
       }
     }, 250);
     return () => clearInterval(t);
@@ -632,7 +713,11 @@ function EDCPaymentDialog({
     onCancelled();
   };
 
-  const status = txn?.status || "pending";
+  const rawStatus = txn?.status || "pending";
+  // Promote a client-side timeout to a "failed" view so the operator gets
+  // the Retry / Close affordances instead of the spinning Tap-card screen.
+  const status: typeof rawStatus = timedOut && rawStatus === "pending" ? "failed" : rawStatus;
+  const timeoutReason = "TIMEOUT — customer didn't tap in time";
   const remaining = Math.max(0, Math.ceil((EDC_CLIENT_TIMEOUT_MS - elapsedMs) / 1000));
   const vendorLabel = vendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
 
@@ -676,23 +761,50 @@ function EDCPaymentDialog({
           </>
         )}
 
-        {status === "failed" && (
-          <>
-            <div style={{ fontSize: 60, marginBottom: 12 }}>❌</div>
-            <div style={{ fontSize: 14, fontWeight: 900, color: "#EF4444", marginBottom: 12 }}>{txn?.errorReason || "DECLINED"}</div>
-            <button onClick={() => onFailed(txn?.errorReason || "DECLINED")}
-              style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.35)", color: "#EF4444", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-              Close & retry
-            </button>
-          </>
-        )}
-
-        {status === "cancelled" && (
-          <>
-            <div style={{ fontSize: 60, marginBottom: 12 }}>🚫</div>
-            <div style={{ fontSize: 14, fontWeight: 900, color: "rgba(255,255,255,.6)", marginBottom: 4 }}>Cancelled</div>
-          </>
-        )}
+        {(status === "failed" || status === "cancelled") && (() => {
+          const isFailed = status === "failed";
+          // "Retry on machine" — disable if the parent didn't supply onRetry,
+          // or while a retry is already in flight, or if the previous retry
+          // attempt errored at the dispatch layer (e.g. server still
+          // rejected). settledRef will be re-armed once the new txn binds.
+          const handleRetry = async () => {
+            if (!onRetry || retrying) return;
+            setRetrying(true); setRetryErr("");
+            // Re-arm settled BEFORE the new subscription binds so the new
+            // txn's terminal status doesn't get dropped between the dispatch
+            // returning and the parent flipping txnId.
+            settledRef.current = false;
+            const r = await onRetry();
+            setRetrying(false);
+            if (!r.ok) {
+              // Re-lock so the leftover failed snapshot doesn't immediately
+              // re-fire onFailed and unmount us.
+              settledRef.current = true;
+              setRetryErr(r.errorMessage || "Retry failed");
+            }
+          };
+          return (
+            <>
+              <div style={{ fontSize: 60, marginBottom: 12 }}>{isFailed ? "❌" : "🚫"}</div>
+              <div style={{ fontSize: 14, fontWeight: 900, color: isFailed ? "#EF4444" : "rgba(255,255,255,.6)", marginBottom: 12 }}>
+                {isFailed ? (timedOut ? timeoutReason : (txn?.errorReason || "DECLINED")) : "Cancelled"}
+              </div>
+              {retryErr && (
+                <div style={{ fontSize: 11, color: "#EF4444", marginBottom: 10 }}>{retryErr}</div>
+              )}
+              {canRetry && onRetry && (
+                <button onClick={handleRetry} disabled={retrying}
+                  style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(168,85,247,.15)", border: "1px solid rgba(168,85,247,.4)", color: "#A855F7", fontSize: 13, fontWeight: 800, cursor: retrying ? "wait" : "pointer", marginBottom: 8 }}>
+                  {retrying ? "Re-dispatching…" : "🔁 Retry on machine"}
+                </button>
+              )}
+              <button onClick={() => isFailed ? onFailed(timedOut ? timeoutReason : (txn?.errorReason || "DECLINED")) : onCancelled()}
+                style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.35)", color: "#EF4444", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                Close
+              </button>
+            </>
+          );
+        })()}
       </div>
     </div>
   );

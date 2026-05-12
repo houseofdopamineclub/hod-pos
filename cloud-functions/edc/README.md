@@ -11,8 +11,34 @@ All functions are HTTPS, region `asia-south1` (same as the existing `createWalle
 | `edcChargeRazorpay` | HTTPS POST | Phase 1 — dispatches a charge to the door EDC machine via Razorpay POS Terminal API. Returns `{ txnId }`. Writes `edcTransactions/{txnId}` with `status: "pending"`. |
 | `edcChargePineLabs` | HTTPS POST | Same contract as Razorpay — routes to Pine Labs Plutus Smart Cloud (`UploadBilledTransaction`). Returns `{ ok: false, reason: "vendor_disabled" }` only when the venue hasn't set its `PINELABS_*` secrets yet. |
 | `edcCancelCharge` | HTTPS POST | Best-effort cancel of an in-flight charge. Tells the vendor to abort if it can; webhook still authoritative. |
+| `edcRefundCharge` | HTTPS POST | Manager-PIN-gated full refund of a previously-successful EDC charge. Dispatches to Razorpay refunds API and writes `status: "refunded"` / `"refund_failed"` back to the same `edcTransactions/{txnId}` doc. |
 | `razorpayEdcWebhook` | HTTPS POST | Razorpay POS Terminal callback. HMAC-verifies `X-Razorpay-Signature` against `RAZORPAY_EDC_WEBHOOK_SECRET`, then writes the matching `edcTransactions` doc with `status: "success"` / `"failed"` / `"cancelled"` plus card metadata. |
 | `pineLabsEdcWebhook` | HTTPS POST | Pine Labs Plutus Smart Cloud status callback. HMAC-verifies `X-PineLabs-Signature` (or legacy `X-Plutus-Signature`) against `PINELABS_WEBHOOK_SECRET`, then writes the matching `edcTransactions` doc with status + card metadata. ResponseCode `0` → success, `1` → cancelled, anything else → failed. |
+
+### Retry semantics
+
+`edcChargeRazorpay` accepts an optional `retry: true` flag. When set, the
+deterministic txnId is salted with the current timestamp so the same-minute
+idempotency guard does NOT reject the second attempt with
+`previous_failed_in_same_minute`. The browser only sets `retry: true` from
+the **Retry on machine** button on the EDC dialog after the previous attempt
+has reached a terminal `failed` / `cancelled` state. Refresh-mid-flow MUST
+NOT set this — that's the codepath the same-minute guard is protecting.
+
+### Refund schema (frontend → `edcRefundCharge`)
+
+```jsonc
+{
+  "txnId":      "edc_2026_05_12_abc123def456", // required, doc id in edcTransactions
+  "managerPin": "1234",                          // required, verified server-side
+  "managerName": "Khushi (Owner)"                // for audit
+}
+```
+
+Returns `{ ok: true, refundId }` on success, or
+`{ ok: false, reason: "bad_pin" | "not_refundable" | "vendor_error" | "unknown_txn" | "error", error }`
+on failure. Already-refunded txns return `{ ok: true, refundId }` idempotently
+without re-dispatching to the vendor.
 
 ## Request schema (frontend → function)
 

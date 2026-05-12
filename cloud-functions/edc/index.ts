@@ -47,10 +47,13 @@ function hashPin(pin: string): string {
   return crypto.createHmac("sha256", PIN_SALT).update(pin).digest("hex");
 }
 
-/** Derive a deterministic txnId so refresh mid-flow does NOT double-charge. */
-function deriveTxnId(bookingRef: string, coverRef: string): string {
+/** Derive a deterministic txnId so refresh mid-flow does NOT double-charge.
+ *  When `retrySalt` is provided (operator-explicit retry after failed/cancelled
+ *  in the same minute) it shifts the bucket so the cloud function generates a
+ *  fresh doc instead of rejecting with `previous_failed_in_same_minute`. */
+function deriveTxnId(bookingRef: string, coverRef: string, retrySalt?: string): string {
   const minuteBucket = Math.floor(Date.now() / 60_000);
-  const raw = `${bookingRef}|${coverRef}|${minuteBucket}`;
+  const raw = `${bookingRef}|${coverRef}|${minuteBucket}${retrySalt ? `|${retrySalt}` : ""}`;
   const h = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
   return `edc_${getOperationalNightStr()}_${h}`;
 }
@@ -60,6 +63,21 @@ async function verifyBouncerPin(pin: string): Promise<{ ok: boolean; name?: stri
   if (!/^\d{4,6}$/.test(pin)) return { ok: false };
   const hashed = hashPin(pin);
   const snap = await db.collection("hodStaffPins").where("pinHash", "==", hashed).limit(1).get();
+  if (snap.empty) return { ok: false };
+  const doc = snap.docs[0];
+  return { ok: true, name: (doc.data().name as string) || doc.id };
+}
+
+/** Verify a manager PIN against `hodStaffPins` — same collection, but only
+ *  docs flagged with `role: "manager"` may authorise refunds. Without the
+ *  role gate any bouncer PIN could refund a charge. */
+async function verifyManagerPin(pin: string): Promise<{ ok: boolean; name?: string }> {
+  if (!/^\d{4,6}$/.test(pin)) return { ok: false };
+  const hashed = hashPin(pin);
+  const snap = await db.collection("hodStaffPins")
+    .where("pinHash", "==", hashed)
+    .where("role", "==", "manager")
+    .limit(1).get();
   if (snap.empty) return { ok: false };
   const doc = snap.docs[0];
   return { ok: true, name: (doc.data().name as string) || doc.id };
@@ -112,9 +130,9 @@ async function preflightAndReserve(
   req: functionsV1.https.Request,
   res: functionsV1.Response,
 ): Promise<PreflightResult> {
-  const { bookingId, bookingRef, coverRef, bouncerPin, bouncerName, expectedAmount } = (req.body || {}) as {
+  const { bookingId, bookingRef, coverRef, bouncerPin, bouncerName, expectedAmount, retry } = (req.body || {}) as {
     bookingId?: string; bookingRef?: string; coverRef?: string; bouncerPin?: string;
-    bouncerName?: string; expectedAmount?: number;
+    bouncerName?: string; expectedAmount?: number; retry?: boolean;
   };
   if (!bookingId || !bookingRef || !coverRef || !bouncerPin) {
     res.status(400).json({ ok: false, reason: "bad_request" }); return { ok: false };
@@ -146,7 +164,14 @@ async function preflightAndReserve(
     res.status(409).json({ ok: false, reason: "amount_mismatch", canonical }); return { ok: false };
   }
 
-  const txnId = deriveTxnId(bookingRef, coverRef);
+  // Operator-explicit retry after a failed/cancelled attempt salts the
+  // txnId so the same-minute idempotency guard doesn't reject it. The
+  // browser only sets `retry: true` from the "Retry on machine" button
+  // in the EDC dialog after the previous attempt has reached a terminal
+  // status — refresh-mid-flow never sets it, so we keep the double-charge
+  // protection for the common case.
+  const retrySalt = retry === true ? `retry_${Date.now()}` : undefined;
+  const txnId = deriveTxnId(bookingRef, coverRef, retrySalt);
   const txnRef = db.collection("edcTransactions").doc(txnId);
   const existing = await txnRef.get();
   if (existing.exists) {
@@ -190,7 +215,10 @@ export const edcChargeRazorpay = functionsV1
         bouncerPin: string; bookingRef: string; coverRef: string;
       };
 
-      // Dispatch to Razorpay POS Terminal API.
+      // Dispatch to Razorpay POS Terminal API. (PIN/amount/idempotency —
+      // including the operator-explicit retry-salt — were already handled
+      // by preflightAndReserve above; `retry: true` from the browser is
+      // consumed there.)
       // POST https://api.razorpay.com/v1/terminals/{terminal_id}/payments
       // Auth: Basic base64(RZP_KEY_ID:RZP_KEY_SECRET)
       // Body: { amount: canonical*100, currency: "INR", reference_id: txnId, description: bookingRef }
@@ -444,6 +472,138 @@ export const razorpayEdcWebhook = functionsV1
     } catch (e: any) {
       functionsV1.logger.error("razorpayEdcWebhook error", e);
       res.status(500).send("error");
+    }
+  });
+
+// ── edcRefundCharge ────────────────────────────────────────────────────────
+// Manager-PIN-gated full refund of a previously-successful EDC charge. Used
+// from Reports → "💳 EDC Card" tab to close out duplicate-success charges
+// that the door bouncer dispatched twice. Writes the refund result back to
+// the same `edcTransactions/{txnId}` doc so the live subscription in Reports
+// reflects the new status, and the CSV export includes refund columns.
+//
+// Security:
+//   • Manager PIN verified server-side against `hodStaffPins` docs flagged
+//     `role: "manager"` (per-IP throttling reuses the bouncer-PIN throttle).
+//   • Browser cannot specify amount or vendor — both are read off the
+//     existing edcTransactions doc, so a malicious browser cannot refund
+//     more than what was originally charged.
+//   • Only `status: "success"` txns are refundable. `pending` must finish
+//     first; `refunded` / `refund_failed` / `failed` / `cancelled` are
+//     rejected with reason=`not_refundable`.
+//   • Idempotency: a second call after status=`refunded` returns the
+//     existing refundId without re-dispatching to the vendor.
+export const edcRefundCharge = functionsV1
+  .region("asia-south1")
+  .https.onRequest(async (req, res) => {
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+    if (req.method !== "POST")    { res.status(405).json({ ok: false, reason: "method" }); return; }
+
+    try {
+      const { txnId, managerPin, managerName } = (req.body || {}) as {
+        txnId?: string; managerPin?: string; managerName?: string;
+      };
+      if (!txnId || !managerPin) { res.status(400).json({ ok: false, reason: "bad_request" }); return; }
+      if (!RZP_KEY_ID || !RZP_KEY_SECRET || !PIN_SALT) {
+        functionsV1.logger.error("edcRefundCharge misconfigured: missing required secrets");
+        res.status(500).json({ ok: false, reason: "error", error: "misconfigured" }); return;
+      }
+
+      // Reuse the same per-IP throttle bucket as the charge endpoint —
+      // brute-forcing a manager PIN here would unlock refunds, so it
+      // deserves the same 5-fail / 10-min lockout.
+      const ip = (req.headers["x-forwarded-for"] as string || req.ip || "").split(",")[0].trim() || "unknown";
+      const throttleRef = db.collection("edcPinThrottle").doc(ip);
+      const throttle = await throttleRef.get();
+      const tdata = throttle.exists ? (throttle.data() as { fails: number; firstAt: number }) : { fails: 0, firstAt: Date.now() };
+      if (Date.now() - tdata.firstAt > 10 * 60_000) { tdata.fails = 0; tdata.firstAt = Date.now(); }
+      if (tdata.fails >= 5) { res.status(429).json({ ok: false, reason: "bad_pin", error: "too_many_attempts" }); return; }
+
+      const pinCheck = await verifyManagerPin(managerPin);
+      if (!pinCheck.ok) {
+        await throttleRef.set({ fails: tdata.fails + 1, firstAt: tdata.firstAt }, { merge: true });
+        res.status(403).json({ ok: false, reason: "bad_pin" }); return;
+      }
+      if (tdata.fails > 0) await throttleRef.delete().catch(() => {});
+
+      const txnRef = db.collection("edcTransactions").doc(txnId);
+      const snap = await txnRef.get();
+      if (!snap.exists) { res.status(404).json({ ok: false, reason: "unknown_txn" }); return; }
+      const t = snap.data() as any;
+
+      // Idempotent return for already-refunded txns.
+      if (t.status === "refunded") {
+        res.json({ ok: true, refundId: t.razorpayRefundId || "" }); return;
+      }
+      if (t.status !== "success") {
+        res.status(409).json({ ok: false, reason: "not_refundable", error: `status_is_${t.status}` }); return;
+      }
+
+      const refundAmount = Number(t.amount || 0);
+      const paymentId = t.razorpayPaymentId || t.razorpayIntentId || "";
+
+      // Pine Labs lands here only in Phase 2 — refuse for now so an operator
+      // doesn't think they refunded when nothing actually happened vendor-side.
+      if (t.vendor !== "razorpay") {
+        await txnRef.update({
+          status: "refund_failed", refundAmount,
+          refundError: "vendor_not_supported_for_refund",
+          refundedAt: new Date().toISOString(),
+          refundedBy: managerName || pinCheck.name || "",
+          updatedAt: new Date().toISOString(),
+        });
+        res.status(400).json({ ok: false, reason: "vendor_error", error: "vendor_not_supported_for_refund" }); return;
+      }
+      if (!paymentId) {
+        await txnRef.update({
+          status: "refund_failed", refundAmount,
+          refundError: "no_payment_id_to_refund",
+          refundedAt: new Date().toISOString(),
+          refundedBy: managerName || pinCheck.name || "",
+          updatedAt: new Date().toISOString(),
+        });
+        res.status(409).json({ ok: false, reason: "vendor_error", error: "no_payment_id_to_refund" }); return;
+      }
+
+      const auth = Buffer.from(`${RZP_KEY_ID}:${RZP_KEY_SECRET}`).toString("base64");
+      const dispatch = await fetch(
+        `https://api.razorpay.com/v1/payments/${paymentId}/refund`,
+        {
+          method: "POST",
+          headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amount: Math.round(refundAmount * 100),
+            speed: "normal",
+            notes: { txnId, refundedBy: managerName || pinCheck.name || "" },
+          }),
+        },
+      );
+      const dispatchJson: any = await dispatch.json().catch(() => ({}));
+      if (!dispatch.ok) {
+        await txnRef.update({
+          status: "refund_failed", refundAmount,
+          refundError: dispatchJson?.error?.description || `razorpay_${dispatch.status}`,
+          refundedAt: new Date().toISOString(),
+          refundedBy: managerName || pinCheck.name || "",
+          updatedAt: new Date().toISOString(),
+        });
+        res.status(502).json({ ok: false, reason: "vendor_error", error: dispatchJson?.error?.description }); return;
+      }
+
+      await txnRef.update({
+        status: "refunded", refundAmount,
+        razorpayRefundId: dispatchJson?.id || "",
+        refundedAt: new Date().toISOString(),
+        refundedBy: managerName || pinCheck.name || "",
+        updatedAt: new Date().toISOString(),
+      });
+      res.json({ ok: true, refundId: dispatchJson?.id || "" });
+    } catch (e: any) {
+      functionsV1.logger.error("edcRefundCharge error", e);
+      res.status(500).json({ ok: false, reason: "error", error: String(e?.message || e) });
     }
   });
 

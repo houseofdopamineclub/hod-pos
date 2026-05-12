@@ -14,6 +14,7 @@ const HOD_FUNCTIONS_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 const EDC_CHARGE_RAZORPAY_URL = `${HOD_FUNCTIONS_BASE}/edcChargeRazorpay`;
 const EDC_CHARGE_PINELABS_URL = `${HOD_FUNCTIONS_BASE}/edcChargePineLabs`;
 const EDC_CANCEL_URL = `${HOD_FUNCTIONS_BASE}/edcCancelCharge`;
+const EDC_REFUND_URL = `${HOD_FUNCTIONS_BASE}/edcRefundCharge`;
 
 export type EdcVendor = "razorpay" | "pinelabs";
 
@@ -75,7 +76,17 @@ export function edcVendorLabel(vendor: EdcVendor): string {
   return vendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
 }
 
-export type EdcStatus = "pending" | "success" | "failed" | "cancelled";
+export type EdcStatus =
+  | "pending"
+  | "success"
+  | "failed"
+  | "cancelled"
+  // Set after a manager-PIN-gated refund completes successfully.
+  | "refunded"
+  // Set when a refund attempt was dispatched but the vendor rejected it.
+  // The original `success` charge still stands; operator must retry the
+  // refund or process it manually via the vendor dashboard.
+  | "refund_failed";
 
 export interface EdcTransactionDoc {
   bookingRef: string;
@@ -98,6 +109,17 @@ export interface EdcTransactionDoc {
   edcRef?: string;
   /** Failure reason from EDC (e.g. "DECLINED", "INSUFFICIENT FUNDS", "TIMEOUT"). */
   errorReason?: string;
+  /** Refund amount in INR (currently always equals `amount` — partial refunds
+   *  are not supported in Phase 1). Set on status=refunded / refund_failed. */
+  refundAmount?: number;
+  /** Razorpay refund id once the vendor confirms the refund (vendor=razorpay). */
+  razorpayRefundId?: string;
+  /** Vendor-side reason on status=refund_failed. */
+  refundError?: string;
+  /** ISO timestamp the refund was dispatched. */
+  refundedAt?: string;
+  /** Display name of the manager whose PIN authorised the refund. */
+  refundedBy?: string;
   /** SHA-256 hash of bouncer PIN (server already verified — kept for audit). */
   bouncerPin?: string;
   /** Display name of the bouncer who initiated the charge. */
@@ -120,6 +142,11 @@ export interface StartEdcChargeOpts {
    *  this so the UI confirmation dialog matches what the server charged; if
    *  they ever diverge that's a server-side bug worth catching. */
   expectedAmount: number;
+  /** Set true when the operator explicitly retried after a failed/cancelled
+   *  attempt. Bypasses the same-minute idempotency guard server-side so the
+   *  cloud function generates a fresh txnId instead of rejecting with
+   *  `previous_failed_in_same_minute`. Refresh-mid-flow MUST NOT set this. */
+  retry?: boolean;
 }
 
 export interface StartEdcChargeResult {
@@ -157,6 +184,7 @@ export async function startEdcCharge(opts: StartEdcChargeOpts): Promise<StartEdc
         bouncerPin: opts.bouncerPin,
         bouncerName: opts.bouncerName || "",
         expectedAmount: opts.expectedAmount,
+        retry: opts.retry === true,
       }),
     });
     const data = await r.json().catch(() => ({} as any));
@@ -212,6 +240,60 @@ export async function cancelEdcCharge(txnId: string): Promise<{ ok: boolean; err
     return { ok: false, error: data?.error || `HTTP ${r.status}` };
   } catch (e: any) {
     return { ok: false, error: e?.message || "Network error" };
+  }
+}
+
+export interface RefundEdcChargeOpts {
+  txnId: string;
+  /** 4-digit manager PIN — verified server-side against the manager-role
+   *  entries in `hodStaffPins`. Plaintext over HTTPS, never logged. */
+  managerPin: string;
+  /** Display name of the manager initiating the refund (for audit). */
+  managerName?: string;
+}
+
+export interface RefundEdcChargeResult {
+  ok: boolean;
+  /** Vendor-side refund id once the cloud function dispatched the refund. */
+  refundId?: string;
+  /** "bad_pin" — manager PIN rejected; "not_refundable" — txn is not in
+   *  status=success (e.g. already refunded, never captured); "vendor_error"
+   *  — vendor returned an error (rare, surface to user with errorMessage);
+   *  "unknown_txn" — txnId not found in Firestore; "error" — unexpected. */
+  reason?: "bad_pin" | "not_refundable" | "vendor_error" | "unknown_txn" | "error";
+  errorMessage?: string;
+}
+
+/** Refund a previously-successful EDC charge end-to-end. The cloud function
+ *  verifies the manager PIN, dispatches a refund to the vendor (Razorpay
+ *  refunds API for vendor=razorpay), and writes the result back to the
+ *  same `edcTransactions/{txnId}` doc with status=`refunded` (or
+ *  `refund_failed` on vendor reject). The caller's existing Firestore
+ *  subscription will pick up the new status — there's no separate listener
+ *  to wire up. */
+export async function refundEdcCharge(opts: RefundEdcChargeOpts): Promise<RefundEdcChargeResult> {
+  if (!opts.txnId) return { ok: false, reason: "error", errorMessage: "Missing txnId" };
+  if (!opts.managerPin || opts.managerPin.length < 4) {
+    return { ok: false, reason: "bad_pin", errorMessage: "Manager PIN required" };
+  }
+  try {
+    const r = await fetch(EDC_REFUND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txnId: opts.txnId,
+        managerPin: opts.managerPin,
+        managerName: opts.managerName || "",
+      }),
+    });
+    const data = await r.json().catch(() => ({} as any));
+    if (r.ok && data?.ok) {
+      return { ok: true, refundId: data.refundId ? String(data.refundId) : undefined };
+    }
+    const reason = (data?.reason as RefundEdcChargeResult["reason"]) || "error";
+    return { ok: false, reason, errorMessage: data?.error || `HTTP ${r.status}` };
+  } catch (e: any) {
+    return { ok: false, reason: "error", errorMessage: e?.message || "Network error" };
   }
 }
 
