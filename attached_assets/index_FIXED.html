@@ -4466,7 +4466,7 @@ function renderWalletPage(bookingRef){
       +'.hod-wallet-v2 .wv-wcard .wv-bal{font-family:var(--fp);font-size:44px;font-weight:900;color:#F2C744;line-height:1;letter-spacing:-1px;}'
       +'.hod-wallet-v2 .wv-wcard .wv-bal.zero{color:#fff;opacity:.6;}'
       // Place order primary button — yellow solid
-      +'.hod-wallet-v2 .wv-place{width:100%;padding:18px !important;border-radius:14px !important;background:#F2C744 !important;border:2px solid #F2C744 !important;color:#0A0A0A !important;font-size:15px !important;font-weight:900 !important;letter-spacing:1.2px !important;text-transform:uppercase;cursor:pointer;font-family:var(--fs);box-shadow:0 6px 22px rgba(242,199,68,.32);}'
+      +'.hod-wallet-v2 .wv-place{display:block;width:auto;min-width:220px;max-width:320px;margin:0 auto !important;padding:14px 28px !important;border-radius:10px !important;background:#B83227 !important;border:2px solid #F2C744 !important;color:#F2C744 !important;font-size:14px !important;font-weight:900 !important;letter-spacing:1.5px !important;text-transform:uppercase;cursor:pointer;font-family:var(--fs);box-shadow:0 4px 14px rgba(184,50,39,.45);}'
       +'.hod-wallet-v2 .wv-place:disabled,.hod-wallet-v2 .wv-place[style*="opacity:.45"]{opacity:.4;}'
       // Veg dot crisp
       +'.hod-wallet-v2 .wv-vegdot{width:11px !important;height:11px !important;border-radius:2px !important;border:1.5px solid currentColor;display:inline-flex;align-items:center;justify-content:center;margin-right:8px;}'
@@ -4719,28 +4719,16 @@ function renderWalletPage(bookingRef){
     qrSec.appendChild(qrWrap);qrSec.appendChild(qrInfo2);inner.appendChild(qrSec);
     generateLocalQR('wallet-qr-wrap','https://hodclub.in/?verify='+encodeURIComponent(cv.ref||cv.bookingId||cv.id||'')+'');
 
-    // For event tickets — show bartender instruction then the menu below
-    if(!cv.isTableBooking){
-      var evInfo=document.createElement('div');
-      evInfo.style.cssText='background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.2);border-radius:14px;padding:18px 20px;margin-bottom:16px;text-align:center;';
-      if(bal>0){
-        evInfo.innerHTML='<div style="font-size:24px;margin-bottom:10px;">🥃</div>'
-          +'<div style="font-size:14px;font-weight:800;color:var(--gold);margin-bottom:6px;">Show your QR to the bartender</div>'
-          +'<div style="font-size:12px;color:var(--muted);line-height:1.7;">Your cover balance of <strong style="color:var(--gold);">₹'+((cv.coverActivated||0).toLocaleString('en-IN'))+'</strong> will be deducted as you order.<br>Your bartender will scan and activate each order.</div>';
-      } else {
-        evInfo.innerHTML='<div style="font-size:24px;margin-bottom:10px;">🥃</div>'
-          +'<div style="font-size:14px;font-weight:800;color:var(--gold);margin-bottom:6px;">Browse our menu below!</div>'
-          +'<div style="font-size:12px;color:var(--muted);line-height:1.7;">Recharge your wallet above to place orders. Show your QR to the bartender — they can also recharge for you via cash, UPI or card.</div>';
-      }
-      inner.appendChild(evInfo);
-    }
-
-    // Instructions
+    // ── Single consolidated order-instructions strip (Digitory red/yellow/black)
     var info=document.createElement('div');
-    info.style.cssText='background:rgba(0,196,255,.06);border:1px solid rgba(0,196,255,.2);border-radius:12px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:rgba(0,196,255,.8);';
-    info.innerHTML=cv.isTableBooking
-      ?'\u2139\ufe0f Browse the menu below, select what you want, and tap <strong>Submit Pre-Order</strong>. Your waiter will scan your QR and activate your order at the table.'
-      :'\u2139\ufe0f Browse our menu below! Show your QR to the bartender when ordering — your cover balance will be deducted automatically.';
+    info.style.cssText='background:#B83227;border:1.5px solid #F2C744;border-radius:12px;padding:14px 18px;margin-bottom:20px;text-align:center;color:#F5F1E8;font-family:var(--fs);font-size:13px;line-height:1.6;font-weight:600;';
+    if(cv.isTableBooking){
+      info.innerHTML='You can <strong style="color:#F2C744;">pre-order from the menu below</strong> or simply <strong style="color:#F2C744;">call your captain</strong> to place an order at the table.';
+    } else if(bal>0){
+      info.innerHTML='You can <strong style="color:#F2C744;">pre-order from the menu below</strong> or simply <strong style="color:#F2C744;">call your bartender</strong> — your cover balance of <strong style="color:#F2C744;">₹'+((cv.coverActivated||0).toLocaleString('en-IN'))+'</strong> will be deducted as you order.';
+    } else {
+      info.innerHTML='You can <strong style="color:#F2C744;">pre-order from the menu below</strong> or simply <strong style="color:#F2C744;">call your bartender</strong> — recharge your wallet above (or ask the bartender) to start ordering.';
+    }
     inner.appendChild(info);
 
     // Cart summary (sticky)
@@ -4981,21 +4969,21 @@ function renderWalletPage(bookingRef){
       });
     }
 
-      // ══ RUNNING TAB FOOTER ══
+      // ══ RUNNING TAB FOOTER (Digitory red/yellow/black) ══
       var submitCard=document.createElement('div');
       submitCard.id='wallet-tab-footer';
-      submitCard.style.cssText='background:rgba(10,10,10,.97);backdrop-filter:blur(14px);padding:18px 0 28px;margin-top:24px;border-top:2px solid rgba(242,199,68,.22);';
+      submitCard.style.cssText='background:#0A0A0A;padding:18px 16px 24px;margin-top:24px;border-top:2px solid #F2C744;border-radius:12px 12px 0 0;font-family:var(--fs);';
 
       var totalRow=document.createElement('div');
       totalRow.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;';
-      totalRow.innerHTML='<span style="font-size:12px;color:var(--muted);">This Round</span>'
-        +'<span id="tab-round-total" style="font-size:22px;font-weight:900;color:var(--gold);">₹0</span>';
+      totalRow.innerHTML='<span style="font-size:12px;color:#F5F1E8;font-weight:700;letter-spacing:.5px;text-transform:uppercase;font-family:var(--fs);">This Round</span>'
+        +'<span id="tab-round-total" style="font-size:22px;font-weight:900;color:#F2C744;font-family:var(--fs);">₹0</span>';
       submitCard.appendChild(totalRow);
 
       var tabRow=document.createElement('div');
-      tabRow.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;';
-      tabRow.innerHTML='<span style="font-size:11px;color:var(--muted);">Running Tab</span>'
-        +'<span id="tab-running-total" style="font-size:13px;font-weight:700;color:rgba(242,199,68,.7);">₹0</span>';
+      tabRow.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:10px;border-bottom:1px dashed rgba(184,50,39,.6);';
+      tabRow.innerHTML='<span style="font-size:11px;color:#9A9A9A;font-weight:600;letter-spacing:.5px;text-transform:uppercase;font-family:var(--fs);">Running Tab</span>'
+        +'<span id="tab-running-total" style="font-size:13px;font-weight:800;color:#F2C744;opacity:.8;font-family:var(--fs);">₹0</span>';
       submitCard.appendChild(tabRow);
 
       var itemLine=document.createElement('div');
@@ -5010,28 +4998,28 @@ function renderWalletPage(bookingRef){
         var items=Object.keys(cart);
         if(!items.length){il.style.display='none';return;}
         il.style.display='block';
-        il.innerHTML='<div style="font-size:10px;font-weight:800;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">YOUR ORDER</div>';
+        il.innerHTML='<div style="font-size:10px;font-weight:900;color:#F2C744;letter-spacing:1.4px;margin-bottom:8px;text-transform:uppercase;font-family:var(--fs);">Your Order</div>';
         items.forEach(function(key){
           var it=cart[key];
           var row=document.createElement('div');
-          row.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04);';
+          row.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px dashed rgba(184,50,39,.45);font-family:var(--fs);';
           var info=document.createElement('div');
           info.style.cssText='flex:1;min-width:0;';
-          info.innerHTML='<div style="font-size:12px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+sanitize(it.n)+'</div>'
-            +'<div style="font-size:10px;color:var(--muted);">₹'+it.p+' each</div>';
+          info.innerHTML='<div style="font-size:13px;color:#F5F1E8;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--fs);">'+sanitize(it.n)+'</div>'
+            +'<div style="font-size:11px;color:#9A9A9A;font-weight:500;font-family:var(--fs);">₹'+it.p+' each</div>';
           var controls=document.createElement('div');
-          controls.style.cssText='display:flex;align-items:center;gap:8px;flex-shrink:0;margin-left:10px;';
+          controls.style.cssText='display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:10px;';
           var minB=document.createElement('button');
-          minB.style.cssText='width:28px;height:28px;border-radius:7px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#EF4444;font-size:14px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+          minB.style.cssText='width:28px;height:28px;border-radius:6px;background:#B83227;border:1.5px solid #B83227;color:#F2C744;font-size:16px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:var(--fs);line-height:1;';
           minB.textContent='−';
           var qtySpan=document.createElement('span');
-          qtySpan.style.cssText='font-size:14px;font-weight:900;color:var(--text);min-width:16px;text-align:center;';
+          qtySpan.style.cssText='font-size:14px;font-weight:900;color:#F5F1E8;min-width:18px;text-align:center;font-family:var(--fs);';
           qtySpan.textContent=it.qty;
           var plusB=document.createElement('button');
-          plusB.style.cssText='width:28px;height:28px;border-radius:7px;background:rgba(0,200,100,.1);border:1px solid rgba(0,200,100,.3);color:#00C864;font-size:14px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+          plusB.style.cssText='width:28px;height:28px;border-radius:6px;background:#F2C744;border:1.5px solid #F2C744;color:#0A0A0A;font-size:16px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:var(--fs);line-height:1;';
           plusB.textContent='+';
           var priceSpan=document.createElement('span');
-          priceSpan.style.cssText='font-size:13px;font-weight:800;color:var(--gold);min-width:50px;text-align:right;';
+          priceSpan.style.cssText='font-size:13px;font-weight:900;color:#F2C744;min-width:54px;text-align:right;font-family:var(--fs);';
           priceSpan.textContent='₹'+(it.p*it.qty);
           (function(k){
             minB.onclick=function(){
@@ -5131,29 +5119,29 @@ function renderWalletPage(bookingRef){
             var _ov=document.createElement('div');
             _ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(6px);';
             var _md=document.createElement('div');
-            _md.style.cssText='background:var(--card);border:1.5px solid rgba(239,68,68,.4);border-radius:20px;padding:28px 24px;width:100%;max-width:360px;text-align:center;';
+            _md.style.cssText='background:#0A0A0A;border:2px solid #F2C744;border-radius:14px;padding:26px 22px;width:100%;max-width:360px;text-align:center;font-family:var(--fs);';
             var _shortfall=ct+pendingTotal-bal;
-            _md.innerHTML='<div style="font-size:40px;margin-bottom:12px;">⚠️</div>'
-              +'<div style="font-size:18px;font-weight:900;color:#EF4444;margin-bottom:8px;">Insufficient Balance</div>'
-              +'<div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:16px;">Your order of <strong style="color:var(--text);">₹'+ct.toLocaleString('en-IN')+'</strong>'+(pendingTotal>0?' + pending orders ₹'+pendingTotal.toLocaleString('en-IN'):'')+' exceeds your wallet balance of <strong style="color:#00C864;">₹'+bal.toLocaleString('en-IN')+'</strong></div>'
-              +'<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:12px;margin-bottom:16px;"><div style="font-size:11px;color:var(--muted);margin-bottom:4px;">You need</div><div style="font-size:24px;font-weight:900;color:#EF4444;">₹'+_shortfall.toLocaleString('en-IN')+' more</div></div>';
+            _md.innerHTML='<div style="font-size:38px;margin-bottom:10px;">⚠️</div>'
+              +'<div style="font-size:18px;font-weight:900;color:#F2C744;margin-bottom:8px;text-transform:uppercase;letter-spacing:1.2px;font-family:var(--fs);">Insufficient Balance</div>'
+              +'<div style="font-size:13px;color:#F5F1E8;line-height:1.7;margin-bottom:16px;font-family:var(--fs);">Your order of <strong style="color:#F2C744;">₹'+ct.toLocaleString('en-IN')+'</strong>'+(pendingTotal>0?' + pending orders ₹'+pendingTotal.toLocaleString('en-IN'):'')+' exceeds your wallet balance of <strong style="color:#F2C744;">₹'+bal.toLocaleString('en-IN')+'</strong></div>'
+              +'<div style="background:#B83227;border:1.5px solid #F2C744;border-radius:10px;padding:12px;margin-bottom:18px;"><div style="font-size:11px;color:#F5F1E8;margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:1px;font-family:var(--fs);">You need</div><div style="font-size:26px;font-weight:900;color:#F2C744;font-family:var(--fs);">₹'+_shortfall.toLocaleString('en-IN')+' more</div></div>';
             // Recharge presets — show amounts that cover the shortfall
             var _rcDiv=document.createElement('div');
             _rcDiv.style.cssText='margin-bottom:14px;';
-            _rcDiv.innerHTML='<div style="font-size:11px;font-weight:800;color:#A855F7;letter-spacing:1px;margin-bottom:8px;">⚡ QUICK RECHARGE</div>';
+            _rcDiv.innerHTML='<div style="font-size:11px;font-weight:900;color:#F2C744;letter-spacing:1.2px;margin-bottom:8px;text-transform:uppercase;font-family:var(--fs);">⚡ Quick Recharge</div>';
             var _rcRow=document.createElement('div');
             _rcRow.style.cssText='display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:10px;';
             var _selRcAmt=0;
             [500,999,1499,1999,2999].forEach(function(amt){
               if(amt<_shortfall)return; // skip amounts less than shortfall
               var pb=document.createElement('button');
-              pb.style.cssText='padding:10px 14px;border-radius:8px;background:var(--surface);border:1.5px solid var(--border);color:var(--text);font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);transition:all .2s;';
+              pb.style.cssText='padding:10px 14px;border-radius:8px;background:#1A1A1A;border:1.5px solid rgba(242,199,68,.35);color:#F5F1E8;font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);transition:all .2s;';
               pb.textContent='₹'+amt.toLocaleString('en-IN');
-              if(!_selRcAmt){_selRcAmt=amt;pb.style.borderColor='rgba(168,85,247,.6)';pb.style.background='rgba(168,85,247,.12)';}
+              if(!_selRcAmt){_selRcAmt=amt;pb.style.borderColor='#F2C744';pb.style.background='#B83227';pb.style.color='#F2C744';}
               pb.onclick=function(){
                 _selRcAmt=amt;
-                _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
-                pb.style.borderColor='rgba(168,85,247,.6)';pb.style.background='rgba(168,85,247,.12)';
+                _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='rgba(242,199,68,.35)';b.style.background='#1A1A1A';b.style.color='#F5F1E8';});
+                pb.style.borderColor='#F2C744';pb.style.background='#B83227';pb.style.color='#F2C744';
               };
               _rcRow.appendChild(pb);
             });
@@ -5169,28 +5157,28 @@ function renderWalletPage(bookingRef){
             _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
             var _modalCustomWrap=document.createElement('div');
             _modalCustomWrap.style.cssText='margin:0 0 10px;';
-            _modalCustomWrap.innerHTML='<div style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;text-align:center;">Or enter your own amount</div>';
+            _modalCustomWrap.innerHTML='<div style="font-size:10px;font-weight:700;color:#9A9A9A;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;text-align:center;font-family:var(--fs);">Or enter your own amount</div>';
             var _modalCustomRow=document.createElement('div');
-            _modalCustomRow.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1.5px solid rgba(168,85,247,.6);background:rgba(168,85,247,.08);';
-            _modalCustomRow.innerHTML='<span style="font-family:var(--fp);font-size:16px;font-weight:900;color:var(--gold);">₹</span>';
+            _modalCustomRow.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1.5px solid #F2C744;background:#1A1A1A;';
+            _modalCustomRow.innerHTML='<span style="font-family:var(--fs);font-size:16px;font-weight:900;color:#F2C744;">₹</span>';
             var _modalCustomInput=document.createElement('input');
             _modalCustomInput.type='number';_modalCustomInput.min='1';_modalCustomInput.max='50000';_modalCustomInput.step='1';
             _modalCustomInput.value=String(_modalMin); // ← pre-fill with shortfall
             _modalCustomInput.placeholder='Enter amount';
-            _modalCustomInput.style.cssText='flex:1;background:transparent;border:none;outline:none;color:#fff;font-family:var(--fp);font-size:16px;font-weight:900;width:100%;';
+            _modalCustomInput.style.cssText='flex:1;background:transparent;border:none;outline:none;color:#F5F1E8;font-family:var(--fs);font-size:16px;font-weight:900;width:100%;';
             _modalCustomInput.oninput=function(){
               var v=parseInt(_modalCustomInput.value,10);
-              if(isNaN(v)||v<1){_modalCustomRow.style.borderColor='rgba(239,68,68,.4)';return;}
+              if(isNaN(v)||v<1){_modalCustomRow.style.borderColor='#B83227';return;}
               if(v>50000){_modalCustomInput.value='50000';v=50000;}
-              _modalCustomRow.style.borderColor='rgba(168,85,247,.6)';
+              _modalCustomRow.style.borderColor='#F2C744';
               _selRcAmt=v;
-              _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
+              _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='rgba(242,199,68,.35)';b.style.background='#1A1A1A';b.style.color='#F5F1E8';});
             };
             _modalCustomRow.appendChild(_modalCustomInput);
             _modalCustomWrap.appendChild(_modalCustomRow);
             _rcDiv.appendChild(_modalCustomWrap);
             var _rcPayBtn2=document.createElement('button');
-            _rcPayBtn2.style.cssText='width:100%;padding:13px;border-radius:10px;background:linear-gradient(135deg,rgba(168,85,247,.9),rgba(123,47,190,.8));border:none;color:#fff;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:8px;';
+            _rcPayBtn2.style.cssText='width:100%;padding:14px;border-radius:10px;background:#B83227;border:2px solid #F2C744;color:#F2C744;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:8px;letter-spacing:1.2px;text-transform:uppercase;';
             _rcPayBtn2.textContent='💳 Recharge & Order';
             _rcPayBtn2.onclick=function(){
               if(!_selRcAmt){showToast('Select an amount','err',2000);return;}
@@ -5215,10 +5203,10 @@ function renderWalletPage(bookingRef){
             _rcDiv.appendChild(_rcPayBtn2);
             _md.appendChild(_rcDiv);
             // Divider
-            var _orDiv=document.createElement('div');_orDiv.style.cssText='font-size:11px;color:var(--muted);margin-bottom:12px;';_orDiv.textContent='or ask your bartender to recharge';
+            var _orDiv=document.createElement('div');_orDiv.style.cssText='font-size:11px;color:#9A9A9A;margin-bottom:12px;font-family:var(--fs);';_orDiv.textContent='or ask your bartender to recharge';
             _md.appendChild(_orDiv);
             var _cb=document.createElement('button');
-            _cb.style.cssText='width:100%;padding:12px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;font-family:var(--fs);';
+            _cb.style.cssText='width:100%;padding:12px;border-radius:10px;background:#1A1A1A;border:1.5px solid rgba(242,199,68,.35);color:#9A9A9A;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--fs);text-transform:uppercase;letter-spacing:1px;';
             _cb.textContent='Close';
             _cb.onclick=function(){_ov.remove();};
             _md.appendChild(_cb);_ov.appendChild(_md);
@@ -5257,18 +5245,20 @@ function renderWalletPage(bookingRef){
             var overlay=document.createElement('div');
             overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(6px);';
             var modal=document.createElement('div');
-            modal.style.cssText='background:var(--card);border:1px solid var(--border);border-radius:22px;padding:28px 24px;width:100%;max-width:380px;text-align:center;position:relative;';
+            modal.style.cssText='background:#0A0A0A;border:2px solid #F2C744;border-radius:14px;padding:26px 22px;width:100%;max-width:380px;text-align:center;position:relative;font-family:var(--fs);';
             modal.innerHTML=
-              '<div style="font-size:36px;margin-bottom:12px;">🍹</div>'
-              +'<div style="font-size:18px;font-weight:900;color:var(--gold);margin-bottom:6px;">Order Placed!</div>'
-              +'<div style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6;">Show this QR to your <strong style="color:var(--text);">bartender</strong> to prepare your order</div>'
-              +'<div id="order-qr-popup" style="width:140px;height:140px;margin:0 auto 14px;background:#0C0C18;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>'
-              +'<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">Your order:</div>'
-              +'<div style="font-size:13px;color:var(--gold);font-weight:700;margin-bottom:4px;">'+sanitize(placedItems)+'</div>'
-              +'<div style="font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;">₹'+ct.toLocaleString('en-IN')+'</div>'
-              +'<div style="font-size:11px;color:var(--muted);background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.15);border-radius:8px;padding:8px 12px;margin-bottom:16px;line-height:1.6;">Your bartender will scan this, confirm your order, and your wallet will be deducted automatically.</div>';
+              '<div style="background:#B83227;margin:-26px -22px 16px;padding:14px;border-radius:12px 12px 0 0;border-bottom:2px solid #F2C744;">'
+              +'<div style="font-size:32px;margin-bottom:4px;">🍹</div>'
+              +'<div style="font-size:18px;font-weight:900;color:#F2C744;text-transform:uppercase;letter-spacing:1.4px;font-family:var(--fs);">Order Placed!</div>'
+              +'</div>'
+              +'<div style="font-size:13px;color:#F5F1E8;margin-bottom:16px;line-height:1.6;font-family:var(--fs);">Show this QR to your <strong style="color:#F2C744;">bartender</strong> to prepare your order</div>'
+              +'<div id="order-qr-popup" style="width:160px;height:160px;margin:0 auto 14px;background:#fff;border-radius:10px;padding:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>'
+              +'<div style="font-size:10px;color:#F2C744;margin-bottom:6px;font-weight:900;letter-spacing:1.4px;text-transform:uppercase;font-family:var(--fs);">Your Order</div>'
+              +'<div style="font-size:13px;color:#F5F1E8;font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px;font-family:var(--fs);">'+sanitize(placedItems)+'</div>'
+              +'<div style="font-size:24px;font-weight:900;color:#F2C744;margin-bottom:16px;font-family:var(--fs);">₹'+ct.toLocaleString('en-IN')+'</div>'
+              +'<div style="font-size:11px;color:#F5F1E8;background:#1A1A1A;border:1px solid rgba(242,199,68,.3);border-radius:8px;padding:10px 12px;margin-bottom:16px;line-height:1.6;font-family:var(--fs);">Your bartender will scan this, confirm your order, and your wallet will be deducted automatically.</div>';
             var closeBtn=document.createElement('button');
-            closeBtn.style.cssText='width:100%;padding:12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:var(--text);font-size:14px;font-weight:700;cursor:pointer;font-family:var(--fs);';
+            closeBtn.style.cssText='width:100%;padding:13px;border-radius:10px;background:#B83227;border:2px solid #F2C744;color:#F2C744;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);text-transform:uppercase;letter-spacing:1.2px;';
             closeBtn.textContent='Got it ✓';
             closeBtn.onclick=function(){overlay.remove();};
             modal.appendChild(closeBtn);
