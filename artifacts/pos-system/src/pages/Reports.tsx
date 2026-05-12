@@ -344,7 +344,17 @@ export default function Reports() {
   const [guestlist, setGuestlist] = useState<HodGuestlistEntry[]>([]);
   const [covers, setCovers] = useState<Array<HodCover & { id: string }>>([]);
   const [orphans, setOrphans] = useState<any[]>([]);
-  const [view, setView] = useState<"tables" | "wallets" | "tally">("tables");
+  const [view, setView] = useState<"tables" | "wallets" | "tally" | "edc">("tables");
+  // ── EDC Cloud transactions (Razorpay POS / Pine Labs) for the selected night.
+  // Read-only ledger of every card-swipe pushed from Door Mode → EDC machine.
+  // Each row is one charge attempt: pending / success / failed / cancelled,
+  // with amount, vendor, card last-4, and EDC reference for reconciliation.
+  // Pulled from Firestore `edcTransactions` collection (written by the cloud
+  // function on dispatch + webhook). Falls back silently if collection absent.
+  const [edcTxns, setEdcTxns] = useState<Array<{ id: string; [k: string]: any }>>([]);
+  const [edcStatusFilter, setEdcStatusFilter] = useState<"all" | "success" | "failed" | "cancelled" | "pending">("all");
+  const [edcVendorFilter, setEdcVendorFilter] = useState<string>("all");
+  const [edcBouncerFilter, setEdcBouncerFilter] = useState<string>("all");
   // "mismatched" = combined leakage + phantom + minor (Khushi-requested merge —
   // 3 separate buttons confused her; the per-row chip still shows the actual
   // verdict so the underlying anti-fraud signal is never lost).
@@ -442,6 +452,21 @@ export default function Reports() {
       }, (e) => { console.warn("[Reports] posKOTs tally subscribe failed", e); setTallyKots([]); setTallyKotsStatus("error"); });
       return unsub;
     } catch (e) { console.warn("[Reports] posKOTs tally setup failed", e); setTallyKotsStatus("error"); return; }
+  }, [today]);
+
+  // 4c) EDC transactions for the selected night. Filter by `date` field
+  //     (operational night string) so we don't pull weeks of history. The
+  //     cloud function stamps `date` at dispatch time using the same
+  //     getOperationalNightStr() the rest of the POS uses, so a charge made
+  //     at 2am Sunday morning is correctly grouped with Saturday's night.
+  useEffect(() => {
+    try {
+      const q = query(collection(db, "edcTransactions"), where("date", "==", today));
+      const unsub = onSnapshot(q,
+        (snap) => setEdcTxns(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))),
+        (e) => { console.warn("[Reports] edcTransactions subscribe failed", e); setEdcTxns([]); });
+      return unsub;
+    } catch { setEdcTxns([]); return; }
   }, [today]);
 
   // 5) Orphan Zomato payments (read-only enrichment) — narrow to today's night
@@ -821,6 +846,35 @@ export default function Reports() {
     downloadCSV(`HOD_KOT_vs_Bill_${today}.csv`, rows);
   };
 
+  // 💳 EDC Cloud transactions export — every card-machine charge attempt
+  // tonight (success / failed / cancelled / pending). Source of truth for
+  // door card payments — accountant reconciles Razorpay settlement report
+  // against this CSV instead of trusting hand-written cash sheets.
+  const exportEdc = () => {
+    const rows = edcTxns.map((t) => ({
+      Date: t.date || today,
+      "Created At": fmtTime(t.createdAt || ""),
+      "Updated At": fmtTime(t.updatedAt || ""),
+      Vendor: t.vendor || "",
+      "Terminal ID": t.terminalId || "",
+      Status: String(t.status || "").toUpperCase(),
+      "Booking Ref": t.bookingRef || "",
+      "Cover Ref": t.coverRef || "",
+      "Amount ₹": Number(t.amount || 0),
+      "Card Network": t.cardNetwork || "",
+      "Card Last 4": t.last4 || "",
+      "EDC Ref / Slip": t.edcRef || "",
+      "Razorpay Payment ID": t.razorpayPaymentId || "",
+      "Razorpay Intent ID": t.razorpayIntentId || "",
+      "Pine Labs Ref": t.pineLabsRef || "",
+      "Bouncer": t.bouncerName || "",
+      "Bouncer PIN Hash": t.bouncerPin || "",
+      "Failure Reason": t.errorReason || "",
+      "Txn ID": t.id,
+    }));
+    downloadCSV(`HOD_EDC_Card_${today}.csv`, rows);
+  };
+
   const ambColor = (a: Ambiguity) => a === "red" ? RED : a === "orange" ? ORANGE : GREEN;
   const dot = (a: Ambiguity) => (
     <span title={a.toUpperCase()} style={{ display: "inline-block", width: 10, height: 10, borderRadius: 5, background: ambColor(a), boxShadow: `0 0 6px ${ambColor(a)}aa` }} />
@@ -860,6 +914,12 @@ export default function Reports() {
               boxShadow: tallyTotals.leakageTables > 0 && view !== "tally" ? `0 0 0 2px ${RED}88` : "none" }}>
             🧾 KOT vs Bill ({tallyRows.length})
             {tallyTotals.leakageTables > 0 && <span style={{ marginLeft: 6, color: view === "tally" ? RED : RED, fontWeight: 900 }}>· 🔴 {tallyTotals.leakageTables}</span>}
+          </button>
+          <button onClick={() => setView("edc")}
+            title="Card-machine charges pushed from Door Mode tonight. Source of truth for cover card payments — no manual reconciliation needed."
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
+              background: view === "edc" ? GOLD : "rgba(255,255,255,.06)", color: view === "edc" ? "#030305" : "#fff" }}>
+            💳 EDC Card ({edcTxns.length})
           </button>
         </div>
       </div>
@@ -931,9 +991,9 @@ export default function Reports() {
             background: showFilters ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.06)", color: showFilters ? GOLD : "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
           ⚙ Filter & Sort {(filter !== "all" || sourceFilter !== "all") ? "•" : ""}
         </button>
-        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : exportTally}
+        <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : view === "edc" ? exportEdc : exportTally}
           style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
-          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : filteredTally.length} rows)
+          ⬇ Export CSV ({view === "tables" ? filteredTables.length : view === "wallets" ? filteredWallets.length : view === "edc" ? edcTxns.length : filteredTally.length} rows)
         </button>
         {view === "tables" && (
           <button onClick={exportItemsForDigiPos}
@@ -1178,6 +1238,119 @@ export default function Reports() {
           </table>
         </div>
       )}
+
+      {/* EDC CARD VIEW — every cloud-card-machine charge attempt tonight */}
+      {view === "edc" && (() => {
+        const sorted = [...edcTxns].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+        // Filters: status / vendor / bouncer (Khushi-requested 12 May 2026 —
+        // when she's reconciling at 3am she wants to isolate just the failed
+        // ones, or just one bouncer's shift, before exporting to CSV).
+        const filtered = sorted.filter(t => {
+          if (edcStatusFilter !== "all" && t.status !== edcStatusFilter) return false;
+          if (edcVendorFilter !== "all" && t.vendor !== edcVendorFilter) return false;
+          if (edcBouncerFilter !== "all" && (t.bouncerName || "—") !== edcBouncerFilter) return false;
+          if (search.trim() && !`${t.bookingRef} ${t.coverRef} ${t.bouncerName} ${t.last4} ${t.edcRef} ${t.razorpayPaymentId} ${t.pineLabsRef}`.toLowerCase().includes(search.toLowerCase())) return false;
+          return true;
+        });
+        const successCount = sorted.filter(t => t.status === "success").length;
+        const failCount = sorted.filter(t => t.status === "failed").length;
+        const cancelCount = sorted.filter(t => t.status === "cancelled").length;
+        const pendingCount = sorted.filter(t => t.status === "pending").length;
+        // Success rate excludes still-pending charges (denominator = settled
+        // attempts only). 0 attempts → "—" so we don't render NaN%.
+        const settled = successCount + failCount + cancelCount;
+        const successRate = settled === 0 ? null : Math.round((successCount / settled) * 100);
+        const successAmt = sorted.filter(t => t.status === "success").reduce((s, t) => s + Number(t.amount || 0), 0);
+        const vendors = Array.from(new Set(sorted.map(t => t.vendor).filter(Boolean))) as string[];
+        const bouncers = Array.from(new Set(sorted.map(t => t.bouncerName || "—"))).sort();
+        const statusColor = (s: string) => s === "success" ? GREEN : s === "failed" ? RED : s === "cancelled" ? "rgba(255,255,255,.5)" : ORANGE;
+        const rateColor = successRate == null ? "rgba(255,255,255,.5)" : successRate >= 90 ? GREEN : successRate >= 70 ? ORANGE : RED;
+        return (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+              <Tile label="Charges tonight" value={String(sorted.length)} color={GOLD} />
+              <Tile label="✅ Successful" value={String(successCount)} color={GREEN} />
+              <Tile label="❌ Declined" value={String(failCount)} color={RED} />
+              <Tile label="🚫 Cancelled" value={String(cancelCount)} color="rgba(255,255,255,.5)" />
+              <Tile label="⏳ Pending" value={String(pendingCount)} color={ORANGE} />
+              <Tile label="Success rate" value={successRate == null ? "—" : `${successRate}%`} color={rateColor} />
+              <Tile label="Card revenue ₹" value={`₹${successAmt.toLocaleString()}`} color={GOLD} />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12, alignItems: "center" }}>
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px" }}>STATUS:</span>
+              {(["all", "success", "failed", "cancelled", "pending"] as const).map(s => (
+                <button key={s} onClick={() => setEdcStatusFilter(s)}
+                  style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "1px solid rgba(255,255,255,.1)",
+                    background: edcStatusFilter === s ? GOLD : "rgba(255,255,255,.06)", color: edcStatusFilter === s ? "#030305" : "rgba(255,255,255,.85)" }}>
+                  {s.toUpperCase()}
+                </button>
+              ))}
+              {vendors.length > 1 && (<>
+                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>VENDOR:</span>
+                <select value={edcVendorFilter} onChange={e => setEdcVendorFilter(e.target.value)}
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  <option value="all">All vendors</option>
+                  {vendors.map(v => <option key={v} value={v}>{v.toUpperCase()}</option>)}
+                </select>
+              </>)}
+              {bouncers.length > 1 && (<>
+                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>BOUNCER:</span>
+                <select value={edcBouncerFilter} onChange={e => setEdcBouncerFilter(e.target.value)}
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  <option value="all">All bouncers</option>
+                  {bouncers.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </>)}
+            </div>
+            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(168,85,247,.06)", border: "1px solid rgba(168,85,247,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+              <strong style={{ color: "#A855F7" }}>💳 EDC CLOUD:</strong> Bouncer-tapped Card payments dispatched to the door card machine via Razorpay POS Terminal API (or Pine Labs Plutus Cloud). Source of truth for door card revenue — the accountant should reconcile this against the vendor settlement report each morning, not the cash sheet.
+            </div>
+            <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+                <thead>
+                  <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                    {["When", "Status", "Vendor", "Amount", "Booking Ref", "Card", "EDC Ref", "Bouncer", "Reason"].map((h) => (
+                      <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 ? (
+                    <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
+                      {sorted.length === 0
+                        ? "No card-machine charges yet for this night. Once Door Mode pushes a card payment, it'll appear here in real time."
+                        : "No charges match this search."}
+                    </td></tr>
+                  ) : filtered.map((t) => {
+                    const c = statusColor(String(t.status || ""));
+                    return (
+                      <tr key={t.id} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", whiteSpace: "nowrap" }}>{fmtTime(t.createdAt || "")}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
+                            {String(t.status || "").toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.85)" }}>{t.vendor || "—"}</td>
+                        <td style={{ padding: "6px 6px", textAlign: "right", color: GOLD, fontWeight: 800 }}>₹{Number(t.amount || 0).toLocaleString()}</td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontFamily: "monospace", fontSize: 10 }}>{t.bookingRef || "—"}</td>
+                        <td style={{ padding: "6px 6px" }}>
+                          {t.last4 ? <span>{t.cardNetwork || "CARD"} ••••{t.last4}</span> : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>
+                          {t.edcRef || t.razorpayPaymentId || t.pineLabsRef || "—"}
+                        </td>
+                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{t.bouncerName || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: t.errorReason ? RED : "rgba(255,255,255,.4)", fontSize: 10 }}>{t.errorReason || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        );
+      })()}
 
       {/* TALLY VIEW */}
       {view === "tally" && (

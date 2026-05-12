@@ -26,6 +26,12 @@ async function requireDoorManagerPin(reason: string): Promise<boolean> {
   return true;
 }
 import { ALL_TABLES, SECTION_LABELS } from "@/lib/tables-config";
+import { FEATURES } from "@/lib/feature-flags";
+import {
+  startEdcCharge, subscribeToEdcTransaction, cancelEdcCharge,
+  EDC_CLIENT_TIMEOUT_MS,
+  type EdcVendor, type EdcTransactionDoc,
+} from "@/lib/edc-charge";
 import { getOperationalNightStr } from "@/lib/utils-pos";
 import { unmarkGuestArrived, markGuestArrived } from "@/lib/firestore-hod";
 import { useToast } from "@/hooks/use-toast";
@@ -157,6 +163,20 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   const [splitCash, setSplitCash] = useState("");
   const [splitUpi, setSplitUpi] = useState("");
   const [splitCard, setSplitCard] = useState("");
+  // ── EDC Cloud (Razorpay POS Terminal) — bouncer PIN + live dialog ────────
+  // We only show the PIN field + dialog when:
+  //   1. FEATURES.edc is on AND
+  //   2. method === "card" (split payments still go through the legacy flow —
+  //      EDC for the card portion of a split adds too much UX/edge-case
+  //      complexity for first ship; revisit once Razorpay flow is proven).
+  // Vendor is currently hard-coded to "razorpay"; once Pine Labs goes live
+  // we'll add a vendor toggle in admin settings.
+  const [edcPin, setEdcPin] = useState("");
+  // dueAmount = what the EDC machine actually charges (cover − online prepayment).
+  // fullAmount = the cover amount to record on activation (covers add-ons + prepaid).
+  // We must NOT pass dueAmount to activation, or the wallet under-activates
+  // for partially prepaid bookings.
+  const [edcTxn, setEdcTxn] = useState<{ txnId: string; vendor: EdcVendor; dueAmount: number; fullAmount: number } | null>(null);
 
   // Edit existing state
   const [editMode, setEditMode] = useState(false);
@@ -184,6 +204,24 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     window.open(`https://wa.me/91${phone}?text=${msg}`, "_blank", "noopener");
   };
 
+  // Shared finalizer — writes the cover doc once payment (EDC or otherwise) is settled.
+  const finalizeActivation = async (
+    amt: number,
+    pm: "cash" | "upi" | "card" | "paid_online" | "split",
+    paymentSplit: { cash?: number; upi?: number; card?: number; paid_online?: number } | undefined,
+    edcRef?: string,
+  ) => {
+    const { cover } = await activateCoverForBooking({ booking, amount: amt, paymentMethod: pm, paymentSplit, staffName: agentName });
+    setExisting(cover);
+    const diff = amt - paidOnline;
+    const collectMsg = pm === "split"
+      ? `\n\nCollect: ${paymentSplit?.cash ? `₹${paymentSplit.cash} cash ` : ""}${paymentSplit?.upi ? `+ ₹${paymentSplit.upi} UPI ` : ""}${paymentSplit?.card ? `+ ₹${paymentSplit.card} card` : ""}`.trim()
+      : edcRef
+        ? `\n\n💳 EDC charged ₹${diff > 0 ? diff : amt} (ref ${edcRef}).`
+        : diff > 0 ? `\n\nCollect ₹${diff} ${pm === "cash" ? "cash" : pm === "upi" ? "UPI" : "card"}.` : "";
+    alert(`✅ Cover ₹${amt} activated for ${booking.name || "guest"}.${collectMsg}`);
+  };
+
   const handleActivate = async () => {
     setErr("");
     const amt = parseInt(amount, 10);
@@ -200,16 +238,63 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
       if (c < 0 || u < 0 || cd < 0) { setErr("Split amounts cannot be negative"); return; }
       paymentSplit = { cash: c, upi: u, card: cd, paid_online: paidOnline };
     }
+
+    // ── EDC Cloud branch ──────────────────────────────────────────────────
+    // Pure-card payment with EDC enabled → push the bill to the card-swipe
+    // machine BEFORE writing the cover doc. We dispatch the charge, open
+    // the live status dialog, and let onSuccess (in the dialog) call
+    // finalizeActivation once the customer has tapped their card.
+    if (FEATURES.edc && method === "card") {
+      if (!/^\d{4,6}$/.test(edcPin)) { setErr("Enter a valid 4–6 digit bouncer PIN"); return; }
+      // bookingId = Firestore doc id; bookingRef = human-readable ref.
+      const bookingId  = booking.id  || booking.ref || "";
+      const bookingRef = booking.ref || booking.id  || "";
+      const coverRef   = bookingRef;
+      if (!bookingId || !bookingRef) { setErr("Missing booking reference"); return; }
+      // Reject EDC dispatch when nothing is owed (e.g. fully paid online).
+      // Without this guard, switching method to Card on a zero-due booking
+      // would push the gross amount to the EDC machine and double-charge.
+      const quoteAmt = amt - paidOnline;
+      if (quoteAmt <= 0) {
+        setErr("Nothing due — this booking is already paid online. Use 'Mark paid' instead.");
+        return;
+      }
+      setBusy(true);
+      // Note: cloud function derives canonical amount strictly from
+      // covers/bookings; expectedAmount below is only a client sanity
+      // check and is rejected server-side if it diverges.
+      const dispatch = await startEdcCharge({
+        bookingId,
+        bookingRef,
+        coverRef,
+        vendor: "razorpay",
+        bouncerPin: edcPin,
+        bouncerName: agentName,
+        expectedAmount: amt - paidOnline > 0 ? amt - paidOnline : amt,
+      });
+      setBusy(false);
+      if (!dispatch.ok || !dispatch.txnId) {
+        const reasonMap: Record<string, string> = {
+          vendor_disabled: "Razorpay POS Terminal API is not yet enabled on this merchant account. Ask owner to enable in Razorpay dashboard.",
+          bad_pin: "Bouncer PIN rejected. Try again or get a manager.",
+          no_amount: "Server couldn't determine the cover amount for this booking. Refresh and retry, or use cash/UPI.",
+          amount_mismatch: dispatch.canonical
+            ? `Amount mismatch — booking actually owes ₹${dispatch.canonical}. Update the cover amount and retry.`
+            : "Amount mismatch — refresh the booking and retry.",
+          vendor_error: dispatch.errorMessage || "EDC vendor rejected the charge — try again or use cash/UPI.",
+          no_terminal: "No EDC machine paired. Configure a Terminal ID in cloud function settings.",
+          error: dispatch.errorMessage || "Could not reach the EDC machine.",
+        };
+        setErr(reasonMap[dispatch.reason || "error"] || dispatch.errorMessage || "EDC dispatch failed");
+        return;
+      }
+      setEdcTxn({ txnId: dispatch.txnId, vendor: "razorpay", dueAmount: quoteAmt, fullAmount: amt });
+      return; // dialog drives the rest
+    }
+
     setBusy(true);
     try {
-      const { cover } = await activateCoverForBooking({ booking, amount: amt, paymentMethod: method, paymentSplit, staffName: agentName });
-      setExisting(cover);
-      const diff = amt - paidOnline;
-      const collectMsg = method === "split"
-        ? `\n\nCollect: ${paymentSplit?.cash ? `₹${paymentSplit.cash} cash ` : ""}${paymentSplit?.upi ? `+ ₹${paymentSplit.upi} UPI ` : ""}${paymentSplit?.card ? `+ ₹${paymentSplit.card} card` : ""}`.trim()
-        : diff > 0 ? `\n\nCollect ₹${diff} ${method === "cash" ? "cash" : method === "upi" ? "UPI" : "card"}.` : "";
-      // Just show success — user can hit the "📲 Send WhatsApp Wallet Link" button below if they want to message the customer
-      alert(`✅ Cover ₹${amt} activated for ${booking.name || "guest"}.${collectMsg}`);
+      await finalizeActivation(amt, method, paymentSplit);
     } catch (e: any) { setErr(e?.message || "Failed to activate"); }
     setBusy(false);
   };
@@ -303,7 +388,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               {([
                 { id: "cash" as const, label: "💵 Cash", color: "#00C864" },
                 { id: "upi" as const, label: "📱 UPI", color: "#00C4FF" },
-                { id: "card" as const, label: "💳 Card", color: "#A855F7" },
+                { id: "card" as const, label: FEATURES.edc ? "💳 Card (EDC)" : "💳 Card", color: "#A855F7" },
                 { id: "paid_online" as const, label: "✅ Paid Online", color: "#F59E0B" },
               ]).map((pm) => {
                 const sel = method === pm.id;
@@ -364,6 +449,25 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               </div>
             )}
 
+            {/* EDC bouncer-PIN gate. Only on the pure-Card path so cash/UPI/split
+                flows are unaffected. PIN keeps the card machine from firing on
+                a phone someone else picked up off the door podium. */}
+            {FEATURES.edc && method === "card" && (
+              <div style={{ background: "rgba(168,85,247,.06)", border: "1px solid rgba(168,85,247,.3)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                <div style={{ fontSize: 10, color: "#A855F7", letterSpacing: ".5px", fontWeight: 800, marginBottom: 6 }}>💳 EDC CLOUD — BOUNCER PIN</div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 8 }}>
+                  We'll push ₹{Math.max(parseInt(amount || "0", 10) - paidOnline, parseInt(amount || "0", 10) || 0).toLocaleString("en-IN")} to the EDC machine. Enter your 4-digit PIN to authorise.
+                </div>
+                <input
+                  type="password" inputMode="numeric" autoComplete="off"
+                  maxLength={6} value={edcPin}
+                  onChange={(e) => setEdcPin(e.target.value.replace(/\D/g, ""))}
+                  placeholder="• • • •"
+                  style={{ width: "100%", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(168,85,247,.4)", color: "#fff", fontSize: 18, letterSpacing: 6, textAlign: "center", outline: "none", boxSizing: "border-box" }}
+                />
+              </div>
+            )}
+
             <button onClick={handleActivate} disabled={busy}
               style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#C9A84C,#A07830)", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", marginBottom: 8 }}>
               {busy ? "Activating…" : "⚡ Activate Cover Wallet"}
@@ -377,6 +481,181 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           style={{ width: "100%", padding: 11, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.55)", fontSize: 13, cursor: "pointer" }}>
           Close
         </button>
+      </div>
+
+      {edcTxn && (
+        <EDCPaymentDialog
+          txnId={edcTxn.txnId}
+          vendor={edcTxn.vendor}
+          amount={edcTxn.dueAmount}
+          customerName={booking.name || "Guest"}
+          onSuccess={async (txn) => {
+            // Record FULL cover amount on activation (so coverActivated
+            // reflects the whole cover incl. any prepaid online portion);
+            // the EDC machine only charged the dueAmount.
+            const full = edcTxn.fullAmount;
+            setEdcTxn(null);
+            setBusy(true);
+            try {
+              await finalizeActivation(full, "card", undefined, txn.edcRef || txn.razorpayPaymentId || txn.pineLabsRef);
+            } catch (e: any) {
+              setErr(`Card swiped OK but cover write failed: ${e?.message || ""}. Owner can manually activate from admin.`);
+            }
+            setBusy(false);
+          }}
+          onFailed={(reason) => {
+            setEdcTxn(null);
+            setErr(`💳 EDC charge failed: ${reason}. Try cash/UPI or run the card again.`);
+          }}
+          onCancelled={() => {
+            setEdcTxn(null);
+            setErr("Card charge cancelled.");
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── EDC Payment Dialog ─────────────────────────────────────────────────────
+// Full-screen modal that subscribes to Firestore `edcTransactions/{txnId}`
+// and reflects live status from the card-swipe machine. States:
+//   • pending   — card machine waiting for tap (default; auto-times-out at 60s)
+//   • success   — vendor webhook confirmed payment → fires onSuccess(txn)
+//   • failed    — card declined / EDC reported error → fires onFailed(reason)
+//   • cancelled — bouncer hit Cancel OR vendor webhook reported cancellation
+// The dialog NEVER auto-confirms on its own — every transition is driven by
+// Firestore writes from the cloud function (which itself only writes after
+// HMAC-verifying the vendor webhook). This keeps the door tablet honest:
+// no way to forge a "success" by tampering with the browser.
+function EDCPaymentDialog({
+  txnId, vendor, amount, customerName,
+  onSuccess, onFailed, onCancelled,
+}: {
+  txnId: string;
+  vendor: EdcVendor;
+  amount: number;
+  customerName: string;
+  onSuccess: (txn: EdcTransactionDoc) => void;
+  onFailed: (reason: string) => void;
+  onCancelled: () => void;
+}) {
+  const [txn, setTxn] = useState<EdcTransactionDoc | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
+  const startRef = useRef(Date.now());
+  // Guard so the success/failure callback only fires once even if Firestore
+  // sends a duplicate snapshot (e.g. metadata-only updates).
+  const settledRef = useRef(false);
+
+  useEffect(() => {
+    const unsub = subscribeToEdcTransaction(txnId, (latest) => {
+      if (!latest) return;
+      setTxn(latest);
+      if (settledRef.current) return;
+      // Delay parent callback so the success/failure screen is actually
+      // visible before the dialog unmounts.
+      if (latest.status === "success") {
+        settledRef.current = true;
+        setTimeout(() => onSuccess(latest), 2000);
+      } else if (latest.status === "failed") {
+        settledRef.current = true;
+        setTimeout(() => onFailed(latest.errorReason || "DECLINED"), 1500);
+      } else if (latest.status === "cancelled") {
+        settledRef.current = true;
+        setTimeout(() => onCancelled(), 1500);
+      }
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [txnId]);
+
+  // Tick the countdown and self-cancel after the client-side timeout. The
+  // server still owns the source of truth — if a webhook later reports
+  // success the cover will be activated by the admin reconciliation job.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const e = Date.now() - startRef.current;
+      setElapsedMs(e);
+      if (e >= EDC_CLIENT_TIMEOUT_MS && !settledRef.current) {
+        settledRef.current = true;
+        cancelEdcCharge(txnId).finally(() => onFailed("TIMEOUT — customer didn't tap in time"));
+      }
+    }, 250);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [txnId]);
+
+  const handleCancel = async () => {
+    if (settledRef.current) return;
+    if (!window.confirm("Cancel this card charge? If the customer has already tapped, the charge may still go through and admin will reverse it.")) return;
+    setCancelling(true);
+    settledRef.current = true;
+    await cancelEdcCharge(txnId);
+    onCancelled();
+  };
+
+  const status = txn?.status || "pending";
+  const remaining = Math.max(0, Math.ceil((EDC_CLIENT_TIMEOUT_MS - elapsedMs) / 1000));
+  const vendorLabel = vendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#0C0816", border: "1.5px solid rgba(168,85,247,.4)", borderRadius: 18, padding: 26, width: "100%", maxWidth: 380, textAlign: "center" }}>
+        <div style={{ fontSize: 11, color: "#A855F7", letterSpacing: 1.5, fontWeight: 900, marginBottom: 14 }}>💳 {vendorLabel} — CARD MACHINE</div>
+
+        <div style={{ fontSize: 36, fontWeight: 900, color: "#fff", marginBottom: 4 }}>
+          ₹{amount.toLocaleString("en-IN")}
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 22 }}>
+          for {customerName}
+        </div>
+
+        {status === "pending" && (
+          <>
+            <div style={{ fontSize: 60, marginBottom: 14, animation: "pulse 1.4s ease-in-out infinite" }}>📡</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#A855F7", marginBottom: 4 }}>Tap card on the EDC machine</div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 18 }}>
+              {remaining}s remaining
+            </div>
+            <div style={{ height: 4, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden", marginBottom: 18 }}>
+              <div style={{ width: `${Math.min(100, (elapsedMs / EDC_CLIENT_TIMEOUT_MS) * 100)}%`, height: "100%", background: "linear-gradient(90deg,#A855F7,#EC4899)", transition: "width .25s linear" }} />
+            </div>
+            <button onClick={handleCancel} disabled={cancelling}
+              style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.35)", color: "#EF4444", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              {cancelling ? "Cancelling…" : "✕ Cancel"}
+            </button>
+          </>
+        )}
+
+        {status === "success" && (
+          <>
+            <div style={{ fontSize: 60, marginBottom: 12 }}>✅</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: "#00C864", marginBottom: 4 }}>Approved</div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
+              {txn?.cardNetwork || "Card"}{txn?.last4 ? ` ••••${txn.last4}` : ""}
+              {txn?.edcRef ? ` · Ref ${txn.edcRef}` : ""}
+            </div>
+          </>
+        )}
+
+        {status === "failed" && (
+          <>
+            <div style={{ fontSize: 60, marginBottom: 12 }}>❌</div>
+            <div style={{ fontSize: 14, fontWeight: 900, color: "#EF4444", marginBottom: 12 }}>{txn?.errorReason || "DECLINED"}</div>
+            <button onClick={() => onFailed(txn?.errorReason || "DECLINED")}
+              style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.35)", color: "#EF4444", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              Close & retry
+            </button>
+          </>
+        )}
+
+        {status === "cancelled" && (
+          <>
+            <div style={{ fontSize: 60, marginBottom: 12 }}>🚫</div>
+            <div style={{ fontSize: 14, fontWeight: 900, color: "rgba(255,255,255,.6)", marginBottom: 4 }}>Cancelled</div>
+          </>
+        )}
       </div>
     </div>
   );
