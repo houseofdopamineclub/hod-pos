@@ -1079,6 +1079,41 @@ export async function markRoundServed(docId: string, roundIndex: number, booking
   }
 }
 
+// 🔴 2026-05-13 — Khushi: Print KOT used to call markRoundServed which
+// flipped the customer wallet straight to "✅ Served" the moment the kitchen
+// ticket printed (long before the food actually reached the table). Split
+// the flow so Print KOT now sets status="activated" (wallet shows
+// "🔵 Ready to Serve") and a separate Mark Served button later sets
+// status="served". Mirrors to covers/{bookingRef} so the customer wallet
+// (which subscribes to covers for in-house HOD- bookings) sees it live.
+export async function markRoundActivated(
+  docId: string, roundIndex: number, staffName: string, bookingRef?: string
+): Promise<void> {
+  const now = new Date().toISOString();
+  const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
+  if (!snap.exists()) throw new Error("Reservation not found");
+  const rounds = [...(snap.data().tabRounds || [])];
+  if (rounds[roundIndex]) {
+    rounds[roundIndex] = {
+      ...rounds[roundIndex],
+      status: "activated",
+      activatedBy: staffName,
+      activatedAt: now,
+    };
+  }
+  await updateDoc(doc(db, TABLE_RES_COL, docId), { tabRounds: rounds });
+  if (bookingRef) {
+    const cs = await getDoc(doc(db, COVERS_COL, bookingRef));
+    if (cs.exists()) {
+      const cr = [...(cs.data().tabRounds || [])];
+      if (cr[roundIndex]) {
+        cr[roundIndex] = { ...cr[roundIndex], status: "activated", activatedBy: staffName, activatedAt: now };
+      }
+      await updateDoc(doc(db, COVERS_COL, bookingRef), { tabRounds: cr });
+    }
+  }
+}
+
 export async function updateRoundItems(
   docId: string, roundIndex: number, items: HodOrderItem[], roundTotal: number, editedBy?: string
 ): Promise<void> {
@@ -1100,6 +1135,21 @@ export async function updateRoundItems(
   const upd: Record<string, unknown> = { tabRounds: rounds, tabTotal };
   if ((data.billPrintCount || 0) > 0) upd.billStale = true;
   await updateDoc(doc(db, TABLE_RES_COL, docId), upd);
+  // 🔴 2026-05-13 — Khushi: edits done by the captain weren't reaching the
+  // customer wallet (wallet subscribes to covers/{ref}.tabRounds for
+  // in-house bookings). Mirror the full rounds array to covers — match the
+  // pattern used by markRoundServed / markRoundActivated. Best-effort; safe
+  // to skip when no cover doc exists (walk-in / table-only flows).
+  try {
+    const bRef = data.bookingRef;
+    if (bRef) {
+      const cRef = doc(db, COVERS_COL, bRef);
+      const cs = await getDoc(cRef);
+      if (cs.exists()) {
+        await updateDoc(cRef, { tabRounds: rounds, tabTotal });
+      }
+    }
+  } catch {}
 }
 
 export async function markTablePaid(
@@ -1973,6 +2023,19 @@ export async function createWalkInTable(
   const existing = await getDocs(q2);
   if (!existing.empty) throw new Error(`Table ${tableId} is already occupied today`);
 
+  // Write covers doc FIRST so if rules/network reject it, the tableReservations
+  // write below never runs and the captain sees the failure instead of getting
+  // a half-created booking with a permanently locked customer menu.
+  // The wallet (hodclub.in) reads this to unlock the menu immediately —
+  // walk-ins are by definition "arrived" with no separate "Guest Arrived" step.
+  // `name` mirrors `customerName` since some wallet code paths read `name`.
+  await setDoc(doc(db, COVERS_COL, ref), {
+    isTableBooking: true, tableId, floor, floorLabel,
+    customerName, name: customerName, phone: phone || "", partySize: partySize || 2,
+    arrivalTime: arrTime, actualArrivalTime: arrTime,
+    bookingRef: ref, ref, isWalkIn: true,
+  }, { merge: true });
+
   const d = doc(db, TABLE_RES_COL, ref);
   await setDoc(d, {
     tableId, floor, floorLabel, date, customerName, phone: phone || "",
@@ -2236,6 +2299,13 @@ export async function createProxyTable(
   const date = now.toISOString().split("T")[0];
   const arrTime = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = `PROXY-${proxyName.replace(/\s+/g, "-")}-${Date.now().toString(36).toUpperCase()}`;
+  // Write covers doc FIRST (see createWalkInTable for rationale).
+  await setDoc(doc(db, COVERS_COL, ref), {
+    isTableBooking: true, tableId: proxyName, floor, floorLabel,
+    customerName, name: customerName, phone: phone || "", partySize: partySize || 2,
+    arrivalTime: arrTime, actualArrivalTime: arrTime,
+    bookingRef: ref, ref, isWalkIn: true, isProxy: true,
+  }, { merge: true });
   const d = doc(db, TABLE_RES_COL, ref);
   await setDoc(d, {
     tableId: proxyName, floor, floorLabel, date, customerName, phone: phone || "",
@@ -2306,7 +2376,33 @@ export async function addRoundToTable(
     const upd: Record<string, unknown> = { tabRounds: rounds, tabTotal };
     if ((data.billPrintCount || 0) > 0) upd.billStale = true;
     txn.update(ref, upd);
+    // 🔴 2026-05-13 — Khushi: captain-added items weren't reaching the
+    // customer wallet because the wallet (for in-house HOD- bookings)
+    // subscribes to covers/{bookingRef}.tabRounds, but addRoundToTable only
+    // wrote to tableReservations. Mirror the full rounds array to covers so
+    // the wallet receives it live. Stash bookingRef + rounds for the
+    // post-txn mirror below (can't do a second collection write inside the
+    // same transaction without enrolling the covers doc, which would
+    // serialize unrelated wallet writes).
+    (upd as any).__mirror = { bookingRef: data.bookingRef, rounds, tabTotal };
   });
+  // Best-effort mirror to covers/{ref} — never fail the captain-side write
+  // if the cover doc doesn't exist (table-only flows e.g. walk-ins).
+  try {
+    const freshSnap = await getDoc(ref);
+    const fd = freshSnap.exists() ? freshSnap.data() : null;
+    const bRef = fd?.bookingRef;
+    if (bRef) {
+      const cRef = doc(db, COVERS_COL, bRef);
+      const cs = await getDoc(cRef);
+      if (cs.exists()) {
+        await updateDoc(cRef, {
+          tabRounds: fd!.tabRounds || [],
+          tabTotal: fd!.tabTotal || 0,
+        });
+      }
+    }
+  } catch {}
 }
 
 export async function releaseTable(
@@ -2314,11 +2410,31 @@ export async function releaseTable(
 ): Promise<void> {
   const archive: Record<string, unknown> = {};
   Object.keys(reservation).forEach((k) => { if (k !== "_docId") archive[k] = (reservation as any)[k]; });
-  archive.releasedAt = new Date().toISOString();
+  const releasedAtIso = new Date().toISOString();
+  archive.releasedAt = releasedAtIso;
   archive.sessionDuration = reservation.bookedAt
     ? Math.round((Date.now() - new Date(reservation.bookedAt).getTime()) / 60000) : null;
   archive.captainName = captainName;
   await addDoc(collection(db, TABLE_HISTORY_COL), archive);
+  // 🔴 2026-05-13 (Khushi spec) — leave a tiny marker doc keyed by the
+  // bookingRef so the customer's wallet can render the "🙏 Thank you for
+  // visiting" screen on next refresh, even if they never opened the wallet
+  // during the live session (breadcrumb missing). Without this marker the
+  // wallet can't tell "captain released" apart from "table never created
+  // yet" — both look like an empty `tableReservations` query. Marker is
+  // intentionally small (no PII beyond what's already in tableHistory) and
+  // long-lived; wallet does a one-shot get(), so cost is negligible.
+  if (reservation.bookingRef) {
+    try {
+      await setDoc(doc(db, "releasedReservations", reservation.bookingRef), {
+        bookingRef: reservation.bookingRef,
+        tableId: reservation.tableId || "",
+        floorLabel: reservation.floorLabel || reservation.floor || "",
+        releasedAt: releasedAtIso,
+        releasedBy: captainName,
+      });
+    } catch {}
+  }
   await deleteDoc(doc(db, TABLE_RES_COL, docId));
   if (reservation.bookingRef) await deleteDoc(doc(db, COVERS_COL, reservation.bookingRef)).catch(() => {});
 }

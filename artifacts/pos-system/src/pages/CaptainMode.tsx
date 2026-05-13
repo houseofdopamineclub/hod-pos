@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Link } from "wouter";
 import {
-  sha256, subscribeToHodReservations, markGuestArrived, markRoundServed,
+  sha256, subscribeToHodReservations, markGuestArrived, markRoundServed, markRoundActivated,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
@@ -22,6 +22,10 @@ import { HOD_MENU_ITEMS as MENU_ITEMS } from "@/lib/hod-menu";
 import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
+// Shared with DoorMode so a single edit updates every WhatsApp message that
+// includes the venue location. Plain Google Maps URL — never a Firebase
+// Dynamic Link (those were shut down 2025-08-25).
+import { HOD_LOCATION_URL } from "@/pages/DoorMode";
 
 const CAPTAIN_HASH = "8eb63d4e8a9814c7f8d2af807808d010d4d2cc1930edae511792764ca53b679c";
 // Manager PIN — guards: changing source after a bill is printed (L1/L7),
@@ -55,6 +59,11 @@ const WALKIN_DISCOUNT_PIN_DELTA = 5;
 // hand-typing into a discount input is locked at 15 and must enter the
 // Manager PIN even for the very first 0 → N change.
 const CAPTAIN_DISCOUNT_MAX = 15;
+// 🔴 2026-05-13 (Khushi spec, round 6) — walk-in (Seat Walk-In Guest)
+// modal is in-house only, discount capped at 10% (was 15%). Settle Bill
+// still allows up to CAPTAIN_DISCOUNT_MAX since managers may need
+// promo/loyalty headroom there.
+const WALKIN_DISCOUNT_MAX = 10;
 
 /** Clamp a captain-typed discount to the 15% cap; alert + return null if rejected. */
 function clampCaptainDiscount(raw: number): number | null {
@@ -297,6 +306,60 @@ const TABLE_OPTIONS = [
   { floor: "dining", label: "Dining", tables: ["FD1","FD2","FD3","FD4","FD5","FD6","FD7","FD8","FD9","FD10","FD11","FD12","FD13","FD14","FD15","FD16","FD17","FD18","SMK1","SMK2","SMK3","SMK4","SMK5","SMK6","SMK7","SMK8"] },
   { floor: "rooftop", label: "Rooftop", tables: ["T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","TVIP1","TVIP2","TVIP3","TVIP4","TVIP5","TVIP6","TVIP7","TEX1"] },
 ];
+
+// 2026-05-13 (Khushi spec) — table picker boxes are now coloured GREEN
+// (available) / RED (taken) per requested time slot, instead of the old
+// white-grey + dim-red scheme. The same table can be booked twice in one
+// night (e.g. 7pm dinner + 11pm party); a 11pm booking should NOT make the
+// box look red at 7pm. Each reservation is treated as occupying its table
+// for SLOT_MINUTES from arrivalTime, with a small 30-min lead-in buffer.
+// Once the bill is paid the table is released immediately.
+const SLOT_MINUTES = 120;
+const SLOT_LEAD_IN_MIN = 30;
+
+function parseClockToMinutes(t?: string): number | null {
+  if (!t) return null;
+  const s = String(t).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (Number.isNaN(h) || Number.isNaN(mm)) return null;
+  const ampm = m[3]?.toUpperCase();
+  if (ampm === "PM" && h < 12) h += 12;
+  if (ampm === "AM" && h === 12) h = 0;
+  return h * 60 + mm;
+}
+
+function nowMinutesIST(): number {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+// Returns the reservation occupying `tableId` at the target wall-clock
+// minutes (if any). Paid bookings are treated as released. Reservations with
+// no parseable arrivalTime are conservatively treated as occupying NOW.
+function tableOccupantAt(
+  tableId: string,
+  targetMin: number,
+  reservations: HodTableReservation[]
+): HodTableReservation | null {
+  for (const r of reservations) {
+    if (r.tableId !== tableId) continue;
+    if (r.paymentStatus === "paid") continue;
+    const start = parseClockToMinutes(r.arrivalTime);
+    if (start == null) {
+      // Unknown arrival time — treat as currently occupying so we don't
+      // accidentally double-book on top of a captain-created walk-in that
+      // never set arrivalTime. This matches the old, time-blind behaviour.
+      return r;
+    }
+    const winStart = start - SLOT_LEAD_IN_MIN;
+    const winEnd = start + SLOT_MINUTES;
+    if (targetMin >= winStart && targetMin <= winEnd) return r;
+  }
+  return null;
+}
 
 function useAudioAlert() {
   const ctxRef = useRef<AudioContext | null>(null);
@@ -553,8 +616,8 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
   );
 }
 
-function ReassignTableModal({ reservation, existingTables, captainName, onClose }: {
-  reservation: HodTableReservation; existingTables: string[]; captainName: string; onClose: () => void;
+function ReassignTableModal({ reservation, existingTables, allReservations, captainName, onClose }: {
+  reservation: HodTableReservation; existingTables: string[]; allReservations: HodTableReservation[]; captainName: string; onClose: () => void;
 }) {
   const [newTable, setNewTable] = useState("");
   const [saving, setSaving] = useState(false);
@@ -588,16 +651,32 @@ function ReassignTableModal({ reservation, existingTables, captainName, onClose 
               <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                 {group.tables.map((t) => {
-                  const occupied = existingTables.includes(t);
+                  // Time-aware: a table booked for an unrelated slot should
+                  // NOT block reassignment to it for THIS reservation's slot.
+                  const targetMin = parseClockToMinutes(reservation.arrivalTime) ?? nowMinutesIST();
+                  const occupant = tableOccupantAt(t, targetMin, allReservations);
+                  const occupied = !!occupant && occupant._docId !== reservation._docId;
                   const isCurrent = t === reservation.tableId;
+                  const isSelected = newTable === t;
+                  // Filled green = available for this slot; filled red = taken
+                  // for this slot. Yellow ring = your current pick. Orange =
+                  // the reservation's existing table.
+                  const bg = isSelected ? "#F2C744"
+                    : isCurrent ? "rgba(242,199,68,.18)"
+                    : occupied ? "#DC2626" : "#16A34A";
+                  const border = isSelected ? "#F2C744"
+                    : isCurrent ? "#F2C744"
+                    : occupied ? "#B91C1C" : "#15803D";
+                  const color = isSelected ? "#0A0A0A"
+                    : isCurrent ? "#F2C744"
+                    : "#FFFFFF";
                   return (
                     <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(t)} disabled={occupied || isCurrent}
-                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700,
+                      title={occupied && occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : ""}
+                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800,
                         cursor: occupied || isCurrent ? "not-allowed" : "pointer",
-                        background: newTable === t ? "rgba(242,199,68,.15)" : isCurrent ? "rgba(239,68,68,.15)" : occupied ? "rgba(239,68,68,.06)" : "rgba(255,255,255,.04)",
-                        border: `1px solid ${newTable === t ? "rgba(242,199,68,.5)" : isCurrent ? "rgba(239,68,68,.4)" : occupied ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.08)"}`,
-                        color: newTable === t ? "#F2C744" : isCurrent ? "#EF4444" : occupied ? "rgba(239,68,68,.3)" : "rgba(255,255,255,.5)",
-                        opacity: occupied && !isCurrent ? 0.5 : 1 }}>
+                        background: bg, border: `1px solid ${border}`, color,
+                        opacity: occupied && !isCurrent ? 0.85 : 1 }}>
                       {t}{isCurrent ? " ●" : ""}
                     </button>
                   );
@@ -959,14 +1038,19 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   );
 }
 
-function WalkInModal({ captainName, existingTables, onClose }: {
-  captainName: string; existingTables: string[]; onClose: () => void;
+function WalkInModal({ captainName, existingTables, allReservations, onClose }: {
+  captainName: string; existingTables: string[]; allReservations: HodTableReservation[]; onClose: () => void;
 }) {
   const [customerName, setCustomerName] = useState("");
+  const [countryCode, setCountryCode] = useState("91");
   const [phone, setPhone] = useState("");
   const [partySize, setPartySize] = useState(2);
   const [selectedTable, setSelectedTable] = useState("");
-  const [aggValue, setAggValue] = useState("inhouse");
+  // 🔴 2026-05-13 (Khushi spec, round 6) — walk-in modal is in-house only.
+  // Aggregator bookings come in pre-tagged from Zomato/Swiggy/EazyDiner via
+  // the booking import path, never via captain-side seat-now. Hardcoding to
+  // "inhouse" keeps the createWalkInTable signature stable.
+  const aggValue = "inhouse";
   const [customDiscount, setCustomDiscount] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -977,10 +1061,26 @@ function WalkInModal({ captainName, existingTables, onClose }: {
   const nextProxyNum = existingTables.filter(t => t.startsWith("Proxy-")).length + 1;
   const proxyName = `Proxy-${nextProxyNum}`;
 
+  // Phone is required so we can send the wallet/menu link via WhatsApp. We
+  // store it as digits-only with country code prefix (e.g. "919686444906" or
+  // "15551234567") — that format works for both wa.me and the WhatsApp Cloud API.
+  // Normalize: strip non-digits, drop a leading 0 (national trunk prefix), and
+  // if the user pasted the country code into the number field, drop it once
+  // so we don't end up with "9191...".
+  let phoneDigits = phone.replace(/\D/g, "");
+  if (phoneDigits.startsWith("0")) phoneDigits = phoneDigits.replace(/^0+/, "");
+  if (countryCode && phoneDigits.startsWith(countryCode)) {
+    phoneDigits = phoneDigits.slice(countryCode.length);
+  }
+  const fullPhone = phoneDigits ? `${countryCode}${phoneDigits}` : "";
+
   const create = async () => {
     if (!customerName.trim()) { setError("Enter customer name"); return; }
+    if (!phoneDigits || phoneDigits.length < 7) { setError("Enter a valid phone number (min 7 digits)"); return; }
+    // E.164 caps total digits at 15. Catches paste accidents like extra digits.
+    if (fullPhone.length > 15) { setError("Phone number too long — check the country code & number"); return; }
     if (!isProxy && !selectedTable) { setError("Select a table"); return; }
-    if (!isProxy && existingTables.includes(selectedTable)) { setError("Table already occupied!"); return; }
+    if (!isProxy && tableOccupantAt(selectedTable, nowMinutesIST(), allReservations)) { setError("Table already occupied right now!"); return; }
     // D3 — when the captain types a customDiscount that exceeds the source's
     // implied discount by more than WALKIN_DISCOUNT_PIN_DELTA percentage points,
     // require a Manager PIN. This catches "in-house + 80% discount" abuse and
@@ -1002,14 +1102,14 @@ function WalkInModal({ captainName, existingTables, onClose }: {
         const floorOpt = TABLE_OPTIONS.find(g => g.floor === proxyFloor);
         createdRef = await createProxyTable(
           proxyName, proxyFloor, floorOpt?.label || proxyFloor,
-          customerName.trim(), phone.trim(), partySize, captainName,
+          customerName.trim(), fullPhone, partySize, captainName,
           aggValue, discountPct
         );
       } else {
         const opt = TABLE_OPTIONS.find((g) => g.tables.includes(selectedTable));
         createdRef = await createWalkInTable(
           selectedTable, opt?.floor || "", opt?.label || "",
-          customerName.trim(), phone.trim(), partySize, captainName,
+          customerName.trim(), fullPhone, partySize, captainName,
           aggValue, discountPct
         );
       }
@@ -1053,17 +1153,35 @@ function WalkInModal({ captainName, existingTables, onClose }: {
         <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="e.g. Karan"
           style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
 
-        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Phone</div>
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Optional"
-              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
-          </div>
-          <div style={{ width: 80 }}>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Guests</div>
-            <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
-              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
-          </div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Phone * (for WhatsApp menu link)</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <select value={countryCode} onChange={(e) => setCountryCode(e.target.value)}
+            style={{ width: 100, padding: "10px 8px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 13, outline: "none", fontFamily: "inherit", cursor: "pointer" }}>
+            <option value="91">🇮🇳 +91</option>
+            <option value="1">🇺🇸 +1</option>
+            <option value="44">🇬🇧 +44</option>
+            <option value="971">🇦🇪 +971</option>
+            <option value="65">🇸🇬 +65</option>
+            <option value="61">🇦🇺 +61</option>
+            <option value="49">🇩🇪 +49</option>
+            <option value="33">🇫🇷 +33</option>
+            <option value="81">🇯🇵 +81</option>
+            <option value="966">🇸🇦 +966</option>
+            <option value="60">🇲🇾 +60</option>
+            <option value="977">🇳🇵 +977</option>
+            <option value="94">🇱🇰 +94</option>
+            <option value="880">🇧🇩 +880</option>
+            <option value="92">🇵🇰 +92</option>
+            <option value="86">🇨🇳 +86</option>
+          </select>
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" type="tel" inputMode="tel"
+            style={{ flex: 1, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+        </div>
+
+        <div style={{ width: 100, marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Guests</div>
+          <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
         </div>
 
         {isProxy ? (
@@ -1094,14 +1212,23 @@ function WalkInModal({ captainName, existingTables, onClose }: {
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {group.tables.map((t) => {
-                      const occupied = existingTables.includes(t);
+                      // Walk-in is "now" — colour boxes by who occupies the
+                      // table at this minute. A 11pm booking should NOT make
+                      // the box red at 7pm.
+                      const occupant = tableOccupantAt(t, nowMinutesIST(), allReservations);
+                      const occupied = !!occupant;
+                      const isSelected = selectedTable === t;
+                      const bg = isSelected ? "#F2C744"
+                        : occupied ? "#DC2626" : "#16A34A";
+                      const border = isSelected ? "#F2C744"
+                        : occupied ? "#B91C1C" : "#15803D";
+                      const color = isSelected ? "#0A0A0A" : "#FFFFFF";
                       return (
                         <button key={t} onClick={() => !occupied && setSelectedTable(t)} disabled={occupied}
-                          style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: occupied ? "not-allowed" : "pointer",
-                            background: selectedTable === t ? "rgba(242,199,68,.2)" : occupied ? "rgba(239,68,68,.1)" : "rgba(255,255,255,.04)",
-                            border: `1px solid ${selectedTable === t ? "rgba(242,199,68,.5)" : occupied ? "rgba(239,68,68,.2)" : "rgba(255,255,255,.08)"}`,
-                            color: selectedTable === t ? "#F2C744" : occupied ? "rgba(239,68,68,.4)" : "rgba(255,255,255,.5)",
-                            opacity: occupied ? 0.5 : 1 }}>
+                          title={occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : "Available now"}
+                          style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: occupied ? "not-allowed" : "pointer",
+                            background: bg, border: `1px solid ${border}`, color,
+                            opacity: occupied ? 0.85 : 1 }}>
                           {t}
                         </button>
                       );
@@ -1113,25 +1240,16 @@ function WalkInModal({ captainName, existingTables, onClose }: {
           </>
         )}
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Source / Aggregator</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-          {AGGREGATOR_OPTIONS.map((agg) => (
-            <button key={agg.value} onClick={() => { setAggValue(agg.value); setCustomDiscount(agg.discount); }}
-              style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
-                background: aggValue === agg.value ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${aggValue === agg.value ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
-                color: aggValue === agg.value ? "#EF4444" : "rgba(255,255,255,.5)" }}>
-              {agg.label}
-            </button>
-          ))}
-        </div>
-
-        {/* 🔴 2026-05-12 — D4: walk-in custom discount capped at 15%, PIN
-            required before saving any non-zero value. */}
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Discount % (max {CAPTAIN_DISCOUNT_MAX}% — PIN required)</div>
+        {/* 🔴 2026-05-13 (Khushi spec, round 6) — Source/Aggregator picker
+            removed. Walk-ins are always in-house here; aggregator tabs come
+            in via the booking import path with their discount pre-stamped.
+            Discount default is 0 and capped at WALKIN_DISCOUNT_MAX (10%) —
+            anything higher needs a manager override on the bill. */}
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%)</div>
         <input type="number" value={customDiscount || ""}
-          onChange={(e) => setCustomDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
-          placeholder={`max ${CAPTAIN_DISCOUNT_MAX}`} min={0} max={CAPTAIN_DISCOUNT_MAX}
+          onChange={(e) => setCustomDiscount(Math.min(WALKIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
+          placeholder="0"
+          min={0} max={WALKIN_DISCOUNT_MAX}
           style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
 
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
@@ -1443,7 +1561,7 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
           </details>
           <button onClick={submit} disabled={saving}
             style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
-            {saving ? "Adding..." : `📝 Add Round · ${formatINR(cartTotal)} (${cart.reduce((s, c) => s + c.qty, 0)} items)`}
+            {saving ? "Adding..." : `📝 Add Round · ${formatINR(cartBreakdown.grandTotal)} (${cart.reduce((s, c) => s + c.qty, 0)} items)`}
           </button>
         </div>
       )}
@@ -1451,8 +1569,8 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
   );
 }
 
-function TableCard({ r, captainName, playAlert, existingTables }: {
-  r: HodTableReservation; captainName: string; playAlert: (u: boolean) => void; existingTables: string[];
+function TableCard({ r, captainName, playAlert, existingTables, allReservations }: {
+  r: HodTableReservation; captainName: string; playAlert: (u: boolean) => void; existingTables: string[]; allReservations: HodTableReservation[];
 }) {
   const [editRound, setEditRound] = useState<{ round: HodTabRound; index: number } | null>(null);
   const [showPaid, setShowPaid] = useState(false);
@@ -1460,6 +1578,7 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
   const [showReassign, setShowReassign] = useState(false);
   const [showVoidBill, setShowVoidBill] = useState(false);
   const [busy, setBusy] = useState("");
+  const [qrFallback, setQrFallback] = useState<{ url: string; reason: string } | null>(null);
   const [aggOpen, setAggOpen] = useState(false);
   const [customDiscInput, setCustomDiscInput] = useState<string>(() =>
     String(r.aggregatorDiscount ?? getAggregatorDiscount(r.aggregator || r.source || "inhouse"))
@@ -1515,10 +1634,20 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
     setBusy("");
   };
 
+  // 🔴 2026-05-13 — Khushi: Print KOT must NOT mark the round as served.
+  // It only flips the round to "activated" (Ready to Serve) so the kitchen
+  // sees the chit; the captain comes back and presses "Mark Served"
+  // (handleMarkServed below) once food has actually reached the table.
+  const handleMarkServed = async (roundIdx: number) => {
+    setBusy(`served-${roundIdx}`);
+    try { await markRoundServed(r._docId, roundIdx, r.bookingRef); } catch {}
+    setBusy("");
+  };
+
   const handleServe = async (roundIdx: number) => {
     setBusy(`serve-${roundIdx}`);
     try {
-      await markRoundServed(r._docId, roundIdx, r.bookingRef);
+      await markRoundActivated(r._docId, roundIdx, captainName, r.bookingRef);
       const round = (r.tabRounds || [])[roundIdx];
       if (round) {
         // Derive floor from TABLE ID, not tablet localStorage — matches bill logic
@@ -1579,7 +1708,9 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
     try {
       for (const idx of pendingIdxs) {
         try {
-          await markRoundServed(r._docId, idx, r.bookingRef);
+          // 🔴 2026-05-13 — match handleServe: Print KOT activates only,
+          // the captain marks served separately when food reaches the table.
+          await markRoundActivated(r._docId, idx, captainName, r.bookingRef);
           const round = (r.tabRounds || [])[idx];
           if (!round) continue;
           if ((round.items || []).some((it) => it.t === "food")) anyFood = true;
@@ -1613,6 +1744,26 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
   };
 
   const handleRelease = async () => {
+    // 🔴 2026-05-13 (Khushi) — Bill MUST be printed before release.
+    // Catches the new edge case introduced by Pay-Online: customer pays
+    // via wallet, "Mark Paid" disappears (correctly), but captain could
+    // previously skip Print Bill and release the table immediately —
+    // leaving the guest without a paper bill and the venue without an
+    // archived printed copy. Hard block; cannot be confirmed past.
+    // Empty tables (no items) are still releasable so genuine no-shows
+    // / accidental seatings don't get stuck.
+    const printed = (r.billPrintCount || 0) > 0;
+    const hasItems = tabTotal > 0 || (r.tabRounds || []).length > 0;
+    if (hasItems && !printed) {
+      alert(`🖨 BILL NOT PRINTED YET\n\nPrint the bill first, then release ${r.tableId}.\n\n(Tap "🖨 Print Bill" above.)`);
+      return;
+    }
+    // Reprint required (items changed since last bill)? Same hard block —
+    // the printed paper must reflect the final order.
+    if (hasItems && r.billStale) {
+      alert(`⚠ ITEMS CHANGED SINCE LAST BILL\n\nReprint the bill before releasing ${r.tableId}.`);
+      return;
+    }
     const preparingRounds = (r.tabRounds || []).filter(rd => rd.status === "preparing").length;
     if (preparingRounds > 0) {
       if (!confirm(`⚠️ ${preparingRounds} round(s) still PREPARING in kitchen!\n\nRelease anyway? Kitchen orders will be lost.`)) return;
@@ -1623,7 +1774,17 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
       : `Release ${r.tableId} for new guests?`;
     if (!confirm(msg)) return;
     setBusy("release");
-    try { await releaseTable(r._docId, r, captainName); } catch {}
+    // 🔴 2026-05-13 v3 (Khushi clarification) — the thank-you message is
+    // for the CUSTOMER's wallet, not the captain. The captain side stays
+    // silent on success (table just disappears from the list, which is
+    // the expected feedback). releaseTable now writes a marker doc to
+    // `releasedReservations/{bookingRef}` so the customer's wallet shows
+    // "🙏 Thank you for visiting" on next refresh. Errors still surface.
+    try {
+      await releaseTable(r._docId, r, captainName);
+    } catch (e: any) {
+      alert(`❌ Release failed: ${e?.message || String(e)}`);
+    }
     setBusy("");
   };
 
@@ -1790,16 +1951,55 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
     const customerName = r.customerName || "Guest";
     const tableLabel = r.tableId;
     const floorLabel = r.floorLabel || r.floor || "";
+    // 2026-05-13 — fallback message format locked by Khushi. Order, emojis,
+    // and spacing must match the spec exactly. Location link MUST be a plain
+    // Google Maps URL — the previous `maps.app.goo.gl/...` short link routed
+    // through Firebase Dynamic Links (shut down 2025-08-25) and showed
+    // "Dynamic Link Not Found" when guests tapped it.
     const fallbackMessage =
-      `Hi ${customerName}, your table at HOD is ready! 🪩\n\n` +
-      `📍 Table: ${tableLabel} · ${floorLabel}\n` +
-      `🕐 Arrival: ${r.arrivalTime || "Tonight"}\n\n` +
-      `Browse the menu & pre-order:\n${url}\n\n` +
-      `Your captain will be with you shortly. See you tonight!\n\n` +
-      `📍 House of Dopamine, Koramangala\nhttps://maps.app.goo.gl/eEEHkqGAqr1ozYU2A`;
+      `Hi ${customerName}! 🎉 Your booking at HOD - House Of Dopamine is confirmed.\n\n` +
+      `📅 Date: ${r.date || ""}\n` +
+      `🕐 Time: ${r.arrivalTime || ""}\n` +
+      `🪑 Table: ${tableLabel}${floorLabel ? ` (${floorLabel})` : ""}\n` +
+      `👥 Guests: ${r.partySize || 2}\n\n` +
+      `View menu & pre-order: ${url}\n\n` +
+      `See you soon!\n\n` +
+      `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+
+    // 🔴 2026-05-13 v2 (Khushi spec) — Send Menu must NOT open a wa.me tab
+    // anymore. The previous wa.me-first flow popped open browser.whatsapp.com
+    // on the captain's tablet AND fired a duplicate Meta send in the
+    // background, so guests received two messages and the captain saw a
+    // confusing browser tab. New flow mirrors Door Mode (BookingDetailModal
+    // sendWhatsApp): Meta Cloud API first (silent), success → ✓ tick alert,
+    // failure → QR popup with the wallet link (reuses WhatsAppQrFallbackModal,
+    // same pattern Door Mode uses for Cover/Guestlist). No wa.me tab ever.
     setBusy("wa");
     try {
-      // 1) Try approved template first (works outside 24h customer service window)
+      // 2026-05-13 — order intentionally flipped. The Meta-approved
+      // `table_ready` template body is LOCKED ("Your table is ready at HOD!
+      // Hi {name}, table {tbl} on {floor} is set for you…") and Meta won't
+      // re-approve text changes for days. Khushi's new spec lives in
+      // `fallbackMessage` above, so we now try free-form text FIRST and only
+      // fall back to the old-format template if Meta blocks the text (guest
+      // outside the 24h customer-service reply window with no prior chat).
+      // Most guests just booked via hodclub.in, which sends a Razorpay
+      // confirmation — that opens the 24h window, so the new format wins.
+      const fbRes = await fetch("/api/whatsapp/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: custPhone, message: fallbackMessage }),
+      });
+      const fbData = await fbRes.json();
+      if (fbRes.ok && fbData.ok) {
+        alert(`✅ WhatsApp menu sent to ${fbData.recipient}\n\nIf the guest doesn't see it in 30s, ask them to check spam or scan the QR fallback.`);
+        setBusy("");
+        return;
+      }
+      console.warn("Text send failed, falling back to template:", fbData);
+
+      // Fallback: approved template (old format, but works outside the 24h
+      // window for guests who haven't chatted with us yet).
       const tplRes = await fetch("/api/whatsapp/send-template", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1812,36 +2012,20 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
       });
       const tplData = await tplRes.json();
       if (tplRes.ok && tplData.ok) {
-        alert(`✓ WhatsApp template sent to ${tplData.recipient}`);
+        alert(`✓ WhatsApp sent to ${tplData.recipient}\n(used approved template — guest is outside the 24h reply window, so the new format couldn't be sent)`);
         setBusy("");
         return;
       }
-      console.warn("Template send failed, falling back to text:", tplData);
+      console.warn("Template fallback also failed:", tplData);
 
-      // 2) Fall back to free-form text (works inside 24h customer service window)
-      const fbRes = await fetch("/api/whatsapp/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: custPhone, message: fallbackMessage }),
-      });
-      const fbData = await fbRes.json();
-      if (fbRes.ok && fbData.ok) {
-        alert(`✓ WhatsApp text sent to ${fbData.recipient}\n(template not approved yet — used text fallback)`);
-        setBusy("");
-        return;
-      }
-      console.warn("Text fallback also failed:", fbData);
-
-      // 3) Last resort: open wa.me on captain's device
+      // Last resort: show in-app QR popup so the guest scans the captain's
+      // tablet directly. Avoids needing a separate "Show QR" button on the row.
       const tplCode = tplData.code;
       const isTemplateMissing = tplCode === 132001 || tplCode === 132000 || tplCode === 132012 || tplCode === 132015;
       const reason = isTemplateMissing
-        ? `Template "table_ready" not yet approved by Meta, and customer is outside 24h reply window.`
-        : `WhatsApp API failed: ${fbData.error || "Send failed"}${fbData.code ? ` (code ${fbData.code})` : ""}`;
-      if (confirm(`${reason}\n\nOpen wa.me link to send manually?`)) {
-        const p = custPhone.length === 10 ? `91${custPhone}` : custPhone;
-        window.open(`https://wa.me/${p}?text=${encodeURIComponent(fallbackMessage)}`, "_blank");
-      }
+        ? `WhatsApp template not approved yet — show this QR for the guest to scan.`
+        : `WhatsApp send failed${fbData.code ? ` (code ${fbData.code})` : ""} — show this QR for the guest to scan.`;
+      setQrFallback({ url, reason });
     } catch (err) {
       console.error("WhatsApp send error", err);
       alert("Network error sending WhatsApp. Check your connection.");
@@ -1863,10 +2047,38 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
                 <span style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>⏳ NOT ARRIVED</span>
               )}
               {voided && <span title={`Bill voided by ${(r as any).voidedBy || "?"} — ${(r as any).voidReason || ""}${(r as any).voidNotes ? ` (${(r as any).voidNotes})` : ""}`} style={{ background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 10, cursor: "help" }}>🚫 BILL VOIDED · ₹{Math.round((r as any).voidedBillTotal || 0)}</span>}
-              {paid && <span title={orphanPay && r.paymentStatus !== "paid" ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.` : "Marked paid by the captain."} style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: orphanPay && r.paymentStatus !== "paid" ? "help" : "default" }}>✅ PAID{(() => {
-                const pm = (r as any).paymentMethod || (orphanPay ? orphanPay.paymentChannel : "");
-                return pm && ["zomato","swiggy","eazydiner","payeazy"].includes(String(pm).toLowerCase()) ? ` · ${String(pm).toUpperCase()}` : "";
-              })()}{orphanPay && r.paymentStatus !== "paid" ? " ⚠︎" : ""}</span>}
+              {paid && (() => {
+                // ── 2026-05-13 round 9 (Khushi spec): when the customer
+                // paid via the wallet's "Pay Online" button, Razorpay
+                // success stamps `paymentMethod:'paid_online'` on the
+                // reservation. Render that as a GREEN ✅ PAID ONLINE
+                // chip so the captain instantly sees online settlements
+                // distinct from captain-marked ones (yellow ✅ PAID).
+                const pm = String((r as any).paymentMethod || (orphanPay ? orphanPay.paymentChannel : "")).toLowerCase();
+                const isOnline = pm === "paid_online";
+                const isAgg = ["zomato","swiggy","eazydiner","payeazy"].includes(pm);
+                const pid = String((r as any).paymentId || "");
+                const amt = (r as any).amountPaid;
+                const paidAtIso = (r as any).paidAt as string | undefined;
+                const paidAtStr = paidAtIso ? new Date(paidAtIso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
+                const tip = isOnline
+                  ? `Customer paid online via Razorpay${amt ? ` · ₹${amt}` : ""}${paidAtStr ? ` at ${paidAtStr}` : ""}${pid ? ` · ID …${pid.slice(-8)}` : ""}`
+                  : (orphanPay && r.paymentStatus !== "paid"
+                      ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.`
+                      : "Marked paid by the captain.");
+                const bg = isOnline ? "rgba(0,200,100,.18)" : "rgba(242,199,68,.12)";
+                const bd = isOnline ? "rgba(0,200,100,.55)" : "rgba(242,199,68,.3)";
+                const fg = isOnline ? "#00C864" : "#F2C744";
+                const label = isOnline
+                  ? "✅ PAID ONLINE"
+                  : ("✅ PAID" + (isAgg ? ` · ${pm.toUpperCase()}` : ""));
+                const showWarn = orphanPay && r.paymentStatus !== "paid" && !isOnline;
+                return (
+                  <span title={tip} style={{ background: bg, border: `1px solid ${bd}`, color: fg, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: showWarn || isOnline ? "help" : "default" }}>
+                    {label}{showWarn ? " ⚠︎" : ""}
+                  </span>
+                );
+              })()}
               {billReq && <span style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🧾 BILL DUE</span>}
               {pending > 0 && <span style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
             </div>
@@ -1943,11 +2155,25 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
               const needsAction = isPending || isActivated;
               return (
                 <div key={idx} style={{ borderTop: "1px solid rgba(255,255,255,.06)", padding: "8px 0", ...(needsAction ? { background: isPending ? "rgba(242,199,68,.02)" : "rgba(242,199,68,.02)" } : { opacity: 0.6 }) }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, gap: 8 }}>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "#F2C744" }}>Round {rd.roundNum}</span>
-                    <span style={{ fontSize: 11, color: isPending ? "#F2C744" : isActivated ? "#F2C744" : "#F2C744" }}>
-                      {isPending ? "🔴 Preparing" : isActivated ? "🔵 Activated — Ready to Serve" : "✅ Served"}
-                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, color: "#F2C744" }}>
+                        {isPending ? "🔴 Preparing" : isActivated ? "🔵 Ready to Serve" : "✅ Served"}
+                      </span>
+                      {needsAction && (
+                        // 🔴 2026-05-13 — Khushi: pencil icon was too cryptic;
+                        // captains kept missing it. Replaced with explicit
+                        // "Edit Order" text button. Edit writes via
+                        // updateRoundItems → mirrors to covers (see
+                        // firestore-hod) so customer wallet sees the change.
+                        <button onClick={() => setEditRound({ round: rd, index: idx })}
+                          title="Edit this round"
+                          style={{ padding: "5px 10px", borderRadius: 6, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 10, fontWeight: 800, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .4, textTransform: "uppercase", lineHeight: 1 }}>
+                          ✏️ Edit Order
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {(rd.items || []).map((it, ii) => (
                     <div key={ii} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0" }}>
@@ -1955,15 +2181,26 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
                       <span style={{ color: "#F2C744" }}>₹{it.p * it.qty}</span>
                     </div>
                   ))}
-                  {needsAction && (
-                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                      <button onClick={() => setEditRound({ round: rd, index: idx })}
-                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
-                        ✏️ Edit Order
-                      </button>
+                  {/* 🔴 2026-05-13 — Khushi: Print KOT was wrongly flipping
+                      the customer wallet to "Served" the moment the kitchen
+                      ticket printed. Split into two distinct actions:
+                        - Print KOT (preparing → activated/Ready to Serve)
+                        - Mark Served (activated → served, only when food has
+                          actually reached the table)
+                      The wallet now matches reality. */}
+                  {isPending && (
+                    <div style={{ marginTop: 8 }}>
                       <button onClick={() => handleServe(idx)} disabled={busy === `serve-${idx}`}
-                        style={{ flex: 1, padding: 8, borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
+                        style={{ width: "100%", padding: 9, borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
                         {busy === `serve-${idx}` ? "..." : "🖨 Print KOT"}
+                      </button>
+                    </div>
+                  )}
+                  {isActivated && (
+                    <div style={{ marginTop: 8 }}>
+                      <button onClick={() => handleMarkServed(idx)} disabled={busy === `served-${idx}`}
+                        style={{ width: "100%", padding: 9, borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.45)", color: "#22c55e", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
+                        {busy === `served-${idx}` ? "..." : "✅ Mark Served"}
                       </button>
                     </div>
                   )}
@@ -2005,12 +2242,9 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
             #A02820 + white-text treatment as the aggregator badge so the
             captain reads "red box = serious action". */}
         <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap", fontFamily: "'Space Grotesk', sans-serif" }}>
-          {!r.actualArrivalTime && (
-            <button onClick={handleArrive} disabled={busy === "arrive"}
-              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
-              {busy === "arrive" ? "..." : "🚶 Guest Arrived"}
-            </button>
-          )}
+          {/* 🔴 2026-05-13 — Guest Arrived button removed from modal; it now lives
+              inline on the BookingRow itself (one-tap arrival without opening the
+              full booking detail). Modal kept clean for ordering / billing actions. */}
           {!paid && (
             <button onClick={() => setShowAddOrder(true)}
               style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
@@ -2064,12 +2298,6 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
               🚫 Void Bill
             </button>
           )}
-          {!paid && !voided && (
-            <button onClick={() => setShowReassign(true)}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
-              🔄 Reassign
-            </button>
-          )}
           <button onClick={handleRelease} disabled={busy === "release"}
             style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             {busy === "release" ? "..." : "🔓 Release Table"}
@@ -2080,7 +2308,8 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
       {editRound && <EditOrderModal round={editRound.round} roundIndex={editRound.index} docId={r._docId} captainName={captainName} bookingRef={r.bookingRef} tableId={r.tableId} floorLabel={r.floorLabel} customerName={r.customerName} onClose={() => setEditRound(null)} />}
       {showPaid && <MarkPaidModal reservation={r} captainName={captainName} onClose={() => setShowPaid(false)} />}
       {showAddOrder && <AddOrderModal docId={r._docId} tableId={r.tableId} captainName={captainName} onClose={() => setShowAddOrder(false)} />}
-      {showReassign && <ReassignTableModal reservation={r} existingTables={existingTables} captainName={captainName} onClose={() => setShowReassign(false)} />}
+      {qrFallback && <WhatsAppQrFallbackModal url={qrFallback.url} reason={qrFallback.reason} customerName={r.customerName || "Guest"} tableId={r.tableId} onClose={() => setQrFallback(null)} />}
+      {showReassign && <ReassignTableModal reservation={r} existingTables={existingTables} allReservations={allReservations} captainName={captainName} onClose={() => setShowReassign(false)} />}
       {showVoidBill && (() => {
         // Recompute the same final total the bill printer used so leakage in
         // Reports / voidLog matches the paper bill the customer was handed.
@@ -2151,14 +2380,228 @@ function TableCard({ r, captainName, playAlert, existingTables }: {
 }
 
 
+function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }: {
+  url: string; reason: string; customerName: string; tableId: string; onClose: () => void;
+}) {
+  const [qrDataUrl, setQrDataUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    import("qrcode").then((QR) => {
+      QR.toDataURL(url, { width: 320, margin: 1, color: { dark: "#0a0a0a", light: "#ffffff" } })
+        .then((u: string) => { if (!cancelled) setQrDataUrl(u); })
+        .catch((e: any) => console.warn("[captain][qr-fallback] generate failed", e));
+    });
+    return () => { cancelled = true; };
+  }, [url]);
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#0d0d0d", border: "1px solid rgba(242,199,68,.35)", borderRadius: 16,
+          maxWidth: 360, width: "100%", padding: 20, fontFamily: "'Space Grotesk', sans-serif", color: "#fff" }}>
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744", marginBottom: 4, letterSpacing: .3 }}>
+          📱 Show this QR to {customerName}
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
+          Table {tableId} · {reason}
+        </div>
+        <div style={{ background: "#fff", borderRadius: 12, padding: 12, display: "flex", justifyContent: "center", marginBottom: 14 }}>
+          {qrDataUrl
+            ? <img src={qrDataUrl} alt="Wallet QR" style={{ width: "100%", maxWidth: 280, display: "block" }} />
+            : <div style={{ width: 280, height: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "#666", fontSize: 12 }}>Generating QR…</div>}
+        </div>
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", textAlign: "center", marginBottom: 12, wordBreak: "break-all" }}>
+          {url}
+        </div>
+        <button onClick={onClose}
+          style={{ width: "100%", padding: "11px 14px", borderRadius: 9,
+            background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none",
+            color: "#0a0a0a", fontSize: 12, fontWeight: 900, cursor: "pointer",
+            letterSpacing: .5, fontFamily: "inherit", textTransform: "uppercase" }}>
+          ✓ Done
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BookingRow({ r, captainName, existingTables, allReservations, onClick }: {
+  r: HodTableReservation; captainName: string; existingTables: string[]; allReservations: HodTableReservation[]; onClick: () => void;
+}) {
+  const [showReassign, setShowReassign] = useState(false);
+  const [arriving, setArriving] = useState(false);
+  const aggName = r.aggregator || r.source || "inhouse";
+  const isAgg = aggName !== "inhouse";
+  const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName;
+  // 🔴 2026-05-13 — Khushi: show the aggregator's discount % next to the
+  // brand name so captains see "ZOMATO DINING -15%" at a glance and know
+  // upfront how much will come off the bill (was just "ZOMATO DINING").
+  const aggDiscount = r.aggregatorDiscount ?? getAggregatorDiscount(aggName);
+  const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
+  const billReq = r.paymentStatus === "bill_requested";
+  const paid = r.paymentStatus === "paid";
+  const voided = (r as any).status === "voided";
+  const arrived = !!r.actualArrivalTime;
+  const canReassign = !paid && !voided;
+
+  const borderColor = billReq ? "rgba(239,68,68,.55)"
+    : pending > 0 ? "rgba(242,199,68,.45)"
+    : voided ? "rgba(239,68,68,.4)"
+    : "rgba(255,255,255,.08)";
+  const bg = billReq ? "rgba(239,68,68,.06)"
+    : pending > 0 ? "rgba(242,199,68,.04)"
+    : "rgba(255,255,255,.03)";
+
+  return (
+    <>
+    <div onClick={onClick}
+      className={billReq ? "pulse-red" : pending > 0 ? "pulse-gold" : ""}
+      style={{
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "10px 12px", marginBottom: 6, borderRadius: 10,
+        background: bg, border: `1px solid ${borderColor}`,
+        cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif",
+        transition: "background .15s",
+      }}>
+      {/* Table id pill — also tap-to-reassign */}
+      <button
+        onClick={(e) => { e.stopPropagation(); if (canReassign) setShowReassign(true); }}
+        disabled={!canReassign}
+        title={canReassign ? "Tap to reassign table" : ""}
+        style={{ flexShrink: 0, minWidth: 46, textAlign: "center",
+          padding: "6px 6px", borderRadius: 6,
+          background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.25)",
+          color: "#F2C744", fontSize: 11, fontWeight: 900, letterSpacing: .3,
+          cursor: canReassign ? "pointer" : "default",
+          fontFamily: "inherit", lineHeight: 1.1 }}>
+        {r.tableId}
+        {canReassign && <div style={{ fontSize: 8, fontWeight: 600, opacity: .7, marginTop: 2 }}>🔄 swap</div>}
+      </button>
+
+      {/* Name + meta line */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#fff",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {r.customerName || "—"}
+          </span>
+          {isAgg && (
+            <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 3,
+              background: "#A02820", color: "#fff", letterSpacing: .4, textTransform: "uppercase" }}>
+              {aggLabel}{aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
+            </span>
+          )}
+          {!isAgg && (
+            <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+              background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.55)",
+              letterSpacing: .4, textTransform: "uppercase" }}>
+              In-House
+            </span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>
+          <span>👥 {r.partySize || "?"}p</span>
+          <span>🕐 {r.arrivalTime || "—"}</span>
+          {r.phone && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📱 {r.phone}</span>}
+        </div>
+      </div>
+
+      {/* Status badges (right side) */}
+      <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+        {voided ? (
+          <span style={{ fontSize: 9, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
+            background: "#A02820", color: "#fff", letterSpacing: .3 }}>🚫 VOIDED</span>
+        ) : paid ? (
+          <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.3)",
+            color: "#F2C744", letterSpacing: .3 }}>✅ PAID</span>
+        ) : billReq ? (
+          <span style={{ fontSize: 9, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)",
+            color: "#EF4444", letterSpacing: .3 }}>🧾 BILL DUE</span>
+        ) : pending > 0 ? (
+          <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)",
+            color: "#F2C744", letterSpacing: .3 }}>🔴 {pending} PENDING</span>
+        ) : arrived ? (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)",
+            color: "rgba(255,255,255,.6)", letterSpacing: .3 }}>✓ ARRIVED</span>
+        ) : (
+          <button
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (arriving) return;
+              if (!confirm(`Mark ${r.customerName || "this guest"} as arrived?`)) return;
+              setArriving(true);
+              try { await markGuestArrived(r._docId, r.bookingRef); } catch {}
+              setArriving(false);
+            }}
+            disabled={arriving}
+            style={{ fontSize: 10, fontWeight: 900, padding: "5px 9px", borderRadius: 6,
+              background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none",
+              color: "#0A0A0A", letterSpacing: .4, cursor: arriving ? "default" : "pointer",
+              fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase",
+              opacity: arriving ? .6 : 1, lineHeight: 1.1 }}
+            title="Tap to mark this guest as arrived"
+          >
+            {arriving ? "..." : "🚶 Guest Arrived"}
+          </button>
+        )}
+        <span style={{ fontSize: 9, color: "rgba(255,255,255,.3)" }}>tap →</span>
+      </div>
+    </div>
+    {showReassign && (
+      <ReassignTableModal
+        reservation={r}
+        existingTables={existingTables}
+        allReservations={allReservations}
+        captainName={captainName}
+        onClose={() => setShowReassign(false)}
+      />
+    )}
+    </>
+  );
+}
+
+function BookingDetailModal({ r, captainName, playAlert, existingTables, allReservations, onClose }: {
+  r: HodTableReservation; captainName: string; playAlert: (u: boolean) => void;
+  existingTables: string[]; allReservations: HodTableReservation[]; onClose: () => void;
+}) {
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9998,
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        padding: "20px 12px", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 640, position: "relative" }}>
+        <button onClick={onClose}
+          style={{ position: "sticky", top: 0, marginLeft: "auto", display: "block",
+            padding: "8px 14px", borderRadius: 8, background: "#0A0A0A",
+            border: "1px solid rgba(242,199,68,.4)", color: "#F2C744",
+            fontSize: 12, fontWeight: 800, cursor: "pointer", marginBottom: 8,
+            fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .5,
+            zIndex: 1 }}>
+          ✕ CLOSE
+        </button>
+        <TableCard r={r} captainName={captainName} playAlert={playAlert} existingTables={existingTables} allReservations={allReservations} />
+      </div>
+    </div>
+  );
+}
+
 function CaptainDashboard({ captainName }: { captainName: string }) {
   const [date, setDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [floor, setFloor] = useState("");
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [showWalkIn, setShowWalkIn] = useState(false);
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
+  const [allReservations, setAllReservations] = useState<HodTableReservation[]>([]);
   const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" });
   const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill">("");
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const prevSnapshot = useRef<Record<string, { rounds: number; status: string }>>({});
   const playAlert = useAudioAlert();
   const pendingCountRef = useRef(0);
@@ -2168,6 +2611,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   useEffect(() => {
     const unsub = subscribeToHodReservations(date, (all) => {
       setAllTableIds(all.map(r => r.tableId));
+      setAllReservations(all);
 
       all.forEach((r) => {
         const prev = prevSnapshot.current[r._docId];
@@ -2209,10 +2653,23 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const billDue = reservations.filter((r) => r.paymentStatus === "bill_requested").length;
 
   const displayedReservations = useMemo(() => {
-    if (pendingFilter === "pending") return reservations.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
-    if (pendingFilter === "bill") return reservations.filter(r => r.paymentStatus === "bill_requested");
-    return reservations;
-  }, [reservations, pendingFilter]);
+    let list = reservations;
+    if (pendingFilter === "pending") list = list.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
+    else if (pendingFilter === "bill") list = list.filter(r => r.paymentStatus === "bill_requested");
+    // 2026-05-13 — Khushi spec: customer search across name/phone/table/ref.
+    // Case-insensitive substring match on any of the four fields so a
+    // captain can find a guest by typing 4 digits of their phone, the
+    // table id ("D5"), or the booking ref ("TBL-HIBH9").
+    const q = customerSearch.trim().toLowerCase();
+    if (q) {
+      list = list.filter(r => {
+        const hay = [r.customerName, r.phone, r.tableId, r.bookingRef]
+          .filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return list;
+  }, [reservations, pendingFilter, customerSearch]);
 
   return (
     <div style={{ minHeight: "100vh", background: "#0A0A0A", color: "#fff", fontFamily: "'Space Grotesk', sans-serif" }}>
@@ -2267,6 +2724,24 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       )}
 
+      {/* 2026-05-13 — Khushi spec: customer search bar.
+          Searches name, phone, table id, and booking ref together. */}
+      <div style={{ padding: "10px 16px 0", position: "relative" }}>
+        <input
+          value={customerSearch}
+          onChange={(e) => setCustomerSearch(e.target.value)}
+          placeholder="🔎 Search customer name, phone, table, or ref"
+          style={{ width: "100%", boxSizing: "border-box", padding: "10px 36px 10px 14px", borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.18)", color: "#fff", fontSize: 13, outline: "none", fontFamily: "'Space Grotesk', sans-serif" }}
+        />
+        {customerSearch && (
+          <button onClick={() => setCustomerSearch("")}
+            aria-label="Clear search"
+            style={{ position: "absolute", right: 22, top: 16, background: "transparent", border: "none", color: "rgba(255,255,255,.6)", fontSize: 16, cursor: "pointer", padding: 4 }}>
+            ✕
+          </button>
+        )}
+      </div>
+
       <div style={{ padding: "10px 16px 0" }}>
         <button onClick={() => setShowWalkIn(true)}
           style={{ width: "100%", padding: 12, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.15),rgba(242,199,68,.08))", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
@@ -2276,17 +2751,39 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
       <div style={{ padding: "10px 16px 120px" }}>
         {displayedReservations.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 60, color: "rgba(255,255,255,.4)" }}>{pendingFilter ? "No matching tables." : "No reservations today."}</div>
+          <div style={{ textAlign: "center", padding: 60, color: "rgba(255,255,255,.4)" }}>{customerSearch ? `No matches for "${customerSearch}".` : pendingFilter ? "No matching tables." : "No reservations today."}</div>
         ) : (
-          displayedReservations.map((r) => <TableCard key={r._docId} r={r} captainName={captainName} playAlert={playAlert} existingTables={allTableIds} />)
+          displayedReservations.map((r) => (
+            <BookingRow key={r._docId} r={r}
+              captainName={captainName}
+              existingTables={allTableIds}
+              allReservations={allReservations}
+              onClick={() => setSelectedDocId(r._docId)} />
+          ))
         )}
       </div>
 
       {showWalkIn && (
         <WalkInModal captainName={captainName}
           existingTables={allTableIds}
+          allReservations={allReservations}
           onClose={() => setShowWalkIn(false)} />
       )}
+
+      {selectedDocId && (() => {
+        const sel = reservations.find((x) => x._docId === selectedDocId);
+        if (!sel) { setSelectedDocId(null); return null; }
+        return (
+          <BookingDetailModal
+            r={sel}
+            captainName={captainName}
+            playAlert={playAlert}
+            existingTables={allTableIds}
+            allReservations={allReservations}
+            onClose={() => setSelectedDocId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

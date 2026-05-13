@@ -368,6 +368,38 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
               📲 Send WhatsApp Wallet Link
             </button>
+            {/* 🔴 2026-05-13 (Khushi) — Void Cover (door equivalent of
+                Captain Mode's Void Bill). Manager-PIN gated. Zeros the
+                remaining cover balance with an audit-logged edit. The
+                cash refund itself is handled out-of-band by the manager
+                (per HOD policy — same as Captain Mode void bills). The
+                amount-already-used remains attributed to the cover so
+                Reports / EOD reconciliation stays accurate. */}
+            <button onClick={async () => {
+              const used = existing.coverUsed || 0;
+              const remaining = (existing.coverActivated || 0) - used;
+              if (remaining <= 0) { alert("Nothing to void — cover has no remaining balance."); return; }
+              const pin = window.prompt(`🚫 VOID COVER\n\nThis will zero the remaining wallet balance of ₹${remaining.toLocaleString("en-IN")} for ${booking.name || "guest"}.\n\nThe ₹${used.toLocaleString("en-IN")} already used stays attributed.\nCash refund (if any) must be handled by the manager separately.\n\nEnter MANAGER PIN to confirm:`)?.trim();
+              if (!pin) return;
+              const h = await sha256(pin);
+              if (h !== DOOR_MANAGER_HASH) { alert("❌ Wrong Manager PIN."); return; }
+              const reason = window.prompt("Reason for void (e.g. customer left without entering, double-charge, manager call):")?.trim();
+              if (!reason) { alert("Void cancelled — reason required."); return; }
+              setBusy(true); setErr("");
+              try {
+                await editCoverAmount(existing.id, used, `${agentName} VOID: ${reason}`);
+                const cv = await getCoverForBooking(booking.id || booking.ref);
+                setExisting(cv);
+                alert(`✅ Cover voided. Remaining ₹${remaining.toLocaleString("en-IN")} cleared.\nManager: please process the cash refund (if any).`);
+              } catch (e: unknown) {
+                setErr(e instanceof Error ? e.message : "Void failed.");
+              }
+              setBusy(false);
+            }} disabled={busy}
+              title="Use ONLY when cover was charged in error / customer left (Manager PIN required)"
+              style={{ width: "100%", padding: 11, borderRadius: 10, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 12, fontWeight: 800, cursor: busy ? "wait" : "pointer", marginBottom: 8, letterSpacing: .4, textTransform: "uppercase" }}>
+              🚫 Void Cover
+            </button>
           </>
         ) : (
           <>
@@ -1074,7 +1106,15 @@ async function sendWhatsAppViaMeta(opts: {
 // body must already be updated in Business Manager — we just feed it the
 // 5 params it expects. Location appended to the fallback text only (Meta
 // template body doesn't include a location placeholder yet).
-const HOD_LOCATION_URL = "https://maps.app.goo.gl/eEEHkqGAqr1ozYU2A";
+//
+// 2026-05-13 — switched away from `maps.app.goo.gl/<id>` short links because
+// those route through Firebase Dynamic Links, which Google shut down on
+// 2025-08-25. The old short link now returns "Dynamic Link Not Found" when
+// guests tap it from WhatsApp. The Google Maps Search API URL below works on
+// every device (Android Maps app, iOS, web) without any redirector and never
+// expires. If the venue ever wants a pinned-coordinate link, replace this
+// with `https://www.google.com/maps/search/?api=1&query=<lat>,<lng>`.
+export const HOD_LOCATION_URL = "https://www.google.com/maps/search/?api=1&query=House+of+Dopamine+Koramangala+Bangalore";
 function formatBookingDateNice(raw?: string): string {
   if (!raw) return "Tonight";
   // Accept YYYY-MM-DD; fall back to the raw string otherwise.

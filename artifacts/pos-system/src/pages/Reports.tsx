@@ -22,6 +22,7 @@
 //            OR unpaid > 30min after bill
 //   GREEN  → paid clean, single bill print, no overrides
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { Link } from "wouter";
 import { collection, onSnapshot, query, where, Timestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import {
@@ -980,10 +981,19 @@ export default function Reports() {
     <div style={{ color: "#fff" }}>
       {/* Header + view tabs + date picker */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, fontFamily: "'Playfair Display', serif" }}>📋 Reports</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
-            {selectedDate === todayNight ? "🟢 LIVE — tonight" : `📅 Archive — ${selectedDate}`} · Live from Firestore · CSV export opens in Excel + Google Sheets.
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {/* 2026-05-13 — Khushi spec: back-to-POS button so admins
+              don't have to use the browser back arrow. Matches the
+              ← POS link style used in CaptainMode. */}
+          <Link href="/"
+            style={{ padding: "8px 12px", borderRadius: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
+            ← POS
+          </Link>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, fontFamily: "'Playfair Display', serif" }}>📋 Reports</div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
+              {selectedDate === todayNight ? "🟢 LIVE — tonight" : `📅 Archive — ${selectedDate}`} · Live from Firestore · CSV export opens in Excel + Google Sheets.
+            </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
