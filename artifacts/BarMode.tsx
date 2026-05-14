@@ -1516,32 +1516,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           </div>
         )}
 
-        {guestHits.length > 0 && (
-          <div style={{ marginTop: results.length > 0 ? 18 : 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "rgba(255,255,255,.5)", marginBottom: 10 }}>
-              {guestHits.length} guest{guestHits.length === 1 ? "" : "s"} without wallet
-            </div>
-            {guestHits.map((g) => (
-              <div key={g.id}
-                style={{ display: "block", width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,.02)", border: "1px dashed rgba(255,255,255,.12)", marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name || "Guest"}</div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 4 }}>
-                      {g.ref} · {g.phone || "no phone"} · {g.eventTitle || (g.type ? g.type.toUpperCase() : "")}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 10, fontWeight: 800, padding: "4px 8px", borderRadius: 6, background: g.source === "guestlist" ? "rgba(96,165,250,.15)" : "rgba(242,199,68,.12)", color: g.source === "guestlist" ? "#60A5FA" : "#F2C744", whiteSpace: "nowrap" }}>
-                    {g.source === "guestlist" ? "📋 GUESTLIST" : "🎫 TICKET"}
-                  </span>
-                </div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", marginTop: 6, fontStyle: "italic" }}>
-                  No cover wallet yet — door staff to tap 🎁 FREE ENTRY at check-in.
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* guests without wallet hidden — bar mode only shows active wallets */}
 
         {results.length === 0 && guestHits.length === 0 && (
           <div style={{ textAlign: "center", padding: "60px 20px", color: "rgba(255,255,255,.3)" }}>
