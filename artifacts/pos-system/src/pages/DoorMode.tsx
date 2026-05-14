@@ -1060,101 +1060,45 @@ async function readJsonSafe(r: Response): Promise<{ data: any; parseError?: stri
   }
 }
 
-// ════════════════════════════════════════════════════════
-// FIXED sendWhatsAppViaMeta — replaces the existing function
-// Paste this OVER the existing sendWhatsAppViaMeta function
-// in your DoorMode.tsx (around line 1063)
-// ════════════════════════════════════════════════════════
 
-async function sendWhatsAppViaMeta(name, phone, ref, eventTitle, eventDate, type) {
-    console.log('[door][wa] sendWhatsAppViaMeta called:', { name, phone: phone?.slice(-4), ref, eventTitle, eventDate, type });
-    
-    if (!WHATSAPP_CF_BASE) {
-      console.warn('[door][wa] WHATSAPP_CF_BASE not set');
-      return { ok: false, error: 'WhatsApp not configured' };
-    }
-    
-    const digits = String(phone || '').replace(/\D/g, '');
-    if (!digits || digits.length < 10) {
-      console.warn('[door][wa] Invalid phone:', phone);
-      return { ok: false, error: 'Invalid phone number' };
-    }
-    
-    // Build the message and URL
-    const sref = encodeURIComponent(ref || '');
-    const baseUrl = WHATSAPP_CF_BASE.substring(0, WHATSAPP_CF_BASE.lastIndexOf('/'));
-    const ticketURL = `${baseUrl}/?wallet=${sref}`;
-    const textMessage = `Hi ${name || 'Guest'}! Your HOD cover for ${eventTitle || 'the event'} on ${eventDate || 'the date'} (${type || 'Guest'}) is booked.\n\nView ticket: ${ticketURL}\n\nShow this at the entrance.`;
-    
-    // ── TRY TEMPLATE FIRST ──
+async function sendWhatsAppViaMeta(opts: {
+  phone: string;
+  template?: { name: string; params: string[]; language?: string };
+  fallbackText: string;
+}): Promise<{ ok: boolean; via?: "template" | "text"; error?: string; code?: number }> {
+  const digits = (opts.phone || "").replace(/\D/g, "");
+  if (digits.length < 10) return { ok: false, error: "Invalid phone" };
+
+  // 1) Approved template (works outside the 24h customer-service window)
+  if (opts.template) {
     try {
-      console.log('[door][wa] Trying template...');
       const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppTemplate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          to: digits,
-          template: 'wallet_ready',
-          language: 'en',
-          params: [name || 'Guest', eventTitle || 'HOD Event', eventDate || 'Today', type || 'Guest', ticketURL]
-        })
+          to: digits, template: opts.template.name,
+          language: opts.template.language || "en", params: opts.template.params,
+        }),
       });
-      const body = await readJsonSafe(r);
-      console.log('[door][wa] Template response:', body);
-      if (r.ok && body.ok) {
-        console.log('[door][wa] Template sent successfully!');
-        return { ok: true, message: body };
-      }
-      throw new Error(body?.error || 'template failed');
-    } catch (err) {
-      console.warn('[door][wa] Template failed:', err?.message);
-    }
-    
-    // ── FALLBACK TO TEXT ──
-    try {
-      console.log('[door][wa] Trying text fallback...');
-      const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: digits, message: textMessage })
-      });
-      console.log('[door][wa] Text response status:', r.status);
-      const body = await readJsonSafe(r);
-      console.log('[door][wa] Text response body:', body);
-      if (r.ok && body.ok) {
-        console.log('[door][wa] Text sent successfully!');
-        return { ok: true, textMessage };
-      }
-      throw new Error(body?.error || `text HTTP ${r.status}`);
-    } catch (textErr) {
-      console.error('[door][wa] TEXT ALSO FAILED:', textErr);
-      return { ok: false, error: textErr?.message || 'Both template and text failed' };
-    }
-}
+      const { data, parseError } = await readJsonSafe(r);
+      if (r.ok && data?.ok) return { ok: true, via: "template" };
+      console.warn("[door][wa] template send failed, trying text:", parseError || data);
+    } catch (e) { console.warn("[door][wa] template request error", e); }
+  }
 
-// Booking 📲: try Meta template `wallet_ready` → text → QR popup. Tablets have
-// no SIM so wa.me is removed entirely. Outcome is logged to covers/{ref}.
-//
-// 2026-05-12 (Khushi spec) — template params and fallback text now match the
-// "previous format" the venue had approved:
-//   Hi {name}, your HOD cover is booked! 🎟️
-//   🎉 Event: {event}
-//   📅 Date: {date}
-//   🚪 Entry: {entry}
-//   …
-//   View ticket: {link}
-// Order = [name, eventTitle, dateNice, entryType, link]. The Meta template
-// body must already be updated in Business Manager — we just feed it the
-// 5 params it expects. Location appended to the fallback text only (Meta
-// template body doesn't include a location placeholder yet).
-//
-// 2026-05-13 — switched away from `maps.app.goo.gl/<id>` short links because
-// those route through Firebase Dynamic Links, which Google shut down on
-// 2025-08-25. The old short link now returns "Dynamic Link Not Found" when
-// guests tap it from WhatsApp. The Google Maps Search API URL below works on
-// every device (Android Maps app, iOS, web) without any redirector and never
-// expires. If the venue ever wants a pinned-coordinate link, replace this
-// with `https://www.google.com/maps/search/?api=1&query=<lat>,<lng>`.
+  // 2) Free-form text (only delivered if customer messaged HOD in last 24h)
+  try {
+    const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to: digits, message: opts.fallbackText }),
+    });
+    const { data, parseError } = await readJsonSafe(r);
+    if (r.ok && data?.ok) return { ok: true, via: "text" };
+    if (parseError) return { ok: false, error: parseError };
+    return { ok: false, error: data?.error || "Send failed", code: data?.code };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error" };
+  }
+}
 export const HOD_LOCATION_URL = "https://www.google.com/maps/search/?api=1&query=House+of+Dopamine+Koramangala+Bangalore";
 function formatBookingDateNice(raw?: string): string {
   if (!raw) return "Tonight";
