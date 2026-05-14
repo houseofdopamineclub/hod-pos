@@ -44,7 +44,7 @@ import { useToast } from "@/hooks/use-toast";
 //   https://us-central1-hod-tickets.cloudfunctions.net
 // During local dev with Firebase emulator:
 //   http://localhost:5001/hod-tickets/us-central1
-const WHATSAPP_CF_BASE = "https://us-central1-hod-tickets.cloudfunctions.net";
+const WHATSAPP_CF_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 
 import { ToastAction } from "@/components/ui/toast";
 import { QrScanner } from "@/components/QrScanner";
