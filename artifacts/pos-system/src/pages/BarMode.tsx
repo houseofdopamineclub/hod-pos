@@ -57,14 +57,13 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#0A0A0A", border: "2px solid rgba(239,68,68,.5)", borderRadius: 14, padding: 20, color: "#fff" }}>
         <div style={{ fontSize: 17, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID WALLET BILL</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginBottom: 10 }}>
-          Refunds every activated round back into the customer's wallet. Use ONLY when the bill must be undone (refused / wrong drink / quality / printer mistake). Audit trail captured.
+          Cancels every activated round on this bill. Use ONLY when the bill must be undone (refused / wrong drink / quality / printer mistake). Audit trail captured.
         </div>
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 10, padding: 12, marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>WALLET / CUSTOMER</div>
           <div style={{ fontSize: 14, fontWeight: 800, color: "#F2C744", marginBottom: 8 }}>{tableId || "WALLET"} · {customerName || "—"}</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>₹ TO REFUND BACK INTO WALLET</div>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444" }}>+ ₹{Math.round(refundAmount).toLocaleString("en-IN")}</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 4 }}>Wallet balance after refund: ₹{Math.round(walletBalance + refundAmount).toLocaleString("en-IN")}</div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>BILL AMOUNT TO VOID</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444" }}>₹{Math.round(refundAmount).toLocaleString("en-IN")}</div>
         </div>
         <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>REASON</label>
         <select value={reason} onChange={(e) => setReason(e.target.value)}
@@ -89,7 +88,7 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
           </button>
           <button onClick={submit} disabled={busy}
             style={{ flex: 1.4, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 13, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer" }}>
-            {busy ? "Voiding..." : "🚫 CONFIRM VOID + REFUND"}
+            {busy ? "Voiding..." : "🚫 CONFIRM VOID BILL"}
           </button>
         </div>
       </div>
@@ -225,7 +224,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
     if (ov.discountAmount) return Math.max(0, Math.round((basePrice - ov.discountAmount) * 100) / 100);
     return basePrice;
   };
-  const [activeGroup, setActiveGroup] = useState("spirits");
+  const [activeGroup, setActiveGroup] = useState<string>("spirits");
+  const [subCategory, setSubCategory] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
   const [rcAmt, setRcAmt] = useState("");
   const [rcMethod, setRcMethod] = useState<"cash" | "upi" | "card" | "split">("cash");
@@ -239,7 +239,6 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const [toast, setToast] = useState("");
   const [lastRcAmt, setLastRcAmt] = useState(0);
   const [lastRcTime, setLastRcTime] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(true);
   const [editBusy, setEditBusy] = useState(false);
   const [showVoidBill, setShowVoidBill] = useState(false);
   // V4 2026-05-11 — screenshot collection at 60-sec fail-open. Holds the
@@ -891,92 +890,103 @@ function WalletOverlay({ cover, staffName, onClose }: {
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: "auto" }}>
-        <div style={{ padding: "10px 16px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <button onClick={() => setMenuOpen(!menuOpen)}
-              style={{ padding: "6px 14px", borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-              {menuOpen ? "▾ Menu" : "▸ Menu"}
-            </button>
-            <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search menu..."
-              style={{ flex: 1, padding: "8px 12px", borderRadius: 8, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 13, outline: "none" }} />
-          </div>
-
-          {menuOpen && (
-            <>
-              {!searchTerm && (
-                <div style={{ display: "flex", gap: 6, overflowX: "auto", marginBottom: 12, paddingBottom: 4 }}>
-                  {menuGroups.map((g) => (
-                    <button key={g} onClick={() => setActiveGroup(g)}
-                      style={{ padding: "7px 14px", borderRadius: 10, whiteSpace: "nowrap", fontSize: 12, fontWeight: 700, cursor: "pointer",
-                        background: activeGroup === g ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-                        border: `1px solid ${activeGroup === g ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-                        color: activeGroup === g ? "#F2C744" : "rgba(255,255,255,.5)" }}>
-                      {GROUP_LABELS[g] || g}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {categories.map((cat) => {
-                const catItems = filteredItems.filter((m) => m.category === cat);
-                const catLabel = cat.split("-").slice(1).join(" ").replace(/\b\w/g, (c) => c.toUpperCase()) || cat;
-                return (
-                  <div key={cat} style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.7)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{catLabel}</div>
-                    {catItems.map((item) => {
-                      const inCart = cart[item.id];
-                      const qty = inCart?.qty || 0;
-                      const ov = menuOverrides[ovKey(item.name)];
-                      const eff = effectivePrice(item.name, item.price);
-                      const hasDisc = eff !== item.price;
-                      return (
-                        <div key={item.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <span style={{ width: 8, height: 8, borderRadius: 2, border: `2px solid ${item.isVeg ? "#22C55E" : "#EF4444"}`, display: "inline-block" }} />
-                              <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{item.name}</span>
-                            </div>
-                            <div style={{ fontSize: 12, color: "#F2C744", marginTop: 2 }}>
-                              {hasDisc ? (
-                                <>
-                                  <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{item.price}</span>
-                                  <span style={{ color: "#22c55e", fontWeight: 800 }}>₹{eff}</span>
-                                  {ov?.discountReason && (
-                                    <span style={{ color: "rgba(34,197,94,.7)", fontSize: 10, marginLeft: 6 }}>· {ov.discountReason}</span>
-                                  )}
-                                </>
-                              ) : (
-                                <>₹{item.price}</>
-                              )}
-                            </div>
-                          </div>
-                          {qty === 0 ? (
-                            <button onClick={() => addToCart(item)}
-                              style={{ padding: "6px 16px", borderRadius: 8, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                              Add
-                            </button>
-                          ) : (
-                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                              <button onClick={() => updateCartQty(item.id, -1)}
-                                style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>−</button>
-                              <span style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", minWidth: 16, textAlign: "center" }}>{qty}</span>
-                              <button onClick={() => updateCartQty(item.id, 1)}
-                                style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer" }}>+</button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-              {filteredItems.length === 0 && (
-                <div style={{ textAlign: "center", padding: 30, color: "rgba(255,255,255,.4)", fontSize: 13 }}>No items found</div>
-              )}
-            </>
-          )}
+      {/* 🔴 2026-05-13 v3 (Khushi) — Bar Mode menu now mirrors Captain Mode
+          1:1: centered search bar with gold border, then 4 BIG tabs
+          (FOOD / LIQUOR / NAB / SMOKE) — gold for active, dark red for
+          inactive — then a sub-category strip (ALL / SINGLE MALT / etc.)
+          underlined in gold for the active one, then a flat item list with
+          red ADD+ buttons. Same shape the customer sees on hodclub.in. */}
+      <div style={{ padding: "10px 16px 0", background: "#0E0B14", flexShrink: 0 }}>
+        <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search"
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "1px solid #F2C744", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${menuGroups.length}, 1fr)`, gap: 6, marginBottom: 8 }}>
+          {menuGroups.map((g) => {
+            const active = activeGroup === g;
+            return (
+              <button key={g} onClick={() => { setActiveGroup(g); setSubCategory(""); }}
+                style={{
+                  padding: "14px 6px", borderRadius: 4, fontSize: 12, fontWeight: 800, letterSpacing: 1, cursor: "pointer",
+                  background: active ? "#F2C744" : "#7A1F18",
+                  color: active ? "#1a1410" : "#F4D7A8",
+                  border: "1px solid " + (active ? "#F2C744" : "#5A150F"),
+                  textTransform: "uppercase",
+                }}>{GROUP_LABELS[g] || g}</button>
+            );
+          })}
         </div>
+        {categories.length > 1 && (
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setSubCategory("")}
+              style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", background: "transparent",
+                border: `1px solid ${!subCategory ? "#F2C744" : "transparent"}`,
+                color: !subCategory ? "#F2C744" : "rgba(255,255,255,.55)" }}>ALL</button>
+            {categories.map((c) => {
+              const label = c.split("-").slice(1).join(" ").replace(/\b\w/g, (ch) => ch.toUpperCase()) || c;
+              return (
+                <button key={c} onClick={() => setSubCategory(c)}
+                  style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: 0.5, background: "transparent",
+                    border: `1px solid ${subCategory === c ? "#F2C744" : "transparent"}`,
+                    color: subCategory === c ? "#F2C744" : "rgba(255,255,255,.55)", textTransform: "uppercase" }}>{label}</button>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ height: 1, background: "rgba(255,255,255,.05)" }} />
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px", background: "#0E0B14" }}>
+        {(() => {
+          const visibleItems = subCategory ? filteredItems.filter((m) => m.category === subCategory) : filteredItems;
+          if (visibleItems.length === 0) {
+            return <div style={{ textAlign: "center", padding: 30, color: "rgba(255,255,255,.4)", fontSize: 13 }}>No items found</div>;
+          }
+          return visibleItems.map((item) => {
+            const inCart = cart[item.id];
+            const qty = inCart?.qty || 0;
+            const ov = menuOverrides[ovKey(item.name)];
+            const eff = effectivePrice(item.name, item.price);
+            const hasDisc = eff !== item.price;
+            const showVeg = item.group === "food";
+            return (
+              <div key={`${item.id}-${item.category}-${item.name}`}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
+                <div style={{ flex: 1, paddingRight: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                    {showVeg && (
+                      <span style={{ display: "inline-block", width: 12, height: 12, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
+                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 5, height: 5, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
+                      </span>
+                    )}
+                    {item.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4, fontWeight: 600 }}>
+                    {hasDisc ? (
+                      <>
+                        <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{item.price.toFixed(2)}</span>
+                        <span style={{ color: "#22c55e" }}>₹{eff.toFixed(2)}</span>
+                        {ov?.discountReason && <span style={{ marginLeft: 6, color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {ov.discountReason}</span>}
+                      </>
+                    ) : (
+                      <>₹{item.price.toFixed(2)}</>
+                    )}
+                  </div>
+                </div>
+                {qty === 0 ? (
+                  <button onClick={() => addToCart(item)}
+                    style={{ padding: "8px 18px", borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer" }}>ADD +</button>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button onClick={() => updateCartQty(item.id, -1)}
+                      style={{ width: 30, height: 30, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 16, fontWeight: 800, cursor: "pointer" }}>−</button>
+                    <span style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", minWidth: 18, textAlign: "center" }}>{qty}</span>
+                    <button onClick={() => updateCartQty(item.id, 1)}
+                      style={{ width: 30, height: 30, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 16, fontWeight: 800, cursor: "pointer" }}>+</button>
+                  </div>
+                )}
+              </div>
+            );
+          });
+        })()}
       </div>
 
       <div style={{ background: "rgba(8,8,18,.96)", borderTop: "1px solid rgba(255,255,255,.08)", padding: "12px 16px 24px", flexShrink: 0, backdropFilter: "blur(8px)" }}>
@@ -1146,13 +1156,13 @@ function WalletOverlay({ cover, staffName, onClose }: {
             <button onClick={() => setShowVoidBill(true)}
               style={{ width: "100%", padding: 12, marginBottom: 10, borderRadius: 12, fontSize: 13, fontWeight: 900,
                 background: "rgba(239,68,68,.10)", border: "1.5px solid rgba(239,68,68,.45)", color: "#EF4444", cursor: "pointer", transition: "all .2s" }}>
-              🚫 VOID BILL — REFUND ₹{Math.round(refundAmt).toLocaleString("en-IN")} TO WALLET
+              🚫 VOID BILL
             </button>
           );
         })()}
         {(cv as unknown as { billVoided?: boolean }).billVoided && (
           <div style={{ width: "100%", padding: 10, marginBottom: 10, borderRadius: 10, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
-            🚫 BILL VOIDED · ₹{Math.round((cv as unknown as { voidedBillTotal?: number }).voidedBillTotal || 0).toLocaleString("en-IN")} REFUNDED
+            🚫 BILL VOIDED
           </div>
         )}
 
