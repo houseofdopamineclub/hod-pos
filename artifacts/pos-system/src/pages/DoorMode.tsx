@@ -1144,7 +1144,7 @@ async function sendBookingWhatsApp(
   }
   const result = await sendWhatsAppViaMeta({
     phone,
-    template: { name: "wallet_ready", params: [customerName, eventTitle, dateNice, entryLabel, link] },
+    template: { name: "cover_confirmed", params: [customerName, eventTitle, dateNice, entryLabel, link] },
     fallbackText,
   });
   if (result.ok) {
@@ -1155,7 +1155,7 @@ async function sendBookingWhatsApp(
   } else {
     const isTemplateMissing = result.code === 132001 || result.code === 132000 || result.code === 132012 || result.code === 132015;
     const reason = isTemplateMissing
-      ? `Template "wallet_ready" not approved by Meta yet, and the guest is outside the 24h reply window.`
+      ? `Template "cover_confirmed" not approved by Meta yet, and the guest is outside the 24h reply window.`
       : `Meta WhatsApp: ${result.error || "send failed"}${result.code ? ` (code ${result.code})` : ""}`;
     if (ref) await logNotificationOutcome(ref, { status: "qr_shown", reason, code: result.code });
     // 2026-05-10 (Khushi) — ALWAYS show a popup so door staff knows the
