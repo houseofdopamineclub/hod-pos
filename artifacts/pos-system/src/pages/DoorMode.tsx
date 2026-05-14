@@ -41,9 +41,9 @@ import { useToast } from "@/hooks/use-toast";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
-//   https://us-central1-hod-tickets.cloudfunctions.net
+//   https://asia-south1-hod-tickets.cloudfunctions.net
 // During local dev with Firebase emulator:
-//   http://localhost:5001/hod-tickets/us-central1
+//   http://localhost:5001/hod-tickets/asia-south1
 const WHATSAPP_CF_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 
 import { ToastAction } from "@/components/ui/toast";

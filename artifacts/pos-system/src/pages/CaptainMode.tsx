@@ -29,9 +29,9 @@ import { HOD_LOCATION_URL } from "@/pages/DoorMode";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
-//   https://us-central1-hod-tickets.cloudfunctions.net
+//   https://asia-south1-hod-tickets.cloudfunctions.net
 // During local dev with Firebase emulator:
-//   http://localhost:5001/hod-tickets/us-central1
+//   http://localhost:5001/hod-tickets/asia-south1
 const WHATSAPP_CF_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 const CAPTAIN_HASH = "8eb63d4e8a9814c7f8d2af807808d010d4d2cc1930edae511792764ca53b679c";
 // Manager PIN — guards: changing source after a bill is printed (L1/L7),
