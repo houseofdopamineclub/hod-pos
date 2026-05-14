@@ -1066,7 +1066,7 @@ async function sendWhatsAppViaMeta(opts: {
   template?: { name: string; params: string[]; language?: string };
   fallbackText: string;
 }): Promise<{ ok: boolean; via?: "template" | "text"; error?: string; code?: number }> {
-  const digits = (opts.phone || "").replace(/\D/g, "");
+  let digits = (opts.phone || "").replace(/\D/g, ""); if (digits.length === 10) digits = "91" + digits;
   if (digits.length < 10) return { ok: false, error: "Invalid phone" };
 
   // 1) Approved template (works outside the 24h customer-service window)
