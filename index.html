@@ -407,8 +407,11 @@ html,body{background:var(--black);color:var(--text);font-family:var(--fs);min-he
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <!-- Chart.js — analytics dashboard -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<!-- EmailJS SDK -->
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" crossorigin="anonymous"></script>
+<!-- 🔴 2026-05-13 (Khushi) — EmailJS SDK removed. Customers were getting
+     the OLD Gmail/EmailJS template (template_wtp5oik) when ZeptoMail
+     errored or timed out. ZeptoMail (cloud-fn sendBookingEmail) is now
+     the ONLY transport. No fallback — if ZeptoMail fails the email is
+     not sent (and we surface the error in the console for debugging). -->
 <!-- Razorpay SDK -->
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <!-- Firebase SDK v9 compat -->
@@ -836,45 +839,113 @@ function hodComputeBreakdown(items){
           serviceCharge:sc, gst:gst, cgst:cgst, sgst:sgst,
           roundOff:roundOff, grandTotal:grandTotal};
 }
-var EMAILJS_PUBLIC_KEY  = "2A_vSCA2nJ3CQUxRu";
-var EMAILJS_SERVICE_ID  = "service_xxbd4i9";
-var EMAILJS_TEMPLATE_ID = "template_wtp5oik";
 
+// ── 2026-05-13 (Khushi) — "View Bill" modal. Shown after a settled
+// bill (online OR offline). Renders an itemized list + the same SC/GST
+// math the captain's thermal printer uses, so the customer sees the
+// exact paper bill on their phone. `opts` accepts { customerName,
+// tableId, paymentMode ('paid_online'|'cash'|'card'|...), paymentId,
+// amountPaid, settledAt, billNumber }. All optional — only items[]
+// is required.
+function showHodBillModal(items, opts){
+  opts = opts || {};
+  var clean = (items||[]).filter(function(it){ return it && (it.qty||0) > 0; });
+  if(!clean.length){ showToast && showToast('No items on this bill.','err',2500); return; }
+  var bd = hodComputeBreakdown(clean);
+  var ovr = document.createElement('div');
+  ovr.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;font-family:var(--fs);';
+  var sheet = document.createElement('div');
+  sheet.style.cssText = 'background:#0E0E14;border:1px solid rgba(242,199,68,.35);border-radius:16px;padding:18px 18px 14px;max-width:380px;width:100%;color:#fff;box-shadow:0 12px 40px rgba(0,0,0,.6);margin:auto;';
+  var pmLabel = ({paid_online:'PAID ONLINE', online:'PAID ONLINE',
+                  cash:'CASH', card:'CARD', upi:'UPI'})[opts.paymentMode] || 'SETTLED';
+  var settledStr = '';
+  if(opts.settledAt){
+    try{ var d=new Date(opts.settledAt); settledStr=d.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }catch(e){}
+  }
+  var html = ''
+    + '<div style="text-align:center;border-bottom:1px dashed rgba(242,199,68,.3);padding-bottom:10px;margin-bottom:10px;">'
+    +   '<div style="font-family:var(--fp);font-size:18px;font-weight:900;color:var(--gold);letter-spacing:1px;">HOUSE OF DOPAMINE</div>'
+    +   '<div style="font-size:10px;color:var(--muted);margin-top:2px;letter-spacing:.6px;">TAX INVOICE · CUSTOMER COPY</div>'
+    + '</div>'
+    + '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:10px;">'
+    +   (opts.customerName?'<div><b style="color:var(--text);">Guest:</b> '+sanitize(opts.customerName)+'</div>':'')
+    +   (opts.tableId?'<div><b style="color:var(--text);">Table:</b> '+sanitize(opts.tableId)+'</div>':'')
+    +   (settledStr?'<div><b style="color:var(--text);">Settled:</b> '+sanitize(settledStr)+'</div>':'')
+    +   (opts.billNumber?'<div><b style="color:var(--text);">Bill #:</b> '+sanitize(String(opts.billNumber))+'</div>':'')
+    + '</div>'
+    + '<div style="border-top:1px dashed rgba(255,255,255,.15);border-bottom:1px dashed rgba(255,255,255,.15);padding:8px 0;margin-bottom:8px;">';
+  clean.forEach(function(it){
+    var line = (it.p||0) * (it.qty||0);
+    html += '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px;">'
+         +    '<span style="flex:1;">'+sanitize(it.n||'Item')+' <span style="color:var(--muted);">× '+(it.qty||0)+'</span></span>'
+         +    '<span style="color:var(--gold);font-variant-numeric:tabular-nums;">\u20b9'+line.toLocaleString('en-IN')+'</span>'
+         + '</div>';
+  });
+  html += '</div>';
+  function row(label, val, bold){
+    return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;'+(bold?'font-weight:900;':'color:var(--muted);')+'">'
+         +   '<span>'+label+'</span>'
+         +   '<span style="font-variant-numeric:tabular-nums;'+(bold?'color:var(--gold);':'')+'">\u20b9'+Math.round(val).toLocaleString('en-IN')+'</span>'
+         + '</div>';
+  }
+  html += row('Subtotal', bd.subtotal, false);
+  html += row('Service Charge (10%)', bd.serviceCharge, false);
+  html += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0;color:var(--muted);"><span>CGST (2.5%)</span><span style="font-variant-numeric:tabular-nums;">\u20b9'+bd.cgst.toFixed(2)+'</span></div>';
+  html += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0;color:var(--muted);"><span>SGST (2.5%)</span><span style="font-variant-numeric:tabular-nums;">\u20b9'+bd.sgst.toFixed(2)+'</span></div>';
+  if(bd.alcSubtotal > 0){
+    html += '<div style="font-size:9px;color:rgba(255,255,255,.4);padding:2px 0 4px;">* Alcohol exempt from GST per liquor licence rules</div>';
+  }
+  html += '<div style="border-top:1px solid rgba(242,199,68,.35);margin-top:6px;padding-top:6px;">'
+       +   row('TOTAL', bd.grandTotal, true)
+       + '</div>';
+  html += '<div style="margin-top:12px;text-align:center;padding:8px;border-radius:8px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.4);color:#22C55E;font-size:12px;font-weight:800;letter-spacing:.5px;">'
+       +   '✓ '+pmLabel
+       +   (opts.paymentId?'<div style="font-family:monospace;font-size:10px;color:rgba(34,197,94,.8);margin-top:3px;letter-spacing:1px;">ID …'+sanitize(String(opts.paymentId).slice(-10))+'</div>':'')
+       + '</div>';
+  html += '<div style="margin-top:10px;text-align:center;font-size:10px;color:rgba(255,255,255,.35);line-height:1.5;">Thank you for visiting House of Dopamine<br/>This is a customer copy of the GST invoice.</div>';
+  html += '<button id="hod-bill-close" style="margin-top:14px;width:100%;padding:12px;border-radius:10px;background:rgba(242,199,68,.15);border:1px solid rgba(242,199,68,.45);color:var(--gold);font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);letter-spacing:.5px;text-transform:uppercase;">Close</button>';
+  sheet.innerHTML = html;
+  ovr.appendChild(sheet);
+  ovr.addEventListener('click', function(e){ if(e.target===ovr) ovr.remove(); });
+  document.body.appendChild(ovr);
+  var cb=document.getElementById('hod-bill-close'); if(cb) cb.onclick=function(){ ovr.remove(); };
+}
+
+// Flatten tabRounds → flat items list (for the bill modal). Used by
+// both online-paid (rounds in hand) and offline-paid (tabRounds from
+// the live tableReservation doc).
+function _hodFlattenRounds(rounds){
+  var out = [];
+  (rounds||[]).forEach(function(rd){ (rd.items||[]).forEach(function(it){ out.push(it); }); });
+  return out;
+}
+// 🔴 2026-05-13 (Khushi) — EmailJS constants removed. ZeptoMail-only.
 // ══════════════════════════════════════════════════
 // ⚡ ZEPTOMAIL CLOUD FUNCTION URL (10,000 free emails/month)
-// After deploying cloud-functions/, paste the URL here.
-// Leave empty to use EmailJS fallback (200/mo limit).
+// Hosted in the separate `hod-tickets` Firebase project.
 // ══════════════════════════════════════════════════
 var CLOUD_FN_EMAIL_URL = "https://us-central1-hod-tickets.cloudfunctions.net/sendBookingEmail";
 
-// ── Unified email sender: ZeptoMail (Cloud Fn) → EmailJS fallback
+// ── ZeptoMail-only email sender. NO fallback (the old EmailJS path was
+// firing the wrong "Gmail" template to customers whenever ZeptoMail had
+// any hiccup, so the customer-facing template was inconsistent). If
+// ZeptoMail fails we log a warning; the booking still completes.
 function _HOD_sendMail(params){
   return new Promise(function(resolve){
-    var sentVia = null;
-    function viaEmailJS(){
-      try{
-        if(typeof emailjs==='undefined' || !EMAILJS_PUBLIC_KEY || EMAILJS_PUBLIC_KEY.includes('PASTE')){
-          resolve({ok:false, via:'none'}); return;
-        }
-        emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, params)
-          .then(function(r){console.log('✉️  via EmailJS', r.status); resolve({ok:true, via:'emailjs'});})
-          .catch(function(e){console.warn('EmailJS failed:', e); resolve({ok:false, via:'emailjs', error:e});});
-      }catch(e){resolve({ok:false, via:'emailjs', error:e});}
+    if(!CLOUD_FN_EMAIL_URL || !/^https:\/\//.test(CLOUD_FN_EMAIL_URL)){
+      console.warn('✉️  CLOUD_FN_EMAIL_URL not configured — email NOT sent');
+      resolve({ok:false, via:'none'}); return;
     }
-    if(CLOUD_FN_EMAIL_URL && /^https:\/\//.test(CLOUD_FN_EMAIL_URL)){
-      try{
-        fetch(CLOUD_FN_EMAIL_URL, {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(params)
-        }).then(function(r){
-          if(r.ok){console.log('✉️  via ZeptoMail'); resolve({ok:true, via:'zeptomail'});}
-          else { console.warn('ZeptoMail HTTP', r.status, '— falling back to EmailJS'); viaEmailJS(); }
-        }).catch(function(e){console.warn('ZeptoMail network error:', e, '— falling back'); viaEmailJS();});
-      }catch(e){viaEmailJS();}
-    } else {
-      viaEmailJS();
-    }
+    try{
+      fetch(CLOUD_FN_EMAIL_URL, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(params)
+      }).then(function(r){
+        if(r.ok){console.log('✉️  via ZeptoMail'); resolve({ok:true, via:'zeptomail'});}
+        else { console.warn('✉️  ZeptoMail HTTP', r.status, '— email NOT sent (no fallback)'); resolve({ok:false, via:'zeptomail', status:r.status}); }
+      }).catch(function(e){console.warn('✉️  ZeptoMail network error:', e, '— email NOT sent (no fallback)'); resolve({ok:false, via:'zeptomail', error:e});});
+    }catch(e){console.warn('✉️  ZeptoMail threw:', e); resolve({ok:false, via:'zeptomail', error:e});}
   });
 }
 
@@ -897,28 +968,14 @@ function _HOD_sendWhatsAppTemplate(phone, template, params){
   }catch(e){console.warn('WA send threw:', e);}
 }
 
-// ── Init EmailJS
-(function(){
-  try{
-    if(EMAILJS_PUBLIC_KEY && !EMAILJS_PUBLIC_KEY.includes('PASTE')){
-      // Support both v3 and v4 EmailJS API
-      if(emailjs.init.length === 1 && typeof emailjs.init === 'function'){
-        try{emailjs.init({publicKey: EMAILJS_PUBLIC_KEY});}
-        catch(e2){emailjs.init(EMAILJS_PUBLIC_KEY);}
-      } else {
-        emailjs.init(EMAILJS_PUBLIC_KEY);
-      }
-      console.log('✅ EmailJS ready — booking confirmations will be emailed');
-    } else {
-      console.log('ℹ️ EmailJS not configured');
-    }
-  }catch(e){console.warn('EmailJS init error:',e);}
-})();
+// 🔴 2026-05-13 (Khushi) — EmailJS init block removed. ZeptoMail is the
+// only transport now (sendBookingEmail cloud function in hod-tickets).
+console.log('✅ Email transport: ZeptoMail only (no EmailJS fallback)');
 
-// ── Send booking confirmation email
+// ── Send booking confirmation email (ZeptoMail only — see _HOD_sendMail)
 function sendBookingEmail(booking, eventTitle, eventDate, eventTime, eventVenue, ev){
   try{
-    if(!EMAILJS_PUBLIC_KEY || EMAILJS_PUBLIC_KEY.includes('PASTE')) return;
+    if(!CLOUD_FN_EMAIL_URL) return;
     // ── BUG FIX: Use event-specific prices, not hardcoded values
     var stagPr=(ev&&ev.stagPrice)||999;
     var couplePr=(ev&&ev.couplePrice)||1499;
@@ -1095,36 +1152,47 @@ function _autoResetStockIfNeeded(evs){
   });
 }
 
+// ── Compare two event arrays for meaningful changes (prevents flicker)
+function _eventsChanged(a,b){
+  if(!a||!b||a.length!==b.length)return true;
+  var sa=a.slice().sort(function(x,y){return (x.id||'').localeCompare(y.id||'');});
+  var sb=b.slice().sort(function(x,y){return (x.id||'').localeCompare(y.id||'');});
+  var keys=['title','dj','date','time','venue','capacity','sold','stagPrice','couplePrice','groupPrice','price','entryOnlyPrice','groupPerHeadPrice','table4Price','vipPrice','gf4Stock','vvipStock','published','genre','description','color','image'];
+  for(var i=0;i<sa.length;i++){
+    if((sa[i].id||'')!==(sb[i].id||''))return true;
+    for(var k=0;k<keys.length;k++){var key=keys[k];var va=sa[i][key],vb=sb[i][key];if((va===undefined?null:va)!==(vb===undefined?null:vb))return true;}
+  }
+  return false;
+}
+
 // ── Firebase: Events real-time listener — started ONCE at app init
 // NEVER call this inside render() — it creates duplicate listeners
 function startEventsListener(){
   if(!firestore)return;
   if(S._eventsUnsub){try{S._eventsUnsub();}catch(e){}}
+  var _renderTimer=null;
   var unsub=firestore.collection('events').orderBy('date').onSnapshot(function(snap){
     var evs=[];snap.forEach(function(doc){evs.push(Object.assign({id:doc.id},doc.data()));});
-    S._cachedEvents=evs;
+    // ── FLICKER FIX: Only re-render if events data actually changed.
+    // Firestore onSnapshot fires multiple times on initial load (cached -> server -> metadata).
+    var prev=S._cachedEvents;S._cachedEvents=evs;
+    if(!_eventsChanged(prev,evs)){return;}
     // ── v3: 6AM nightly stock auto-reset for table inventory.
-    // Operational night rolls over at 6AM. If an event's lastStockResetDate !== today,
-    // restore gf4Stock & vvipStock to their _gf4Default / _vvipDefault snapshots.
-    // Skipped for past events (date < today) so we never resurrect stock for old gigs.
     try{ _autoResetStockIfNeeded(evs); }catch(e){console.warn('[HOD] stock reset:',e);}
     // Sync to localStorage
     var db=getDB();db.events=evs;try{saveDB(db);}catch(e){}
-    // Re-render on home or admin events tab.
-    // CRITICAL: Also re-render if a modal is pending but the event isn't loaded yet
-    // (this happens when user lands via ?event=... ad link before Firestore sync).
-    if(S.view==='home'){
-      if(!S.modal){render();}
-      else {
-        // Modal pending — check if its event is now available
-        var modalEvExists=evs.some(function(e){return e.id===S.modal;});
-        if(modalEvExists){render();}
+    // Debounce: batch rapid re-renders within 150ms window
+    if(_renderTimer)clearTimeout(_renderTimer);
+    _renderTimer=setTimeout(function(){
+      _renderTimer=null;
+      // Re-render on home or admin events tab.
+      if(S.view==='home'){
+        if(!S.modal){render();}
+        else{var modalEvExists=evs.some(function(e){return e.id===S.modal;});if(modalEvExists){render();}}
       }
-    }
-    else if(S.view==='admin'&&S.adminTab==='events'){render();}
-  },function(err){
-    console.warn('Events listener error:',err);
-  });
+      else if(S.view==='admin'&&S.adminTab==='events'){render();}
+    },150);
+  },function(err){console.warn('Events listener error:',err);});
   S._eventsUnsub=unsub;
   S._eventsListenerStarted=true;
 }
@@ -1612,10 +1680,10 @@ function renderHome(){
   sec.appendChild(secHead);
 
   // Load events — use Firebase cache if available, else localStorage
+  // 🔴 2026-05-13 (Khushi) — Past tab removed entirely (was loading 50+
+  // poster images and slowing the homepage). pastEvs no longer computed.
   var allPublished=(S._cachedEvents||db.events).filter(function(e){return e.published;}).sort(function(a,b){return a.date<b.date?-1:1;});
-  // Split using isEventPast — checks actual end time not just date
-  var pub=allPublished.filter(function(e){return !isEventPast(e);});  // upcoming: soonest first
-  var pastEvs=allPublished.filter(function(e){return isEventPast(e);}).reverse(); // past: newest first
+  var pub=allPublished.filter(function(e){return !isEventPast(e);});  // upcoming only
   var dates=['all'];
   pub.forEach(function(e){if(!dates.includes(e.date))dates.push(e.date);});
   // Events are kept fresh by startEventsListener() — no fetch needed here
@@ -1703,20 +1771,11 @@ function renderHome(){
     }
     fb.appendChild(chip);
   });
-  // PAST EVENTS chip
-  if(pastEvs.length>0){
-    var pastC=document.createElement('div');
-    pastC.style.cssText='flex-shrink:0;padding:10px 16px;border-radius:8px;font-size:11px;font-weight:800;letter-spacing:2px;font-family:var(--fs);transition:all .22s;cursor:pointer;background:'+(S.filterPast?'rgba(107,107,138,.2)':'rgba(255,255,255,.02)')+';border:1px solid '+(S.filterPast?'rgba(107,107,138,.4)':'rgba(255,255,255,.04)')+';color:'+(S.filterPast?'rgba(245,240,232,.6)':'rgba(107,107,138,.5)')+';';
-    pastC.innerHTML='🕐 PAST ('+pastEvs.length+')';
-    pastC.onclick=function(){set({filterPast:true,filterDate:'all',filterDow:null});};
-    fb.appendChild(pastC);
-  }
+  // 🔴 2026-05-13 (Khushi) — PAST EVENTS chip removed (image load).
   sec.appendChild(fb);
 
   var filtered;
-  if(S.filterPast){
-    filtered=pastEvs;
-  } else if(S.filterDate==='all'&&(S.filterDow===null||S.filterDow===undefined)){
+  if(S.filterDate==='all'&&(S.filterDow===null||S.filterDow===undefined)){
     filtered=pub;
   } else if(S.filterDow!==null&&S.filterDow!==undefined){
     filtered=pub.filter(function(e){
@@ -1740,29 +1799,8 @@ function renderHome(){
   filtered.forEach(function(ev,i){grid.appendChild(buildEvCard(ev,i));});
   sec.appendChild(grid);
 
-  // AUTO-SHOW PAST EVENTS — disabled, past events only show when Past tab is clicked
-  var _isAllView=false;
-  if(_isAllView&&pastEvs.length>0&&filtered.length<3){
-    var _pSec=document.createElement('section');
-    _pSec.style.cssText='padding:0 28px 40px;max-width:1180px;margin:0 auto;';
-    var _pHead=document.createElement('div');
-    _pHead.style.cssText='display:flex;align-items:center;gap:16px;margin:40px 0 24px;';
-    var _pL=document.createElement('div');_pL.style.cssText='flex:1;height:1px;background:rgba(201,168,76,.12);';
-    var _pT=document.createElement('div');_pT.style.cssText='font-size:11px;font-weight:800;letter-spacing:2px;color:rgba(107,107,138,.6);text-transform:uppercase;white-space:nowrap;';
-    _pT.textContent="You missed these — don’t miss next time 🔥";
-    var _pR=document.createElement('div');_pR.style.cssText='flex:1;height:1px;background:rgba(201,168,76,.12);';
-    _pHead.appendChild(_pL);_pHead.appendChild(_pT);_pHead.appendChild(_pR);
-    _pSec.appendChild(_pHead);
-    var _pGrid=el('div','ev-grid');
-    pastEvs.slice(0,6).forEach(function(ev,i){
-      var _c=buildEvCard(ev,i);
-      _c.style.opacity='0.72';
-      _c.style.filter='saturate(0.6)';
-      _pGrid.appendChild(_c);
-    });
-    _pSec.appendChild(_pGrid);
-    sec.appendChild(_pSec);
-  }
+  // 🔴 2026-05-13 (Khushi) — "You missed these" past-events strip removed
+  // (was disabled by _isAllView=false but still imported pastEvs).
 
   // Tagline section at bottom
   var tagSec=el('section','');
@@ -4388,7 +4426,7 @@ function renderTableFloorPlan(){
         setTimeout(function(){generateLocalQR('tbl-conf-qr-'+ref2,'https://hodclub.in/?wallet='+ref2);},200);
         var doneBtn=document.createElement('button');
         doneBtn.style.cssText='width:100%;padding:14px;border-radius:12px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.3);color:var(--gold);font-weight:800;font-size:14px;cursor:pointer;font-family:var(--fs);';
-                // Email confirmation via Cloud Fn (ZeptoMail) → EmailJS fallback
+                // Email confirmation via Cloud Fn (ZeptoMail only — no fallback)
         if(email){
           _HOD_sendMail({
             to_email:email,to_name:name,ref:ref2,
@@ -4626,9 +4664,9 @@ function renderWalletPage(bookingRef){
       +'.hod-wallet-v2 .wv-fchip.on{background:#F2C744;color:#0A0A0A;border-color:#F2C744;}'
       // Sub-category chip row (wrapped)
       +'.hod-wallet-v2 .wv-subrow{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:18px;padding:0 4px;}'
-      +'.hod-wallet-v2 .wv-subchip{padding:7px 12px;border-radius:6px;background:transparent;border:1px solid transparent;color:rgba(245,241,232,.85);font-size:11px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;cursor:pointer;font-family:var(--fs);transition:all .12s;}'
-      +'.hod-wallet-v2 .wv-subchip:hover{color:#F2C744;}'
-      +'.hod-wallet-v2 .wv-subchip.on{border-color:#F2C744;color:#F2C744;background:rgba(242,199,68,.04);}'
+      +'.hod-wallet-v2 .wv-subchip{padding:7px 12px;border-radius:6px;background:transparent;border:1px solid rgba(242,199,68,.45);color:rgba(245,241,232,.85);font-size:11px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;cursor:pointer;font-family:var(--fs);transition:all .12s;}'
+      +'.hod-wallet-v2 .wv-subchip:hover{color:#F2C744;border-color:#F2C744;}'
+      +'.hod-wallet-v2 .wv-subchip.on{border-color:#F2C744;color:#F2C744;background:rgba(242,199,68,.08);box-shadow:0 0 0 1px rgba(242,199,68,.4);}'
       // Section title above item list (e.g. "MANGO MANIA")
       +'.hod-wallet-v2 .wv-sectiontitle{font-family:var(--fp);font-size:24px;font-weight:900;color:#F5F1E8;letter-spacing:1.2px;text-transform:uppercase;margin:18px 4px 14px;}'
       // Bottom fixed View Cart footer (red strip)
@@ -4686,25 +4724,13 @@ function renderWalletPage(bookingRef){
     var used=cv.coverUsed||0;
     var name=cv.name||'Guest';
 
-    // Wallet card
-    if(!cv.isTableBooking){
-    var wCard=document.createElement('div');
-    wCard.className='wv-wcard';
-    var pct=activated>0?Math.round((used/activated)*100):0;
-    wCard.innerHTML='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;">'
-      +'<div><div style="font-size:11px;font-weight:800;color:#F2C744;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;opacity:.85;">Cover Wallet</div>'
-      +'<div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:-.3px;">'+sanitize(name)+'</div>'
-      +'<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px;letter-spacing:.5px;">'+sanitize(cv.eventTitle||'HOD · Tonight')+'</div></div>'
-      +'<div style="text-align:right;"><div style="font-size:10px;color:rgba(255,255,255,.7);margin-bottom:4px;letter-spacing:1.2px;text-transform:uppercase;">Available</div>'
-      +'<div class="wv-bal'+(bal<=0?' zero':'')+'">\u20b9'+bal.toLocaleString('en-IN')+'</div></div></div>'
-      +'<div style="background:rgba(0,0,0,.45);border-radius:6px;overflow:hidden;height:8px;margin-bottom:8px;">'
-      +'<div style="height:100%;background:linear-gradient(90deg,#F2C744,#fff);width:'+Math.max(0,100-pct)+'%;transition:width .5s;border-radius:6px;box-shadow:0 0 8px rgba(242,199,68,.5);"></div></div>'
-      +'<div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,.7);font-weight:600;letter-spacing:.3px;">'
-      +'<span>\u20b9'+used.toLocaleString('en-IN')+' used</span><span>\u20b9'+activated.toLocaleString('en-IN')+' total</span></div>';
-    inner.appendChild(wCard);
-    } // end if(!isTableBooking)
-
-    // Table booking info banner
+    // 🔴 2026-05-13 (Khushi) — UNIFIED top banner. Covers / guestlist /
+    // entry-only / group bookings now share the same visual treatment
+    // as table bookings (slim gold-bordered card, info chips). The only
+    // functional difference: covers carry a real wallet balance shown
+    // as a chip; tables show ₹0 until the captain settles. Replaces
+    // the old red gradient wv-wcard for covers.
+    var _isActivatedTop = !!cv.checkedIn || (cv.coverActivated||0) > 0;
     if(cv.isTableBooking){
       var tbBanner=document.createElement('div');
       tbBanner.style.cssText='background:rgba(242,199,68,.08);border:1px solid rgba(242,199,68,.2);border-radius:14px;padding:14px 16px;margin-bottom:14px;';
@@ -4718,6 +4744,60 @@ function renderWalletPage(bookingRef){
         +(bal<=0?'<div style="margin-top:8px;font-size:11px;color:rgba(242,199,68,.7);">💰 Pre-order below — pay via cash, card or UPI at your table.</div>':'')
         ;
       inner.appendChild(tbBanner);
+    } else {
+      // ── Cover / Guestlist / Entry-Only / Group banner — same chrome
+      // as table banner above for visual parity. Header line varies
+      // based on type (entry-only is door-only, others redeem against
+      // the wallet balance via bartender scan).
+      var _coverHeader = '🎫 Cover · ' + sanitize(cv.eventTitle || 'HOD · Tonight');
+      var _balChipBg = bal > 0 ? 'rgba(34,197,94,.12)' : 'rgba(255,255,255,.04)';
+      var _balChipBorder = bal > 0 ? 'rgba(34,197,94,.4)' : 'rgba(255,255,255,.12)';
+      var _balChipColor = bal > 0 ? '#22C55E' : 'rgba(255,255,255,.55)';
+      var coverBanner = document.createElement('div');
+      coverBanner.style.cssText='background:rgba(242,199,68,.08);border:1px solid rgba(242,199,68,.2);border-radius:14px;padding:14px 16px;margin-bottom:14px;';
+      // 🔴 2026-05-13 v2 (Khushi) — small balance chip removed; balance now
+      // displayed prominently in its own BALANCE card above the QR (below).
+      coverBanner.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">'+_coverHeader+'</div>'
+        +'<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);">'
+        +  '<span>👤 <b style="color:var(--text);">'+sanitize(name)+'</b></span>'
+        +  (activated>0?'<span>💰 <b style="color:var(--text);">\u20b9'+used.toLocaleString('en-IN')+'</b> used / \u20b9'+activated.toLocaleString('en-IN')+' total</span>':'')
+        +'</div>'
+        +(!_isActivatedTop?'<div style="margin-top:8px;font-size:11px;color:rgba(242,199,68,.75);background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.2);border-radius:8px;padding:6px 10px;">⏳ Your cover will be activated at HOD when you arrive.</div>':'');
+      inner.appendChild(coverBanner);
+    }
+
+    // 🔴 2026-05-13 (Khushi) — "✅ Bill Settled · View Bill" banner.
+    // Shown the moment captain stamps paymentStatus:'paid' on the
+    // tableReservation (offline cash/card mark-paid) OR when the
+    // wallet's own paid_online stamp lands. The customer can tap
+    // "View Bill" to see the full GST invoice (matches the captain's
+    // thermal print). Stays visible until the captain releases the
+    // table (after which the "Thank you for visiting" screen kicks in
+    // — that path also gets a View Bill button, see below).
+    if(cv.isTableBooking && cv.paymentStatus==='paid'){
+      var paidBanner=document.createElement('div');
+      paidBanner.style.cssText='background:rgba(34,197,94,.10);border:1.5px solid rgba(34,197,94,.45);border-radius:14px;padding:14px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;';
+      var pmTxt=(cv.paymentMethod==='paid_online'||cv.paymentMethod==='online')?'Paid Online':((cv.paymentMethod||'').toUpperCase()||'Settled');
+      var amtTxt=cv.amountPaid?(' · ₹'+Number(cv.amountPaid).toLocaleString('en-IN')):'';
+      paidBanner.innerHTML='<div style="font-size:24px;">✅</div>'
+        +'<div style="flex:1;min-width:140px;">'
+        +  '<div style="font-size:13px;font-weight:900;color:#22C55E;letter-spacing:.4px;">Bill Settled</div>'
+        +  '<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:2px;">'+sanitize(pmTxt)+sanitize(amtTxt)+'</div>'
+        +'</div>'
+        +'<button id="hod-paid-viewbill" style="padding:9px 14px;border-radius:9px;background:rgba(242,199,68,.15);border:1.5px solid rgba(242,199,68,.5);color:var(--gold);font-size:12px;font-weight:800;cursor:pointer;font-family:var(--fs);letter-spacing:.5px;text-transform:uppercase;">📄 View Bill</button>';
+      inner.appendChild(paidBanner);
+      var _vbBtn=document.getElementById('hod-paid-viewbill');
+      if(_vbBtn) _vbBtn.onclick=function(){
+        var billItems=_hodFlattenRounds(cv.tabRounds||[]);
+        showHodBillModal(billItems, {
+          customerName:cv.name||'',
+          tableId:cv.tableId||'',
+          paymentMode:cv.paymentMethod||'',
+          paymentId:cv.paymentId||'',
+          amountPaid:cv.amountPaid||0,
+          settledAt:cv.paidAt||null
+        });
+      };
     }
 
     // Expiry check — date-based or expiresAt
@@ -4768,9 +4848,10 @@ function renderWalletPage(bookingRef){
     if(bal<=0&&!cv.isTableBooking){
       // Show recharge banner — menu continues below
       var emptyBanner=document.createElement('div');
-      emptyBanner.style.cssText='background:rgba(168,85,247,.06);border:1.5px solid rgba(168,85,247,.25);border-radius:16px;padding:20px;margin-bottom:16px;text-align:center;';
+      // 🔴 2026-05-13 v2 (Khushi) — recolor purple → red/yellow/white theme.
+      emptyBanner.style.cssText='background:rgba(239,68,68,.06);border:1.5px solid rgba(239,68,68,.3);border-radius:16px;padding:20px;margin-bottom:16px;text-align:center;';
       emptyBanner.innerHTML='<div style="font-size:28px;margin-bottom:8px;">⚡</div>'
-        +'<div style="font-size:15px;font-weight:900;color:#A855F7;margin-bottom:6px;">Load your wallet to start ordering</div>'
+        +'<div style="font-size:15px;font-weight:900;color:#EF4444;margin-bottom:6px;">Load your wallet to start ordering</div>'
         +'<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:14px;">Recharge online below or show your QR to the bartender. Browse the menu while you decide!</div>';
       // Compact recharge presets
       var rcRow=document.createElement('div');
@@ -4783,7 +4864,7 @@ function renderWalletPage(bookingRef){
         pb.onclick=function(){
           _rcAmt=amt;
           rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
-          pb.style.borderColor='rgba(168,85,247,.6)';pb.style.background='rgba(168,85,247,.12)';
+          pb.style.borderColor='rgba(239,68,68,.6)';pb.style.background='rgba(239,68,68,.12)';
         };
         rcRow.appendChild(pb);
       });
@@ -4805,7 +4886,7 @@ function renderWalletPage(bookingRef){
         var v=parseInt(_emptyCustomInput.value,10);
         if(isNaN(v)||v<1){_emptyCustomRow.style.borderColor='rgba(239,68,68,.4)';return;}
         if(v>50000){_emptyCustomInput.value='50000';v=50000;}
-        _emptyCustomRow.style.borderColor='rgba(168,85,247,.6)';
+        _emptyCustomRow.style.borderColor='rgba(239,68,68,.6)';
         _rcAmt=v;
         rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
       };
@@ -4813,7 +4894,7 @@ function renderWalletPage(bookingRef){
       _emptyCustomWrap.appendChild(_emptyCustomRow);
       emptyBanner.appendChild(_emptyCustomWrap);
       var rcPayBtn=document.createElement('button');
-      rcPayBtn.style.cssText='width:100%;padding:12px;border-radius:10px;background:linear-gradient(135deg,rgba(168,85,247,.9),rgba(123,47,190,.8));border:none;color:#fff;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);';
+      rcPayBtn.style.cssText='width:100%;padding:12px;border-radius:10px;background:linear-gradient(135deg,#F2C744,#B8951F);border:none;color:#0A0A0A;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);letter-spacing:.4px;';
       rcPayBtn.textContent='💳 Pay & Recharge';
       rcPayBtn.onclick=function(){
         if(!_rcAmt){showToast('Select an amount first','err',2000);return;}
@@ -4840,11 +4921,32 @@ function renderWalletPage(bookingRef){
       // Don't return — menu continues below
     }
 
+    // 🔴 2026-05-13 v2 (Khushi) — Big BALANCE block above the QR for
+    // covers/guestlist/entry-only/group. Non-cursive tabular numerals,
+    // large font, sits centred so the customer (and bartender across
+    // the counter) can read it at a glance. Hidden for table bookings.
+    if(!cv.isTableBooking){
+      var balBlock=document.createElement('div');
+      var _bbColor = bal > 0 ? '#22C55E' : '#EF4444';
+      var _bbBg = bal > 0 ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.06)';
+      var _bbBorder = bal > 0 ? 'rgba(34,197,94,.45)' : 'rgba(239,68,68,.35)';
+      balBlock.style.cssText='background:'+_bbBg+';border:1.5px solid '+_bbBorder+';border-radius:14px;padding:14px 16px;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:14px;';
+      balBlock.innerHTML='<span style="font-family:var(--fs);font-size:13px;font-weight:800;color:rgba(255,255,255,.85);letter-spacing:2px;text-transform:uppercase;">Balance</span>'
+        +'<span style="font-family:var(--fs);font-size:18px;font-weight:900;color:rgba(255,255,255,.6);">—</span>'
+        +'<span style="font-family:var(--fs);font-size:36px;font-weight:900;color:'+_bbColor+';line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.5px;">\u20b9'+bal.toLocaleString('en-IN')+'</span>';
+      inner.appendChild(balBlock);
+    }
+
     // QR code for customer
     var qrSec=document.createElement('div');
-    qrSec.style.cssText='background:#141414;border:1.5px solid rgba(242,199,68,.22);border-radius:16px;padding:24px 16px;margin-bottom:18px;text-align:center;';
+    // 2026-05-13 (Khushi spec, round 5) — table guests don't NEED a big QR
+    // (the captain just glances at it before scanning). Shrunk the card +
+    // QR + text considerably so the menu sits closer to the top.
+    var _isTbl=cv.isTableBooking;
+    qrSec.style.cssText='background:#141414;border:1.5px solid rgba(242,199,68,.22);border-radius:14px;padding:'+(_isTbl?'12px 14px':'24px 16px')+';margin-bottom:'+(_isTbl?'12px':'18px')+';text-align:center;';
     var qrWrap=document.createElement('div');qrWrap.id='wallet-qr-wrap';
-    qrWrap.style.cssText='width:180px;height:180px;margin:0 auto 14px;background:#fff;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden;';
+    var _qrPx=_isTbl?100:180;
+    qrWrap.style.cssText='width:'+_qrPx+'px;height:'+_qrPx+'px;margin:0 auto '+(_isTbl?'8px':'14px')+';background:#fff;border-radius:'+(_isTbl?'8px':'14px')+';display:flex;align-items:center;justify-content:center;overflow:hidden;';
     var qrInfo2=document.createElement('div');
     var _isActivated=cv.checkedIn||cv.coverActivated>0;
     var _qrSub=cv.isTableBooking?'Show to your captain to activate orders.':(_isActivated?'Show this QR to the bartender to order.':'Show this at the entrance to check in.');
@@ -4852,11 +4954,11 @@ function renderWalletPage(bookingRef){
     // 2026-05-13 (Khushi spec) — show the guest's name prominently above the
     // QR card so the captain can verify identity at a glance before scanning.
     var _guestName=sanitize(cv.name||'Guest');
-    qrInfo2.innerHTML='<div style="font-family:var(--fp);font-size:18px;font-weight:900;color:var(--gold);margin-bottom:8px;letter-spacing:.3px;line-height:1.2;">'+_guestName+'</div>'
-      +'<div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px;">Your HOD QR Code</div>'
-      +'<div style="font-size:11px;color:var(--muted);line-height:1.5;">'+_qrSub+'</div>'
+    qrInfo2.innerHTML='<div style="font-family:var(--fp);font-size:'+(_isTbl?'14px':'18px')+';font-weight:900;color:var(--gold);margin-bottom:'+(_isTbl?'4px':'8px')+';letter-spacing:.3px;line-height:1.2;">'+_guestName+'</div>'
+      +(_isTbl?'':'<div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:4px;">Your HOD QR Code</div>')
+      +'<div style="font-size:'+(_isTbl?'10px':'11px')+';color:var(--muted);line-height:1.5;">'+_qrSub+'</div>'
       +_walletNote
-      +'<div style="font-size:11px;color:var(--gold);margin-top:6px;font-family:monospace;letter-spacing:1px;">'+sanitize(cv.ref||cv.bookingId||'')+'</div>';
+      +'<div style="font-size:'+(_isTbl?'10px':'11px')+';color:var(--gold);margin-top:'+(_isTbl?'4px':'6px')+';font-family:monospace;letter-spacing:1px;">'+sanitize(cv.ref||cv.bookingId||'')+'</div>';
     qrSec.appendChild(qrWrap);qrSec.appendChild(qrInfo2);inner.appendChild(qrSec);
     generateLocalQR('wallet-qr-wrap','https://hodclub.in/?verify='+encodeURIComponent(cv.ref||cv.bookingId||cv.id||'')+'');
 
@@ -4884,15 +4986,22 @@ function renderWalletPage(bookingRef){
       :'\u2139\ufe0f Browse our menu below! Show your QR to the bartender when ordering — your cover balance will be deducted automatically.';
     inner.appendChild(info);
 
-    // Cart summary (sticky)
+    // Cart summary (sticky) — 2026-05-13 (Khushi spec, round 5):
+    // suppressed entirely. The same info now lives in the bottom
+    // "Running Tab" footer (renderCartSummary), so showing it at the top
+    // too was a duplicate. We keep the element + updateCartBar() function
+    // so existing callers keep working — it just stays hidden.
     var cartBar=document.createElement('div');
     cartBar.id='wallet-cart-bar';
-    cartBar.style.cssText='position:sticky;top:62px;z-index:99;background:rgba(184,50,39,.95);border-bottom:2px solid #F2C744;padding:12px 16px;margin:0 -20px 16px;display:none;backdrop-filter:blur(8px);color:#F2C744;font-weight:900;';
+    cartBar.style.cssText='display:none !important;';
     inner.appendChild(cartBar);
 
     function updateCartBar(){
       var total=getCartTotal();
       cartTotal=total;
+      cartBar.style.display='none';
+      return;
+      // (legacy code below intentionally unreachable — kept for diff context)
       if(Object.keys(cart).length===0){cartBar.style.display='none';return;}
       cartBar.style.display='block';
       var over=total>bal;
@@ -5089,11 +5198,11 @@ function renderWalletPage(bookingRef){
         var vegDot=typeof item.v!=='undefined'?'<span class="wv-vegdot" style="color:'+(isVeg?'#00C864':'#EF4444')+';"></span>':'';
         var priceHtml=hasDisc
           ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;font-weight:600;">\u20b9'+item.p+'</span>'
-            +'<span style="color:#fff;font-weight:800;">\u20b9'+eff+'</span>'
+            +'<span style="color:#F2C744;font-weight:900;">\u20b9'+eff+'</span>'
             +(ov && ov.discountReason ? '<span style="color:rgba(242,199,68,.75);font-size:10px;margin-left:6px;font-weight:600;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
-          : '<span style="color:#fff;font-weight:800;">\u20b9'+item.p+'</span>';
+          : '<span style="color:#F2C744;font-weight:900;">\u20b9'+item.p+'</span>';
         row.innerHTML='<div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;font-size:13px;font-weight:800;color:#F5F1E8;letter-spacing:.4px;">'+vegDot+'<span style="text-transform:uppercase;">'+sanitize(item.n)+'</span></div>'
-          +'<div style="font-size:13px;font-family:var(--fp);margin-top:6px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
+          +'<div style="font-size:14px;font-family:var(--fs);font-weight:800;margin-top:6px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
         var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:10px;flex-shrink:0;';
         var qty=cart[key]?cart[key].qty:0;
         if(qty===0){
@@ -5138,7 +5247,7 @@ function renderWalletPage(bookingRef){
       var tabRow=document.createElement('div');
       tabRow.style.cssText='display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:2px;';
       tabRow.innerHTML='<span style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;font-weight:700;">Running Tab</span>'
-        +'<span id="tab-running-total" style="font-size:24px;font-weight:900;color:var(--gold);font-family:var(--fp);">₹0</span>';
+        +'<span id="tab-running-total" style="font-size:24px;font-weight:900;color:var(--gold);">₹0</span>';
       submitCard.appendChild(tabRow);
 
       // Tiny tax-inclusive hint sitting RIGHT under the Running Tab — taps
@@ -5343,7 +5452,7 @@ function renderWalletPage(bookingRef){
             // Recharge presets — show amounts that cover the shortfall
             var _rcDiv=document.createElement('div');
             _rcDiv.style.cssText='margin-bottom:14px;';
-            _rcDiv.innerHTML='<div style="font-size:11px;font-weight:800;color:#A855F7;letter-spacing:1px;margin-bottom:8px;">⚡ QUICK RECHARGE</div>';
+            _rcDiv.innerHTML='<div style="font-size:11px;font-weight:800;color:#F2C744;letter-spacing:1px;margin-bottom:8px;">⚡ QUICK RECHARGE</div>';
             var _rcRow=document.createElement('div');
             _rcRow.style.cssText='display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:10px;';
             var _selRcAmt=0;
@@ -5352,11 +5461,11 @@ function renderWalletPage(bookingRef){
               var pb=document.createElement('button');
               pb.style.cssText='padding:10px 14px;border-radius:8px;background:var(--surface);border:1.5px solid var(--border);color:var(--text);font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);transition:all .2s;';
               pb.textContent='₹'+amt.toLocaleString('en-IN');
-              if(!_selRcAmt){_selRcAmt=amt;pb.style.borderColor='rgba(168,85,247,.6)';pb.style.background='rgba(168,85,247,.12)';}
+              if(!_selRcAmt){_selRcAmt=amt;pb.style.borderColor='rgba(242,199,68,.6)';pb.style.background='rgba(242,199,68,.12)';}
               pb.onclick=function(){
                 _selRcAmt=amt;
                 _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
-                pb.style.borderColor='rgba(168,85,247,.6)';pb.style.background='rgba(168,85,247,.12)';
+                pb.style.borderColor='rgba(242,199,68,.6)';pb.style.background='rgba(242,199,68,.12)';
               };
               _rcRow.appendChild(pb);
             });
@@ -5374,7 +5483,7 @@ function renderWalletPage(bookingRef){
             _modalCustomWrap.style.cssText='margin:0 0 10px;';
             _modalCustomWrap.innerHTML='<div style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;text-align:center;">Or enter your own amount</div>';
             var _modalCustomRow=document.createElement('div');
-            _modalCustomRow.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1.5px solid rgba(168,85,247,.6);background:rgba(168,85,247,.08);';
+            _modalCustomRow.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1.5px solid rgba(242,199,68,.6);background:rgba(242,199,68,.08);';
             _modalCustomRow.innerHTML='<span style="font-family:var(--fp);font-size:16px;font-weight:900;color:var(--gold);">₹</span>';
             var _modalCustomInput=document.createElement('input');
             _modalCustomInput.type='number';_modalCustomInput.min='1';_modalCustomInput.max='50000';_modalCustomInput.step='1';
@@ -5385,7 +5494,7 @@ function renderWalletPage(bookingRef){
               var v=parseInt(_modalCustomInput.value,10);
               if(isNaN(v)||v<1){_modalCustomRow.style.borderColor='rgba(239,68,68,.4)';return;}
               if(v>50000){_modalCustomInput.value='50000';v=50000;}
-              _modalCustomRow.style.borderColor='rgba(168,85,247,.6)';
+              _modalCustomRow.style.borderColor='rgba(242,199,68,.6)';
               _selRcAmt=v;
               _rcRow.querySelectorAll('button').forEach(function(b){b.style.borderColor='var(--border)';b.style.background='var(--surface)';});
             };
@@ -5393,7 +5502,7 @@ function renderWalletPage(bookingRef){
             _modalCustomWrap.appendChild(_modalCustomRow);
             _rcDiv.appendChild(_modalCustomWrap);
             var _rcPayBtn2=document.createElement('button');
-            _rcPayBtn2.style.cssText='width:100%;padding:13px;border-radius:10px;background:linear-gradient(135deg,rgba(168,85,247,.9),rgba(123,47,190,.8));border:none;color:#fff;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:8px;';
+            _rcPayBtn2.style.cssText='width:100%;padding:13px;border-radius:10px;background:linear-gradient(135deg,#F2C744,#B8951F);border:none;color:#0A0A0A;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);margin-bottom:8px;letter-spacing:.4px;';
             _rcPayBtn2.textContent='💳 Recharge & Order';
             _rcPayBtn2.onclick=function(){
               if(!_selRcAmt){showToast('Select an amount','err',2000);return;}
@@ -5478,21 +5587,34 @@ function renderWalletPage(bookingRef){
             document.body.appendChild(tbOv);
           } else {
             // COVER/EVENT: show QR popup for bartender
+            // 🔴 2026-05-13 (Khushi) — restyled to match the View Bill /
+            // captain-mode modal aesthetic: gold-bordered dark sheet,
+            // dashed dividers, monospace ref code, tabular price.
+            // Functionality unchanged — still shows the verify QR the
+            // bartender scans to redeem against the wallet.
             var overlay=document.createElement('div');
-            overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(6px);';
+            overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(6px);font-family:var(--fs);';
             var modal=document.createElement('div');
-            modal.style.cssText='background:var(--card);border:1px solid var(--border);border-radius:22px;padding:28px 24px;width:100%;max-width:380px;text-align:center;position:relative;';
+            modal.style.cssText='background:#0E0E14;border:1px solid rgba(242,199,68,.35);border-radius:16px;padding:18px 18px 14px;width:100%;max-width:380px;color:#fff;box-shadow:0 12px 40px rgba(0,0,0,.6);';
             modal.innerHTML=
-              '<div style="font-size:36px;margin-bottom:12px;">🍹</div>'
-              +'<div style="font-size:18px;font-weight:900;color:var(--gold);margin-bottom:6px;">Order Placed!</div>'
-              +'<div style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6;">Show this QR to your <strong style="color:var(--text);">bartender</strong> to prepare your order</div>'
-              +'<div id="order-qr-popup" style="width:140px;height:140px;margin:0 auto 14px;background:#0C0C18;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>'
-              +'<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">Your order:</div>'
-              +'<div style="font-size:13px;color:var(--gold);font-weight:700;margin-bottom:4px;">'+sanitize(placedItems)+'</div>'
-              +'<div style="font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;">₹'+ct.toLocaleString('en-IN')+'</div>'
-              +'<div style="font-size:11px;color:var(--muted);background:rgba(242,199,68,.06);border:1px solid rgba(242,199,68,.15);border-radius:8px;padding:8px 12px;margin-bottom:16px;line-height:1.6;">Your bartender will scan this, confirm your order, and your wallet will be deducted automatically.</div>';
+               '<div style="text-align:center;border-bottom:1px dashed rgba(242,199,68,.3);padding-bottom:10px;margin-bottom:12px;">'
+              +  '<div style="font-family:var(--fp);font-size:18px;font-weight:900;color:var(--gold);letter-spacing:1px;">HOUSE OF DOPAMINE</div>'
+              +  '<div style="font-size:10px;color:var(--muted);margin-top:2px;letter-spacing:.6px;">ORDER PLACED · BARTENDER REDEEM</div>'
+              +'</div>'
+              +'<div style="text-align:center;font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.6;">Show this QR to your <strong style="color:var(--text);">bartender</strong> to prepare your order</div>'
+              +'<div id="order-qr-popup" style="width:160px;height:160px;margin:0 auto 12px;background:#fff;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>'
+              +'<div style="text-align:center;font-family:monospace;font-size:12px;color:var(--gold);letter-spacing:2px;margin-bottom:12px;">'+sanitize(cv.ref||cv.bookingId||'')+'</div>'
+              +'<div style="border-top:1px dashed rgba(255,255,255,.15);border-bottom:1px dashed rgba(255,255,255,.15);padding:10px 0;margin-bottom:10px;">'
+              +  '<div style="font-size:10px;color:var(--muted);letter-spacing:.6px;text-transform:uppercase;margin-bottom:4px;">Your Order</div>'
+              +  '<div style="font-size:13px;color:var(--text);font-weight:700;line-height:1.5;">'+sanitize(placedItems)+'</div>'
+              +'</div>'
+              +'<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0 10px;">'
+              +  '<span style="font-size:13px;font-weight:900;color:var(--text);">Total</span>'
+              +  '<span style="font-family:var(--fp);font-size:20px;font-weight:900;color:var(--gold);font-variant-numeric:tabular-nums;">\u20b9'+ct.toLocaleString('en-IN')+'</span>'
+              +'</div>'
+              +'<div style="font-size:11px;color:rgba(34,197,94,.85);background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:9px 12px;margin-bottom:14px;line-height:1.6;text-align:center;">✓ Bartender will scan, confirm, and deduct from your wallet automatically.</div>';
             var closeBtn=document.createElement('button');
-            closeBtn.style.cssText='width:100%;padding:12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:var(--text);font-size:14px;font-weight:700;cursor:pointer;font-family:var(--fs);';
+            closeBtn.style.cssText='width:100%;padding:12px;border-radius:10px;background:rgba(242,199,68,.15);border:1.5px solid rgba(242,199,68,.5);color:var(--gold);font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);letter-spacing:.6px;text-transform:uppercase;';
             closeBtn.textContent='Got it ✓';
             closeBtn.onclick=function(){overlay.remove();};
             modal.appendChild(closeBtn);
@@ -5524,11 +5646,21 @@ function renderWalletPage(bookingRef){
         showCheckoutModal(getTabTotal());
       };
 
-      // ── Rounds history shown above menu
+      // ── Rounds history — 2026-05-13 v3 (Khushi spec, round 8):
+      // YOUR TAB now sits ABOVE the Running Tab / Place Order / Done
+      // Ordering block so the bottom of the page is always the two
+      // action buttons. Order: menu → YOUR TAB → RUNNING TAB +
+      // PLACE ORDER + Done Ordering. (Round 5 placed YOUR TAB after
+      // submitCard; Round 8 flips it via insertBefore so Place Order
+      // and Done Ordering stay the last two CTAs at the page bottom.)
       var roundsSection=document.createElement('div');
       roundsSection.id='tab-rounds-history';
-      roundsSection.style.cssText='margin-bottom:16px;';
-      menuContent.insertBefore(roundsSection,menuContent.firstChild);
+      roundsSection.style.cssText='margin:18px 0 24px;';
+      if(submitCard&&submitCard.parentNode===inner){
+        inner.insertBefore(roundsSection, submitCard);
+      } else {
+        inner.appendChild(roundsSection);
+      }
 
       function renderRoundsHistory(){
         var sec=document.getElementById('tab-rounds-history');
@@ -5583,9 +5715,34 @@ function renderWalletPage(bookingRef){
         });
 
         bHtml+='</div>'
-          +'<div style="display:flex;justify-content:space-between;border-top:2px solid rgba(242,199,68,.3);padding-top:14px;margin-bottom:24px;">'
+          +'<div style="display:flex;justify-content:space-between;border-top:2px solid rgba(242,199,68,.3);padding-top:14px;margin-bottom:6px;">'
           +'<span style="font-size:16px;font-weight:900;">TOTAL</span>'
           +'<span style="font-size:22px;font-weight:900;color:var(--gold);">₹'+tt+'</span></div>';
+
+        // 2026-05-13 (Khushi spec, round 5) — Order Total screen had no tax
+        // breakdown. Add a collapsed "View tax breakdown" disclosure so
+        // customers can see SC + GST split before paying.
+        var _coAll=[];
+        (tabRounds||[]).forEach(function(r){(r.items||[]).forEach(function(i){_coAll.push(i);});});
+        var _coBd;try{_coBd=hodComputeBreakdown(_coAll);}catch(e){_coBd=null;}
+        if(_coBd){
+          var _coRows='';
+          if(_coBd.foodSubtotal>0)    _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>Food subtotal</span><span>\u20B9'+_coBd.foodSubtotal.toFixed(0)+'</span></div>';
+          if(_coBd.alcSubtotal>0)     _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>Liquor subtotal</span><span>\u20B9'+_coBd.alcSubtotal.toFixed(0)+'</span></div>';
+          if(_coBd.nonAlcSubtotal>0)  _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>Beverages subtotal</span><span>\u20B9'+_coBd.nonAlcSubtotal.toFixed(0)+'</span></div>';
+          _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>Service charge (10%)</span><span>\u20B9'+_coBd.serviceCharge.toFixed(0)+'</span></div>';
+          _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>GST (5%)</span><span>\u20B9'+_coBd.gst.toFixed(0)+'</span></div>';
+          if(Math.abs(_coBd.roundOff||0)>=0.01) _coRows+='<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>Round off</span><span>'+(_coBd.roundOff>=0?'+':'')+'\u20B9'+Math.abs(_coBd.roundOff).toFixed(2)+'</span></div>';
+          _coRows+='<div style="display:flex;justify-content:space-between;padding:6px 0 2px;border-top:1px solid rgba(242,199,68,.2);margin-top:6px;color:var(--gold);font-weight:800;"><span>Grand total</span><span>\u20B9'+_coBd.grandTotal+'</span></div>';
+          bHtml+='<details style="margin-bottom:18px;border:1px solid rgba(245,241,232,.08);border-radius:10px;background:rgba(0,0,0,.25);">'
+            +'<summary style="display:flex;justify-content:space-between;align-items:center;list-style:none;cursor:pointer;padding:10px 14px;font-size:11px;color:rgba(245,241,232,.6);font-style:italic;">'
+            +'<span>Inclusive of all taxes</span><span style="opacity:.7;">\u25BE view breakdown</span>'
+            +'</summary>'
+            +'<div style="padding:0 14px 12px;font-size:12px;line-height:1.7;color:rgba(245,241,232,.8);font-family:var(--fs);">'+_coRows+'</div>'
+            +'</details>';
+        } else {
+          bHtml+='<div style="margin-bottom:18px;font-size:11px;color:rgba(245,241,232,.5);font-style:italic;text-align:right;padding:0 4px;">Inclusive of all taxes</div>';
+        }
         sheet.innerHTML=bHtml;
 
         var poBtn=document.createElement('button');
@@ -5594,6 +5751,80 @@ function renderWalletPage(bookingRef){
         poBtn.onclick=function(){
           if(poBtn.disabled)return;
           poBtn.disabled=true;poBtn.textContent='Opening payment...';
+          // ── 2026-05-13 round 9 (Khushi spec): Pay Online → flip captain
+          // BILL DUE chip to green ✅ PAID ONLINE.
+          // Safety order is critical:
+          //   1. Razorpay handler fires ONLY when Razorpay confirms the
+          //      charge with a payment_id (success). On dismiss / failure
+          //      we NEVER stamp paid — captain keeps seeing BILL DUE.
+          //   2. After success we retry the Firestore stamp 3× with
+          //      backoff. If all retries fail, we KEEP the bill in
+          //      bill_requested state (so the red BILL DUE chip stays
+          //      blinking and the captain still walks over) AND show
+          //      the customer a non-dismissable Payment-ID screen they
+          //      MUST show to the captain. We also drop a best-effort
+          //      pendingPaymentNotices/{ref} marker so a later flow can
+          //      surface a ⚠️ "customer claims paid" hint if needed.
+          //   3. On payment.failed event we re-enable the button.
+          function _writePaidOnline(pid){
+            if(!firestore||!cv.ref) return Promise.reject(new Error('no_firestore_or_ref'));
+            var nowIso=new Date().toISOString();
+            var paidPatch={
+              paymentStatus:'paid',
+              paymentMethod:'paid_online',
+              paidAt:nowIso,
+              paymentId:pid,
+              amountPaid:tt,
+              orderTotal:tt,
+              tabTotal:tt
+            };
+            function _attempt(n){
+              return firestore.collection('tableReservations').where('bookingRef','==',cv.ref).get()
+                .then(function(snap){
+                  var ps=[];
+                  snap.forEach(function(d){ ps.push(d.ref.update(paidPatch)); });
+                  ps.push(firestore.collection('covers').doc(cv.ref).set(paidPatch,{merge:true}));
+                  return Promise.all(ps);
+                })
+                .catch(function(err){
+                  if(n<3){
+                    return new Promise(function(res){ setTimeout(res, 400*Math.pow(2,n)); })
+                      .then(function(){ return _attempt(n+1); });
+                  }
+                  throw err;
+                });
+            }
+            return _attempt(0);
+          }
+          function _showPaymentIdFallback(pid){
+            // Firestore stamp failed after retries. KEEP captain BILL DUE
+            // chip intact (do not flip), surface the Payment ID prominently
+            // so customer can show it to the captain in person.
+            sheet.innerHTML=
+              '<div style="text-align:center;padding:20px 6px;">'
+              +'<div style="font-size:48px;margin-bottom:14px;">⚠️</div>'
+              +'<div style="font-size:18px;font-weight:900;color:#F2C744;margin-bottom:10px;font-family:var(--fs);">Payment Received — Show This To Your Captain</div>'
+              +'<div style="font-size:13px;color:#aaa;margin-bottom:18px;line-height:1.5;font-family:var(--fs);">Razorpay confirmed your payment but we couldn\'t notify your table. Please show this Payment ID to your captain — they will mark your bill paid manually.</div>'
+              +'<div style="background:rgba(242,199,68,.12);border:1.5px dashed rgba(242,199,68,.5);border-radius:14px;padding:18px;margin-bottom:18px;">'
+              +'<div style="font-size:10px;font-weight:800;color:var(--gold);letter-spacing:1.5px;margin-bottom:8px;">PAYMENT ID</div>'
+              +'<div style="font-size:18px;font-weight:900;color:#fff;font-family:monospace;letter-spacing:1px;word-break:break-all;">'+sanitize(pid||'(missing)')+'</div>'
+              +'<div style="font-size:11px;color:var(--muted);margin-top:10px;font-family:var(--fs);">Amount: \u20b9'+tt+' \u00b7 '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+'</div>'
+              +'</div>'
+              +'<button id="_walletPaidOk" style="width:100%;padding:14px;border-radius:12px;background:#F2C744;border:none;color:#000;font-size:14px;font-weight:900;cursor:pointer;font-family:var(--fs);">Got it \u2014 I\'ll show my captain</button>'
+              +'</div>';
+            var okBtn=sheet.querySelector('#_walletPaidOk');
+            if(okBtn) okBtn.onclick=function(){ overlay.remove(); };
+            // Best-effort fallback marker (silent fail)
+            try {
+              firestore.collection('pendingPaymentNotices').doc(cv.ref).set({
+                bookingRef:cv.ref,
+                paymentId:pid||'',
+                amount:tt,
+                claimedAt:new Date().toISOString(),
+                source:'wallet_paid_online_writefail'
+              }).catch(function(){});
+            } catch(_){}
+          }
           var rz=new Razorpay({
             key:RAZORPAY_KEY,amount:tt*100,currency:'INR',
             name:'HOD — House of Dopamine',
@@ -5601,11 +5832,47 @@ function renderWalletPage(bookingRef){
             prefill:{name:sanitize(cv.name||''),contact:sanitize(cv.phone||'')},
             theme:{color:'#F2C744'},
             handler:function(resp){
-              overlay.remove();
-              submitOrder(cv,bal,{mode:'online',paymentId:resp.razorpay_payment_id,amount:tt,rounds:tabRounds});
+              var pid=(resp&&resp.razorpay_payment_id)||'';
+              if(!pid){
+                // Defensive: handler fired without a payment id. Treat as
+                // failure — keep BILL DUE intact, do NOT flip to paid.
+                alert('\u274c Payment status unclear. Please try again or use Pay at Table.');
+                poBtn.disabled=false;poBtn.innerHTML='\ud83d\udcb3  Pay Online  —  \u20b9'+tt;
+                return;
+              }
+              _writePaidOnline(pid).then(function(){
+                overlay.remove();
+                submitOrder(cv,bal,{mode:'online',paymentId:pid,amount:tt,rounds:tabRounds});
+              }).catch(function(err){
+                console.error('[HOD wallet] paid_online stamp failed after retries:', err);
+                _showPaymentIdFallback(pid);
+                // Still record the round so kitchen/bar history is intact,
+                // but DELIBERATELY pass mode:'bill_requested' (not 'online')
+                // so submitOrder's status branch (~line 6054) lands on
+                // 'bill_requested', NOT 'paid'. This guarantees the captain
+                // chip stays red BILL DUE — even though the customer holds
+                // a valid Razorpay payment id — until the captain manually
+                // verifies and marks paid on the door tablet.
+                try {
+                  submitOrder(cv,bal,{
+                    mode:'bill_requested',
+                    paymentId:pid,
+                    amount:tt,
+                    rounds:tabRounds,
+                    pendingOnlinePaymentId:pid
+                  });
+                } catch(_){}
+              });
             },
             modal:{ondismiss:function(){poBtn.disabled=false;poBtn.innerHTML='💳  Pay Online  —  ₹'+tt;}}
           });
+          if(rz&&typeof rz.on==='function'){
+            rz.on('payment.failed',function(r){
+              var msg=(r&&r.error&&(r.error.description||r.error.reason))||'Unknown error';
+              alert('\u274c Payment failed: '+msg+'\nPlease try again or use Pay at Table.');
+              poBtn.disabled=false;poBtn.innerHTML='\ud83d\udcb3  Pay Online  —  \u20b9'+tt;
+            });
+          }
           rz.open();
         };
         sheet.appendChild(poBtn);
@@ -5655,12 +5922,12 @@ function renderWalletPage(bookingRef){
         var isVeg=item.v===true;
         var vegDot=typeof item.v!=='undefined'?'<span class="wv-vegdot" style="color:'+(isVeg?'#00C864':'#EF4444')+';"></span>':'';
         var priceHtml = hasDisc
-          ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;font-weight:600;">\u20b9'+item.p+'</span>'
-            +'<span style="color:#F2C744;font-weight:900;">\u20b9'+eff+'</span>'
+          ? '<span style="text-decoration:line-through;color:rgba(255,255,255,.35);margin-right:6px;font-weight:600;font-family:var(--fs);">\u20b9'+item.p+'</span>'
+            +'<span style="color:#F2C744;font-weight:900;font-family:var(--fs);">\u20b9'+eff+'</span>'
             +(ov && ov.discountReason ? '<span style="color:rgba(242,199,68,.75);font-size:10px;margin-left:6px;font-weight:600;">\u00b7 '+sanitize(ov.discountReason)+'</span>' : '')
-          : '<span style="color:#F2C744;font-weight:900;">\u20b9'+item.p+'</span>';
+          : '<span style="color:#F2C744;font-weight:900;font-family:var(--fs);">\u20b9'+item.p+'</span>';
         row.innerHTML='<div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;font-size:14px;font-weight:700;color:#F5F1E8;letter-spacing:.2px;">'+vegDot+'<span style="text-transform:uppercase;letter-spacing:.4px;">'+sanitize(item.n)+'</span></div>'
-          +'<div style="font-size:13px;font-family:var(--fp);margin-top:4px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
+          +'<div style="font-size:14px;font-family:var(--fs);font-weight:800;margin-top:4px;letter-spacing:.3px;">'+priceHtml+'</div></div>';
         var ctrl=document.createElement('div');ctrl.style.cssText='display:flex;align-items:center;gap:10px;flex-shrink:0;';
         var qty=cart[key]?cart[key].qty:0;
         if(qty===0){
@@ -5900,10 +6167,17 @@ function renderWalletPage(bookingRef){
     // For tab checkout (rounds already placed), cart may be empty
     var _isTabCheckout=payInfo&&payInfo.rounds&&payInfo.rounds.length>0;
     if(!items.length&&!_isTabCheckout){showToast('Please select at least one item.','err',3000);return;}
-    var total=getCartTotal();
+    // 2026-05-13 round 9 fix: when this is a tab checkout (cart already
+    // emptied into rounds), getCartTotal() returns 0. Fall back to the
+    // running tab amount passed in via _pay.amount, otherwise the
+    // "Payment Done!" screen shows "✅ ₹0 paid online" — confusing the
+    // customer even though the captain side correctly shows the real
+    // amount stamped via _writePaidOnline.
+    var _cartTotal=getCartTotal();
     var coverDocId=(cv.bookingId||cv.ref||'').replace(/[^a-zA-Z0-9_-]/g,'_');
     if(!firestore){showToast('Not connected. Try again.','err',3000);return;}
-    var _pay=payInfo||{mode:'cash',amount:total};
+    var _pay=payInfo||{mode:'cash',amount:_cartTotal};
+    var total = (_cartTotal>0) ? _cartTotal : (typeof _pay.amount==='number'?_pay.amount:0);
     var orderData={
       items:items.map(function(it){return {n:it.n,p:it.p,qty:it.qty,cat:it.cat,t:it.t||"drink",alc:it.alc===false?false:(it.t==="food"?false:true)};}),
       total:total,
@@ -5957,6 +6231,29 @@ function renderWalletPage(bookingRef){
         conf.innerHTML+='<div style="display:flex;justify-content:space-between;padding:10px 0 0;font-size:14px;font-weight:900;">'
           +'<span>Total</span><span style="color:var(--gold);">₹'+total.toLocaleString('en-IN')+'</span></div></div>'
           +'<div style="font-size:12px;color:var(--muted);">Wallet Balance: ₹'+bal.toLocaleString('en-IN')+'</div>';
+        // 🔴 2026-05-13 (Khushi) — "View Bill" button after payment.
+        // Customer can tap to see the full itemized GST invoice (matches
+        // the captain's thermal print). For online-paid: pull items from
+        // _pay.rounds (tab checkout) or fall back to the local cart.
+        if(_isOnline){
+          var _billItems = (_pay && _pay.rounds && _pay.rounds.length)
+            ? _hodFlattenRounds(_pay.rounds)
+            : items.slice();
+          var vb=document.createElement('button');
+          vb.style.cssText='display:block;margin:14px auto 0;padding:11px 20px;border-radius:10px;background:rgba(242,199,68,.15);border:1.5px solid rgba(242,199,68,.5);color:var(--gold);font-size:13px;font-weight:800;cursor:pointer;font-family:var(--fs);letter-spacing:.6px;text-transform:uppercase;';
+          vb.textContent='📄 View Bill';
+          vb.onclick=function(){
+            showHodBillModal(_billItems, {
+              customerName: cv.name||'',
+              tableId: cv.tableId||'',
+              paymentMode: 'paid_online',
+              paymentId: _pay.paymentId||'',
+              amountPaid: _pay.amount||total,
+              settledAt: orderData.submittedAt
+            });
+          };
+          conf.appendChild(vb);
+        }
         inner.appendChild(conf);
         generateLocalQR('conf-qr-wrap', 'https://hodclub.in/?verify='+encodeURIComponent(cv.ref||cv.bookingId||cv.id||'')+'');
       setTimeout(function(){generateLocalQR('conf-qr-wrap','https://hodclub.in/?verify='+encodeURIComponent(cv.ref||cv.bookingId||cv.id||'')+'');
@@ -5984,21 +6281,52 @@ function renderWalletPage(bookingRef){
         .onSnapshot(function(tSnap){
           inner.innerHTML='';
           if(tSnap.empty){
-            // Two scenarios land here: (a) brand-new pre-arrival booking
+            // Three scenarios land here: (a) brand-new pre-arrival booking
             // for which the captain hasn't created a tableReservations doc
-            // yet, or (b) the captain has RELEASED the table mid-session
-            // (doc deleted/archived). Decision rules (Khushi spec v3,
-            // hardened 2026-05-13 after architect review):
-            //   • If we've seen a non-empty doc in THIS session → release.
-            //   • Else if breadcrumb exists → likely release, but show
-            //     a 1.5s "Connecting…" spinner first to absorb transient
-            //     empty snapshots from cache before committing to the
-            //     thank-you copy.
+            // yet, (b) the captain has RELEASED the table mid-session
+            // (doc deleted/archived), or (c) the customer is opening the
+            // wallet for the FIRST time after release (no breadcrumb, no
+            // session flag). To distinguish (a) from (b)/(c), we now also
+            // do a one-shot get on `releasedReservations/{bookingRef}`,
+            // a marker doc the POS writes inside `releaseTable`. If that
+            // doc exists → committed release, render thank-you immediately
+            // regardless of breadcrumb/session state. Decision rules
+            // (Khushi spec v4, 2026-05-13):
+            //   • Marker doc exists → release (commit immediately).
+            //   • Else if seen non-empty doc THIS session → release.
+            //   • Else if breadcrumb exists → likely release, show 1.5s
+            //     "Connecting…" spinner first to absorb transient empties.
             //   • Else → genuine pre-arrival.
             var visitKey='hod_wallet_visited_'+bookingRef;
             var hasVisited=false;
             try{ hasVisited=!!localStorage.getItem(visitKey); }catch(e){}
             var commitToThankYou=_seenLiveDocThisSession;
+            // One-shot marker check — only meaningful for TBL-/AGG- refs
+            // (covers/guestlist refs handled by other listeners). Fires
+            // synchronously alongside the existing breadcrumb logic so we
+            // don't add latency to the pre-arrival path.
+            if(!commitToThankYou && (bookingRef.indexOf('TBL-')===0||bookingRef.indexOf('AGG-')===0)){
+              try{
+                firestore.collection('releasedReservations').doc(bookingRef).get().then(function(mDoc){
+                  if(!mDoc.exists) return;
+                  // Marker found — render thank-you screen immediately,
+                  // overriding any pre-arrival paint that may already be
+                  // on screen. Drop a breadcrumb so subsequent refreshes
+                  // skip straight to thank-you on the breadcrumb path too.
+                  try{ localStorage.setItem(visitKey,'1'); }catch(e){}
+                  _seenLiveDocThisSession=true;
+                  inner.innerHTML='<div style="text-align:center;padding:60px 20px;">'
+                    +'<div style="font-size:54px;margin-bottom:14px;">🙏</div>'
+                    +'<div style="font-family:var(--fp);font-size:22px;font-weight:800;color:var(--gold);margin-bottom:10px;">Thank you for visiting!</div>'
+                    +'<div style="font-size:14px;color:var(--muted);line-height:1.7;max-width:300px;margin:0 auto 14px;">Your table session has ended. We hope you had a wonderful evening at House of Dopamine.</div>'
+                    +'<div style="font-family:monospace;font-size:13px;color:rgba(242,199,68,.55);margin-top:6px;letter-spacing:2px;">'+sanitize(bookingRef)+'</div>'
+                    +'<div style="margin-top:24px;font-size:12px;color:#888;">See you again soon ✨</div>'
+                  +'</div>';
+                  try{ if(typeof renderHodFeedbackForm==='function') renderHodFeedbackForm(inner, 0); }catch(e){}
+                  try{ wireCallWaiterFallback(bookingRef); }catch(e){}
+                }).catch(function(){});
+              }catch(e){}
+            }
             if(!commitToThankYou && hasVisited){
               // Show a brief connecting state, then commit. If a non-empty
               // snapshot arrives in the meantime, this branch never runs
@@ -6065,7 +6393,17 @@ function renderWalletPage(bookingRef){
             isTableBooking:true,tabRounds:td.tabRounds||[],tabTotal:td.tabTotal||0,expiresAt:null,
             // Pass source/aggregator flags so song-request hide logic works
             source:td.source||'',
-            isAggregator:!!(td.source&&td.source!=='inhouse')||bookingRef.startsWith('AGG-')
+            isAggregator:!!(td.source&&td.source!=='inhouse')||bookingRef.startsWith('AGG-'),
+            // 🔴 2026-05-13 (Khushi) — payment fields piped through so the
+            // "✅ Bill Settled · View Bill" banner can render the moment
+            // the captain marks paid (offline) or a wallet pay-online
+            // stamp lands. Without this, the customer wouldn't see any
+            // confirmation until the table is released.
+            paymentStatus:td.paymentStatus||'',
+            paymentMethod:td.paymentMethod||td.paymentMode||'',
+            paymentId:td.paymentId||'',
+            amountPaid:td.amountPaid||0,
+            paidAt:td.paidAt||td.orderedAt||null
           });
         },function(){inner.innerHTML='<div style="text-align:center;padding:60px;color:var(--muted);">Error loading wallet.</div>';});
     }
@@ -6480,14 +6818,23 @@ function renderTableReservations(){
 // they're nudged toward the Google My Business review link to convert
 // happy guests into public reviews. <4 stars they get a thank-you so the
 // venue privately captures the gripe without amplifying it publicly.
-function showCaptainFeedback(container, total){
+function showCaptainFeedback(container, total, alreadyPaid){
   if(!container) return;
   var card=document.createElement('div');
   card.style.cssText='padding:36px 22px 18px;text-align:center;color:#fff;font-family:var(--fs);';
-  var amt=(typeof total==='number'&&total>0) ? '<div style="font-size:13px;color:#888;margin-top:6px;">Order Total · ₹'+total.toLocaleString('en-IN')+'</div>' : '';
-  card.innerHTML='<div style="font-size:48px;margin-bottom:14px;">✨</div>'
-    +'<div style="font-size:20px;font-weight:800;color:#C9A84C;font-family:var(--fp);margin-bottom:8px;">Captain on the way</div>'
-    +'<div style="font-size:14px;color:#aaa;line-height:1.5;max-width:320px;margin:0 auto;">Your captain has been notified. They will be at your table shortly to settle the bill.</div>'
+  var amt=(typeof total==='number'&&total>0) ? '<div style="font-size:13px;color:#888;margin-top:6px;">'+(alreadyPaid?'Paid':'Order Total')+' · ₹'+total.toLocaleString('en-IN')+'</div>' : '';
+  // 2026-05-13 round 9 fix: honour the alreadyPaid flag passed in from
+  // the Pay Online success path. Without this, online-paid customers
+  // saw "Captain on the way · They will be at your table shortly to
+  // settle the bill" — confusing because the bill is already settled.
+  var heading = alreadyPaid ? 'Bill Settled · Thank you' : 'Captain on the way';
+  var sub = alreadyPaid
+    ? 'Your payment is confirmed. Enjoy the rest of your evening — the captain has been notified online.'
+    : 'Your captain has been notified. They will be at your table shortly to settle the bill.';
+  var icon = alreadyPaid ? '🙏' : '✨';
+  card.innerHTML='<div style="font-size:48px;margin-bottom:14px;">'+icon+'</div>'
+    +'<div style="font-size:20px;font-weight:800;color:#C9A84C;font-family:var(--fp);margin-bottom:8px;">'+heading+'</div>'
+    +'<div style="font-size:14px;color:#aaa;line-height:1.5;max-width:320px;margin:0 auto;">'+sub+'</div>'
     +amt
     +'<div style="margin-top:18px;font-size:12px;color:#666;">Thank you for visiting House of Dopamine</div>';
   container.appendChild(card);
@@ -6543,8 +6890,10 @@ function renderHodFeedbackForm(container, total){
       +'</div>';
   });
   wrap.innerHTML=''
-    +'<div style="font-family:var(--fp);font-size:17px;font-weight:800;color:#C9A84C;margin-bottom:4px;">How was your evening?</div>'
-    +'<div style="font-size:12px;color:#888;margin-bottom:12px;line-height:1.5;">Rate each — takes 10 seconds. Helps us serve you better.</div>'
+    +'<div id="hod-fb-heading">'
+    +  '<div style="font-family:var(--fp);font-size:17px;font-weight:800;color:#C9A84C;margin-bottom:4px;">How was your evening?</div>'
+    +  '<div style="font-size:12px;color:#888;margin-bottom:12px;line-height:1.5;">Rate each — takes 10 seconds. Helps us serve you better.</div>'
+    +'</div>'
     +'<div id="hod-fb-grid" style="margin-bottom:12px;">'+rowsHtml+'</div>'
     +'<textarea id="hod-fb-note" placeholder="One line about your experience (optional)" style="width:100%;min-height:54px;padding:10px 12px;background:#0c0c0c;border:1px solid rgba(245,241,232,.12);border-radius:10px;color:#fff;font-family:var(--fs);font-size:13px;resize:none;outline:none;box-sizing:border-box;margin-bottom:12px;"></textarea>'
     +'<button id="hod-fb-submit" disabled style="width:100%;padding:13px;border-radius:12px;background:#C9A84C;color:#0c0c0c;border:none;font-family:var(--fs);font-size:14px;font-weight:900;letter-spacing:.6px;text-transform:uppercase;cursor:pointer;opacity:.45;transition:opacity .2s;">Submit Feedback</button>'
@@ -6616,6 +6965,10 @@ function renderHodFeedbackForm(container, total){
           +'<div style="font-size:12px;color:#aaa;line-height:1.5;">Our manager will personally review your note. We will do better next time.</div>';
       }
       // Hide the form controls so the screen settles on the result.
+      // 2026-05-13 (Khushi spec, round 5) — also hide the "How was your
+      // evening? / Rate each — takes 10 seconds…" heading. The customer
+      // already gave feedback, no need to keep prompting them.
+      var heading=wrap.querySelector('#hod-fb-heading'); if(heading) heading.style.display='none';
       var grid=wrap.querySelector('#hod-fb-grid'); if(grid) grid.style.display='none';
       note.style.display='none';
       submitBtn.style.display='none';

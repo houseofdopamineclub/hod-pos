@@ -27,6 +27,12 @@ import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 // Dynamic Link (those were shut down 2025-08-25).
 import { HOD_LOCATION_URL } from "@/pages/DoorMode";
 
+// Firebase Cloud Functions — replaces Replit /api/whatsapp/*
+// Set this to your Firebase Functions URL after deploying:
+//   https://us-central1-hod-tickets.cloudfunctions.net
+// During local dev with Firebase emulator:
+//   http://localhost:5001/hod-tickets/us-central1
+const WHATSAPP_CF_BASE = "https://us-central1-hod-tickets.cloudfunctions.net";
 const CAPTAIN_HASH = "8eb63d4e8a9814c7f8d2af807808d010d4d2cc1930edae511792764ca53b679c";
 // Manager PIN — guards: changing source after a bill is printed (L1/L7),
 // marking paid without ever printing a bill (L9). Default PIN is 8888.
@@ -1985,7 +1991,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
       // outside the 24h customer-service reply window with no prior chat).
       // Most guests just booked via hodclub.in, which sends a Razorpay
       // confirmation — that opens the 24h window, so the new format wins.
-      const fbRes = await fetch("/api/whatsapp/send", {
+      const fbRes = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ to: custPhone, message: fallbackMessage }),
@@ -2000,7 +2006,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
 
       // Fallback: approved template (old format, but works outside the 24h
       // window for guests who haven't chatted with us yet).
-      const tplRes = await fetch("/api/whatsapp/send-template", {
+      const tplRes = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppTemplate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
