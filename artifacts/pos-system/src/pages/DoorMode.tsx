@@ -1086,7 +1086,7 @@ async function sendWhatsAppViaMeta(opts: {
   }
 
   // 2) Free-form text (only delivered if customer messaged HOD in last 24h)
-  console.log("[door][wa] >>> TEXT FALLBACK STARTING...");
+  console.warn("[door][wa] >>> TEXT FALLBACK STARTING...");
   try {
     const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
       method: "POST", headers: { "Content-Type": "application/json" },
