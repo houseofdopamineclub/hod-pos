@@ -1060,43 +1060,76 @@ async function readJsonSafe(r: Response): Promise<{ data: any; parseError?: stri
   }
 }
 
-async function sendWhatsAppViaMeta(opts: {
-  phone: string;
-  template?: { name: string; params: string[]; language?: string };
-  fallbackText: string;
-}): Promise<{ ok: boolean; via?: "template" | "text"; error?: string; code?: number }> {
-  const digits = (opts.phone || "").replace(/\D/g, "");
-  if (digits.length < 10) return { ok: false, error: "Invalid phone" };
+// ════════════════════════════════════════════════════════
+// FIXED sendWhatsAppViaMeta — replaces the existing function
+// Paste this OVER the existing sendWhatsAppViaMeta function
+// in your DoorMode.tsx (around line 1063)
+// ════════════════════════════════════════════════════════
 
-  // 1) Approved template (works outside the 24h customer-service window)
-  if (opts.template) {
+async function sendWhatsAppViaMeta(name, phone, ref, eventTitle, eventDate, type) {
+    console.log('[door][wa] sendWhatsAppViaMeta called:', { name, phone: phone?.slice(-4), ref, eventTitle, eventDate, type });
+    
+    if (!WHATSAPP_CF_BASE) {
+      console.warn('[door][wa] WHATSAPP_CF_BASE not set');
+      return { ok: false, error: 'WhatsApp not configured' };
+    }
+    
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits || digits.length < 10) {
+      console.warn('[door][wa] Invalid phone:', phone);
+      return { ok: false, error: 'Invalid phone number' };
+    }
+    
+    // Build the message and URL
+    const sref = encodeURIComponent(ref || '');
+    const baseUrl = WHATSAPP_CF_BASE.substring(0, WHATSAPP_CF_BASE.lastIndexOf('/'));
+    const ticketURL = `${baseUrl}/?wallet=${sref}`;
+    const textMessage = `Hi ${name || 'Guest'}! Your HOD cover for ${eventTitle || 'the event'} on ${eventDate || 'the date'} (${type || 'Guest'}) is booked.\n\nView ticket: ${ticketURL}\n\nShow this at the entrance.`;
+    
+    // ── TRY TEMPLATE FIRST ──
     try {
+      console.log('[door][wa] Trying template...');
       const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppTemplate`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: digits, template: opts.template.name,
-          language: opts.template.language || "en", params: opts.template.params,
-        }),
+          to: digits,
+          template: 'wallet_ready',
+          language: 'en',
+          params: [name || 'Guest', eventTitle || 'HOD Event', eventDate || 'Today', type || 'Guest', ticketURL]
+        })
       });
-      const { data, parseError } = await readJsonSafe(r);
-      if (r.ok && data?.ok) return { ok: true, via: "template" };
-      console.warn("[door][wa] template send failed, trying text:", parseError || data);
-    } catch (e) { console.warn("[door][wa] template request error", e); }
-  }
-
-  // 2) Free-form text (only delivered if customer messaged HOD in last 24h)
-  try {
-    const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: digits, message: opts.fallbackText }),
-    });
-    const { data, parseError } = await readJsonSafe(r);
-    if (r.ok && data?.ok) return { ok: true, via: "text" };
-    if (parseError) return { ok: false, error: parseError };
-    return { ok: false, error: data?.error || "Send failed", code: data?.code };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || "Network error" };
-  }
+      const body = await readJsonSafe(r);
+      console.log('[door][wa] Template response:', body);
+      if (r.ok && body.ok) {
+        console.log('[door][wa] Template sent successfully!');
+        return { ok: true, message: body };
+      }
+      throw new Error(body?.error || 'template failed');
+    } catch (err) {
+      console.warn('[door][wa] Template failed:', err?.message);
+    }
+    
+    // ── FALLBACK TO TEXT ──
+    try {
+      console.log('[door][wa] Trying text fallback...');
+      const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: digits, message: textMessage })
+      });
+      console.log('[door][wa] Text response status:', r.status);
+      const body = await readJsonSafe(r);
+      console.log('[door][wa] Text response body:', body);
+      if (r.ok && body.ok) {
+        console.log('[door][wa] Text sent successfully!');
+        return { ok: true, textMessage };
+      }
+      throw new Error(body?.error || `text HTTP ${r.status}`);
+    } catch (textErr) {
+      console.error('[door][wa] TEXT ALSO FAILED:', textErr);
+      return { ok: false, error: textErr?.message || 'Both template and text failed' };
+    }
 }
 
 // Booking 📲: try Meta template `wallet_ready` → text → QR popup. Tablets have
