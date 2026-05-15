@@ -233,7 +233,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const [rcBusy, setRcBusy] = useState(false);
   const [actBusy, setActBusy] = useState(false);
   const [billBusy, setBillBusy] = useState(false);
-  const [billDone, setBillDone] = useState<{ billNumber: string; total: number; itemCount: number; isDuplicate: boolean } | null>(null);
+  const [billDone, setBillDone] = useState<{ billNumber: string; total: number; itemCount: number; isDuplicate: boolean; withKot?: boolean } | null>(null);
   const [actDone, setActDone] = useState(false);
   const [actResult, setActResult] = useState<{ total: number; newBal: number; note: string } | null>(null);
   const [toast, setToast] = useState("");
@@ -255,6 +255,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // typed value (would feel buggy). If they haven't, the deficit auto-prefill
   // (below) is free to update as the cart changes.
   const [rcAmtTouched, setRcAmtTouched] = useState(false);
+  // 2026-05-14 (Khushi UX) — collapse recharge panel by default so the items
+  // list gets the full screen height. Auto-expands when balance is low or
+  // bartender hits a deficit. Tap "💰 Recharge" header to toggle manually.
+  const [rechargeOpen, setRechargeOpen] = useState(false);
   const rechargeRowRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -396,7 +400,28 @@ function WalletOverlay({ cover, staffName, onClose }: {
     if (!rcAmtTouched && suggestedRecharge === 0 && rcAmt !== "") {
       setRcAmt("");
     }
+    // 2026-05-15 (Khushi BUG FIX) — when deficit GROWS past what's currently
+    // typed (cash-and-carry: bartender pre-typed ₹500, customer added more
+    // items → deficit jumps to ₹884), bump the field up. This stops the
+    // misleading "pre-filled ₹884" banner showing alongside a stale ₹87
+    // in the input. Only bumps UP, never down — so bartender's deliberate
+    // larger amount is never shrunk.
+    const currentAmt = parseInt(rcAmt) || 0;
+    if (suggestedRecharge > 0 && currentAmt < suggestedRecharge) {
+      setRcAmt(String(suggestedRecharge));
+      setRcAmtTouched(false);
+    }
   }, [suggestedRecharge, rcAmtTouched]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 2026-05-15 (Khushi BUG FIX) — when the recharge modal OPENS, reset to a
+  // clean state synced to the current deficit. Prevents leftover input from
+  // a previous flow showing alongside a fresh deficit hint.
+  useEffect(() => {
+    if (rechargeOpen) {
+      setRcAmtTouched(false);
+      setRcAmt(suggestedRecharge > 0 ? String(suggestedRecharge) : "");
+    }
+  }, [rechargeOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
 
@@ -419,6 +444,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
       if (newQty <= 0) { const next = { ...prev }; delete next[key]; return next; }
       return { ...prev, [key]: { ...item, qty: newQty } };
     });
+  };
+
+  // 2026-05-15 (Khushi UX) — quick cart-chip × delete (wipe wrong tap from anywhere)
+  const removeFromCart = (key: string) => {
+    setCart((prev) => { const next = { ...prev }; delete next[key]; return next; });
   };
 
   const doRecharge = async () => {
@@ -533,14 +563,23 @@ function WalletOverlay({ cover, staffName, onClose }: {
       .filter((it) => it && it.qty > 0);
     if (allItems.length === 0) { showToast("No activated items yet — print a KOT first."); return; }
     // B1/B6 — debounce/confirm rapid reprints (anti double-print).
+    // 2026-05-15 (Khushi UX) — CASH & CARRY. If a new round was activated
+    // AFTER the last bill print, this is a fresh round bill (not a duplicate).
+    // Skip the duplicate-confirm dialog so bartender flow stays one-tap.
     const prevCount = cv.walletBillPrintCount || 0;
     const lastAt = cv.lastWalletBillPrintedAt ? new Date(cv.lastWalletBillPrintedAt).getTime() : 0;
-    if (prevCount > 0 && Date.now() - lastAt < WALLET_BILL_DEBOUNCE_MS) {
+    const billableForCheck = (cv.tabRounds || []).filter((r) => r && (r.status === "activated" || r.status === "served"));
+    const latestActivatedAt = billableForCheck.reduce((max, r) => {
+      const t = r.activatedAt ? new Date(r.activatedAt).getTime() : 0;
+      return t > max ? t : max;
+    }, 0);
+    const hasNewRoundSinceLastBill = prevCount > 0 && lastAt > 0 && latestActivatedAt > lastAt;
+    if (prevCount > 0 && Date.now() - lastAt < WALLET_BILL_DEBOUNCE_MS && !hasNewRoundSinceLastBill) {
       const ago = Math.ceil((Date.now() - lastAt) / 1000);
       if (!window.confirm(`⚠ A bill was just printed for this wallet ${ago}s ago.\n\nPrint AGAIN? (Guest will get a DUPLICATE chit.)`)) return;
-    } else if (prevCount > 0) {
-      // Even after the debounce window, any reprint must be confirmed (guest already has paper).
-      if (!window.confirm(`This wallet already has ${prevCount} printed bill${prevCount > 1 ? "s" : ""}.\n\nPrint another DUPLICATE chit?`)) return;
+    } else if (prevCount > 0 && !hasNewRoundSinceLastBill) {
+      // True reprint of same items — guest already has paper. Confirm.
+      if (!window.confirm(`This wallet already has ${prevCount} printed bill${prevCount > 1 ? "s" : ""} for the SAME items.\n\nPrint another DUPLICATE chit?`)) return;
     }
     // Floor: prefer cv.tableId prefix; fall back to bartender's saved tablet floor.
     const id = (cv.tableId || "").toUpperCase();
@@ -583,7 +622,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
     setBillBusy(false);
   };
 
-  const doActivate = async () => {
+  const doActivate = async (alsoBill: boolean = false) => {
     const allItems: HodOrderItem[] = [];
     // Carry tax class `t` end-to-end so wallet debit matches what the customer was shown.
     preOrderItems.forEach((it) => allItems.push({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", v: it.v }));
@@ -655,7 +694,6 @@ function WalletOverlay({ cover, staffName, onClose }: {
         pendingOrder: null,
       }));
       setActResult({ total, newBal: result.newBalance, note: allItems.map((it) => `${it.qty}x ${it.n}`).join(", ") });
-      setActDone(true);
 
       printKOT({
         tableId: cv.tableId || cv.ref || "", floorLabel: cv.floorLabel || "",
@@ -665,6 +703,60 @@ function WalletOverlay({ cover, staffName, onClose }: {
         roundNum: (cv.transactions || []).filter((t) => t.type === "activate").length + 1,
         items: allItems, roundTotal: total,
       }).catch(() => {});
+
+      // 2026-05-14 — COMBINED "PRINT KOT + BILL" path. Used by ground-floor
+      // cash-and-carry where bartender wants both prints in one tap. Bills
+      // ALL activated rounds (the just-activated one + any prior ones) so
+      // the customer chit reflects the running tab. Falls back to actDone
+      // (KOT-only success screen) if billing fails — KOT is already printed
+      // and wallet already debited so we never lose audit.
+      if (alsoBill) {
+        try {
+          const updated = (result.updatedRounds || []).filter((r: any) => r && (r.status === "activated" || r.status === "served"));
+          const billItems = updated.flatMap((r: any) => r.items || []);
+          const subtotalB = billItems.reduce((s: number, it: any) => s + (it.p || 0) * (it.qty || 0), 0);
+          const scAmtB = Math.round(subtotalB * 0.10);
+          const taxAmtB = Math.round(subtotalB * 0.05);
+          const cgstB = Math.round((taxAmtB / 2) * 100) / 100;
+          const sgstB = Math.round((taxAmtB / 2) * 100) / 100;
+          const finalB = subtotalB + scAmtB + taxAmtB;
+          const idB = (cv.tableId || "").toUpperCase();
+          let floorB: TabletFloor | null = null;
+          if (idB.startsWith("C")) floorB = "ground";
+          else if (idB.startsWith("T")) floorB = "rooftop";
+          else if (idB.startsWith("FD") || idB.startsWith("SMK")) floorB = "first";
+          // 2026-05-15 (Khushi UX) — CASH & CARRY. Combined PRINT KOT+BILL
+          // ALWAYS includes the round we just activated → by definition a
+          // fresh round bill, never a duplicate of the prior one.
+          const recB = await recordWalletBillPrint(cover.id, {
+            by: staffName, total: finalB, itemCount: billItems.length,
+            billNumberBase: (cv.ref || cv.id.slice(-6)).toUpperCase(),
+            hasNewRoundSinceLastBill: true,
+          });
+          const okB = await printBill({
+            tableId: cv.tableId || cv.ref || "WALLET",
+            floorLabel: cv.floorLabel || "Wallet",
+            customerName: cv.name,
+            staff: staffName,
+            items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty })),
+            amounts: { subtotal: subtotalB, serviceCharge: scAmtB, cgst: cgstB, sgst: sgstB, discount: 0, roundOff: 0, total: finalB },
+            billNumber: recB.billNumber,
+            isDuplicate: recB.isDuplicate,
+            tabletFloor: floorB,
+          });
+          if (okB) {
+            setBillDone({ billNumber: recB.billNumber, total: finalB, itemCount: billItems.length, isDuplicate: recB.isDuplicate, withKot: true });
+          } else {
+            showToast("✅ KOT printed but ❌ bill print failed — try PRINT BILL");
+            setActDone(true);
+          }
+        } catch (e: any) {
+          showToast(`✅ KOT printed but bill failed: ${e?.message || e}`);
+          setActDone(true);
+        }
+      } else {
+        setActDone(true);
+      }
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (msg.startsWith("COOLDOWN:")) {
@@ -704,9 +796,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
     return (
       <div style={{ position: "fixed", inset: 0, background: "#0A0A0A", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ background: "rgba(255,255,255,.04)", border: `2px solid ${goldBg}`, borderRadius: 24, padding: "36px 28px", width: "100%", maxWidth: 380, textAlign: "center", boxShadow: `0 8px 40px ${goldBg}` }}>
-          <div style={{ fontSize: 56, marginBottom: 12 }}>{billDone.isDuplicate ? "⚠️" : "🖨"}</div>
+          <div style={{ fontSize: 56, marginBottom: 12 }}>{billDone.isDuplicate ? "⚠️" : (billDone.withKot ? "🖨✨" : "🖨")}</div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: goldFg, marginBottom: 6 }}>
-            {billDone.isDuplicate ? "DUPLICATE Bill Printed" : "Bill Printed!"}
+            {billDone.isDuplicate ? "DUPLICATE Bill Printed" : (billDone.withKot ? "KOT + BILL Printed!" : "Bill Printed!")}
           </div>
           <div style={{ fontSize: 13, color: "rgba(255,255,255,.6)", marginBottom: 14 }}>{cv.name}</div>
           <div style={{ background: "rgba(0,0,0,.4)", border: `1px dashed ${goldBg}`, borderRadius: 10, padding: "10px 12px", marginBottom: 18, fontFamily: "monospace" }}>
@@ -814,18 +906,50 @@ function WalletOverlay({ cover, staffName, onClose }: {
         <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(20,18,30,.98)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#F2C744", zIndex: 99999, maxWidth: 320 }}>{toast}</div>
       )}
 
-      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(242,199,68,.2)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 900, color: "#F2C744" }}>{cv.name}</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>{cv.ref} · {cv.tier || "Standard"}{isExpired ? " · EXPIRED" : ""}</div>
+      {/* 2026-05-15 (Khushi UX) — pulse keyframe for low/over balance recharge nudge */}
+      <style>{`@keyframes hodPulseRed{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.65);}50%{box-shadow:0 0 0 8px rgba(239,68,68,0);}}@keyframes hodPulseGold{0%,100%{box-shadow:0 0 0 0 rgba(242,199,68,.55);}50%{box-shadow:0 0 0 8px rgba(242,199,68,0);}}`}</style>
+
+      <div style={{ background: "rgba(12,8,22,.98)", borderBottom: "1px solid rgba(242,199,68,.2)", padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, gap: 8 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cv.name}</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>{cv.ref} · {cv.tier || "Standard"}{isExpired ? " · EXPIRED" : ""}</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>Balance</div>
-            <div style={{ fontSize: 20, fontWeight: 900, color: bal > 0 ? "#00C864" : "#EF4444" }}>₹{bal.toLocaleString("en-IN")}</div>
-          </div>
-          <button onClick={onClose} style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 18, cursor: "pointer" }}>×</button>
-        </div>
+        {/* 2026-05-15 (Khushi UX) — TOP recharge button. Pulses RED when bal≤0
+            or cart exceeds balance; pulses GOLD when bal<100. Tap → opens
+            (and scrolls to) the recharge panel below. */}
+        {(() => {
+          const over = activeTotal > bal;
+          const zero = bal <= 0;
+          const low = bal < 100 && !zero;
+          const healthy = !over && !zero && !low;
+          // 2026-05-15 (Khushi UX) — bal in BIG GREEN text when healthy
+          // (₹100+ and cart fits). Pulses RED on deficit / zero, GOLD on low.
+          const anim = over || zero ? "hodPulseRed 1.2s infinite" : low ? "hodPulseGold 1.6s infinite" : "none";
+          const bg = over || zero
+            ? "linear-gradient(135deg,#EF4444,#7A1F18)"
+            : low
+              ? "linear-gradient(135deg,#F2C744,#A07F2E)"
+              : "rgba(0,200,100,.10)";
+          const border = over || zero
+            ? "1.5px solid #EF4444"
+            : low
+              ? "1.5px solid #F2C744"
+              : "1.5px solid rgba(0,200,100,.55)";
+          const balColor = healthy ? "#00E676" : (low ? "#000" : "#fff");
+          const ctaColor = healthy ? "#F2C744" : (low ? "#000" : "#fff");
+          return (
+            <button onClick={() => { setRechargeOpen(true); setTimeout(() => rechargeRowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); }}
+              style={{ padding: "6px 14px", borderRadius: 12, background: bg, border, cursor: "pointer", textAlign: "center", lineHeight: 1.1, animation: anim, whiteSpace: "nowrap", boxShadow: healthy ? "0 2px 14px rgba(0,200,100,.18)" : undefined }}>
+              <div style={{ fontSize: 16, fontWeight: 900, color: balColor, letterSpacing: 0.3 }}>
+                ₹{bal.toLocaleString("en-IN")}
+              </div>
+              <div style={{ fontSize: 10, fontWeight: 800, color: ctaColor, marginTop: 1, letterSpacing: 0.4 }}>
+                {over ? `➕ RECHARGE ₹${activeTotal - bal}` : zero ? "➕ RECHARGE NOW" : "➕ RECHARGE"}
+              </div>
+            </button>
+          );
+        })()}
+        <button onClick={onClose} style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 18, cursor: "pointer", flexShrink: 0 }}>×</button>
       </div>
 
       {/* V4 2026-05-11 — persistent PENDING TICK badge. Lives on the cover
@@ -914,23 +1038,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
             );
           })}
         </div>
-        {categories.length > 1 && (
-          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, flexWrap: "wrap" }}>
-            <button onClick={() => setSubCategory("")}
-              style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", background: "transparent",
-                border: `1px solid ${!subCategory ? "#F2C744" : "transparent"}`,
-                color: !subCategory ? "#F2C744" : "rgba(255,255,255,.55)" }}>ALL</button>
-            {categories.map((c) => {
-              const label = c.split("-").slice(1).join(" ").replace(/\b\w/g, (ch) => ch.toUpperCase()) || c;
-              return (
-                <button key={c} onClick={() => setSubCategory(c)}
-                  style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: 0.5, background: "transparent",
-                    border: `1px solid ${subCategory === c ? "#F2C744" : "transparent"}`,
-                    color: subCategory === c ? "#F2C744" : "rgba(255,255,255,.55)", textTransform: "uppercase" }}>{label}</button>
-              );
-            })}
-          </div>
-        )}
+        {/* 2026-05-15 (Khushi UX) — sub-category strip removed. Search bar now
+            covers ALL groups (FOOD/LIQUOR/NAB/SMOKE) globally — bartender
+            doesn't need to switch tabs. Tabs above still work as a quick
+            visual filter when not searching. */}
         <div style={{ height: 1, background: "rgba(255,255,255,.05)" }} />
       </div>
 
@@ -949,38 +1060,37 @@ function WalletOverlay({ cover, staffName, onClose }: {
             const showVeg = item.group === "food";
             return (
               <div key={`${item.id}-${item.category}-${item.name}`}
-                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
-                <div style={{ flex: 1, paddingRight: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px dashed rgba(255,255,255,.06)" }}>
+                <div style={{ flex: 1, paddingRight: 8, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.2, lineHeight: 1.2 }}>
                     {showVeg && (
-                      <span style={{ display: "inline-block", width: 12, height: 12, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
-                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 5, height: 5, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
+                      <span style={{ display: "inline-block", width: 10, height: 10, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
+                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 4, height: 4, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
                       </span>
                     )}
-                    {item.name}
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
                   </div>
-                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4, fontWeight: 600 }}>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 1, fontWeight: 600, lineHeight: 1.2 }}>
                     {hasDisc ? (
                       <>
-                        <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{item.price.toFixed(2)}</span>
-                        <span style={{ color: "#22c55e" }}>₹{eff.toFixed(2)}</span>
-                        {ov?.discountReason && <span style={{ marginLeft: 6, color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {ov.discountReason}</span>}
+                        <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 4 }}>₹{item.price.toFixed(0)}</span>
+                        <span style={{ color: "#22c55e" }}>₹{eff.toFixed(0)}</span>
                       </>
                     ) : (
-                      <>₹{item.price.toFixed(2)}</>
+                      <>₹{item.price.toFixed(0)}</>
                     )}
                   </div>
                 </div>
                 {qty === 0 ? (
                   <button onClick={() => addToCart(item)}
-                    style={{ padding: "8px 18px", borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer" }}>ADD +</button>
+                    style={{ padding: "5px 12px", borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.3, cursor: "pointer", flexShrink: 0 }}>ADD +</button>
                 ) : (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
                     <button onClick={() => updateCartQty(item.id, -1)}
-                      style={{ width: 30, height: 30, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 16, fontWeight: 800, cursor: "pointer" }}>−</button>
-                    <span style={{ fontSize: 14, fontWeight: 900, color: "#F2C744", minWidth: 18, textAlign: "center" }}>{qty}</span>
+                      style={{ width: 24, height: 24, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", padding: 0 }}>−</button>
+                    <span style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", minWidth: 16, textAlign: "center" }}>{qty}</span>
                     <button onClick={() => updateCartQty(item.id, 1)}
-                      style={{ width: 30, height: 30, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 16, fontWeight: 800, cursor: "pointer" }}>+</button>
+                      style={{ width: 24, height: 24, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", padding: 0 }}>+</button>
                   </div>
                 )}
               </div>
@@ -994,8 +1104,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
           const fmt = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
           return (
             <div style={{ background: "rgba(242,199,68,.06)", borderRadius: 12, padding: "8px 12px", marginBottom: 10 }}>
-              <div style={{ fontSize: 11, color: "rgba(242,199,68,.8)", lineHeight: 1.6, wordBreak: "break-word" }}>
-                {Object.values(cart).map((it) => `${it.qty}x ${it.n} ₹${it.p * it.qty}`).join(" · ")}
+              {/* 2026-05-15 (Khushi UX) — every cart item now shows as a chip
+                  with × delete. Bartender can wipe a wrong-tap from anywhere
+                  without scrolling back up to the menu row. */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                {Object.entries(cart).map(([key, it]) => (
+                  <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 14, padding: "3px 4px 3px 9px", fontSize: 11, fontWeight: 700, color: "#F2C744" }}>
+                    <span>{it.qty}× {it.n} ₹{it.p * it.qty}</span>
+                    <button onClick={() => removeFromCart(key)} title="Remove from cart"
+                      style={{ width: 18, height: 18, borderRadius: "50%", background: "rgba(239,68,68,.25)", border: "1px solid rgba(239,68,68,.5)", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer", padding: 0, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
+                  </span>
+                ))}
               </div>
               <details style={{ borderTop: "1px solid rgba(255,255,255,.07)", paddingTop: 5, marginTop: 5 }}>
                 <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", listStyle: "none", cursor: "pointer" }}>
@@ -1029,19 +1148,39 @@ function WalletOverlay({ cover, staffName, onClose }: {
           );
         })()}
 
-        <div ref={rechargeRowRef} style={{ background: "linear-gradient(135deg, rgba(242,199,68,.10), rgba(0,0,0,.55))", border: "1px solid rgba(242,199,68,.35)", borderRadius: 14, padding: 14, marginBottom: 10 }}>
+        {/* 2026-05-15 (Khushi UX) — recharge panel is now a TOP-anchored
+            POPOVER OVERLAY (floats over the items list, doesn't push it
+            down). Triggered ONLY by the top Recharge button — no longer
+            auto-expanded inline at the bottom. Backdrop dim + tap-to-close. */}
+        {rechargeOpen && (
+          <div onClick={() => setRechargeOpen(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.55)", zIndex: 99990, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60, paddingBottom: 20, paddingLeft: 12, paddingRight: 12, backdropFilter: "blur(2px)", overflowY: "auto" }}>
+        <div ref={rechargeRowRef} onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100vh - 80px)", overflowY: "auto", background: "linear-gradient(135deg, rgba(35,28,12,.99), rgba(15,10,5,.99))", border: "1.5px solid rgba(242,199,68,.55)", borderRadius: 14, padding: 14, position: "relative", boxShadow: "0 12px 48px rgba(0,0,0,.7)" }}>
+          <button onClick={() => setRechargeOpen(false)} title="Close"
+            style={{ position: "absolute", top: 8, right: 10, width: 28, height: 28, borderRadius: 8, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0, fontWeight: 900 }}>×</button>
+          <div style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", marginBottom: 10, paddingRight: 32 }}>
+            ➕ RECHARGE WALLET · Bal ₹{bal.toLocaleString("en-IN")}
+          </div>
           {/* V3 2026-05-11 — deficit hint banner. Surfaces the EXACT shortfall
               (and the auto-rounded ₹50 recharge suggestion) so the bartender
               can just hit ➕ Recharge. Pulses gold to grab attention. */}
-          {deficit > 0 && (
-            <div style={{ background: "rgba(239,68,68,.10)", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, fontSize: 12, fontWeight: 800, color: "#EF4444", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-              <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · pre-filled ₹{suggestedRecharge.toLocaleString("en-IN")}</span>
-              <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
-                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-                ↻ RESET
-              </button>
-            </div>
-          )}
+          {deficit > 0 && (() => {
+            // 2026-05-15 (Khushi BUG FIX) — banner now truthful. If input
+            // matches the exact shortfall, say "pre-filled". Otherwise prompt
+            // bartender to tap RESET (no more "pre-filled ₹884" lie next to
+            // a stale ₹87 in the input).
+            const currentAmt = parseInt(rcAmt) || 0;
+            const matches = currentAmt === suggestedRecharge;
+            return (
+              <div style={{ background: "rgba(239,68,68,.10)", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, fontSize: 12, fontWeight: 800, color: "#EF4444", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · {matches ? `pre-filled ₹${suggestedRecharge.toLocaleString("en-IN")}` : `tap RESET → ₹${suggestedRecharge.toLocaleString("en-IN")}`}</span>
+                <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
+                  style={{ padding: "4px 8px", borderRadius: 6, background: matches ? "rgba(242,199,68,.15)" : "rgba(242,199,68,.30)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
+                  ↻ RESET
+                </button>
+              </div>
+            );
+          })()}
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="Recharge amount"
               style={{ flex: 1, background: "rgba(0,0,0,.55)", border: `1px solid ${deficit > 0 ? "rgba(239,68,68,.5)" : "rgba(242,199,68,.35)"}`, borderRadius: 8, padding: "10px 12px", color: "#fff", fontSize: 15, outline: "none", fontWeight: deficit > 0 ? 800 : 400 }} />
@@ -1111,6 +1250,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
             </div>
           )}
         </div>
+          </div>
+        )}
 
         {(() => {
           const billableRounds = (cv.tabRounds || []).filter((r) => r && (r.status === "activated" || r.status === "served"));
@@ -1122,14 +1263,31 @@ function WalletOverlay({ cover, staffName, onClose }: {
           const canBill = billableRounds.length > 0 && !billBusy && !hasPreparing;
           const billSubtotal = billableRounds.flatMap((r) => r.items || []).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
           const billTotal = billSubtotal > 0 ? Math.round(billSubtotal * 1.155) : 0;
-          // Post-print: gold dim + DUPLICATE warning so bartender does NOT casually re-tap.
-          const dimAfterPrint = printedCount > 0 && !billBusy;
+          // 2026-05-15 (Khushi UX) — hide the "Print Bill (no activated items yet)"
+          // disabled placeholder entirely. It only shows once there's something
+          // to bill, freeing ~70px on a quiet wallet.
+          if (!billableRounds.length && !billBusy && !hasPreparing) return null;
+          // 2026-05-15 (Khushi UX) — CASH & CARRY FIX. Bar mode is round-by-round
+          // cash-and-carry: customer orders Round 1, bartender prints KOT+BILL,
+          // customer pays/leaves; later orders Round 2, prints KOT+BILL AGAIN.
+          // That second print is NOT a duplicate — it's a NEW round bill.
+          // Only flag as DUPLICATE if there is NO new activated round since
+          // the last bill print (i.e. bartender genuinely tapping print twice
+          // for the same items).
+          const latestActivatedAt = billableRounds.reduce((max, r) => {
+            const t = r.activatedAt ? new Date(r.activatedAt).getTime() : 0;
+            return t > max ? t : max;
+          }, 0);
+          const hasNewRoundSinceLastBill = printedCount > 0 && lastBillAt > 0 && latestActivatedAt > lastBillAt;
+          const isTrueReprint = printedCount > 0 && !hasNewRoundSinceLastBill;
+          const dimAfterPrint = isTrueReprint && !billBusy;
           let label: string;
           if (billBusy) label = "Sending bill...";
           else if (hasPreparing) label = "⏳ Activate pending KOT first";
           else if (!billableRounds.length) label = "Print Bill (no activated items yet)";
-          else if (printedCount > 0 && inCooldown) label = `✅ Bill #${printedCount} just printed · wait ${cooldownLeft}s`;
-          else if (printedCount > 0) label = `⚠ REPRINT BILL (will mark DUPLICATE) — #${printedCount + 1}`;
+          else if (isTrueReprint && inCooldown) label = `✅ Bill #${printedCount} just printed · wait ${cooldownLeft}s`;
+          else if (isTrueReprint) label = `⚠ REPRINT SAME BILL (DUPLICATE) — #${printedCount + 1}`;
+          else if (hasNewRoundSinceLastBill) label = `🖨 PRINT BILL — ₹${billTotal.toLocaleString("en-IN")} · Round ${printedCount + 1}`;
           else label = `🖨 PRINT BILL — ₹${billTotal.toLocaleString("en-IN")}`;
           const style = !canBill
             ? { background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.18)", color: "rgba(242,199,68,.4)", cursor: "not-allowed" as const }
@@ -1215,21 +1373,36 @@ function WalletOverlay({ cover, staffName, onClose }: {
           </div>
         )}
 
-        <button onClick={canActivateFinal ? doActivate : undefined} disabled={actBusy || !canActivateFinal}
-          style={{ width: "100%", padding: 18, borderRadius: 14, fontSize: 16, fontWeight: 900, transition: "all .2s",
+        {/* 2026-05-14 (Khushi UX) — hide both PRINT KOT buttons when cart +
+            pre-order are both empty. Frees ~140px of vertical space so the
+            items list above can show 4-5 more rows. Buttons reappear the
+            instant the bartender adds the first item. */}
+        {hasItems && (<>
+        {/* 2026-05-14 — COMBINED "PRINT KOT + BILL" button. One-tap shortcut
+            for ground-floor cash-and-carry. Same activation guards as
+            standard PRINT KOT (balance, expired, pending-tick) — just also
+            prints the bill chit immediately after. Shown side-by-side with
+            standard PRINT KOT so bartender keeps the choice when running a
+            real tab on rooftop / FF. */}
+        {/* 2026-05-15 (Khushi UX) — single combined button only. PRINT KOT ONLY
+            removed per Khushi: bartenders kept tapping wrong one. One button
+            = one decision, faster service. */}
+        <button onClick={canActivateFinal ? () => doActivate(true) : undefined} disabled={actBusy || !canActivateFinal}
+          style={{ width: "100%", padding: "12px 12px", borderRadius: 10, fontSize: 14, fontWeight: 900, transition: "all .2s",
             ...(canActivateFinal
-              ? { background: "linear-gradient(135deg,rgba(0,200,100,.95),rgba(0,200,100,.65))", border: "none", color: "#000", cursor: "pointer", boxShadow: "0 4px 24px rgba(0,200,100,.3)" }
+              ? { background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", cursor: "pointer", boxShadow: "0 4px 24px rgba(242,199,68,.3)" }
               : tickGateBlocked
                 ? { background: "rgba(242,199,68,.10)", border: "1.5px solid rgba(242,199,68,.4)", color: "#F2C744", cursor: "not-allowed" }
                 : { background: "rgba(107,107,138,.15)", border: "1px solid rgba(107,107,138,.3)", color: "rgba(107,107,138,.6)", cursor: "not-allowed" }) }}>
-          {actBusy ? "Printing KOT..." :
-            blocked ? "✅ KOT Printed — Rescan to refresh" :
+          {actBusy ? "Printing KOT + BILL..." :
+            blocked ? "✅ Printed — Rescan to refresh" :
             tickGateBlocked ? `⏳ AWAITING ✅ TICK · ${Math.max(0, Math.ceil((PENDING_TICK_FAIL_OPEN_MS - pendingTickAgeMs) / 1000))}s` :
-            canActivate ? (lastVerifiedOnlineTick ? "🖨️ ✅ PRINT KOT" : "🖨️ PRINT KOT") :
+            canActivate ? (lastVerifiedOnlineTick ? "🖨 ✅ PRINT KOT + BILL" : "🖨 PRINT KOT + BILL") :
             activeTotal > bal ? `❌ Recharge ₹${activeTotal - bal} first` :
-            !hasItems ? "Select items to print KOT" :
-            "PRINT KOT (No Balance)"}
+            !hasItems ? "Select items first" :
+            "PRINT KOT + BILL (No Balance)"}
         </button>
+        </>)}
       </div>
       {/* V4 2026-05-11 — SCREENSHOT COLLECTION MODAL. Triggered when bartender
           taps PRINT KOT during the 60-sec fail-open window (Razorpay payment
@@ -1443,7 +1616,11 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         searchCovers(searchQ.trim(), tonight),
         searchBookingsAndGuestlist(searchQ.trim(), tonight),
       ]);
-      setResults(covers.filter((c) => (c.coverBalance || 0) > 0 && (!c.expiresAt || new Date(c.expiresAt).getTime() >= Date.now())));
+      // 2026-05-15 (Khushi UX) — DO NOT filter out ₹0 balance wallets.
+      // Entry-only / "Pay at venue" guests show up with coverBalance:0 until
+      // they recharge — bartender MUST be able to find them to top up. Only
+      // expired wallets (past nights) are dropped.
+      setResults(covers.filter((c) => !c.expiresAt || new Date(c.expiresAt).getTime() >= Date.now()));
       // Hide guest hits that already have a matching cover wallet (by ref)
       // to avoid showing the same person twice.
       const coverRefs = new Set(covers.map((c) => c.ref));
