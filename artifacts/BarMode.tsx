@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "wouter";
 import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
@@ -1148,11 +1149,15 @@ function WalletOverlay({ cover, staffName, onClose }: {
           );
         })()}
 
-        {/* 2026-05-15 (Khushi UX) — recharge panel is now a TOP-anchored
-            POPOVER OVERLAY (floats over the items list, doesn't push it
-            down). Triggered ONLY by the top Recharge button — no longer
-            auto-expanded inline at the bottom. Backdrop dim + tap-to-close. */}
-        {rechargeOpen && (
+        {/* 2026-05-15 (Khushi UX) — recharge panel is a TOP-anchored POPOVER
+            OVERLAY portaled to document.body. PORTAL IS REQUIRED: the cart
+            container at line ~1102 has `backdropFilter: blur(8px)`, which
+            in modern browsers makes that element a containing block for any
+            descendant `position: fixed` element. Without the portal the
+            popover gets trapped inside the bottom cart bar and renders
+            squished at the bottom (Khushi bug 2026-05-15 PM). Portaling
+            escapes that trap and lets it float over the entire viewport. */}
+        {rechargeOpen && typeof document !== "undefined" && document.body && createPortal(
           <div onClick={() => setRechargeOpen(false)}
             style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.55)", zIndex: 99990, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60, paddingBottom: 20, paddingLeft: 12, paddingRight: 12, backdropFilter: "blur(2px)", overflowY: "auto" }}>
         <div ref={rechargeRowRef} onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100vh - 80px)", overflowY: "auto", background: "linear-gradient(135deg, rgba(35,28,12,.99), rgba(15,10,5,.99))", border: "1.5px solid rgba(242,199,68,.55)", borderRadius: 14, padding: 14, position: "relative", boxShadow: "0 12px 48px rgba(0,0,0,.7)" }}>
@@ -1250,7 +1255,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
             </div>
           )}
         </div>
-          </div>
+          </div>,
+          document.body
         )}
 
         {(() => {
