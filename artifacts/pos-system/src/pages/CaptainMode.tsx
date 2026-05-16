@@ -12,8 +12,12 @@ import {
   computeHodBreakdown, lookupOrphanZomatoPaymentByName, type TabletFloor,
   type HodTableReservation, type HodTabRound, type HodOrderItem,
   type OrphanZomatoPayment,
+  // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
+  redeemFromWalletAtTable, undoWalletRedemption, findCoverForRedemption,
+  type WalletRedemption, type HodCover,
 } from "@/lib/firestore-hod";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
+import { QrScanner } from "@/components/QrScanner";
 // 🔴 2026-05-09 — switched from menu-data.ts (314 legacy items) to canonical
 // HOD_MENU_ITEMS (373) so Captain's picker matches Admin/Bar/wallet exactly.
 // Without this, OOS/discount overrides set by manager can silently miss items
@@ -709,6 +713,200 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
   );
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// 2026-05-15 — WalletScanModal (Khushi: Captain × Cover wallet redemption)
+// ────────────────────────────────────────────────────────────────────────
+// Three lookup tabs: 📷 SCAN (camera) · 📱 PHONE · 🎟 REF. After lookup,
+// shows wallet name + phone + balance + expiry. Confirm → calls
+// redeemFromWalletAtTable which auto-clamps amount to min(remaining,
+// balance) — no captain math, no partial entry. The reservation prop
+// auto-refreshes from Firestore subscription so the parent modal sees
+// the new walletRedemptions[] entry without manual re-read.
+// ════════════════════════════════════════════════════════════════════════
+function WalletScanModal({ reservation, remaining, captainName, onClose }: {
+  reservation: HodTableReservation;
+  remaining: number;
+  captainName: string;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<"scan" | "phone" | "ref">("scan");
+  const [showCamera, setShowCamera] = useState(false);
+  const [needle, setNeedle] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [found, setFound] = useState<HodCover | null>(null);
+  const [success, setSuccess] = useState<{ amount: number; newBalance: number; name: string } | null>(null);
+
+  const lookup = async (raw: string) => {
+    setError(""); setFound(null);
+    if (!raw.trim()) { setError("Enter a phone or ref"); return; }
+    setBusy(true);
+    try {
+      const r = await findCoverForRedemption(raw);
+      if (!r.ok) { setError(r.reason); setBusy(false); return; }
+      const c = r.cover;
+      // Pre-flight validations (UX — backend re-checks these too).
+      if (!c.coverBalance || c.coverBalance <= 0) {
+        setError(`Wallet ${c.ref || c.id} has zero balance`);
+      } else if (c.expiresAt && new Date(c.expiresAt).getTime() < Date.now()) {
+        setError(`Wallet ${c.ref || c.id} expired at ${new Date(c.expiresAt).toLocaleString()}`);
+      } else {
+        // Loophole #10 / Q5 — already redeemed at this table?
+        const already = (reservation.walletRedemptions || []).find((e) => e.walletRef === (c.ref || c.id));
+        if (already) {
+          setError(`This wallet is already redeemed here (₹${already.amount}). Undo it first to re-scan.`);
+        } else {
+          setFound(c);
+        }
+      }
+    } catch (e: any) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  const onScanResult = (raw: string) => {
+    setShowCamera(false);
+    setNeedle(raw);
+    lookup(raw);
+  };
+
+  const confirmRedeem = async () => {
+    if (!found) return;
+    setBusy(true); setError("");
+    try {
+      // Pass the Firestore DOC ID (found.id) — NOT the public ref. Doc id and
+      // ref differ for table-source covers; an orphan empty doc may exist at
+      // the public-ref id and would 0-balance-throw if we wrote there.
+      const docId = found.id;
+      // billCap = remaining + walletPaidSoFar = the bill's TOTAL final amount.
+      // Server-side guard prevents over-deduction even on stale modal / race.
+      const walletPaidSoFar = (reservation.walletRedemptions || []).reduce((s, r) => s + (r.amount || 0), 0);
+      const billCap = remaining + walletPaidSoFar;
+      const result = await redeemFromWalletAtTable(reservation._docId, docId, remaining, captainName, billCap);
+      setSuccess({ amount: result.amountRedeemed, newBalance: result.newWalletBalance, name: found.name || found.ref || docId });
+    } catch (e: any) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  // Loophole #2 — name/phone mismatch warning
+  const nameMismatch = found && reservation.customerName &&
+    String(found.name || "").toLowerCase().trim() !== String(reservation.customerName).toLowerCase().trim();
+  const phoneMismatch = found && reservation.phone && found.phone &&
+    String(found.phone).replace(/\D/g, "") !== String(reservation.phone).replace(/\D/g, "");
+
+  if (showCamera) {
+    return <QrScanner onResult={onScanResult} onClose={() => setShowCamera(false)} />;
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 20, padding: 22, width: "100%", maxWidth: 400, maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 17, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>🎫 REDEEM FROM WALLET</div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>
+          Table {reservation.tableId} · Bill remaining: <span style={{ color: "#F2C744", fontWeight: 800 }}>{formatINR(remaining)}</span>
+        </div>
+
+        {success ? (
+          <>
+            <div style={{ background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.5)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: "#22C55E", marginBottom: 6 }}>✅ REDEEMED {formatINR(success.amount)}</div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.7)" }}>From <b>{success.name}</b>'s wallet</div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.7)", marginTop: 4 }}>New balance: <b>{formatINR(success.newBalance)}</b></div>
+            </div>
+            <button onClick={onClose}
+              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
+              ← Back to Mark Paid
+            </button>
+          </>
+        ) : (
+          <>
+            {/* Tabs */}
+            <div style={{ display: "flex", gap: 4, marginBottom: 14, padding: 4, background: "rgba(0,0,0,.3)", borderRadius: 10 }}>
+              {([
+                { k: "scan", label: "📷 SCAN" },
+                { k: "phone", label: "📱 PHONE" },
+                { k: "ref", label: "🎟 REF" },
+              ] as const).map((t) => (
+                <button key={t.k} onClick={() => { setTab(t.k); setError(""); setFound(null); setNeedle(""); }}
+                  style={{ flex: 1, padding: "8px 4px", borderRadius: 7, fontSize: 11, fontWeight: 800, cursor: "pointer", border: "none",
+                    background: tab === t.k ? "rgba(242,199,68,.18)" : "transparent",
+                    color: tab === t.k ? "#F2C744" : "rgba(255,255,255,.5)" }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {tab === "scan" && (
+              <button onClick={() => { setError(""); setFound(null); setShowCamera(true); }}
+                style={{ width: "100%", padding: 18, borderRadius: 12, background: "rgba(242,199,68,.1)", border: "2px dashed rgba(242,199,68,.4)", color: "#F2C744", fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 14 }}>
+                📷 OPEN CAMERA · POINT AT QR
+              </button>
+            )}
+
+            {tab !== "scan" && (
+              <div style={{ marginBottom: 14 }}>
+                <input
+                  value={needle}
+                  onChange={(e) => setNeedle(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") lookup(needle); }}
+                  placeholder={tab === "phone" ? "9611111261" : "HOD-MP6KSRBR"}
+                  inputMode={tab === "phone" ? "numeric" : "text"}
+                  autoFocus
+                  style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
+                <button onClick={() => lookup(needle)} disabled={busy || !needle.trim()}
+                  style={{ width: "100%", padding: 12, borderRadius: 10, background: needle.trim() ? "rgba(242,199,68,.2)" : "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.4)", color: needle.trim() ? "#F2C744" : "rgba(255,255,255,.3)", fontSize: 13, fontWeight: 800, cursor: needle.trim() ? "pointer" : "not-allowed" }}>
+                  {busy ? "Searching…" : "🔍 LOOK UP WALLET"}
+                </button>
+              </div>
+            )}
+
+            {error && (
+              <div style={{ padding: 10, marginBottom: 12, borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 12, fontWeight: 600 }}>
+                ⚠ {error}
+              </div>
+            )}
+
+            {found && (
+              <div style={{ padding: 14, marginBottom: 14, borderRadius: 12, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.3)" }}>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#fff", marginBottom: 4 }}>{found.name || "—"}</div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 2 }}>📱 {found.phone || "—"}</div>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginBottom: 8, fontFamily: "monospace" }}>{found.ref || found.id}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "rgba(0,0,0,.3)", borderRadius: 8 }}>
+                  <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Available balance</span>
+                  <span style={{ fontSize: 18, fontWeight: 900, color: "#22C55E" }}>{formatINR(found.coverBalance || 0)}</span>
+                </div>
+                {(nameMismatch || phoneMismatch) && (
+                  <div style={{ marginTop: 10, padding: 8, borderRadius: 6, background: "rgba(245,158,11,.15)", border: "1px solid rgba(245,158,11,.5)", color: "#FBBF24", fontSize: 10, fontWeight: 700, lineHeight: 1.4 }}>
+                    ⚠ NAME/PHONE DOESN'T MATCH TABLE ({reservation.customerName || "—"} · {reservation.phone || "—"}). Confirm with customer this is THEIR wallet before redeeming.
+                  </div>
+                )}
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "rgba(242,199,68,.1)", borderRadius: 6, fontSize: 11, color: "#F2C744", fontWeight: 700, textAlign: "center" }}>
+                  Will deduct {formatINR(Math.min(remaining, found.coverBalance || 0))} ({remaining > (found.coverBalance || 0) ? "full balance" : "bill remaining"})
+                </div>
+              </div>
+            )}
+
+            {found && (
+              <button onClick={confirmRedeem} disabled={busy}
+                style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#22C55E,#15803D)", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+                {busy ? "Redeeming…" : `✅ REDEEM ${formatINR(Math.min(remaining, found.coverBalance || 0))}`}
+              </button>
+            )}
+
+            <button onClick={onClose}
+              style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 13, cursor: "pointer" }}>
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MarkPaidModal({ reservation, captainName, onClose }: {
   reservation: HodTableReservation; captainName: string; onClose: () => void;
 }) {
@@ -734,6 +932,9 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const [serviceCharge, setServiceCharge] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // 🔴 2026-05-15 — themed in-modal "Did you collect ₹X?" dialog (replaces
+  // the ugly native window.confirm). Only shown on mixed wallet+cash path.
+  const [showCollectConfirm, setShowCollectConfirm] = useState(false);
   // 🔀 Split payment — captain can split final amount across cash/card/upi.
   // Only available for non-aggregator paths. Sum must equal finalAmount.
   const [splitMode, setSplitMode] = useState(false);
@@ -775,18 +976,52 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     ? Math.round(finalAmount * (1 - (aggDiscount || 0) / 100))
     : undefined;
 
+  // ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ──
+  // walletRedemptions live on the reservation doc (written atomically by
+  // redeemFromWalletAtTable). We READ them straight from the prop so the
+  // Firestore subscription auto-refreshes the modal after each redeem/undo
+  // — no local copy to drift out of sync.
+  const walletRedemptions: WalletRedemption[] = reservation.walletRedemptions || [];
+  const walletPaidSoFar = walletRedemptions.reduce((s, r) => s + (r.amount || 0), 0);
+  // payable = what's still owed via cash/card/UPI/split AFTER wallet hits.
+  // Zero = fully covered by wallet, payment buttons are hidden.
+  const payable = Math.max(0, Math.round((finalAmount - walletPaidSoFar) * 100) / 100);
+  const [showWalletScan, setShowWalletScan] = useState(false);
+  const [undoBusy, setUndoBusy] = useState<string | null>(null);
+  const [walletErr, setWalletErr] = useState("");
+  // Q6 — aggregator BOOKINGS block wallet redemption entirely (separate
+  // accounting — Zomato/Swiggy/EazyDiner already collected/discounted at the
+  // platform). Source-level check (not just payMethod) so a captain switching
+  // payChannel from aggregator → in-house can't bypass the block. (Architect
+  // review 2026-05-15.)
+  const walletAllowed = !isAggregator && payMethod !== "aggregator";
+
   const splitTotal = splitCash + splitCard + splitUpi;
-  const splitDiff = finalAmount - splitTotal;
+  // Split must equal `payable` (NOT finalAmount) — the wallet slice already
+  // settled separately. Captain only enters the cash/card/UPI remainder.
+  const splitDiff = payable - splitTotal;
+
+  const undoWallet = async (txId: string) => {
+    setUndoBusy(txId); setWalletErr("");
+    try { await undoWalletRedemption(reservation._docId, txId, captainName); }
+    catch (e: any) { setWalletErr(e.message || String(e)); }
+    setUndoBusy(null);
+  };
 
   const confirm = async () => {
     if (finalAmount <= 0) { setError("Invalid amount"); return; }
     if (splitMode) {
-      if (splitTotal !== finalAmount) {
-        setError(`Split total ₹${splitTotal} must equal final amount ₹${finalAmount} (off by ₹${splitDiff}).`);
+      if (splitTotal !== payable) {
+        setError(`Split total ₹${splitTotal} must equal remaining ₹${payable} (off by ₹${Math.abs(splitDiff)}).`);
         return;
       }
       const nonZero = [splitCash, splitCard, splitUpi].filter((n) => n > 0).length;
       if (nonZero < 2) { setError("Split needs at least 2 non-zero amounts. Use single payment instead."); return; }
+    }
+    // 2026-05-15 — Q6: aggregator + wallet must NOT mix (separate accounting).
+    if (payMethod === "aggregator" && walletPaidSoFar > 0) {
+      setError("Aggregator payments can't combine with wallet redemption. Undo the wallet redemption(s) first or switch to In-House.");
+      return;
     }
     // D1/D2 — Manager-PIN gates for high manual discount and SC waiver. We
     // collect over-threshold actions into overrideEntries so they get logged
@@ -855,20 +1090,34 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     }
     setSaving(true);
     try {
-      const splits = splitMode
+      const splits = splitMode && payable > 0
         ? [
             { method: "cash", amount: splitCash },
             { method: "card", amount: splitCard },
             { method: "upi",  amount: splitUpi  },
           ].filter((s) => s.amount > 0)
         : undefined;
-      const methodLabel = splitMode
-        ? `split:${splits!.map((s) => s.method).join("+")}`
-        : (payMethod === "aggregator" ? aggName : payMethod);
+      // 2026-05-15 — payable === 0 means wallet covered the whole bill, no
+      // cash/card/UPI side. methodLabel reflects what the captain ACTUALLY
+      // collected outside the wallet:
+      //   wallet only           → "wallet"
+      //   wallet + cash         → "wallet+cash"
+      //   wallet + split:cash+upi → "wallet+split:cash+upi"
+      const cashLabel = payable === 0
+        ? ""
+        : (splits
+            ? `split:${splits.map((s) => s.method).join("+")}`
+            : (payMethod === "aggregator" ? aggName : payMethod));
+      const methodLabel = walletPaidSoFar > 0
+        ? (cashLabel ? `wallet+${cashLabel}` : "wallet")
+        : cashLabel;
       await markTablePaid(reservation._docId, {
         amount: finalAmount,
         method: methodLabel,
         captainName,
+        // 2026-05-15 — sum of walletRedemptions[].amount; reports subtract this
+        // from `amount` to get true cash/card/UPI collected for EOD reconcile.
+        walletPaidAmount: walletPaidSoFar > 0 ? walletPaidSoFar : undefined,
         aggregator: payMethod === "aggregator" ? aggName : undefined,
         aggregatorDiscount: payMethod === "aggregator" ? aggDiscount : undefined,
         // 🔴 Net amount the venue receives from the aggregator after their
@@ -938,6 +1187,87 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
         </div>
 
+        {/* ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ── */}
+        <div style={{ marginBottom: 16, padding: 12, borderRadius: 12,
+          background: walletPaidSoFar > 0 ? "rgba(34,197,94,.06)" : "rgba(242,199,68,.04)",
+          border: `1px solid ${walletPaidSoFar > 0 ? "rgba(34,197,94,.3)" : "rgba(242,199,68,.2)"}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: walletRedemptions.length > 0 ? 10 : 0 }}>
+            <span style={{ fontSize: 11, fontWeight: 800, color: walletPaidSoFar > 0 ? "#22C55E" : "#F2C744", letterSpacing: 0.5 }}>
+              🎫 CUSTOMER WALLET
+            </span>
+            {walletPaidSoFar > 0 && (
+              <span style={{ fontSize: 11, fontWeight: 800, color: "#22C55E" }}>
+                {formatINR(walletPaidSoFar)} REDEEMED
+              </span>
+            )}
+          </div>
+
+          {walletRedemptions.map((w) => (
+            <div key={w.txId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", marginBottom: 4, borderRadius: 6, background: "rgba(0,0,0,.25)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {w.walletName || "—"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {w.walletPhone || "—"}</span>
+                </div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,.4)", fontFamily: "monospace" }}>{w.walletRef}</div>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 900, color: "#22C55E" }}>−{formatINR(w.amount)}</div>
+              <button onClick={() => undoWallet(w.txId)} disabled={undoBusy === w.txId}
+                title="Refund this wallet hit"
+                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
+                {undoBusy === w.txId ? "…" : "↶ UNDO"}
+              </button>
+            </div>
+          ))}
+
+          {walletErr && (
+            <div style={{ marginTop: 6, padding: 6, borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#FCA5A5", fontSize: 10, fontWeight: 600 }}>⚠ {walletErr}</div>
+          )}
+
+          {walletPaidSoFar > 0 && (
+            payable === 0 ? (
+              <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.4)", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
+                <span style={{ color: "rgba(255,255,255,.7)", fontWeight: 700 }}>Remaining</span>
+                <span style={{ fontWeight: 900, color: "#22C55E" }}>✅ FULLY PAID BY WALLET</span>
+              </div>
+            ) : (
+              // 🔴 2026-05-15 (Khushi spec) — when wallet only PARTIALLY covers
+              // the bill, the captain MUST physically collect ₹{payable} from
+              // the customer in cash/card/UPI. Make this number unmissable so
+              // bartenders/captains in a noisy floor don't accidentally close
+              // a bill thinking the wallet covered everything.
+              <div style={{ marginTop: 10, padding: "14px 16px", borderRadius: 10,
+                background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.12))",
+                border: "2px solid rgba(242,199,68,.7)",
+                boxShadow: "0 0 0 3px rgba(242,199,68,.08), 0 4px 16px rgba(242,199,68,.15)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#F2C744", letterSpacing: 0.6 }}>STILL TO COLLECT</span>
+                    <span style={{ fontSize: 10, color: "rgba(255,255,255,.55)", fontWeight: 600 }}>from customer · cash / card / UPI</span>
+                  </div>
+                  <span style={{ fontSize: 28, fontWeight: 900, color: "#F2C744", lineHeight: 1, letterSpacing: -0.5 }}>
+                    {formatINR(payable)}
+                  </span>
+                </div>
+              </div>
+            )
+          )}
+
+          {payable > 0 && walletAllowed && (
+            <button onClick={() => { setWalletErr(""); setShowWalletScan(true); }}
+              style={{ marginTop: walletRedemptions.length > 0 ? 10 : 0, width: "100%", padding: 12, borderRadius: 10,
+                background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.18))",
+                border: "1px solid rgba(242,199,68,.5)", color: "#F2C744", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>
+              {walletRedemptions.length === 0 ? `🎫 REDEEM FROM WALLET (${formatINR(payable)})` : "🎫 SCAN ANOTHER WALLET"}
+            </button>
+          )}
+
+          {!walletAllowed && (
+            <div style={{ marginTop: 8, padding: 8, borderRadius: 6, background: "rgba(160,40,32,.1)", border: "1px dashed rgba(160,40,32,.4)", fontSize: 10, color: "rgba(255,255,255,.5)", textAlign: "center", fontWeight: 600 }}>
+              Wallet redemption blocked on aggregator bills (Q6 spec)
+            </div>
+          )}
+        </div>
+
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <button onClick={() => setServiceCharge(!serviceCharge)}
             style={{ width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer", position: "relative",
@@ -965,11 +1295,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
         )}
 
-        {payMethod !== "aggregator" && (
+        {payMethod !== "aggregator" && payable > 0 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Payment Method</span>
-              <button onClick={() => { setSplitMode(!splitMode); setError(""); if (!splitMode) { setSplitCash(finalAmount); setSplitCard(0); setSplitUpi(0); } }}
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Payment Method · ₹{payable} owed</span>
+              <button onClick={() => { setSplitMode(!splitMode); setError(""); if (!splitMode) { setSplitCash(payable); setSplitCard(0); setSplitUpi(0); } }}
                 style={{ padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: "pointer",
                   background: splitMode ? "rgba(239,68,68,.2)" : "rgba(255,255,255,.04)",
                   border: `1px solid ${splitMode ? "rgba(239,68,68,.6)" : "rgba(255,255,255,.1)"}`,
@@ -1008,7 +1338,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid rgba(239,68,68,.2)", fontSize: 12 }}>
                   <span style={{ color: "rgba(255,255,255,.5)" }}>Split sum</span>
                   <span style={{ fontWeight: 800, color: splitDiff === 0 ? "#F2C744" : "#EF4444" }}>
-                    ₹{splitTotal} / ₹{finalAmount} {splitDiff !== 0 && `(${splitDiff > 0 ? "short" : "over"} ₹${Math.abs(splitDiff)})`}
+                    ₹{splitTotal} / ₹{payable} {splitDiff !== 0 && `(${splitDiff > 0 ? "short" : "over"} ₹${Math.abs(splitDiff)})`}
                   </span>
                 </div>
               </div>
@@ -1034,12 +1364,89 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
 
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
 
-        <button onClick={confirm} disabled={saving}
+        <button onClick={() => {
+            // 🔴 2026-05-15 (Khushi spec) — when wallet only partially covers
+            // a bill, force the captain to acknowledge that the leftover
+            // ₹{payable} was physically collected from the customer BEFORE
+            // closing the bill. Plain wallet-only and no-wallet flows skip
+            // the prompt — only mixed wallet+cash needs the double-check.
+            if (payable > 0 && walletPaidSoFar > 0) { setShowCollectConfirm(true); return; }
+            confirm();
+          }} disabled={saving}
           style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
-          {saving ? "Saving..." : "✅ Confirm Payment"}
+          {saving ? "Saving..." : (payable === 0 && walletPaidSoFar > 0 ? "✅ Close Bill (Wallet Paid)" : "✅ Confirm Payment")}
         </button>
         <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
       </div>
+
+      {showWalletScan && (
+        <WalletScanModal
+          reservation={reservation}
+          remaining={payable}
+          captainName={captainName}
+          onClose={() => setShowWalletScan(false)}
+        />
+      )}
+
+      {/* 🔴 2026-05-15 (Khushi spec) — themed in-modal "Did you collect ₹X?"
+          double-confirm. Replaces native window.confirm which rendered as a
+          stark black-on-white browser dialog that didn't match HOD theme.
+          Black/red/gold gradient · ₹ amount HUGE · two big buttons. Sits at
+          z-10001 (above MarkPaidModal 9999 + WalletScanModal 10000). */}
+      {showCollectConfirm && (
+        <div onClick={() => setShowCollectConfirm(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.85)", backdropFilter: "blur(8px)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10001, padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: 420, background: "linear-gradient(155deg,#1a0d0a 0%,#0a0606 70%,#030305 100%)",
+              border: "2px solid rgba(242,199,68,.6)", borderRadius: 16,
+              boxShadow: "0 0 0 4px rgba(242,199,68,.1), 0 20px 60px rgba(160,40,32,.4), 0 0 80px rgba(242,199,68,.15)",
+              padding: 24, color: "#fff", fontFamily: "inherit" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+              <span style={{ fontSize: 22 }}>⚠️</span>
+              <span style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", letterSpacing: 1.2, textTransform: "uppercase" }}>Collect From Customer</span>
+            </div>
+
+            <div style={{ padding: "22px 16px", marginBottom: 16, borderRadius: 12,
+              background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.18))",
+              border: "1px solid rgba(242,199,68,.45)", textAlign: "center" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,.6)", letterSpacing: 0.8, marginBottom: 6 }}>STILL TO COLLECT</div>
+              <div style={{ fontSize: 44, fontWeight: 900, color: "#F2C744", lineHeight: 1, letterSpacing: -1, textShadow: "0 0 20px rgba(242,199,68,.4)" }}>
+                {formatINR(payable)}
+              </div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", fontWeight: 600, marginTop: 8 }}>
+                via {splitMode ? "SPLIT" : (payMethod || "cash").toUpperCase()}
+              </div>
+            </div>
+
+            <div style={{ padding: "10px 12px", marginBottom: 14, borderRadius: 8,
+              background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.25)",
+              fontSize: 11, color: "rgba(255,255,255,.7)", fontWeight: 600, textAlign: "center" }}>
+              Wallet already covered <span style={{ color: "#22C55E", fontWeight: 900 }}>{formatINR(walletPaidSoFar)}</span>
+            </div>
+
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,.85)", fontWeight: 700, lineHeight: 1.5, marginBottom: 18, textAlign: "center" }}>
+              Have you actually collected <span style={{ color: "#F2C744", fontWeight: 900 }}>{formatINR(payable)}</span> from the customer?
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setShowCollectConfirm(false)}
+                style={{ flex: 1, padding: 14, borderRadius: 10, background: "rgba(255,255,255,.05)",
+                  border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.8)",
+                  fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
+                ❌ NOT YET
+              </button>
+              <button onClick={() => { setShowCollectConfirm(false); confirm(); }}
+                style={{ flex: 1.4, padding: 14, borderRadius: 10,
+                  background: "linear-gradient(135deg,#F2C744 0%,#A02820 100%)",
+                  border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5,
+                  boxShadow: "0 4px 14px rgba(160,40,32,.4)" }}>
+                ✅ YES — CLOSE BILL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
