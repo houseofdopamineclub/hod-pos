@@ -1,0 +1,536 @@
+// ════════════════════════════════════════════════════════════════════════
+// HOD — WALLET RECHARGE: SERVER-VERIFIED CREDIT + WEBHOOK BACKSTOP
+// (Razorpay double-confirmation, V2 hardened — Khushi ask Mon 11 May 2026)
+// ────────────────────────────────────────────────────────────────────────
+//
+// THE FRAUD HOLE WE FOUND (Mon 11 May):
+//   The customer site recharges wallets DIRECTLY from the browser:
+//     firestore.collection('covers').doc(ref).update({
+//       coverBalance: FieldValue.increment(amount), ... });
+//   Anyone with browser DevTools can run that line themselves and credit
+//   ANY wallet ANY amount with NO Razorpay payment. The deployed
+//   `walletOperation` cloud function is also unsafe (its only "auth" is
+//   a hardcoded admin key sitting in the customer site source).
+//
+// THIS DROP — 3 layers of defence:
+//   1. NEW `createWalletOrder` — server creates the Razorpay order AND
+//      writes a server-side mapping `_meta/walletOrders/{orderId}` =>
+//      {coverRef, kind, amount}. The client NEVER again sends coverRef
+//      or amount as a trusted input — the server looks them up by orderId.
+//   2. NEW `verifyRechargePayment` — signature-checks the success
+//      callback, FETCHES the actual payment from Razorpay's API to
+//      confirm `status==='captured'` + amount/currency match the order,
+//      then credits the wallet using the SERVER-side coverRef from
+//      `_meta/walletOrders`. Idempotent on `paymentId`.
+//   3. EXTEND existing `razorpayWebhook` (in index.js) — handles the
+//      same wallet recharge as a backstop when the customer's browser
+//      crashes after Razorpay capture but before our verify call.
+//      Resolves coverRef the same way (from `_meta/walletOrders` first,
+//      then from `notes.coverRef` if present).
+//
+// FAIL-OPEN PHILOSOPHY (Khushi's rule):
+//   - RAZORPAY_SECRET / RAZORPAY_KEY_ID missing → 500 (deploy issue)
+//   - Signature mismatch → 400 (rejected, audit logged)
+//   - Razorpay API says payment NOT captured → 400 (audit logged)
+//   - Cover doc missing → 404 (don't auto-create — would mask attacks)
+//   - paymentId already credited → 200 OK (idempotent, no double-credit)
+//   - Amount mismatch (Razorpay says ₹500, order said ₹1000) → 400
+//   - Firestore write fails → 500 (customer sees error, retry safe)
+//
+// WHERE THIS FILE GOES — see DEPLOY-WALLET-WEBHOOK.md
+// ════════════════════════════════════════════════════════════════════════
+
+const admin = require('firebase-admin');
+const crypto = require('crypto');
+const { onRequest } = require('firebase-functions/v2/https');
+
+if (!admin.apps.length) admin.initializeApp();
+
+// Sanity caps so a typo or attacker can't brick a wallet.
+// Mon 11 May 2026 — Khushi: drop floor to ₹1 so customers can pay
+// exact tiny shortfalls (e.g. ₹36) without rounding up to ₹100.
+const MIN_INR = 1;
+const MAX_INR = 50000;
+
+// Audit log path — every webhook + verify call lands here for the void
+// digest sibling cron to scan, and for Khushi to inspect manually.
+const AUDIT_COLL = '_meta';
+const AUDIT_DOC_PREFIX = 'razorpayWalletLog';
+// Server-side trusted record of what each Razorpay order was created FOR.
+// Written by createWalletOrder. Read by verify + webhook to resolve coverRef
+// without trusting client input. Survives even if Razorpay notes are dropped.
+const ORDERS_DOC = 'walletOrders';
+
+async function logAudit(paymentId, payload) {
+  try {
+    await admin.firestore()
+      .collection(AUDIT_COLL).doc(AUDIT_DOC_PREFIX)
+      .collection('events').doc(paymentId)
+      .set({ ...payload, at: new Date().toISOString() }, { merge: true });
+  } catch (e) {
+    console.warn('[walletRecharge] audit write failed (non-fatal):', e.message);
+  }
+}
+
+async function readWalletOrder(orderId) {
+  if (!orderId) return null;
+  try {
+    const snap = await admin.firestore()
+      .collection(AUDIT_COLL).doc(ORDERS_DOC)
+      .collection('orders').doc(String(orderId)).get();
+    return snap.exists ? snap.data() : null;
+  } catch (e) {
+    console.warn('[walletRecharge] readWalletOrder failed:', e.message);
+    return null;
+  }
+}
+
+async function writeWalletOrder(orderId, payload) {
+  await admin.firestore()
+    .collection(AUDIT_COLL).doc(ORDERS_DOC)
+    .collection('orders').doc(String(orderId))
+    .set({ ...payload, createdAt: new Date().toISOString() }, { merge: true });
+}
+
+// ── Fetch payment from Razorpay API (server-to-server, BasicAuth).
+//    Returns the payment object or throws. We use this to PROVE
+//    `status === 'captured'` + the amount + the order_id match what
+//    we recorded server-side at createWalletOrder time. Never trust
+//    the client's claimed amount.
+async function fetchRazorpayPayment(paymentId) {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const secret = process.env.RAZORPAY_SECRET;
+  if (!keyId || !secret) throw new Error('RAZORPAY_KEY_ID / RAZORPAY_SECRET not set');
+  const auth = Buffer.from(`${keyId}:${secret}`).toString('base64');
+  // Node 20 has global fetch.
+  const r = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+    method: 'GET',
+    headers: { Authorization: `Basic ${auth}` },
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    throw new Error(`Razorpay API ${r.status}: ${body.slice(0, 200)}`);
+  }
+  return await r.json();
+}
+
+// ── Shared crediting logic — used by BOTH the verify endpoint AND the
+//    razorpayWebhook backstop branch. Idempotent by paymentId.
+async function creditCoverWalletOnce({
+  coverRef, amount, paymentId, orderId, source, notes, kind,
+}) {
+  if (!coverRef) throw new Error('coverRef required');
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt < MIN_INR || amt > MAX_INR) {
+    throw new Error(`amount out of range (₹${MIN_INR}–₹${MAX_INR})`);
+  }
+  // kind is one of: 'topup' (default — adds to coverBalance + topUpTotal),
+  //                 'diff_paid' (table-booking cover-charge top-up: clears
+  //                  pendingTopUp + writes diffPaid* fields on top of the
+  //                  normal credit).
+  const txKind = kind === 'diff_paid' ? 'diff_paid' : 'topup';
+  const db = admin.firestore();
+  const docRef = db.collection('covers').doc(String(coverRef));
+
+  // Transaction guarantees idempotency even on concurrent verify+webhook hits.
+  return await db.runTransaction(async (txn) => {
+    const snap = await txn.get(docRef);
+    if (!snap.exists) {
+      throw new Error(`cover not found: ${coverRef}`);
+    }
+    const data = snap.data() || {};
+    const txList = Array.isArray(data.transactions) ? data.transactions : [];
+    // Idempotency — if any prior tx has this paymentId, skip.
+    const already = txList.find((t) => t && t.paymentId === paymentId);
+    if (already) {
+      // If the prior tx wasn't yet flagged serverVerified (rare race: client
+      // wrote first, then we arrived), upgrade it in-place.
+      if (already.serverVerified !== true) {
+        const upgraded = txList.map((t) =>
+          t && t.paymentId === paymentId
+            ? { ...t, serverVerified: true, verifiedAt: new Date().toISOString(), verifiedSource: source || 'verify' }
+            : t
+        );
+        txn.update(docRef, { transactions: upgraded });
+        return { credited: false, upgraded: true, newBalance: data.coverBalance || 0 };
+      }
+      return { credited: false, upgraded: false, newBalance: data.coverBalance || 0 };
+    }
+    // Real new credit.
+    const newBal = (data.coverBalance || 0) + amt;
+    const isDiffPaid = txKind === 'diff_paid';
+    const newTx = {
+      amount: amt,
+      note: isDiffPaid
+        ? 'Cover charge paid (online · verified)'
+        : (source === 'webhook' ? '💳 Online recharge (webhook)' : '💳 Online recharge (verified)'),
+      timestamp: new Date().toISOString(),
+      type: isDiffPaid ? 'diff_paid' : 'online_topup',
+      paymentId,
+      orderId: orderId || '',
+      serverVerified: true,
+      verifiedAt: new Date().toISOString(),
+      verifiedSource: source || 'verify',
+      ...(notes ? { notes } : {}),
+    };
+    const update = {
+      coverBalance: newBal,
+      transactions: [...txList, newTx],
+      lastVerifiedTopUpAt: new Date().toISOString(),
+    };
+    if (isDiffPaid) {
+      update.pendingTopUp = 0;
+      update.diffPaidAt = new Date().toISOString();
+      update.diffPaidAmount = amt;
+      update.diffMethod = 'paid_online';
+      // coverActivated mirrors coverBalance for cover-charge flow (so the
+      // customer-site banner reads "your cover ₹X is ready").
+      update.coverActivated = (data.coverActivated || 0) + amt;
+    } else {
+      update.coverActivated = (data.coverActivated || 0) + amt;
+      update.topUpTotal = (data.topUpTotal || 0) + amt;
+    }
+    txn.update(docRef, update);
+    return { credited: true, upgraded: false, newBalance: newBal, kind: txKind };
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 1) createWalletOrder — server creates the Razorpay order AND writes
+//    a SERVER-SIDE mapping {orderId → coverRef, kind, amount}. The
+//    client NEVER again sends those as trusted inputs — verify +
+//    webhook both look them up by orderId.
+//    Body:  { amount, coverRef, kind?, name?, phone? }
+//    Resp:  { ok:true, orderId, amount, currency }
+// ════════════════════════════════════════════════════════════════════
+exports.createWalletOrder = onRequest(
+  { region: 'asia-south1', secrets: ['RAZORPAY_KEY_ID', 'RAZORPAY_SECRET'], cors: true, timeoutSeconds: 30, memory: '256MiB' },
+  async (req, res) => {
+    try {
+      if (req.method === 'OPTIONS') return res.status(204).send('');
+      if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+
+      const { amount, coverRef, kind, name, phone } = req.body || {};
+      const amt = Number(amount);
+      if (!Number.isFinite(amt) || amt < MIN_INR || amt > MAX_INR) {
+        return res.status(400).json({ ok: false, error: `Amount must be ₹${MIN_INR}–₹${MAX_INR}` });
+      }
+      if (!coverRef) return res.status(400).json({ ok: false, error: 'Missing coverRef' });
+      const txKind = kind === 'diff_paid' ? 'diff_paid' : 'topup';
+
+      // Confirm the cover doc exists BEFORE charging — saves a refund flow
+      // if the customer scanned a non-existent QR.
+      const coverSnap = await admin.firestore().collection('covers').doc(String(coverRef)).get();
+      if (!coverSnap.exists) return res.status(404).json({ ok: false, error: 'Wallet not found' });
+
+      const Razorpay = require('razorpay');
+      const rzp = new Razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_SECRET,
+      });
+      const receipt = `wal_${txKind}_${String(coverRef).slice(-12)}_${Date.now().toString(36)}`.slice(0, 40);
+      const order = await rzp.orders.create({
+        amount: Math.round(amt * 100),
+        currency: 'INR',
+        receipt,
+        notes: {
+          type: 'wallet_topup',
+          coverRef: String(coverRef),
+          kind: txKind,
+          name: name || '',
+          phone: phone || '',
+        },
+      });
+
+      // Server-side trusted mapping. Verify + webhook will read this and
+      // ignore any client-claimed coverRef/amount/kind.
+      await writeWalletOrder(order.id, {
+        coverRef: String(coverRef),
+        amount: amt,
+        kind: txKind,
+        name: name || '',
+        phone: phone || '',
+        receipt,
+      });
+
+      return res.json({ ok: true, orderId: order.id, amount: order.amount, currency: order.currency });
+    } catch (e) {
+      console.error('[createWalletOrder] fatal:', e);
+      return res.status(500).json({ ok: false, error: 'Could not create order: ' + (e.message || 'unknown') });
+    }
+  }
+);
+
+// ════════════════════════════════════════════════════════════════════
+// 2) verifyRechargePayment — the SAFE endpoint the customer site calls
+//    after a Razorpay success callback. Three layers of proof:
+//      a. Signature check (proves Razorpay produced the response)
+//      b. Razorpay API fetch (proves the payment is actually CAPTURED
+//         and the captured amount matches the original order amount)
+//      c. coverRef + amount from server-side `_meta/walletOrders` —
+//         the client's claimed amount/coverRef are IGNORED.
+//    Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+//    Resp: { ok:true, verified:true, credited, newBalance, paymentId } on OK
+// ════════════════════════════════════════════════════════════════════
+exports.verifyRechargePayment = onRequest(
+  { region: 'asia-south1', secrets: ['RAZORPAY_KEY_ID', 'RAZORPAY_SECRET'], cors: true, timeoutSeconds: 30, memory: '256MiB' },
+  async (req, res) => {
+    const startedAt = Date.now();
+    try {
+      if (req.method === 'OPTIONS') return res.status(204).send('');
+      if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+
+      const {
+        razorpay_order_id: orderId,
+        razorpay_payment_id: paymentId,
+        razorpay_signature: signature,
+      } = req.body || {};
+
+      if (!orderId || !paymentId || !signature) {
+        return res.status(400).json({ ok: false, error: 'Missing payment fields' });
+      }
+      const secret = process.env.RAZORPAY_SECRET;
+      if (!secret) {
+        console.error('[verifyRechargePayment] RAZORPAY_SECRET not set');
+        return res.status(500).json({ ok: false, error: 'Server misconfigured' });
+      }
+
+      // ── Layer (a) — signature
+      const expected = crypto.createHmac('sha256', secret)
+        .update(orderId + '|' + paymentId).digest('hex');
+      if (expected !== signature) {
+        await logAudit(paymentId, { kind: 'verify-rejected-bad-signature', orderId, ip: req.ip || '' });
+        console.warn('[verifyRechargePayment] signature mismatch', { paymentId, orderId });
+        return res.status(400).json({ ok: false, error: 'Invalid payment signature' });
+      }
+
+      // ── Layer (c) — server-side trusted order record (we wrote it at
+      //    createWalletOrder time). If absent, this orderId wasn't
+      //    created via OUR wallet flow — reject (could be a ticket
+      //    booking order being replayed against this endpoint).
+      const orderRecord = await readWalletOrder(orderId);
+      if (!orderRecord || !orderRecord.coverRef) {
+        await logAudit(paymentId, { kind: 'verify-rejected-unknown-order', orderId });
+        return res.status(404).json({ ok: false, error: 'Order not found in wallet ledger (was it created via createWalletOrder?)' });
+      }
+
+      // ── Layer (b) — fetch the payment from Razorpay's API and require
+      //    captured + amount + currency + order_id all match.
+      let payment;
+      try {
+        payment = await fetchRazorpayPayment(paymentId);
+      } catch (e) {
+        await logAudit(paymentId, { kind: 'verify-razorpay-api-failed', orderId, error: String(e.message || e) });
+        // Fail-open: don't credit. Webhook backstop will catch it.
+        return res.status(502).json({ ok: false, error: 'Could not confirm payment with Razorpay — webhook will retry' });
+      }
+      if (!payment || payment.status !== 'captured') {
+        await logAudit(paymentId, { kind: 'verify-rejected-not-captured', orderId, paymentStatus: payment && payment.status });
+        return res.status(400).json({ ok: false, error: `Payment not captured (status: ${payment && payment.status})` });
+      }
+      if (payment.order_id !== orderId) {
+        await logAudit(paymentId, { kind: 'verify-rejected-order-mismatch', orderId, paymentOrderId: payment.order_id });
+        return res.status(400).json({ ok: false, error: 'Order/payment mismatch' });
+      }
+      const trustedAmt = Number(orderRecord.amount);
+      const paidAmtInr = Math.round((payment.amount || 0) / 100);
+      if (paidAmtInr !== trustedAmt) {
+        await logAudit(paymentId, { kind: 'verify-rejected-amount-mismatch', orderId, expected: trustedAmt, paid: paidAmtInr });
+        return res.status(400).json({ ok: false, error: `Amount mismatch (expected ₹${trustedAmt}, paid ₹${paidAmtInr})` });
+      }
+      if ((payment.currency || 'INR') !== 'INR') {
+        await logAudit(paymentId, { kind: 'verify-rejected-currency', orderId, currency: payment.currency });
+        return res.status(400).json({ ok: false, error: 'Only INR supported' });
+      }
+
+      // All three layers passed → credit (idempotent on paymentId).
+      let result;
+      try {
+        result = await creditCoverWalletOnce({
+          coverRef: orderRecord.coverRef,
+          amount: trustedAmt,
+          paymentId,
+          orderId,
+          source: 'verify',
+          kind: orderRecord.kind,
+        });
+      } catch (e) {
+        const msg = String(e.message || e);
+        if (msg.startsWith('cover not found')) return res.status(404).json({ ok: false, error: msg });
+        if (msg.startsWith('amount out of range')) return res.status(400).json({ ok: false, error: msg });
+        throw e;
+      }
+
+      await logAudit(paymentId, {
+        kind: result.credited ? 'verify-credited' : (result.upgraded ? 'verify-upgraded-existing' : 'verify-already-processed'),
+        orderId, coverRef: orderRecord.coverRef, amount: trustedAmt, newBalance: result.newBalance, took: Date.now() - startedAt,
+      });
+
+      return res.json({
+        ok: true, verified: true, credited: result.credited, upgraded: result.upgraded,
+        newBalance: result.newBalance, paymentId,
+      });
+    } catch (e) {
+      console.error('[verifyRechargePayment] fatal:', e);
+      return res.status(500).json({ ok: false, error: 'Server error: ' + (e.message || 'unknown') });
+    }
+  }
+);
+
+// ════════════════════════════════════════════════════════════════════
+// 3) razorpayWebhook — HTTP endpoint Razorpay calls when a payment is
+//    captured. Verifies the X-Razorpay-Signature against
+//    RAZORPAY_WEBHOOK_SECRET, then routes payment.captured events
+//    through handleWalletWebhookBranch (below) for wallet recharges.
+//
+//    PHASE 2 BACKSTOP — this catches payments where the customer's
+//    browser closed BEFORE verifyRechargePayment ran (phone died,
+//    network dropped, customer swiped away). Razorpay re-tries
+//    webhook delivery up to 24 hrs, so even a 30-min outage on our
+//    side doesn't lose credits — wallet still gets credited when
+//    Razorpay finally reaches us.
+//
+//    CONFIGURE IN RAZORPAY DASHBOARD:
+//      Settings → Webhooks → Add New
+//      URL:    https://razorpaywebhook-qq5hm6xzjq-el.a.run.app
+//              (URL is printed by `firebase deploy` — copy from there)
+//      Events: payment.captured (minimum)
+//      Secret: same value as RAZORPAY_WEBHOOK_SECRET in functions .env
+//
+//    IDEMPOTENT: handleWalletWebhookBranch dedupes on paymentId, so
+//    Razorpay's automatic retries (up to 24 hrs) are safe.
+// ════════════════════════════════════════════════════════════════════
+// NOTE: deployed as `razorpayWalletWebhook` (not `razorpayWebhook`)
+// because Firebase blocks 1st-gen → 2nd-gen rename in place. An old
+// 1st-gen `razorpayWebhook` from a long-removed booking flow still
+// exists in the cloud as an orphan — leave it alone.
+exports.razorpayWalletWebhook = onRequest(
+  { region: 'asia-south1', cors: true, maxInstances: 10 },
+  async (req, res) => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ ok: false, error: 'POST only' });
+    }
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) {
+      console.error('[razorpayWebhook] RAZORPAY_WEBHOOK_SECRET not set');
+      return res.status(500).json({ ok: false, error: 'webhook secret not configured' });
+    }
+
+    // Razorpay signs the RAW body. Firebase Functions v2 onRequest
+    // gives us req.rawBody (Buffer) which is what we need to HMAC.
+    // If req.rawBody is missing for any reason, fall back to a
+    // stringified body (less safe but better than crashing).
+    const sigHeader = String(req.get('x-razorpay-signature') || '');
+    const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
+    let expected;
+    try {
+      expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    } catch (e) {
+      console.error('[razorpayWebhook] HMAC compute failed:', e);
+      return res.status(500).json({ ok: false, error: 'sig compute failed' });
+    }
+
+    // Constant-time compare to prevent timing attacks.
+    let sigOk = false;
+    try {
+      sigOk = crypto.timingSafeEqual(Buffer.from(sigHeader, 'hex'), Buffer.from(expected, 'hex'));
+    } catch { sigOk = false; }
+    if (!sigOk) {
+      console.warn('[razorpayWebhook] signature mismatch — rejected');
+      await logAudit('sig-fail-' + Date.now(), { kind: 'webhook-sig-mismatch', headerLen: sigHeader.length });
+      return res.status(400).json({ ok: false, error: 'signature mismatch' });
+    }
+
+    const event = req.body || {};
+    const evtType = String(event.event || '');
+    const payment = event.payload && event.payload.payment && event.payload.payment.entity;
+
+    // We only process payment.captured events here. Razorpay also fires
+    // payment.failed, payment.authorized, order.paid, etc. — ignore them.
+    if (evtType !== 'payment.captured' || !payment) {
+      return res.status(200).json({ ok: true, ignored: evtType });
+    }
+
+    try {
+      const result = await exports.handleWalletWebhookBranch(payment);
+      // handled:false = order was NOT created via createWalletOrder
+      // (e.g. it's a ticket-booking payment). We just 200 so Razorpay
+      // doesn't keep retrying. If you later add a booking branch, call
+      // it here in the !result.handled path.
+      return res.status(200).json({ ok: true, ...result });
+    } catch (e) {
+      console.error('[razorpayWebhook] handler crashed:', e);
+      await logAudit(payment.id || 'unknown', { kind: 'webhook-crashed', error: String(e.message || e) });
+      // 500 → Razorpay will retry. That's what we want for transient errors.
+      return res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  }
+);
+
+// ════════════════════════════════════════════════════════════════════
+// 4) handleWalletWebhookBranch — pure function called by razorpayWebhook
+//    above. Also exported so a future booking-branch razorpayWebhook
+//    in index.js could call it BEFORE its own logic if needed.
+//    Returns { handled: true } if it processed a wallet recharge event,
+//    { handled: false } otherwise.
+//
+//    Trigger condition: the order was created via createWalletOrder
+//    (we find it in `_meta/walletOrders/{orderId}`). Falls back to
+//    `notes.type === 'wallet_topup'` for forward compat.
+// ════════════════════════════════════════════════════════════════════
+exports.handleWalletWebhookBranch = async function handleWalletWebhookBranch(payment) {
+  if (!payment || !payment.id) return { handled: false };
+  const paymentId = payment.id;
+  const orderId = payment.order_id || '';
+  const notes = payment.notes || {};
+
+  // Source-of-truth lookup first.
+  let coverRef = null;
+  let kind = 'topup';
+  let trustedAmt = null;
+  const orderRecord = orderId ? await readWalletOrder(orderId) : null;
+  if (orderRecord && orderRecord.coverRef) {
+    coverRef = String(orderRecord.coverRef);
+    kind = orderRecord.kind || 'topup';
+    trustedAmt = Number(orderRecord.amount);
+  } else if (notes && notes.type === 'wallet_topup' && notes.coverRef) {
+    coverRef = String(notes.coverRef);
+    kind = notes.kind || 'topup';
+  } else {
+    return { handled: false };
+  }
+
+  // Cross-check captured amount vs. our recorded amount when we have it.
+  const paidAmtInr = Math.round((payment.amount || 0) / 100);
+  const amountInr = trustedAmt != null ? trustedAmt : paidAmtInr;
+  if (trustedAmt != null && paidAmtInr !== trustedAmt) {
+    await logAudit(paymentId, { kind: 'webhook-rejected-amount-mismatch', orderId, expected: trustedAmt, paid: paidAmtInr, coverRef });
+    return { handled: true, error: 'amount mismatch' };
+  }
+  if (payment.status && payment.status !== 'captured') {
+    await logAudit(paymentId, { kind: 'webhook-skipped-not-captured', orderId, status: payment.status, coverRef });
+    return { handled: true, error: 'not captured' };
+  }
+
+  try {
+    const result = await creditCoverWalletOnce({
+      coverRef, amount: amountInr, paymentId, orderId, source: 'webhook', notes, kind,
+    });
+    await logAudit(paymentId, {
+      kind: result.credited ? 'webhook-credited' : (result.upgraded ? 'webhook-upgraded-existing' : 'webhook-already-processed'),
+      coverRef, amount: amountInr, newBalance: result.newBalance, orderId,
+    });
+    console.log(`[razorpayWebhook→wallet] ✅ ${result.credited ? 'credited' : 'idempotent skip'} ${paymentId} → ${coverRef} (₹${amountInr})`);
+    return { handled: true, ...result };
+  } catch (e) {
+    await logAudit(paymentId, { kind: 'webhook-failed', coverRef, amount: amountInr, error: String(e.message || e), orderId });
+    console.error(`[razorpayWebhook→wallet] failed for ${paymentId}:`, e);
+    // Still return handled:true so the booking branch doesn't ALSO try this payment.
+    return { handled: true, error: String(e.message || e) };
+  }
+};
+
+// Exported for unit tests / manual repair scripts. Not wired as endpoints.
+exports._creditCoverWalletOnce = creditCoverWalletOnce;
+exports._fetchRazorpayPayment = fetchRazorpayPayment;
+exports._readWalletOrder = readWalletOrder;

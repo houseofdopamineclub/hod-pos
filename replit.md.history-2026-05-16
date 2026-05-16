@@ -1,0 +1,192 @@
+# HOD — House of Dopamine
+A comprehensive POS system for nightclubs, managing billing, KOTs, and staff operations. Owner: **Khushi** (non-technical, ALL-CAPS comms preferred). Mac username `darshan.n` is also Khushi.
+
+## Run & Operate
+- **Run:** `pnpm dev` · **Build:** `pnpm build`
+- **Required env:** `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `admin_password`
+- **KOT Print Server:** HTTP endpoint per floor PC (default `http://192.168.0.x:3001/print`).
+
+## Stack
+- **Frontend:** React + Vite (pnpm monorepo).
+- **Backend:** Firebase Cloud Functions (Node 20, asia-south1) — repo `hod-functions-backend` on Khushi's Mac at `~/Desktop/hod-functions-backend/`.
+- **Firebase project:** `hod-tickets` (admin: `houseofdopamineclub@gmail.com`). **DB:** Firestore.
+- **Customer site:** Netlify (`hodclub-patched/index.html` — single-file ~472 KB SPA). Razorpay live key `rzp_live_Sgf6ON1mQY95kT`.
+
+## Where things live
+- **Monorepo:** `artifacts/pos-system` (React POS) · `artifacts/hod-preview` (Netlify mirror) · `artifacts/api-server` (DO NOT TOUCH without explicit instruction).
+- **Schemas:** Implicit Firestore (`tableReservations`, `posOrders`, `posKOTs`, `events`, `bookings`, `guestlist`, `covers`, `captainVoidStats`, `voidNotificationsQueue`).
+- **Customer site:** `hodclub-patched/index.html` — booking + wallet + table reservations + Razorpay.
+- **Admin Dashboard:** Native React (`artifacts/pos-system/src/pages/`) — Reports, Live Monitor, Events, Staff, Audit, Locks.
+- **Print Server:** `print-server/` (Node daemon, runs on each floor PC as Windows Service).
+- **UI Theme:** Black `#030305`, gold `#C9A84C`, Playfair Display + Space Grotesk.
+
+## Architecture decisions
+- **Monorepo:** pnpm. POS is leaf workspace package; functions are separate repo on owner's machine.
+- **PIN auth:** 4-digit per-staff (Captain/Bar/Door/Manager/Admin tiers).
+- **Anti-fraud by design:** Manager PIN gates on high-risk ops; comp limits; full audit trail.
+- **Real-time:** Firestore for cross-terminal sync.
+- **Cloud-routed multi-floor printing:** KOTs → Firestore with destination tags; floor PCs subscribe.
+- **Operational night** = 6am→6am via `getOperationalNightStr()` (covers/wallets use 12pm→12pm).
+
+## PINs (rotate via sha256(newPin) and replace hash constants)
+- **Captain login** → set per-staff in Admin → Staff (default seed 1234).
+- **Manager** → `8888` (post-bill source/discount swap, walk-in over-discount, KOT void, SC waiver ≥₹1500, high-discount mark-paid, pre-bill source change, door over-discount, bill void).
+- **Admin** → `9999` (second factor for aggregator → in-house downgrade · Locks tab unlock).
+
+## ✅ Phase 1 SHIPPED (terse — see history file for full breadcrumbs)
+- POS Captain/Bar/Door modes · Anti-fraud (12 gates) · Live Monitor · Reports · Events admin native.
+- Cloud printing on ALL 4 floors (GF + FF + 2F + RT) — Windows Service installed everywhere.
+- Customer site (hodclub.in): deep-stripped to 472 KB · 12 hotfixes · perf optimized.
+- Sheets sync v3 (12 tabs) DEPLOYED — daily cron + manualArchive callable. Sheet `1xpuiwB96gLjQANaIe6qinKisQdEcNREoz2quRFb99sg`.
+- **Feature #4** OOS + Per-Item Discount (Sat 9 May) — Manager toggles items OOS / sets % or ₹ discount; live-syncs across captain + bar + customer wallet menus; locked-in price snapshots at add-to-cart.
+- **Feature #2** KOT vs BILL TALLY leakage detector (Sun 10 May night, V2 hardened same night) — Reports → 🧾 KOT vs Bill tab + 9th Live Monitor tile pulses red on ≥₹500 leakage.
+- **V3 Anti-Fraud bundle (Sun 10 May):** silent pre-print edit log (#A1) · daily void cap + auto-suspend (#A2) · auto-WhatsApp customer on bill void (#A3) · audit enrichment · daily void digest cloud function (#B4, verified delivered).
+- **VOID BILL post-print** (Sun 10 May afternoon) — captain `🚫 Void Bill` button + 8 reasons + Manager PIN + auto void slip.
+- **Door Mode 📱 QR fallback** on Tickets + Guestlist tabs (Sun 10 May night).
+- **Reports Wallets** — SOURCE chips (5 categories) + Pay Channel column (Sat 10 May afternoon).
+- **Bar Mode VOID BILL + recharge auto-prefill deficit** (Sun 10 May → Mon 11 May).
+- **Customer site CUSTOM AMOUNT input on wallet recharge** (Mon 11 May) — free-form ₹ box (min 100, max 50000) below the 4 chips. Patched in canonical + 2 mirror files.
+- **Min recharge floor ₹100 → ₹1** (Wed 14 May) — `hodPayAndCredit()` line 567 + insufficient-balance modal input line 5628/5629/5633. Razorpay's hard floor is ₹1. Note: tiny recharges still pay ~2.36% + GST so net-loss below ~₹50.
+- ✅ **WhatsApp send moved to Firebase Cloud Functions** (Wed 14 May, code-drop READY for Khushi to deploy) — kills the Replit-tab-must-stay-open dependency for booking/guestlist/table-reservation WhatsApp confirmations. Drop: `hod-functions-patch/whatsappSend.js` (NEW — `sendWhatsAppTemplate` + `sendWhatsAppText`, asia-south1, defineSecret WHATSAPP_ACCESS_TOKEN + WHATSAPP_PHONE_NUMBER_ID, CORS, same body shape `{to, template, language, params}` as old Replit endpoint) + `hod-functions-patch/DEPLOY-WHATSAPP.md` (7-step guide: secrets → file → index.js wire-up → deploy → curl smoke test → Netlify push → real booking test). Customer site `hodclub-patched/index.html` line ~740 URL flipped from `…replit.dev/api/whatsapp/send-template` → `https://asia-south1-hod-tickets.cloudfunctions.net/sendWhatsAppTemplate`. **Replit api-server route LEFT INTACT** as silent fallback (per "fail-open + leave fallbacks" rule) — 30-sec URL flip-back possible if Firebase ever errors. Customer site call sites unchanged (3 places: cover_confirmed L2924, guestlist_confirmed L3079→L3085 post-edit, booking_confirmed L4083→L4090 post-edit).
+
+## 🚧 Phase 1 PENDING (in agreed order)
+- 🟡 **Feature #1 STAGE 2 — BAR MODE per-item VOID:** Captain side ✅ shipped. Bar side gap: once a wallet round is activated (KOT printed + ₹ debited), bartender has NO UI to void an item — needs same modal + ₹ refund to wallet + void slip. Target: `BarMode.tsx` (WalletOverlay activated rounds).
+- 🟡 **Feature #3A — DigiPos PER-ITEM CSV:** ✅ already in Reports tab; confirm with Khushi if anything else needed.
+- ✅ **Razorpay webhook auto-credit + double-confirmation tick** (Mon 11 May, 4-stage code-drop READY for Khushi to deploy):
+  - **STAGE 1 — Backend (V2 hardened):** `hod-functions-patch/walletRechargeWebhook.js` (NEW). Adds **two** endpoints: `createWalletOrder` (server creates Razorpay order + writes `_meta/walletOrders/{orderId}` server-trusted ledger of `{coverRef, amount, kind}`) AND `verifyRechargePayment` (HMAC sig check + Razorpay API fetch to confirm `status==='captured'`/amount/currency/order_id, then resolves coverRef from the server-side ledger — client-claimed amount/coverRef are IGNORED, closing the over-credit hole). Plus `handleWalletWebhookBranch` exported helper to extend the existing `razorpayWebhook` as backstop (resolves coverRef from `_meta/walletOrders` first, falls back to notes). Idempotent on `paymentId`. Audit log to `_meta/razorpayWalletLog/events/{paymentId}`. Caps ₹100–₹50,000.
+  - **STAGE 2 — Customer site:** `hodclub-patched/index.html` (canonical) + 2 mirrors. Added shared `hodPayAndCredit()` helper (line ~563) and replaced ALL 3 Razorpay handlers (line ~4359 emptyBanner, ~4780 modal, ~5591 renderTopUpContent locked+unlocked). Now: `createWalletOrder` → Razorpay JS with `order_id` → `verifyRechargePayment` (sends ONLY order_id/payment_id/signature — no client-trusted amount or coverRef) → wallet credited with `serverVerified:true`. NO direct Firestore writes anymore.
+  - **STAGE 3 — POS Bar Mode (V4 hardened):** `artifacts/pos-system/src/pages/BarMode.tsx`. (a) "AWAITING ✅ WEBHOOK TICK · Xs" gold banner + countdown. (b) Auto-fail-open at **60 sec** — but tap PRINT KOT now opens SCREENSHOT COLLECTION MODAL forcing bartender to type UPI ref ID from customer's phone (Skip path requires confirm dialog → suffix becomes `NO-SCREENSHOT`). (c) GREEN ✅ "RAZORPAY VERIFIED" banner + button label flips to "🖨️ ✅ PRINT KOT" once a serverVerified online tx lands in last 5 min. (d) Persistent 🟡 PENDING ✅ TICK badge in cover header counts ALL unverified online txs at any age (survives wallet close/reopen) → EOD reconciliation. Staff suffix `[PENDING-TICK pay_xxxxxxxx SCREENSHOT upi_xxx | NO-SCREENSHOT]`. Screenshot proof saved to `cover.pendingScreenshots[]` via new `recordPendingPaymentScreenshot()` (firestore-hod.ts line ~1819). Cash/UPI/card via bartender panel unaffected.
+  - **STAGE 4 — Firestore rules + DEPLOY:** `hod-functions-patch/firestore.rules.wallet-lock.md` (rules patch denies client-SDK writes to `coverBalance`, `coverActivated`, `coverUsed`, `transactions`, `topUpTotal`, `pendingTopUp`, `diffPaid*`) + `hod-functions-patch/DEPLOY-WALLET-WEBHOOK.md` (full step-by-step: drop file → patch index.js → `firebase deploy --only functions:verifyRechargePayment,functions:razorpayWebhook` → smoke test ₹100 → THEN apply rules lock).
+  - **Schema additions:** `HodTransaction` extended (firestore-hod.ts line ~126) with `serverVerified`, `verifiedAt`, `verifiedSource`, `orderId`, `pendingWebhookTick` fields.
+  - **Fraud hole closed:** the existing `firestore.collection('covers').doc(ref).update({coverBalance: increment(amt)})` browser-side path stops working once the rules lock lands. Admin SDK (cloud functions) bypasses rules → still works.
+  - **PENDING (next chunk, not in this drop):** Live Monitor 10th tile counting `pendingWebhookTick` activations + Reports column flagging same in next-day leakage tally. POS Live Monitor + Reports unchanged in this drop.
+- 🟡 **Sheets cron timezone fix** — currently us-central1 06:00 UTC = 11:30 IST; should be Asia/Kolkata 06:00.
+- 🟡 **WhatsApp template for void digest** — bypass 24-hr engagement window (currently managers must "hi" once/day).
+- 🟡 **Bar mode V2** — "last item cancels round" still uses confirm() not audit (rare flow).
+- 🟡 **TablePOS legacy retirement** — `/table/*` routes V1, NO aggregator/tax/anti-fraud/audit. Scope-locked: NEW work only in `/captain` and `/bar`.
+- 🟡 **DigiPoS integration** — forward KOTs for inventory/recipe-cost analytics.
+- 🟡 **Static IPs** for GF/FF/RT print PCs.
+- 🟡 **Pine Labs Plutus integration** (1-2 days after API docs arrive). Khushi has machine + already EDC-integrated with DigiPos + same WiFi as tablet. Khushi to call Pine Labs support for: (1) Plutus EDC API docs (REST or socket), (2) Terminal ID (TID), (3) static LAN IP for machine, (4) merchant auth key. Email to: houseofdopamineclub@gmail.com.
+
+## 🎯 BAR MODE PAYMENT BUTTON REDESIGN (DECIDED 11 May 2026 — PENDING PINE LABS API)
+**Final layout once Pine Labs Plutus is integrated** — 3 buttons (down from 4):
+1. 💵 **CASH** — bartender marks cash received (no change from today).
+2. 🖥️ **CARD / UPI** — single button → tablet POSTs amount to Pine Labs Plutus on local LAN → machine prompts customer "Tap card / Scan QR / Wallet" → customer chooses on machine → machine returns paymentId → tablet calls `verifyRechargePayment` → wallet credits with `serverVerified:true`. Pine Labs settles ALL methods (Visa/Master/Rupay/UPI/Sodexo) into single bank deposit.
+3. 🪓 **SPLIT** — mix cash + machine.
+
+**Rationale:** Customer chooses payment method ON the machine, not via bartender's tablet. Faster line, fewer "card or UPI?" questions, machine prints its own receipt for customer.
+**Current state:** 4 buttons (Cash · UPI · Card[disabled] · Split). DO NOT touch UI until Pine Labs docs land — Razorpay UPI is the ONLY working digital path right now and renaming it prematurely would break it. When Pine Labs ships: rename 📱 UPI → 🖥️ CARD/UPI, wire to Plutus, keep Razorpay UPI as silent fallback if machine offline, remove 💳 Card button.
+
+## 📱 APK CONVERSION PLAN — INTERNAL ALPHA (4-5 DAYS) → SAAS POLISH (LATER)
+Decided 15 May 2026. Target: working HOD-only APK in 5 days; SaaS-ready polished APK after multi-tenant refactor (~2-3 months out).
+
+### ✅ Already done (15 May 2026)
+- ✅ **Firestore offline persistence** — `firebase.ts` now uses `persistentLocalCache` + `persistentMultipleTabManager` with try/catch fallback to memory-only. Tablets survive WiFi drops + reboots; queued writes auto-sync. Bonus: should reduce Firestore READ bill (155K/day → maybe 80-100K) once cache warms up.
+
+### 🔍 Pre-flight code audit (grep'd 15 May 2026 — actual file refs, not generic)
+**🔴 P0 — APK won't work without these (~7-10 days)**
+1. **Cleartext HTTP traffic to print server** — `firestore-hod.ts:261` `DEFAULT_KOT_ENDPOINT = "http://192.168.0.97:3001/print"`. Android 9+ blocks HTTP by default. FIX: `android:usesCleartextTraffic="true"` + `network_security_config.xml` whitelisting `192.168.0.0/16`. Without this NO printing.
+2. **`window.print()` for bills** — `BillView.tsx:273,275,351`, `ShiftView.tsx:694`. Android WebView's print dialog is dead (Cloud Print sunset 2020). FIX: route bill prints through existing print server (same path as KOTs) OR Capacitor `Print` plugin. ~2-3 days.
+3. **Razorpay popup in WebView** — DoorMode + future BarMode. Razorpay checkout uses `window.open` popup which Android WebView handles inconsistently. FIX (proper): Razorpay native Android SDK, ~5-7 days. FIX (5-day alpha): keep WebView popup, accept ~5% failure rate, fall back to manual UPI ref entry.
+4. **Camera / QR scanner** — `QrScanner.tsx:36-48` `navigator.mediaDevices.getUserMedia`. FIX: `@capacitor/camera` plugin + `<uses-permission android:name="android.permission.CAMERA"/>`. ~1 day.
+
+**🟠 P1 — Likely to break, easy-moderate fixes (~2 days)**
+5. **WhatsApp deep link** — `DoorMode.tsx:193` `window.open("https://wa.me/91${phone}", "_blank")`. WebView may open inside app. FIX: Capacitor `Browser.open()` or Android Intent. ~2 hrs.
+6. **Clipboard copy** — `DoorMode.tsx:987` `navigator.clipboard.writeText`. Has try/catch fallback (good!). FIX: `@capacitor/clipboard` plugin. ~1 hr.
+7. **Audio beep** — `CaptainMode.tsx:374` `new AudioContext()`. WebView blocks autoplay. FIX: `AudioContext.resume()` on first user gesture. ~1 hr.
+8. **File picker** — `EventsAdmin.tsx:48,196` `new FileReader()`. Works but ugly. FIX: `@capacitor/filesystem` + camera plugin. ~2 hrs.
+
+**🟡 P2 — Cosmetic only, ship APK first then fix gradually (~3-5 days)**
+9. **35+ × `window.confirm/alert/prompt`** across all pages — native Android dialogs look ugly on tablets. Replace with custom React modals incrementally.
+10. **Soft-keyboard quirks** — recharge modal + every form needs re-test on real Android. ~1-2 days.
+
+**🟢 No changes needed**
+- React rendering, React Router, Firebase Auth/Firestore/Functions, Cloud Function calls (createWalletOrder, verifyRechargePayment, sheets sync, WhatsApp send), offline persistence, Tailwind/CSS, ALL business logic (covers, KOTs, anti-fraud, audit, leakage, Live Monitor, Reports CSV).
+
+### 🚀 Plan A — 5-DAY INTERNAL ALPHA APK (HOD-ONLY)
+| Day | Work | Outcome |
+|---|---|---|
+| 1 | Capacitor setup (`npx cap add android`) + first APK build + cleartext traffic config + install on 1 Samsung tablet | APK opens, POS loads, Firestore syncs |
+| 2 | Fix `window.print()` (route through print server) + `@capacitor/camera` plugin + WhatsApp Intent + audio gesture fix | Bills + KOTs print, door QR works, WhatsApp opens externally |
+| 3 | Razorpay testing — keep WebView popup, hammer test ₹1 → ₹50 → ₹500 recharges; document failure modes | Wallet recharge works (95%+ success rate) |
+| 4 | Real bar shift on 1 tablet during prep hours; surface and fix surprises | Real-world stress test passes |
+| 5 | Splash screen + HOD launcher icon + install on remaining 3 floor tablets | All 4 floors on APK |
+
+**Acceptable rough edges in Alpha:** native confirm/alert dialogs ugly · no kiosk lockdown · no Bluetooth printer · single-venue (HOD ID hardcoded) · NO SaaS readiness.
+
+### 🏢 Plan B — SAAS-READY POLISHED APK (after Phase 1 + multi-tenant refactor, ~2-3 months out)
+- Razorpay native SDK (real fix)
+- Replace all 35× confirm/alert with custom modals
+- Kiosk lockdown (Android Lock Task Mode)
+- Bluetooth thermal printer fallback (per-tablet, not floor PC)
+- Pine Labs Plutus over Bluetooth (when their API docs land)
+- Per-venue branding (logo, colors, name on receipts)
+- Auto-update via Capacitor Live Update (95% of fixes ship in 10 sec, no reinstall)
+- Push notifications (anti-fraud alerts to manager phone)
+- Google Play Store listing (₹2,125 one-time)
+
+### ⚠️ Honest gotchas
+- **`192.168.0.97` print fallback** is HOD-specific — for SaaS each venue's `printerEndpoint` must come from per-tenant Firestore config (already supported, just needs default removed).
+- **Daily iteration speed drops** once on APK: rebuild + reinstall takes ~30-40 min across 4 floors per release. MITIGATION: Capacitor Live Update from day 1 keeps web-only fixes at ~10 sec push.
+- **Razorpay popup** is the single biggest unknown — if it fails on real Android tablets, Plan A Day 3 may slip 1-2 days.
+- **No multi-tenant data isolation** in Plan A — every Plan A APK = HOD only. Selling to Venue #2 requires multi-tenant refactor first.
+
+### 🧱 SaaS multi-venue architecture (separate from APK, prerequisite for Plan B)
+~8-12 weeks of focused work, BEFORE Plan B APK:
+- `venueId` field on every Firestore doc + every query filtered by it
+- Per-venue auth + role boundaries (Venue A staff can't read Venue B)
+- Per-venue Razorpay routing (each venue's money → their bank, not yours) — Razorpay Route or sub-merchants
+- Per-venue subscription billing (you charge ₹5K-₹15K/month per venue)
+- Self-serve onboarding flow (owner signs up → picks plan → configures menu → adds staff → prints QR)
+- Multi-tenant admin dashboard for Khushi (see all venues, billing, support, usage)
+
+### 💰 Cost model summary
+- Firebase per venue: ₹500-₹2,000/month (mostly Firestore reads)
+- Razorpay platform fee: ~₹500/month
+- WhatsApp Cloud API: ₹500-₹1,000/month
+- Support time: ₹2,000-₹5,000/month
+- **Total cost per venue: ₹3,500-₹8,500/month**
+- **Sell at ₹5,000-₹15,000/month** → 50-70% margin (matches Petpooja / Posist / Limetray pricing)
+
+## Reports (`/admin → 📋 Reports`)
+- Two views (Tables · Wallets) + KOT vs Bill tab; date picker (last 7 nights); CSV export with UTF-8 BOM (₹ renders in Excel).
+- Tables view: ambiguity scoring 🟢/🟠/🔴 · 💰 Aggregator Variance column flags captain over-discounting (RED ≤ −₹500, AMBER ≥₹200) · DigiPoS per-item CSV.
+- **Google Sheets sync v3** — 12 tabs (Aggregators / Walk-ins / Events / Wallets / Anti-Fraud Log / Customer Master / Online Bookings / Entry-Only / Guestlist Contacts / Table Bookings / Regular Customers ≥2 visits / VVIP Customers ≥₹15k spend). Source: `hod-functions-patch/sheetsSync.js`. Sheet beautified via `beautifyAllTabs()` Apps Script.
+- **Sheet Regular/VVIP formulas** — use NESTED QUERY (parser rejects `having`): `=QUERY(QUERY(...group by B),"select * where Col2 >= N",1)`.
+- **Test phones to exclude in QUERY filters:** `9611111261`, `9611111126`, `9591961444`, `9999999999`.
+
+## Live Monitor (`/admin → 🔴 Live Monitor` — DEFAULT)
+- 9 real-time tiles (overrides · source swaps · KOT voids · duplicate bills · stale bills · unpaid >30min · modified discounts · open tabs · KOT-bill leakage). Pulse RED on activity in last 15min.
+- 👥 Per-Staff Leakage Score · 🌡 Discount Drift Heatmap · 🔇 Silent Pre-Print Edits.
+
+## 🖨 Venue Printer Layout
+- **GF** — `gf_bar` → **.80** (dedicated bar KOT printer, split out 14 May 2026) · `gf_bill` → .55. PC `SK-POS` @ .171, install path `C:\Users\SK-POS\Downloads\hod-print-server\`. ✅ Service installed (auto-start). Note: first cold print may TCP-timeout on attempt 1/3 then succeed on retry — harmless.
+- **FF** — `ff_bar` + `ff_bill` + `kitchen` (eventual) → .15. PC @ .127. ✅ Service installed.
+- **2F** — `2f_bar` + `kitchen` (food from all floors) → .89. ✅ Service installed.
+- **Rooftop** — `rt_kitchen` + `rt_bill` → .130. PC @ .154. ✅ Service installed.
+- **Routing:** ALL drink KOTs → `ff_bar` (single bar, runners distribute). See `deriveItemDestination`.
+
+## Gotchas
+- 🔴 **PRINT SERVER CMD WINDOW** must stay open until `node install-service.js` registers as Windows Service.
+- 🔴 **WINDOWS CMD "SELECT MODE":** clicking inside cmd freezes Node. Press `Esc` to resume. Best fix = service.
+- **KOT Print Idempotency:** `printKOT` is fire-and-forget; manual retry needed if print fails after debit.
+- **Legacy admin.html Timezone:** covers may expire early.
+- **WhatsApp templates:** `wallet_ready`, `guestlist_ready` need Meta approval. Plain-text WhatsApp sends require recipient engagement in last 24hrs.
+- **Aggregator integration:** manual; API sync future.
+- **Offline printing:** tablet KOTs queue locally; total internet blackout = no print.
+- **DO NOT touch `artifacts/api-server`** without explicit instruction.
+- **DO NOT modify Firebase rules for non-`pos*` collections.**
+- **Fail-open philosophy:** anti-fraud cap failures (Firestore rules / connectivity) NEVER block legitimate revenue ops — they just lose audit and surface a banner.
+
+## User preferences
+- ALL-CAPS / non-technical communication. One step at a time. Plain language. Detailed explanations for complex features.
+- Iterative dev with clear comms on major changes.
+- Khushi prefers fallback options included ("if X fails, do Y") in every instruction.
+
+## Pointers
+- Firebase: https://firebase.google.com/docs · React: https://react.dev/ · Vite: https://vitejs.dev/ · pnpm: https://pnpm.io/
+- WhatsApp Cloud API: https://developers.facebook.com/docs/whatsapp/cloud-api/
+- Razorpay Webhooks: https://dashboard.razorpay.com/app/webhooks · API docs: https://razorpay.com/docs/webhooks/
+
+---
+*Historical changelog (shipped features, bugfixes, perf passes, full file:line breadcrumbs) archived to `replit.md.history-2026-05-08`. Read that file for the full audit trail of what was built and when.*

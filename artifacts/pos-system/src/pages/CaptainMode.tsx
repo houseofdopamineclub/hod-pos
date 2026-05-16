@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Link } from "wouter";
 import {
-  sha256, subscribeToHodReservations, markGuestArrived, markRoundServed, markRoundActivated,
+  sha256, subscribeToHodReservations, diagnoseTableReservationDates, markGuestArrived, markRoundServed, markRoundActivated,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
@@ -3020,6 +3020,15 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const pendingCountRef = useRef(0);
   const billCountRef = useRef(0);
   const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 2026-05-16 one-shot diagnostic — on mount, dump ALL tableReservations
+  // grouped by `date` so we can see if customer-site bookings are landing
+  // under a date string different from what POS is querying for.
+  useEffect(() => {
+    diagnoseTableReservationDates()
+      .then((r) => console.log("[captain][diag] tableReservations BY DATE", r.totals, "RECENT 20:", r.recent, "POS QUERIES:", date))
+      .catch((e) => console.warn("[captain][diag] failed", e));
+  }, [date]);
 
   useEffect(() => {
     const unsub = subscribeToHodReservations(date, (all) => {

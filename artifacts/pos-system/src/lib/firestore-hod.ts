@@ -214,6 +214,42 @@ export interface HodTableReservation {
    *  to swap aggregator after this point need a Manager PIN. */
   billLockedSource?: string;
   billLockedDiscount?: number;
+  // ── 2026-05-15 — CAPTAIN × COVER WALLET REDEMPTION (Khushi spec) ──
+  /** Append-only ledger of every wallet redemption against this table.
+   *  Each entry = one customer's wallet hit. Captain Mode shows the running
+   *  list inside Mark-Paid modal; Reports + Sheets sync read this to show
+   *  the wallet/cash split so cash-drawer EOD reconciles cleanly. */
+  walletRedemptions?: WalletRedemption[];
+  /** Convenience: sum of `walletRedemptions[].amount` cached at markPaid time
+   *  so Reports can sort/filter without unrolling the array. */
+  walletPaidAmount?: number;
+}
+
+/** 2026-05-15 — One redemption hit against a customer wallet at table close.
+ *  Multiple entries allowed per table (Rahul + friend each redeeming separately).
+ *  Race-safe: written atomically inside redeemFromWalletAtTable runTransaction. */
+export interface WalletRedemption {
+  /** Public customer-facing wallet ref (HOD-XXX) — used for display, dedup,
+   *  and the per-table "already redeemed" check. NOT necessarily the
+   *  Firestore doc id. */
+  walletRef: string;
+  /** Firestore doc id of the cover (HodCover.id). For table-source bookings
+   *  this differs from `walletRef`. Required for `undoWalletRedemption` to
+   *  refund the correct doc. Optional for backward-compat with legacy entries
+   *  written before 2026-05-15 (those fall back to walletRef as the doc id). */
+  walletDocId?: string;
+  /** Customer name snapshot at redemption time (so guest renames don't rewrite history). */
+  walletName: string;
+  /** Phone snapshot — surfaced in audit + Reports. */
+  walletPhone?: string;
+  /** ₹ deducted from this wallet (already auto-clamped to min(requested, balance)). */
+  amount: number;
+  /** ISO timestamp of redemption. */
+  redeemedAt: string;
+  /** Captain who tapped REDEEM. */
+  redeemedBy: string;
+  /** Idempotency / undo key — `${tableDocId}-${walletRef}-${epochMs}`. */
+  txId: string;
 }
 
 export interface HodBooking {
@@ -579,8 +615,16 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
   const docId = coverDocIdFor(bookingId);
   const ref = doc(db, COVERS_COL, docId);
 
+  // 2026-05-16 — `logNotificationOutcome` (auto-WA) writes a NOTIFICATION-ONLY
+  // stub doc immediately after booking save (no ref/balance/activated fields).
+  // We must NOT mistake that stub for a real activation. Real activation =
+  // `coverActivated > 0`. If the stub is here we upsert the real cover OVER it.
   const existing = await getDoc(ref);
-  if (existing.exists()) throw new Error("Cover already activated for this booking");
+  if (existing.exists()) {
+    const ex = existing.data() as any;
+    const alreadyReal = (ex?.coverActivated || 0) > 0 || (ex?.coverBalance || 0) > 0;
+    if (alreadyReal) throw new Error("Cover already activated for this booking");
+  }
 
   const isCash = booking.paymentId && booking.paymentId.startsWith("cash_");
   const paidOnline = isCash ? 0 : (booking.total || 0);
@@ -619,7 +663,8 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     coverDocId: docId,
     source: "walkin_door_cover",
   };
-  await setDoc(ref, cover);
+  // merge:true → upserts cleanly OVER the notification-only stub if it exists.
+  await setDoc(ref, cover, { merge: true });
 
   // If guestlist, log payment method on the GL doc too
   if (booking._isGuestList && (booking as any)._glDocId) {
@@ -846,7 +891,18 @@ export async function searchCovers(searchQuery: string, tonightDate?: string): P
       if (Number.isFinite(exp) && exp < nowMs) return; // expired — past night
     }
     if (tonightDate && cv.date && cv.date !== tonightDate) return; // wrong night
-    if ((cv.name || "").toLowerCase().includes(q) || (cv.phone || "").includes(q)) results.push(cv);
+    // 2026-05-15 — tighten stale-stub rule. If BOTH date AND expiresAt are
+    // missing (legacy / orphan table-booking cover stubs), only keep them
+    // when they carry an actual balance. Prevents past-night noise leaking
+    // into tonight's Bar/Captain search now that the ₹0 filter is gone.
+    if (!cv.date && !cv.expiresAt && (cv.coverBalance || 0) <= 0) return;
+    // 2026-05-15 (Khushi UX) — also match by wallet REF (e.g. HOD-MP6KSRBR)
+    // so bartender can paste it from the door printout / customer's screen.
+    if (
+      (cv.name || "").toLowerCase().includes(q)
+      || (cv.phone || "").includes(q)
+      || (cv.ref || "").toLowerCase().includes(q)
+    ) results.push(cv);
   });
   return results;
 }
@@ -1005,6 +1061,23 @@ export function subscribeToHodReservations(
   }, () => cb([]));
 }
 
+// 2026-05-16 one-shot diagnostic — fetches ALL tableReservations and groups by
+// `date` field so we can see if customer-site bookings are landing under a
+// different date string than POS is querying for.
+export async function diagnoseTableReservationDates(): Promise<{ totals: Record<string, number>; recent: Array<{ id: string; date: string; src: string; name: string; ref: string }> }> {
+  const snap = await getDocs(collection(db, TABLE_RES_COL));
+  const totals: Record<string, number> = {};
+  const recent: Array<{ id: string; date: string; src: string; name: string; ref: string }> = [];
+  snap.forEach((d) => {
+    const x = d.data() as any;
+    const dateKey = x.date || "(blank)";
+    totals[dateKey] = (totals[dateKey] || 0) + 1;
+    recent.push({ id: d.id, date: dateKey, src: x.source || "(blank)", name: x.customerName || "", ref: x.bookingRef || "" });
+  });
+  recent.sort((a, b) => b.date.localeCompare(a.date));
+  return { totals, recent: recent.slice(0, 20) };
+}
+
 // Transactionally mark guest as arrived. Returns { arrivalTime, wasNew }.
 // If `wasNew === false`, the reservation was ALREADY arrived (concurrent or
 // double-tap). Callers MUST check wasNew before firing irreversible side effects
@@ -1152,6 +1225,286 @@ export async function updateRoundItems(
   } catch {}
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// 2026-05-15 — CAPTAIN × COVER WALLET REDEMPTION (Khushi spec)
+// ────────────────────────────────────────────────────────────────────────
+// Customer flow: Rahul + friend activate ₹2000 each at GF door. They sit
+// upstairs at FF table. Captain bills ₹3500. At Mark-Paid, captain taps
+// "🎫 REDEEM WALLET" → scans/types Rahul's QR/phone/ref → ₹2000 deducted
+// (full balance) → modal shows ₹1500 remaining → captain scans friend's
+// → only ₹1500 deducted (smart auto-fit, friend's wallet keeps ₹500) →
+// remaining = ₹0 → bill closed. NO partial-amount entry by captain — the
+// system always deducts min(remaining, walletBalance).
+//
+// Anti-fraud: full audit log on BOTH the cover doc (transactions[]) and
+// the reservation doc (walletRedemptions[]) — race-safe via runTransaction
+// so concurrent Bar Mode drink-rounds never over-deduct the same wallet.
+// Server-side billCap (passed by caller) prevents any combo of redemptions
+// across stale/concurrent terminals from exceeding the bill total.
+//
+// ⚠ DEPLOY NOTE — Razorpay STAGE 4 wallet rules-lock will deny browser-side
+// writes to covers.{coverBalance,coverUsed,transactions}. When that lands,
+// `redeemFromWalletAtTable` + `undoWalletRedemption` STOP WORKING from the
+// captain tablet and must be moved to a Cloud Function (Admin SDK bypasses
+// rules). Plan: ship a `redeemTableWallet` callable alongside
+// `verifyRechargePayment` BEFORE the rules-lock deploy. Same logic as below,
+// just executed server-side. Until then this client-side path works.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Find a cover wallet by ref (HOD-XXX), bookingId, or phone. Returns the
+ *  best match (highest balance, checked-in preferred) or a clear failure
+ *  reason. Used by Captain Mode wallet-scan modal — supports all 3 lookup
+ *  paths (QR scan → ref / typed phone / typed ref). */
+export async function findCoverForRedemption(
+  needle: string
+): Promise<{ ok: true; cover: HodCover } | { ok: false; reason: string }> {
+  const raw = String(needle || "").trim();
+  if (!raw) return { ok: false, reason: "Empty input" };
+  // Strip URL wrapper if QR was https://hodclub.in/?wallet=HOD-XXX
+  let probe = raw;
+  const urlMatch = raw.match(/wallet=([A-Za-z0-9-]+)/i);
+  if (urlMatch) probe = urlMatch[1];
+  const upper = probe.toUpperCase();
+
+  // Helper: pick best cover from a list (checked-in + highest balance first).
+  const pickBest = (cands: HodCover[]): HodCover | null => {
+    if (!cands.length) return null;
+    cands.sort((a, b) => {
+      const aIn = a.checkedIn ? 1 : 0;
+      const bIn = b.checkedIn ? 1 : 0;
+      if (aIn !== bIn) return bIn - aIn;
+      return (b.coverBalance || 0) - (a.coverBalance || 0);
+    });
+    return cands[0];
+  };
+
+  // 1. HOD-XXX ref lookup. The active cover doc id is `coverDocIdFor(bookingId)`
+  //    NOT the public ref — for table-source bookings or aggregator-mint covers
+  //    the doc id can differ entirely from `ref`. So we query the `ref` FIELD
+  //    first (primary), then fall back to doc-id (legacy / direct cover docs).
+  //    This also dodges stale 0-balance orphan docs that happen to share the id.
+  if (/^HOD-/i.test(upper) || /^[A-Z0-9_-]{6,}$/i.test(upper)) {
+    const candidates: HodCover[] = [];
+    try {
+      const q = query(collection(db, COVERS_COL), where("ref", "==", upper), limit(10));
+      const snap = await getDocs(q);
+      snap.docs.forEach((d) => candidates.push({ id: d.id, ...(d.data() as Omit<HodCover, "id">) }));
+    } catch (e) {
+      console.warn("[findCoverForRedemption] ref query failed", e);
+    }
+    try {
+      const direct = await getDoc(doc(db, COVERS_COL, upper));
+      if (direct.exists()) candidates.push({ id: direct.id, ...(direct.data() as Omit<HodCover, "id">) });
+    } catch { /* ignore */ }
+    // Dedupe by doc id.
+    const seen = new Set<string>();
+    const unique = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+    const best = pickBest(unique);
+    if (best) {
+      // Prefer the one with balance > 0 if tied — orphan stubs at 0 must lose.
+      const withBal = unique.filter((c) => (c.coverBalance || 0) > 0);
+      const final = pickBest(withBal) || best;
+      return { ok: true, cover: final };
+    }
+  }
+  // 2. Phone fallback — try exact + last-10-digits (covers store either form).
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length >= 6) {
+    const tail10 = digits.slice(-10);
+    const variants = Array.from(new Set([digits, tail10].filter((s) => s.length >= 6)));
+    const candidates: HodCover[] = [];
+    for (const v of variants) {
+      try {
+        const q = query(collection(db, COVERS_COL), where("phone", "==", v), limit(10));
+        const snap = await getDocs(q);
+        snap.docs.forEach((d) => candidates.push({ id: d.id, ...(d.data() as Omit<HodCover, "id">) }));
+      } catch (e) {
+        console.warn("[findCoverForRedemption] phone query failed", e);
+      }
+    }
+    const seen = new Set<string>();
+    const unique = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+    const withBal = unique.filter((c) => (c.coverBalance || 0) > 0);
+    const best = pickBest(withBal) || pickBest(unique);
+    if (best) return { ok: true, cover: best };
+  }
+  return { ok: false, reason: "No wallet found for that QR / phone / ref" };
+}
+
+/** Captain Mode: redeem `requested` ₹ from a customer wallet (cover) against
+ *  an open table reservation. Atomic via runTransaction — race-safe with Bar
+ *  Mode drink-round activations and other Captain redemptions on the same
+ *  wallet (Loophole #1).
+ *
+ *  Smart auto-fit (Khushi spec): actual deduction = min(requested, walletBalance).
+ *  Caller passes the bill REMAINING and we deduct only what's available — the
+ *  friend's ₹2000 wallet hit by a ₹1500 remainder ends up at ₹500, not ₹0.
+ *
+ *  Idempotency: same {tableDocId, walletRef, amount} within 60 sec is treated
+ *  as a duplicate scan and returns the prior entry without re-deducting
+ *  (Loophole #10).
+ *
+ *  Throws on: wallet not found · wallet expired · zero balance · reservation
+ *  paid/voided · same wallet already redeemed at this table (use undo first). */
+export async function redeemFromWalletAtTable(
+  reservationDocId: string,
+  /** Firestore DOC ID of the cover (HodCover.id) — NOT the public HOD-XXX ref.
+   *  For table-source / aggregator-mint covers the doc id is derived from the
+   *  bookingId via `coverDocIdFor()` and differs from the public `ref` field.
+   *  An orphan empty doc may exist at the public-ref id, so we MUST write to
+   *  the doc id returned by findCoverForRedemption. The public ref is read
+   *  out of the doc itself inside the transaction and stored on the
+   *  WalletRedemption entry for display/dedup. */
+  walletDocId: string,
+  requested: number,
+  captainName: string,
+  /** Caller (Mark-Paid modal) passes the bill's TOTAL final amount (subtotal +
+   *  SC + GST after discount). Inside the transaction we enforce the invariant
+   *  `sum(existing walletRedemptions) + amountRedeemed <= billCap` so a stale
+   *  modal / concurrent redeem on a second terminal can't drain a wallet past
+   *  the bill total. Without this, the captain's local `remaining` was the
+   *  only ceiling — vulnerable to race/staleness/tampering (see architect
+   *  review 2026-05-15). Pass `0` or omit for legacy callers (no cap). */
+  billCap?: number
+): Promise<{ amountRedeemed: number; newWalletBalance: number; redemption: WalletRedemption }> {
+  if (!reservationDocId || !walletDocId) throw new Error("Missing reservation or wallet doc id");
+  if (!requested || requested <= 0) throw new Error("Amount must be > 0");
+  const want = Math.round(requested * 100) / 100;
+  const at = new Date().toISOString();
+  const txId = `${reservationDocId}-${walletDocId}-${Date.now()}`;
+  const resvRef = doc(db, TABLE_RES_COL, reservationDocId);
+  const coverRef = doc(db, COVERS_COL, walletDocId);
+  let amountRedeemed = 0;
+  let newWalletBalance = 0;
+  let redemption: WalletRedemption | null = null;
+
+  await runTransaction(db, async (tx) => {
+    const [resvSnap, coverSnap] = await Promise.all([tx.get(resvRef), tx.get(coverRef)]);
+    if (!resvSnap.exists()) throw new Error("Table reservation not found");
+    if (!coverSnap.exists()) throw new Error("Wallet not found");
+    const resv = resvSnap.data();
+    const cover = coverSnap.data();
+    if (resv.paymentStatus === "paid") throw new Error("Bill already marked paid — cannot redeem more");
+    if (resv.status === "voided") throw new Error("Bill is voided — cannot redeem");
+    // Loophole #5 — wallet expired
+    if (cover.expiresAt) {
+      const exp = new Date(cover.expiresAt).getTime();
+      if (exp && exp < Date.now()) {
+        throw new Error(`Wallet expired at ${new Date(exp).toLocaleString()}`);
+      }
+    }
+    // Public ref (HOD-XXX) is read from the cover doc itself. We dedup/store
+    // by this string so a customer's wallet is uniquely identified across
+    // any orphan/duplicate doc-id quirks.
+    const publicRef = String(cover.ref || walletDocId);
+    const balance = Number(cover.coverBalance || 0);
+    if (balance <= 0) throw new Error(`Wallet ${publicRef} has zero balance`);
+
+    const existing: WalletRedemption[] = Array.isArray(resv.walletRedemptions) ? resv.walletRedemptions : [];
+    // Loophole #10 — duplicate scan within 60 sec → return prior entry, no re-deduct.
+    const dupe = existing.find((r) =>
+      r.walletRef === publicRef &&
+      Math.abs(r.amount - want) < 0.01 &&
+      Date.now() - new Date(r.redeemedAt).getTime() < 60_000
+    );
+    if (dupe) {
+      amountRedeemed = dupe.amount;
+      newWalletBalance = balance;
+      redemption = dupe;
+      return;
+    }
+    // Block re-redemption from same wallet at same table — caller should call
+    // undo first. (Different from idempotency above: this catches a deliberate
+    // 2nd scan after the first one settled.)
+    if (existing.some((r) => r.walletRef === publicRef)) {
+      throw new Error(`Wallet ${publicRef} already redeemed at this table — undo first to re-scan`);
+    }
+
+    // Smart auto-fit: deduct min(requested, balance, billCap-already-redeemed).
+    // The billCap arm closes the architect-flagged race: two concurrent redeems
+    // on the same table (different terminals / stale modal) can't combine to
+    // exceed the bill total. If existing redemptions already hit the cap we
+    // throw — captain must undo first or the customer was over-charged earlier.
+    const existingTotal = existing.reduce((s, r) => s + (r.amount || 0), 0);
+    const capRemaining = billCap && billCap > 0
+      ? Math.max(0, Math.round((billCap - existingTotal) * 100) / 100)
+      : Infinity;
+    if (capRemaining <= 0) {
+      throw new Error(`Bill already fully covered by wallets (${existingTotal} of ${billCap}). Undo a prior redemption first.`);
+    }
+    amountRedeemed = Math.round(Math.min(want, balance, capRemaining) * 100) / 100;
+    newWalletBalance = Math.round((balance - amountRedeemed) * 100) / 100;
+    const oldUsed = Number(cover.coverUsed || 0);
+    redemption = {
+      walletRef: publicRef, walletDocId, walletName: String(cover.name || ""),
+      walletPhone: String(cover.phone || ""),
+      amount: amountRedeemed, redeemedAt: at, redeemedBy: captainName, txId,
+    };
+    tx.update(coverRef, {
+      coverBalance: newWalletBalance,
+      coverUsed: Math.round((oldUsed + amountRedeemed) * 100) / 100,
+      transactions: arrayUnion({
+        type: "table-redemption",
+        amount: amountRedeemed,
+        note: `Redeemed at table ${resv.tableId || "?"} by ${captainName}`,
+        timestamp: at,
+        staff: captainName,
+        paymentId: txId,
+      }),
+    });
+    tx.update(resvRef, { walletRedemptions: [...existing, redemption] });
+  });
+  return { amountRedeemed, newWalletBalance, redemption: redemption! };
+}
+
+/** Captain Mode: undo a wallet redemption that hasn't been bill-closed yet.
+ *  Refunds the ₹ to the wallet and removes the entry from the reservation.
+ *  Used when captain scans wrong wallet or customer changes mind BEFORE bill
+ *  close. Throws if bill already marked paid — Khushi Q3 spec: post-paid
+ *  refunds happen via Void Bill + manager-approved cash refund, NOT wallet. */
+export async function undoWalletRedemption(
+  reservationDocId: string,
+  txId: string,
+  captainName: string
+): Promise<void> {
+  const resvRef = doc(db, TABLE_RES_COL, reservationDocId);
+  const at = new Date().toISOString();
+  await runTransaction(db, async (tx) => {
+    const resvSnap = await tx.get(resvRef);
+    if (!resvSnap.exists()) throw new Error("Reservation not found");
+    const resv = resvSnap.data();
+    if (resv.paymentStatus === "paid") {
+      throw new Error("Bill already paid — use Void Bill + cash refund, not wallet undo");
+    }
+    const list: WalletRedemption[] = Array.isArray(resv.walletRedemptions) ? resv.walletRedemptions : [];
+    const idx = list.findIndex((r) => r.txId === txId);
+    if (idx < 0) throw new Error("Redemption not found (already undone?)");
+    const entry = list[idx];
+    // Use stored doc id (correct one written from 2026-05-15 onward); fall
+    // back to walletRef for legacy entries that pre-date the field.
+    const coverDocId = entry.walletDocId || entry.walletRef;
+    const coverRef = doc(db, COVERS_COL, coverDocId);
+    const coverSnap = await tx.get(coverRef);
+    if (!coverSnap.exists()) throw new Error("Wallet not found (deleted?)");
+    const cover = coverSnap.data();
+    const balance = Number(cover.coverBalance || 0);
+    const used = Number(cover.coverUsed || 0);
+    tx.update(coverRef, {
+      coverBalance: Math.round((balance + entry.amount) * 100) / 100,
+      coverUsed: Math.max(0, Math.round((used - entry.amount) * 100) / 100),
+      transactions: arrayUnion({
+        type: "table-redemption-undo",
+        amount: entry.amount,
+        note: `Undone by ${captainName} at table ${resv.tableId || "?"}`,
+        timestamp: at,
+        staff: captainName,
+        paymentId: `undo-${entry.txId}`,
+      }),
+    });
+    tx.update(resvRef, { walletRedemptions: [...list.slice(0, idx), ...list.slice(idx + 1)] });
+  });
+}
+
 export async function markTablePaid(
   docId: string,
   payment: {
@@ -1178,6 +1531,12 @@ export async function markTablePaid(
      *  doc as `paymentSplits` for Reports + audit. `method` field becomes a
      *  summary like "split:cash+card". */
     splits?: Array<{ method: string; amount: number }>;
+    /** 2026-05-15 — Sum of `walletRedemptions[].amount` already deducted at this
+     *  table BEFORE markPaid. Reports + cash-drawer reconciliation use this:
+     *  `amount` = TOTAL bill (cash+wallet); `walletPaidAmount` = the wallet
+     *  slice. Cash collected = amount − walletPaidAmount. Pass `undefined` (not
+     *  0) to keep doc clean when no wallet redemption happened. */
+    walletPaidAmount?: number;
   },
   bookingRef?: string
 ): Promise<void> {
@@ -1185,6 +1544,9 @@ export async function markTablePaid(
     paymentStatus: "paid", paymentMode: payment.method, amountPaid: payment.amount,
     paidAt: new Date().toISOString(), captainName: payment.captainName,
   };
+  if (payment.walletPaidAmount !== undefined && payment.walletPaidAmount > 0) {
+    upd.walletPaidAmount = payment.walletPaidAmount;
+  }
   if (payment.splits && payment.splits.length > 0) {
     upd.paymentSplits = payment.splits.map((s) => ({ method: s.method, amount: s.amount }));
   }
@@ -1939,7 +2301,14 @@ export async function recordPendingPaymentScreenshot(
 
 export async function recordWalletBillPrint(
   coverId: string,
-  entry: { by: string; total: number; itemCount: number; billNumberBase: string }
+  entry: { by: string; total: number; itemCount: number; billNumberBase: string;
+    /** 2026-05-15 (Khushi UX) — CASH & CARRY AWARENESS. When the caller knows
+     *  a NEW round was activated since the last bill print (round-by-round
+     *  bar service), pass `hasNewRoundSinceLastBill:true` so this print is
+     *  recorded as a fresh bill, NOT a duplicate. Default false → legacy
+     *  behavior (any 2nd+ print = duplicate). */
+    hasNewRoundSinceLastBill?: boolean;
+  }
 ): Promise<{ count: number; isDuplicate: boolean; billNumber: string }> {
   const ref = doc(db, COVERS_COL, coverId);
   return await runTransaction(db, async (txn) => {
@@ -1948,7 +2317,8 @@ export async function recordWalletBillPrint(
     const data = snap.data();
     const prev = (data.walletBillPrintCount as number) || 0;
     const next = prev + 1;
-    const isDuplicate = prev > 0;
+    // True duplicate ONLY if there's a prior bill AND no new round since.
+    const isDuplicate = prev > 0 && !entry.hasNewRoundSinceLastBill;
     const billNumber = `${entry.billNumberBase}-${next}`;
     const now = new Date().toISOString();
     const log = Array.isArray(data.walletBillPrintLog) ? [...data.walletBillPrintLog] : [];
@@ -2116,9 +2486,16 @@ export async function createWalkInTicketBooking(input: {
   tableType?: string;        // "VIP", "Standard" etc — group flow only
   notes?: string;
   staffName: string;
+  // 2026-05-16 (Khushi) — door girl picks how the customer paid. Drives the
+  // paymentMethod / paymentId / paymentSplit fields on the booking doc so
+  // Reports / Live Monitor / Sheets sync attribute revenue correctly.
+  // Defaults to "cash" for backward compatibility with older callers.
+  paymentMethod?: "cash" | "upi" | "card" | "split" | "online" | "comp";
+  paymentRef?: string;       // UPI txn ID / card auth / Razorpay paymentId
+  paymentSplit?: { cash?: number; upi?: number; card?: number; online?: number };
 }): Promise<{ ref: string }> {
   const { kind, name, email, phone, guests, total, tier, type, eventId, eventTitle,
-    partySize, tableType, notes, staffName } = input;
+    partySize, tableType, notes, staffName, paymentMethod, paymentRef, paymentSplit } = input;
   if (!name?.trim()) throw new Error("Enter customer name");
   if (!phone?.trim()) throw new Error("Enter phone number");
 
@@ -2136,6 +2513,22 @@ export async function createWalkInTicketBooking(input: {
   else if (kind === "group") entryType = "group_booking";
   // cover flow leaves entryType undefined (goes to the Tickets tab).
 
+  // 2026-05-16 — payment method resolution. If caller passes paymentMethod
+  // explicitly we honor it; else fall back to legacy cash_door / comp_door
+  // behavior so older callers (existing tests, aggregator-arrival flows)
+  // keep working unchanged.
+  const pm = paymentMethod || (total > 0 ? "cash" : "comp");
+  const pmField =
+    pm === "cash"   ? "cash_door"  :
+    pm === "upi"    ? "upi_door"   :
+    pm === "card"   ? "card_door"  :
+    pm === "split"  ? "split_door" :
+    pm === "online" ? "online_door" :
+    "comp_door";
+  const pidField = paymentRef
+    ? `${pm}_${paymentRef}`
+    : (total > 0 ? `${pm}_${ref}` : `comp_${ref}`);
+
   const docPayload: Record<string, any> = {
     ref,
     name: name.trim(),
@@ -2148,8 +2541,9 @@ export async function createWalkInTicketBooking(input: {
     type: type || "",
     eventId: eventId || "",
     eventTitle: eventTitle || "",
-    paymentMethod: total > 0 ? "cash_door" : "comp_door",
-    paymentId: total > 0 ? `cash_${ref}` : `comp_${ref}`,
+    paymentMethod: pmField,
+    paymentId: pidField,
+    paymentRef: paymentRef || "",
     paidAt: new Date().toISOString(),
     bookedAt: new Date().toISOString(),
     createdAt: serverTimestamp(),
@@ -2159,6 +2553,14 @@ export async function createWalkInTicketBooking(input: {
     notes: notes || "",
     status: "confirmed",
   };
+  if (paymentSplit && pm === "split") {
+    docPayload.paymentSplit = {
+      cash:   Math.max(0, Math.round(paymentSplit.cash   || 0)),
+      upi:    Math.max(0, Math.round(paymentSplit.upi    || 0)),
+      card:   Math.max(0, Math.round(paymentSplit.card   || 0)),
+      online: Math.max(0, Math.round(paymentSplit.online || 0)),
+    };
+  }
   if (entryType) docPayload.entryType = entryType;
   if (kind === "group") {
     docPayload.bookMode = "group";
@@ -2262,6 +2664,53 @@ export async function createAggregatorTableBooking(input: {
     isManualAggregatorEntry: true,
   });
   return ref;
+}
+
+// 🔴 2026-05-16 (Khushi) — door staff need to FIX aggregator bookings whose
+// parser-extracted data is incomplete (Zomato emails only give us the
+// customer name; pax/time/date often get defaults). This is an audit-trailed
+// edit so any later disputes have a clear paper trail of who edited what.
+// Idempotent — only writes fields the caller passed in.
+export async function updateReservationDetails(
+  docId: string,
+  patch: { partySize?: number; arrivalTime?: string; date?: string; phone?: string },
+  staffName: string
+): Promise<void> {
+  const cleaned: Record<string, unknown> = {};
+  if (typeof patch.partySize === "number" && patch.partySize > 0 && patch.partySize <= 50) {
+    cleaned.partySize = Math.floor(patch.partySize);
+  }
+  if (typeof patch.arrivalTime === "string" && patch.arrivalTime.trim().length > 0 && patch.arrivalTime.length <= 20) {
+    cleaned.arrivalTime = patch.arrivalTime.trim();
+  }
+  // Strict date validation: must be YYYY-MM-DD AND parse to a real calendar date
+  // (rejects 2026-99-99 etc.) AND within ±60 days of today (defends against typos).
+  if (typeof patch.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(patch.date)) {
+    const d = new Date(patch.date + "T12:00:00Z");
+    if (!isNaN(d.getTime()) && d.toISOString().slice(0, 10) === patch.date) {
+      const deltaDays = Math.abs((d.getTime() - Date.now()) / 86400000);
+      if (deltaDays <= 60) cleaned.date = patch.date;
+    }
+  }
+  // 🔴 2026-05-16 (Khushi) — phone added so door staff can fill in numbers
+  // missing from Zomato emails. Accept 10-15 digits with optional + prefix
+  // and forgiving spaces/dashes; we strip non-digits on save so the canonical
+  // form (used by WhatsApp + Sheets sync + admin search) is consistent.
+  if (typeof patch.phone === "string" && patch.phone.trim().length > 0) {
+    const raw = patch.phone.trim();
+    const digitsOnly = raw.replace(/[^\d]/g, "");
+    if (digitsOnly.length >= 10 && digitsOnly.length <= 15) {
+      cleaned.phone = digitsOnly;
+    } else {
+      throw new Error("Phone must be 10–15 digits (e.g. 9611111261 or +919611111261).");
+    }
+  }
+  if (Object.keys(cleaned).length === 0) {
+    throw new Error("Nothing valid to save — check your inputs (pax 1–50, valid time, date within 60 days).");
+  }
+  cleaned.lastEditedAt = new Date().toISOString();
+  cleaned.lastEditedBy = staffName;
+  await updateDoc(doc(db, TABLE_RES_COL, docId), cleaned);
 }
 
 export async function cancelTableReservation(docId: string, staffName: string): Promise<void> {

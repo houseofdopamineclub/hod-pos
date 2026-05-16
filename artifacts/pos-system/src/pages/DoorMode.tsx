@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import {
   sha256, lookupBooking, subscribeToBookings, subscribeToGuestlist,
   subscribeToHodReservations, checkInGuest, reassignTable, cancelTableReservation,
+  updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
   subscribeToHodEvents, type HodEvent,
   getCoverForBooking, activateCoverForBooking, editCoverAmount,
@@ -838,6 +839,26 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
       // For booking source, prefer docId (fast path); checkInGuest falls back to ref query.
       const key = source === "booking" ? (booking.id || booking.ref) : (booking.ref || booking.id);
       const { checkedInAt, wasNew } = await checkInGuest(key, source, agentName);
+      // 🔴 BUGFIX 2026-05-16 (Khushi) — auto-mint ₹0 cover wallet on every
+      // non-table check-in so the customer site's hodclub.in/?wallet=XXX URL
+      // flips from "Guest List Confirmed" QR page to the wallet+menu view
+      // immediately. Previously only the "🎁 Free Entry" button minted the
+      // wallet, so any guest who got check-in via lookup/search was stuck on
+      // the QR page with no menu access. Table bookings skip — their wallet
+      // lifecycle is handled by the captain seating flow.
+      if (source !== "table") {
+        const walletRef = booking.ref || booking.id;
+        ensureZeroBalanceCoverForGuest({
+          bookingRef: walletRef,
+          sourceDocId: booking.id || walletRef,
+          name: booking.name || "Guest",
+          phone: booking.phone || "",
+          source: source as "booking" | "guestlist",
+          eventId: (booking as any).eventId || "",
+          eventTitle: booking.eventTitle || "",
+          staffName: agentName,
+        }).catch(() => {});
+      }
       setDone(true);
       // Only offer undo if THIS call was the actual check-in mutation. If the guest
       // was already checked in (e.g., another agent did it earlier), show an
@@ -1401,7 +1422,7 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
 }) {
   const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [detail, setDetail] = useState<HodBooking | null>(null);
-  const [showOnlyCheckedIn, setShowOnlyCheckedIn] = useState(false);
+  const [viewMode, setViewMode] = useState<"all" | "pending" | "checked">("pending");
 
   // Tab-specific copy
   const COPY = kind === "group"
@@ -1430,8 +1451,13 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
   }
   if (eventId !== "all") todayBookings = todayBookings.filter((b) => !b.eventId || b.eventId === eventId);
   const checked = todayBookings.filter((b) => b.checkedIn).length;
-  // Hide checked-in / activated rows from the default view; surface them via the toggle.
-  const visibleBookings = showOnlyCheckedIn ? todayBookings.filter((b) => b.checkedIn) : todayBookings.filter((b) => !b.checkedIn);
+  const pending = todayBookings.length - checked;
+  // Tri-state filter: ALL / YET TO CHECK IN / CHECKED IN. Default = pending (operationally most useful at the door).
+  const visibleBookings = viewMode === "checked"
+    ? todayBookings.filter((b) => b.checkedIn)
+    : viewMode === "pending"
+      ? todayBookings.filter((b) => !b.checkedIn)
+      : todayBookings;
   const filtered = visibleBookings.filter((b) => matchQuery(query, b.name, b.phone, b.ref));
 
   return (
@@ -1447,20 +1473,27 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
         />
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${!showOnlyCheckedIn ? "#C8A645" : "transparent"}`,
-            borderRadius: 10, padding: 14, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayBookings.length}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>{COPY.all.toUpperCase()} {!showOnlyCheckedIn ? "•" : ""}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+        <div onClick={() => setViewMode("all")}
+          style={{ background: viewMode === "all" ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "all" ? "#C8A645" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayBookings.length}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>{COPY.all.toUpperCase()} {viewMode === "all" ? "•" : ""}</div>
         </div>
-        <div onClick={() => setShowOnlyCheckedIn(true)}
-          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${showOnlyCheckedIn ? "#00C864" : "transparent"}`,
-            borderRadius: 10, padding: 14, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checked}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {showOnlyCheckedIn ? "•" : ""}</div>
+        <div onClick={() => setViewMode("pending")}
+          style={{ background: viewMode === "pending" ? "rgba(245,158,11,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "pending" ? "#F59E0B" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pending}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>YET TO CHECK IN {viewMode === "pending" ? "•" : ""}</div>
+        </div>
+        <div onClick={() => setViewMode("checked")}
+          style={{ background: viewMode === "checked" ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "checked" ? "#00C864" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checked}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {viewMode === "checked" ? "•" : ""}</div>
         </div>
       </div>
 
@@ -1470,7 +1503,8 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
       {filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,0.35)", fontSize: 13, fontWeight: 500 }}>
           {query ? `No matches for "${query}"`
-            : showOnlyCheckedIn ? "No one checked in yet — tap PENDING to see remaining guests"
+            : viewMode === "checked" ? "No one checked in yet — tap YET TO CHECK IN to see remaining guests"
+            : viewMode === "pending" ? "Everyone's checked in! 🎉 Tap CHECKED IN or ALL to see them."
             : COPY.empty}
         </div>
       )}
@@ -1482,7 +1516,7 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   const [guests, setGuests] = useState<HodGuestlistEntry[]>([]);
   const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [busyId, setBusyId] = useState("");
-  const [showOnlyCheckedIn, setShowOnlyCheckedIn] = useState(false);
+  const [viewMode, setViewMode] = useState<"all" | "pending" | "checked">("pending");
   const [detail, setDetail] = useState<HodBooking | null>(null);
   const { toast } = useToast();
 
@@ -1506,6 +1540,22 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
     const _source: "booking" | "guestlist" = (g as any)._source === "booking" ? "booking" : "guestlist";
     try {
       const { checkedInAt, wasNew } = await checkInGuest(g.id, _source, agentName, wasCheckedIn);
+      // 🔴 BUGFIX 2026-05-16 (Khushi) — mirror the LookupResult fix: any
+      // guest-list check-in must also mint the ₹0 cover so the customer
+      // site's wallet URL flips to wallet+menu view (was stuck on QR page).
+      // Only on a fresh check-in (not un-check / not idempotent re-check).
+      if (!wasCheckedIn && wasNew) {
+        ensureZeroBalanceCoverForGuest({
+          bookingRef: g.id,
+          sourceDocId: (g as any)._bookingDocId || g.id,
+          name: g.name || "Guest",
+          phone: g.phone || "",
+          source: _source,
+          eventId: g.eventId || "",
+          eventTitle: g.eventTitle || "",
+          staffName: agentName,
+        }).catch(() => {});
+      }
       // Only show undo for a fresh check-in mutation (not idempotent no-ops, not un-checks).
       // Prevents stale-UI undo from clobbering a re-check-in by another agent.
       if (!wasCheckedIn && wasNew) {
@@ -1570,10 +1620,13 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   // Permissive: keep entries with no eventId (legacy / unscoped guest list adds)
   if (eventId !== "all") todayGuests = todayGuests.filter((g) => !g.eventId || g.eventId === eventId);
   const checkedIn = todayGuests.filter((g) => g.checkedIn).length;
-  // Hide checked-in / activated rows from the default view; surface them via the toggle.
-  const visibleGuests = showOnlyCheckedIn
+  const pendingGuests = todayGuests.length - checkedIn;
+  // Tri-state filter: ALL / YET TO CHECK IN / CHECKED IN. Default = pending (door operations).
+  const visibleGuests = viewMode === "checked"
     ? todayGuests.filter((g) => g.checkedIn)
-    : todayGuests.filter((g) => !g.checkedIn);
+    : viewMode === "pending"
+      ? todayGuests.filter((g) => !g.checkedIn)
+      : todayGuests;
   const filtered = visibleGuests.filter((g) => matchQuery(query, g.name, g.phone));
   // Find the underlying guestlist entry for the open detail modal so we can
   // wire the per-row free-entry / cover / WA flows through the modal.
@@ -1686,20 +1739,27 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <div onClick={() => setShowOnlyCheckedIn(false)}
-          style={{ background: !showOnlyCheckedIn ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${!showOnlyCheckedIn ? "#C8A645" : "transparent"}`,
-            borderRadius: 10, padding: 14, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayGuests.length}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>TONIGHT'S GUEST LIST {!showOnlyCheckedIn ? "•" : ""}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+        <div onClick={() => setViewMode("all")}
+          style={{ background: viewMode === "all" ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "all" ? "#C8A645" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayGuests.length}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>TONIGHT'S LIST {viewMode === "all" ? "•" : ""}</div>
         </div>
-        <div onClick={() => setShowOnlyCheckedIn(true)}
-          style={{ background: showOnlyCheckedIn ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${showOnlyCheckedIn ? "#00C864" : "transparent"}`,
-            borderRadius: 10, padding: 14, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checkedIn}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {showOnlyCheckedIn ? "•" : ""}</div>
+        <div onClick={() => setViewMode("pending")}
+          style={{ background: viewMode === "pending" ? "rgba(245,158,11,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "pending" ? "#F59E0B" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pendingGuests}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>YET TO CHECK IN {viewMode === "pending" ? "•" : ""}</div>
+        </div>
+        <div onClick={() => setViewMode("checked")}
+          style={{ background: viewMode === "checked" ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
+            border: `2px solid ${viewMode === "checked" ? "#00C864" : "transparent"}`,
+            borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checkedIn}</div>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {viewMode === "checked" ? "•" : ""}</div>
         </div>
       </div>
 
@@ -1709,7 +1769,8 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
       {filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,0.35)", fontSize: 13, fontWeight: 500 }}>
           {query ? `No matches for "${query}" in today's guest list`
-            : showOnlyCheckedIn ? "No one checked in yet — tap PENDING to see remaining guests"
+            : viewMode === "checked" ? "No one checked in yet — tap YET TO CHECK IN to see remaining guests"
+            : viewMode === "pending" ? "Everyone's checked in! 🎉"
             : "No guests for today"}
         </div>
       )}
@@ -1799,10 +1860,23 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
   const { toast } = useToast();
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [aggFilter, setAggFilter] = useState<string>("all");
-  const [showOnlyArrived, setShowOnlyArrived] = useState(false);
+  // Tri-state arrival filter: "" = all, "arrived" = only arrived, "pending" = not yet.
+  const [arrivalFilter, setArrivalFilter] = useState<"" | "arrived" | "pending">("");
   const [reassignFor, setReassignFor] = useState<HodTableReservation | null>(null);
   const [arrBusy, setArrBusy] = useState("");
   const [cancelBusy, setCancelBusy] = useState("");
+  // 🔴 2026-05-16 (Khushi): door tables redesign — compact rows mirroring
+  // captain mode (BookingRow in CaptainMode.tsx ~2842). Selected row opens
+  // a detail modal with the full meta + action buttons.
+  const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+  // 🔴 Khushi 16 May — Zomato/aggregator email parsers only reliably extract
+  // the guest's name. Pax / arrival time / date must be hand-edited at the
+  // door, so the modal has inline-editable inputs backed by these drafts.
+  const [editPax, setEditPax] = useState<string>("");
+  const [editTime, setEditTime] = useState<string>("");
+  const [editDate, setEditDate] = useState<string>("");
+  const [editPhone, setEditPhone] = useState<string>(""); // 🔴 Khushi 16 May — Zomato parser leaves phone blank.
+  const [editBusy, setEditBusy] = useState(false);
   const today = TODAY_STR();
   const calToday = CALENDAR_TODAY_STR();
 
@@ -1828,6 +1902,38 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
     return () => { unsub1(); unsub2(); };
   }, [today, calToday]);
 
+  // 🔴 Reset edit drafts ONLY when the modal opens for a different doc —
+  // NOT on every `reservations` snapshot, or live Firestore updates would
+  // clobber the captain's in-progress typing (architect review 16 May).
+  // We snapshot the row once on open via a ref so this effect's dep array
+  // is just [expandedDocId].
+  const reservationsRef = useRef(reservations);
+  reservationsRef.current = reservations;
+  useEffect(() => {
+    if (!expandedDocId) return;
+    const r = reservationsRef.current.find((x) => x._docId === expandedDocId);
+    if (!r) return;
+    setEditPax(String(r.partySize || ""));
+    setEditTime(r.arrivalTime || "");
+    setEditDate(r.date || "");
+    setEditPhone(r.phone || "");
+  }, [expandedDocId]);
+
+  // 2026-05-16 diagnostic — log what tableReservations are loading and why filters drop them.
+  // Helps Khushi confirm "0 tables" = no bookings today vs. date-format mismatch vs. status:cancelled.
+  useEffect(() => {
+    const sources = reservations.reduce((m, r) => {
+      const s = (r.source || "(blank)").toLowerCase();
+      m[s] = (m[s] || 0) + 1;
+      return m;
+    }, {} as Record<string, number>);
+    const cancelled = reservations.filter((r) => (r as any).status === "cancelled").length;
+    console.log("[door][tables] LOADED",
+      { total: reservations.length, cancelled, today, calToday, sources },
+      reservations.map((r) => ({ ref: r.bookingRef, src: r.source, date: r.date, name: r.customerName, status: (r as any).status }))
+    );
+  }, [reservations, today, calToday]);
+
   const activeAll = reservations.filter((r) => (r as any).status !== "cancelled");
   // Tables are physical assets, not per-event — door staff need to see EVERY
   // reservation arriving tonight regardless of which event chip is selected.
@@ -1838,23 +1944,51 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
   const active = activeAll;
   const bookedTableIds = new Set(active.map((r) => r.tableId).filter(Boolean) as string[]);
 
-  // IN-HOUSE = anything that ISN'T a known aggregator (covers "inhouse", "online",
-  // "walkin", "website", blank, legacy values from hodclub.in, etc.). Aggregator
-  // chips still strict-match their key.
+  // 🔴 BUGFIX 2026-05-16 v2 (Khushi) — first fix used a strict equality on
+  // ["swiggy","eazydiner","zomato"]. But actual aggregator values written by
+  // the email parsers are "swiggy-dineout" / "swiggy-scenes" / "eazydiner" /
+  // "zomato" (see AGGREGATOR_OPTIONS in firestore-hod.ts). Strict match meant
+  // "swiggy-dineout" fell into IN-HOUSE — that's why SWIGGY=0 and IN-HOUSE
+  // showed 23 inflated rows in the screenshot. canonicalAggKey collapses ALL
+  // brand variants down to one of 4 buckets used by the chips + dashboard.
   const AGG_KEYS = new Set(["swiggy", "eazydiner", "zomato"]);
+  const canonicalAggKey = (raw: string): "zomato" | "swiggy" | "eazydiner" | "inhouse" => {
+    const s = (raw || "").toLowerCase().trim();
+    if (!s) return "inhouse";
+    if (s.includes("zomato")) return "zomato";
+    if (s.includes("swiggy")) return "swiggy";          // catches swiggy-dineout, swiggy-scenes
+    if (s.includes("eazy") || s.includes("easydiner")) return "eazydiner";
+    return "inhouse";
+  };
+  const effectiveSrc = (r: HodTableReservation) =>
+    canonicalAggKey(r.aggregator || r.source || "inhouse");
   const byAgg = aggFilter === "all"
     ? active
     : aggFilter === "inhouse"
-      ? active.filter((r) => !AGG_KEYS.has((r.source || "").toLowerCase()))
-      : active.filter((r) => (r.source || "").toLowerCase() === aggFilter);
-  const byArrival = showOnlyArrived ? byAgg.filter((r) => r.actualArrivalTime) : byAgg;
+      ? active.filter((r) => !AGG_KEYS.has(effectiveSrc(r)))
+      : active.filter((r) => effectiveSrc(r) === aggFilter);
+  const byArrival =
+    arrivalFilter === "arrived" ? byAgg.filter((r) => r.actualArrivalTime) :
+    arrivalFilter === "pending" ? byAgg.filter((r) => !r.actualArrivalTime) :
+    byAgg;
   const filtered = byArrival.filter((r) => matchQuery(query, r.customerName, r.phone, r.tableId, r.bookingRef));
 
   const arrivedCount = active.filter((r) => r.actualArrivalTime).length;
-  const totalGuests = active.reduce((s, r) => s + (r.partySize || 0), 0);
+  const pendingCount = active.length - arrivedCount;
+
+  // Per-aggregator booking counts for the chip badges + mini dashboard.
+  const countBySrc: Record<string, number> = { all: active.length, inhouse: 0, swiggy: 0, eazydiner: 0, zomato: 0 };
+  active.forEach((r) => {
+    const s = effectiveSrc(r);
+    if (AGG_KEYS.has(s)) countBySrc[s] = (countBySrc[s] || 0) + 1;
+    else countBySrc.inhouse += 1;
+  });
 
   const handleArrived = async (r: HodTableReservation) => {
-    const src = (r.source || "inhouse").toLowerCase();
+    // 🔴 Use aggregator-aware resolver — manually created aggregator bookings
+    // carry source="inhouse"/"walkin" with the brand on r.aggregator. Without
+    // this, isAggregator=false → cover NOT minted, WA NOT sent (silent miss).
+    const src = (r.aggregator || r.source || "inhouse").toLowerCase();
     const isAggregator = src !== "inhouse";
     // Aggregator arrival mints a cover + sends WhatsApp = irreversible side effects.
     // Require explicit confirmation to prevent accidental fire.
@@ -2022,26 +2156,45 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
 
   return (
     <div>
-      {/* Stats — first two tiles toggle the arrival filter */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
-        <div onClick={() => setShowOnlyArrived(false)}
-          style={{ background: !showOnlyArrived ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${!showOnlyArrived ? "#C8A645" : "transparent"}`,
-            borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#F2C744" }}>{active.length}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>Tables {!showOnlyArrived ? "•" : ""}</div>
-        </div>
-        <div onClick={() => setShowOnlyArrived(true)}
-          style={{ background: showOnlyArrived ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
-            border: `2px solid ${showOnlyArrived ? "#00C864" : "transparent"}`,
-            borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "#00C864" }}>{arrivedCount}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>Arrived {showOnlyArrived ? "•" : ""}</div>
-        </div>
-        <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 10, padding: 10, textAlign: "center" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 28, fontWeight: 900, color: "rgba(255,255,255,.6)" }}>{totalGuests}</div>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>Guests</div>
-        </div>
+      {/* 🔴 2026-05-16 (Khushi) — mini dashboard. 3 status tiles (tap to filter)
+          + per-aggregator strip showing booked-count per source. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        {([
+          { key: "",        label: "Booked",     val: active.length,  color: "#F2C744" },
+          { key: "arrived", label: "Arrived",    val: arrivedCount,   color: "#00C864" },
+          { key: "pending", label: "Not Yet",    val: pendingCount,   color: "#E08A2C" },
+        ] as const).map((t) => {
+          const on = arrivalFilter === t.key;
+          return (
+            <div key={t.label} onClick={() => setArrivalFilter((prev) => (prev === t.key ? "" : t.key))}
+              style={{
+                background: on ? `${t.color}1f` : "rgba(255,255,255,.04)",
+                border: `2px solid ${on ? t.color : "transparent"}`,
+                borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer",
+              }}>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: t.color }}>{t.val}</div>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>{t.label} {on ? "•" : ""}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Per-aggregator breakdown strip (read-only quick analytics). */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {(["inhouse", "zomato", "swiggy", "eazydiner"] as const).map((k) => {
+          const ss = SRC_STYLES[k];
+          const c = ss?.color || "#C8A645";
+          return (
+            <div key={k} style={{
+              flex: 1, minWidth: 70,
+              background: "rgba(255,255,255,0.03)", border: `1px solid ${c}33`,
+              borderRadius: 8, padding: "6px 8px", textAlign: "center",
+            }}>
+              <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.6px", color: c, textTransform: "uppercase" }}>{ss?.label || k}</div>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#fff", marginTop: 2 }}>{countBySrc[k] || 0}</div>
+            </div>
+          );
+        })}
       </div>
 
       {/* Aggregator chips */}
@@ -2049,6 +2202,7 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
         {AGG_FILTERS.map((f) => {
           const on = aggFilter === f.key;
           const ss = f.key === "all" ? null : SRC_STYLES[f.key];
+          const c = countBySrc[f.key] ?? 0;
           return (
             <button key={f.key} onClick={() => setAggFilter(f.key)}
               style={{
@@ -2057,76 +2211,94 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
                 background: "transparent",
                 border: on ? (ss ? `2px solid ${ss.color}` : "2px solid #C8A645") : "1px solid rgba(255,255,255,0.1)",
                 color: on ? (ss ? ss.color : "#C8A645") : "rgba(255,255,255,0.5)",
+                display: "inline-flex", alignItems: "center", gap: 6,
               }}>
-              {f.label}
+              <span>{f.label}</span>
+              <span style={{
+                fontSize: 10, fontWeight: 900, padding: "1px 6px", borderRadius: 10,
+                background: on ? (ss ? `${ss.color}33` : "rgba(200,166,69,0.25)") : "rgba(255,255,255,0.08)",
+                color: on ? (ss ? ss.color : "#C8A645") : "rgba(255,255,255,0.6)",
+                minWidth: 16, textAlign: "center",
+              }}>{c}</span>
             </button>
           );
         })}
       </div>
 
-      {/* Cards */}
+      {/* 🔴 2026-05-16 (Khushi) — COMPACT ROWS mirroring captain mode:
+          [table pill] [name + agg badge w/ discount + meta] [status pill] [📞 call]
+          Tap the row → detail modal with full meta + Arrived/Reassign/WA/Cancel. */}
       {filtered.map((r) => {
-        const src = (r.source || "inhouse").toLowerCase();
-        const ss = SRC_STYLES[src] || SRC_STYLES.inhouse;
-        const arrived = r.actualArrivalTime;
-        const tableLabel = r.tableId || "(unassigned)";
+        // Canonical aggregator bucket (zomato/swiggy/eazydiner/inhouse) — drives
+        // chip filter membership + styling. We keep `aggName` as the RAW brand
+        // string so the badge can still show "Swiggy Dineout -30%" etc.
+        const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
+        const aggName = (r.aggregator || r.source || "inhouse").toLowerCase();
         const isAggregator = src !== "inhouse";
+        const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName.toUpperCase();
+        const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
+        const arrived = !!r.actualArrivalTime;
+        const tableLabel = r.tableId || "—";
 
         return (
-          <div key={r._docId} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
-            {/* Header row */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, gap: 8 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, fontWeight: 900, color: "#C8A645", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  {tableLabel}
-                  <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: ".8px", padding: "2px 6px", borderRadius: 5, background: ss.bg, border: `1px solid ${ss.border}`, color: ss.color }}>{ss.label}</span>
-                </div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{r.floorLabel || r.floor || ""}</div>
+          <div key={r._docId} onClick={() => setExpandedDocId(r._docId)}
+            style={{ display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 12px", marginBottom: 6, borderRadius: 10,
+              background: arrived ? "rgba(0,200,100,.04)" : "rgba(255,255,255,.03)",
+              border: `1px solid ${arrived ? "rgba(0,200,100,.25)" : "rgba(255,255,255,.08)"}`,
+              cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", transition: "background .15s" }}>
+            {/* Table id pill */}
+            <div style={{ flexShrink: 0, minWidth: 46, textAlign: "center",
+              padding: "6px 6px", borderRadius: 6,
+              background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.25)",
+              color: "#F2C744", fontSize: 11, fontWeight: 900, letterSpacing: .3, lineHeight: 1.1 }}>
+              {tableLabel}
+            </div>
+
+            {/* Name + agg badge + meta */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#fff",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.customerName || "—"}
+                </span>
+                {isAggregator ? (
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 3,
+                    background: "#A02820", color: "#fff", letterSpacing: .4, textTransform: "uppercase" }}>
+                    {aggLabel}{aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+                    background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.55)",
+                    letterSpacing: .4, textTransform: "uppercase" }}>
+                    In-House
+                  </span>
+                )}
               </div>
-              <div style={{ textAlign: "right", minWidth: 0, flex: "0 0 auto" }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{r.customerName || "—"}</div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)" }}>{r.phone || "—"}</div>
+              <div style={{ display: "flex", gap: 8, fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>
+                <span>👥 {r.partySize || "?"}p</span>
+                <span>🕐 {r.arrivalTime || "—"}</span>
+                {arrived && <span style={{ color: "#00C864", fontWeight: 700 }}>✓ {r.actualArrivalTime}</span>}
               </div>
             </div>
 
-            {/* Aggregator manual review banner */}
-            {isAggregator && !r.tableId && (
-              <div style={{ background: "rgba(255,200,0,.08)", border: "1px solid rgba(255,200,0,.35)", color: "#FFC800", fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, marginBottom: 8 }}>
-                ⚠️ Check {src === "zomato" ? "Zomato/District" : src} app for full details
-              </div>
-            )}
-
-            {/* Meta row */}
-            <div style={{ display: "flex", gap: 14, fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 10, flexWrap: "wrap" }}>
-              <span>👥 {r.partySize || "?"}</span>
-              <span>📅 {r.date}</span>
-              <span>🕐 Expected: {r.arrivalTime || "—"}</span>
-              {arrived && <span style={{ color: "#00C864", fontWeight: 700 }}>✓ Arrived: {arrived}</span>}
-            </div>
-
-            {/* Action row */}
-            <div style={{ display: "grid", gridTemplateColumns: arrived ? "1fr 1fr 1fr 1fr" : "1.1fr 1fr 1fr 1fr 1fr", gap: 6 }}>
-              {!arrived && (
-                <button onClick={() => handleArrived(r)} disabled={arrBusy === r._docId}
-                  style={{ padding: "9px 4px", borderRadius: 8, background: "linear-gradient(135deg,#B83227,#8B2520)", border: "none", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer" }}>
-                  {arrBusy === r._docId ? "Marking…" : "🚶 Arrived"}
-                </button>
+            {/* Right side: status pill + Call button */}
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6 }}>
+              {arrived ? (
+                <span style={{ fontSize: 9, fontWeight: 700, padding: "3px 7px", borderRadius: 4,
+                  background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.3)",
+                  color: "#00C864", letterSpacing: .3 }}>✓ ARRIVED</span>
+              ) : (
+                <span style={{ fontSize: 9, fontWeight: 800, padding: "3px 7px", borderRadius: 4,
+                  background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)",
+                  color: "#F2C744", letterSpacing: .3 }}>PENDING</span>
               )}
-              <button onClick={() => setReassignFor(r)}
-                style={{ padding: "9px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", color: "rgba(255,255,255,0.7)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                🔄 Reassign
-              </button>
-              <button onClick={() => handleCall(r)}
-                style={{ padding: "9px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", color: "rgba(255,255,255,0.7)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                📞 Call
-              </button>
-              <button onClick={() => handleWhatsapp(r)}
-                style={{ padding: "9px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", color: "rgba(255,255,255,0.7)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                📲 WA
-              </button>
-              <button onClick={() => handleCancel(r)} disabled={cancelBusy === r._docId}
-                style={{ padding: "9px 4px", borderRadius: 8, background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#EF4444", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                {cancelBusy === r._docId ? "..." : "✕ Cancel"}
+              <button onClick={(e) => { e.stopPropagation(); handleCall(r); }}
+                title="Call guest"
+                style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 8,
+                  background: "rgba(0,200,100,.1)", border: "1px solid rgba(0,200,100,.35)",
+                  color: "#00C864", fontSize: 13, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>
+                📞
               </button>
             </div>
           </div>
@@ -2141,6 +2313,172 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
       {reassignFor && (
         <ReassignModal reservation={reassignFor} bookedTableIds={bookedTableIds} agentName={agentName} onClose={() => setReassignFor(null)} />
       )}
+
+      {/* 🔴 Detail modal — opens on row tap, shows full meta + actions.
+          Khushi 16 May: aggregator emails (esp. Zomato) only carry name reliably —
+          PAX/TIME/DATE must be hand-editable here at the door. Audit trail kept
+          on the doc via lastEditedAt/lastEditedBy (see updateReservationDetails). */}
+      {expandedDocId && (() => {
+        const r = filtered.find((x) => x._docId === expandedDocId);
+        if (!r) return null;
+        // Canonical bucket for styling; raw brand name for label lookups.
+        const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
+        const ss = SRC_STYLES[src] || SRC_STYLES.inhouse;
+        const arrived = r.actualArrivalTime;
+        const tableLabel = r.tableId || "(unassigned)";
+        const isAggregator = src !== "inhouse";
+        const aggName = (r.aggregator || r.source || "inhouse").toLowerCase();
+        const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
+        return (
+          <div onClick={() => setExpandedDocId(null)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9998,
+              display: "flex", alignItems: "flex-start", justifyContent: "center",
+              padding: "20px 12px", overflowY: "auto" }}>
+            <div onClick={(e) => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 520, background: "#0C0816",
+                border: "1.5px solid rgba(242,199,68,.4)", borderRadius: 14, padding: 18,
+                fontFamily: "'Space Grotesk', sans-serif" }}>
+              {/* Header */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900, color: "#F2C744", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    {tableLabel}
+                    <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: ".8px", padding: "3px 7px", borderRadius: 5, background: ss.bg, border: `1px solid ${ss.border}`, color: ss.color }}>
+                      {ss.label}{isAggregator && aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginTop: 4 }}>{r.floorLabel || r.floor || ""}</div>
+                </div>
+                <button onClick={() => setExpandedDocId(null)}
+                  style={{ padding: "6px 12px", borderRadius: 6, background: "transparent",
+                    border: "1px solid rgba(242,199,68,.4)", color: "#F2C744",
+                    fontSize: 11, fontWeight: 800, cursor: "pointer", letterSpacing: .5 }}>
+                  ✕ CLOSE
+                </button>
+              </div>
+
+              {/* Customer */}
+              <div style={{ marginBottom: 14, padding: 12, background: "rgba(255,255,255,.03)", borderRadius: 10 }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>{r.customerName || "—"}</div>
+                {/* Phone moved below into the editable grid (Khushi 16 May). */}
+              </div>
+
+              {/* Aggregator warning */}
+              {isAggregator && !r.tableId && (
+                <div style={{ background: "rgba(255,200,0,.08)", border: "1px solid rgba(255,200,0,.35)", color: "#FFC800", fontSize: 12, fontWeight: 700, padding: "8px 12px", borderRadius: 8, marginBottom: 12 }}>
+                  ⚠️ Check {src === "zomato" ? "Zomato/District" : src} app for full details
+                </div>
+              )}
+
+              {/* ── EDITABLE META (Khushi: Zomato parser only gets name, so
+                  pax / expected time / date must be hand-editable here). */}
+              {(() => {
+                const paxNum = parseInt(editPax || "0", 10);
+                const phoneTrim = (editPhone || "").trim();
+                const dirty =
+                  paxNum !== (r.partySize || 0) ||
+                  (editTime || "") !== (r.arrivalTime || "") ||
+                  (editDate || "") !== (r.date || "") ||
+                  phoneTrim !== (r.phone || "");
+                const editLabel: React.CSSProperties = { fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,.4)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 };
+                const editInput: React.CSSProperties = {
+                  width: "100%", padding: "8px 10px", borderRadius: 6,
+                  background: "rgba(0,0,0,.4)", border: "1px solid rgba(242,199,68,.25)",
+                  color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: "inherit", outline: "none",
+                };
+                return (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                      <div style={{ padding: 10, background: "rgba(255,255,255,.03)", borderRadius: 8 }}>
+                        <div style={editLabel}>👥 Party (edit)</div>
+                        <input type="number" min={1} max={50} value={editPax}
+                          onChange={(e) => setEditPax(e.target.value)} style={editInput} />
+                      </div>
+                      <div style={{ padding: 10, background: "rgba(255,255,255,.03)", borderRadius: 8 }}>
+                        <div style={editLabel}>🕐 Expected (edit)</div>
+                        <input type="text" placeholder="9:30 PM" value={editTime}
+                          onChange={(e) => setEditTime(e.target.value)} style={editInput} />
+                      </div>
+                      <div style={{ padding: 10, background: "rgba(255,255,255,.03)", borderRadius: 8 }}>
+                        <div style={editLabel}>📅 Date (edit)</div>
+                        <input type="date" value={editDate}
+                          onChange={(e) => setEditDate(e.target.value)} style={editInput} />
+                      </div>
+                      <div style={{ padding: 10, background: arrived ? "rgba(0,200,100,.08)" : "rgba(255,255,255,.03)", borderRadius: 8 }}>
+                        <div style={editLabel}>Status</div>
+                        <div style={{ fontSize: 14, fontWeight: 800, color: arrived ? "#00C864" : "#F2C744", marginTop: 2 }}>
+                          {arrived ? `✓ ${arrived}` : "PENDING"}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 📞 PHONE (Khushi 16 May) — Zomato parser leaves this
+                        blank; door staff types it in here. Saves to the same
+                        Firestore doc that admin/reports/Sheets sync all read,
+                        so the number propagates everywhere automatically. */}
+                    <div style={{ padding: 10, background: "rgba(255,255,255,.03)", borderRadius: 8, marginBottom: 10 }}>
+                      <div style={editLabel}>📞 Phone (edit)</div>
+                      <input type="tel" inputMode="tel" placeholder="10-digit mobile e.g. 9611111261"
+                        value={editPhone}
+                        onChange={(e) => setEditPhone(e.target.value)}
+                        style={editInput} />
+                      {phoneTrim && !/^[+\d][\d\s-]{8,18}$/.test(phoneTrim) && (
+                        <div style={{ fontSize: 10, color: "#F87171", marginTop: 4, fontWeight: 700 }}>
+                          ⚠ Doesn't look like a valid phone — save will be rejected.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Save bar — only appears once a field is dirty so staff
+                        never push accidental writes. Fallback: if save fails
+                        the alert tells the captain to retry or note manually. */}
+                    {dirty && (
+                      <button
+                        disabled={editBusy}
+                        onClick={async () => {
+                          if (editBusy) return;
+                          setEditBusy(true);
+                          try {
+                            await updateReservationDetails(r._docId, {
+                              partySize: paxNum > 0 ? paxNum : undefined,
+                              arrivalTime: editTime || undefined,
+                              date: editDate || undefined,
+                              phone: phoneTrim || undefined,
+                            }, agentName);
+                            toast({ title: "✓ Updated", description: "Pax / time / date / phone saved everywhere (admin · reports · sheets).", duration: 3500 });
+                          } catch (err: any) {
+                            alert("Save failed: " + (err?.message || "Try again or note on paper."));
+                          }
+                          setEditBusy(false);
+                        }}
+                        style={{ width: "100%", padding: "12px", borderRadius: 8, marginBottom: 12,
+                          background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none",
+                          color: "#0A0A0A", fontSize: 13, fontWeight: 900, letterSpacing: .6, cursor: "pointer" }}>
+                        {editBusy ? "Saving…" : "💾 SAVE CHANGES"}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+
+              {/* ── ACTION BUTTONS (Khushi 16 May: keep ONLY Arrived + Reassign.
+                  Call stays as the icon on the row itself; WA + Cancel removed). */}
+              <div style={{ display: "grid", gridTemplateColumns: arrived ? "1fr" : "1.2fr 1fr", gap: 6 }}>
+                {!arrived && (
+                  <button onClick={() => handleArrived(r)} disabled={arrBusy === r._docId}
+                    style={{ padding: "13px 4px", borderRadius: 8, background: "linear-gradient(135deg,#B83227,#8B2520)", border: "none", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer" }}>
+                    {arrBusy === r._docId ? "Marking…" : "🚶 Arrived"}
+                  </button>
+                )}
+                <button onClick={() => { setReassignFor(r); setExpandedDocId(null); }}
+                  style={{ padding: "13px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", color: "rgba(255,255,255,0.85)", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+                  🔄 Reassign
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2161,26 +2499,115 @@ type WalkInChoice = "guestlist" | "cover" | "onlyentry" | "group" | "agg";
 // Switching categories preserves name/email/phone. Aggregator stays
 // reachable via a small link below the CTA (kept out of the 2×2 grid
 // because the customer-facing modal only shows 4 cards).
-function NewWalkInModal({ agentName, onClose }: { agentName: string; onClose: () => void }) {
+function NewWalkInModal({ agentName, onClose, onActivateCover }: { agentName: string; onClose: () => void; onActivateCover: (b: HodBooking) => void }) {
   const [showAgg, setShowAgg] = useState(false);
   if (showAgg) {
     return <AddAggregatorBookingModal agentName={agentName} onClose={onClose} onBack={() => setShowAgg(false)} />;
   }
-  return <UnifiedWalkInModal agentName={agentName} onClose={onClose} onAggregator={() => setShowAgg(true)} />;
+  return <UnifiedWalkInModal agentName={agentName} onClose={onClose} onAggregator={() => setShowAgg(true)} onActivateCover={onActivateCover} />;
 }
 
 type WalkInKind = "guestlist" | "onlyentry" | "cover" | "group";
 
-// Tier presets mirror the hodclub.in modal exactly.
-const TIER_PRICES: Record<"Stag" | "Couple" | "Ladies", { price: number; label: string; sub: string }> = {
-  Stag:   { price: 500, label: "STAG",   sub: "1 Person · Cover Redeemable" },
-  Couple: { price: 999, label: "COUPLE", sub: "2 Persons · Cover Redeemable" },
-  Ladies: { price: 0,   label: "LADIES", sub: "Complimentary Entry" },
+// Tier preset DEFAULTS — used only when the selected event has no
+// stagPrice / couplePrice configured. Real prices come from the event
+// doc (see `tierPrices` derived below) so changing prices in Events
+// Admin instantly flows to BOTH the customer site (hodclub.in) and the
+// door tablet — no double-edit required.
+const TIER_PRICE_DEFAULTS: Record<"Stag" | "Couple" | "Ladies", { price: number; label: string; sub: string }> = {
+  Stag:   { price: 999,  label: "STAG",   sub: "1 Person · Cover Redeemable" },
+  Couple: { price: 1499, label: "COUPLE", sub: "2 Persons · Cover Redeemable" },
+  Ladies: { price: 0,    label: "LADIES", sub: "Complimentary Entry" },
 };
 
+// ── Walk-In modal helpers (Khushi spec 16 May 2026) ─────────────────────────
+// actionBtn: success-screen button factory in the chosen accent color.
+// QrPopup:   shows a scannable QR for any URL (uses public api.qrserver.com
+//            so we don't ship a QR npm dep — fallback: URL is rendered as
+//            plain text below the image so the door girl can read it out).
+// openClientSideRazorpay: amount-only Razorpay popup mirroring the customer
+//            site (hodclub.in). Used for "ONLINE" payment in the door modal.
+//            The bartender-side Bar Mode recharge keeps using the server-
+//            verified createWalletOrder flow — that's a separate fraud
+//            surface and out of scope here. Server-verified upgrade for
+//            door bookings is queued for the next chunk (will bind paymentId
+//            → bookingRef in Firestore via createWalletOrder).
+const _actionBtn = (color: string): React.CSSProperties => ({
+  padding: "12px 8px", borderRadius: 10, border: `1.5px solid ${color}`,
+  background: `${color}1A`, color, fontFamily: "inherit",
+  fontSize: 12, fontWeight: 900, letterSpacing: .4, cursor: "pointer",
+});
+
+function QrPopup({ url, title, onClose }: { url: string; title: string; onClose: () => void }) {
+  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=${encodeURIComponent(url)}`;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid #C8A645", borderRadius: 18, padding: 22, maxWidth: 380, width: "100%", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900, color: "#C8A645", marginBottom: 12 }}>{title}</div>
+        <div style={{ background: "#fff", padding: 10, borderRadius: 12, display: "inline-block", marginBottom: 12 }}>
+          <img src={qrSrc} alt="QR" style={{ width: 280, height: 280, display: "block" }} />
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", wordBreak: "break-all", marginBottom: 14, fontFamily: "monospace" }}>{url}</div>
+        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 10, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "none", color: "#0a0a0a", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+// Auto-fire WhatsApp confirmation right after the booking lands. Uses the
+// correct approved Meta template for each booking type so it's delivered
+// even if the customer hasn't pinged HOD in the last 24h. Fire-and-forget
+// — never blocks the UI; logs result to console for debugging.
+function _autoFireBookingWhatsApp(opts: {
+  ref: string; name: string; cleanPhone: string;
+  kind: WalkInKind; eventTitle: string;
+  tier: string; partySize: number; tableType: string;
+}) {
+  const { ref, name, cleanPhone, kind, eventTitle, tier, partySize, tableType } = opts;
+  const tplName =
+    kind === "guestlist" ? "guestlist_confirmed" :
+    kind === "cover"     ? "cover_confirmed" :
+    "booking_confirmed";
+  const dateNice = formatBookingDateNice(TODAY_STR());
+  const entryLabel =
+    kind === "cover"     ? tier.toUpperCase() :
+    kind === "group"     ? `${partySize} GUESTS · ${tableType.toUpperCase()}` :
+    kind === "onlyentry" ? "ENTRY ONLY" :
+    tier.toUpperCase();
+  const link = `https://hodclub.in/?wallet=${encodeURIComponent(ref)}`;
+  const fallbackText =
+    `Hi ${name}, your HOD booking is confirmed! 🎉\n\n` +
+    `🎉 Event: ${eventTitle || "Tonight at H.O.D"}\n` +
+    `📅 ${dateNice}\n` +
+    `🚪 ${entryLabel}\n\n` +
+    `View ticket: ${link}\n\n` +
+    `📍 House of Dopamine, Koramangala`;
+  // 🔴 BUGFIX 2026-05-16 (Khushi) — walk-in guestlist WhatsApp was using
+  // cover_confirmed-style params [name, eventTitle, date, entryLabel, link],
+  // which the Meta-approved `guestlist_confirmed` template REJECTS because
+  // its body expects [name, type(STAG/COUPLE/LADIES), date, "FREE before 9PM",
+  // link] (matches the customer-site send at hodclub-patched line 3151).
+  // Param mismatch → Meta silently drops → customer never receives. Align.
+  const templateParams = kind === "guestlist"
+    ? [name, tier.toUpperCase() || "STAG", dateNice, "FREE before 9 PM", link]
+    : [name, eventTitle || "Tonight at H.O.D", dateNice, entryLabel, link];
+  sendWhatsAppViaMeta({
+    phone: cleanPhone,
+    template: { name: tplName, params: templateParams },
+    fallbackText,
+  }).then((res) => {
+    console.log("[door][auto-wa]", tplName, res.ok ? `✓ via ${res.via}` : `✗ ${res.error}`);
+    if (ref && res.ok) logNotificationOutcome(ref, res.via === "template"
+      ? { status: "sent_template", recipient: cleanPhone }
+      : { status: "sent_text", recipient: cleanPhone });
+  }).catch((e) => console.warn("[door][auto-wa] error", e));
+}
+
+type WalkInPayMethod = "cash" | "upi" | "card" | "split";
+
 function UnifiedWalkInModal({
-  agentName, onClose, onAggregator,
-}: { agentName: string; onClose: () => void; onAggregator: () => void }) {
+  agentName, onClose, onAggregator, onActivateCover,
+}: { agentName: string; onClose: () => void; onAggregator: () => void; onActivateCover: (b: HodBooking) => void }) {
   // Default tab = Buy Covers (matches the screenshot's active state).
   const [kind, setKind] = useState<WalkInKind>("cover");
 
@@ -2193,37 +2620,93 @@ function UnifiedWalkInModal({
   const [tickets, setTickets] = useState(1);
 
   // Entry-Only flat price (₹500 default) and Group min-spend.
-  const [entryPrice, setEntryPrice] = useState(500);
+  // 2026-05-16 (Khushi v3): hold price as a STRING so the input always
+  // reflects exactly what's typed — fixes the "0500" leading-zero bug
+  // where a controlled numeric input wouldn't re-sync DOM when state
+  // didn't change. Parsed to int via `entryPrice` getter below.
+  const [entryPriceStr, setEntryPriceStr] = useState("500");
+  const entryPrice = parseInt(entryPriceStr || "0", 10) || 0;
   const [partySize, setPartySize] = useState(4);
-  const [tableType, setTableType] = useState<"Standard" | "VIP">("Standard");
-  const [groupMinSpend, setGroupMinSpend] = useState(15000);
+  // Hoisted to top-level (React rules-of-hooks): activating-state for the
+  // one-click ⚡ ACTIVATE WALLET button on the success screen.
+  const [activating, setActivating] = useState(false);
+  // 2026-05-16 (Khushi v5): Group tab is now a 1:1 copy of hodclub.in's
+  // "VIP TABLES / GROUP" tab — three options:
+  //   1. GROUP · per head    (perHeadPrice × partySize, no table)
+  //   2. TABLE FOR 4         (flat table4Price, gf4Stock left)
+  //   3. VVIP TABLE FOR 6    (flat vipPrice, vvipStock left)
+  // All prices + stocks pull from the selected event so Events Admin is
+  // the single source of truth across customer site + door tablet.
+  const [groupMode, setGroupMode] = useState<"entry" | "table4" | "vvip">("entry");
+
+  // 2026-05-16 (Khushi v2): payment method picker — 4 ways the door girl
+  // can collect (cash / upi / card / split). ONLINE was removed at her
+  // request — door walk-ins are always in-person; if customer wants to
+  // pay online they use hodclub.in directly. UPI / card txn refs also
+  // removed because the EDC machine prints its own receipt.
+  const [payMethod, setPayMethod] = useState<WalkInPayMethod>("cash");
+  const [splitCash, setSplitCash] = useState(0);
+  const [splitUpi, setSplitUpi] = useState(0);
+  const [splitCard, setSplitCard] = useState(0);
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [done, setDone] = useState<{ ref: string } | null>(null);
+  const [done, setDone] = useState<{ ref: string; phone: string; isCover: boolean; total: number } | null>(null);
+  const [showQrModal, setShowQrModal] = useState<{ url: string; title: string } | null>(null);
+  const [actionMsg, setActionMsg] = useState("");
 
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [eventId, setEventId] = useState<string>("");
   useEffect(() => {
+    // 2026-05-16 (Khushi v2): silently auto-pick tonight's first event.
+    // Door girl never books for a future date — the EVENT dropdown was
+    // removed. If multiple events tonight, take the first; if none, leave
+    // empty (booking still saves with eventTitle="").
     const unsub = subscribeToHodEvents((all) => {
       setEvents(all);
       const today = TODAY_STR();
       const tonight = all.filter((e) => (e.date || "") === today);
-      if (tonight.length === 1) setEventId(tonight[0].id);
+      if (tonight.length > 0) setEventId(tonight[0].id);
     });
     return unsub;
   }, []);
+
+  // 2026-05-16 (Khushi v3): pull tier prices from the selected event so
+  // changing prices in Events Admin flows here automatically. Falls back
+  // to defaults if the event hasn't set them yet.
+  const selectedEvent = events.find((e) => e.id === eventId);
+  const tierPrices: typeof TIER_PRICE_DEFAULTS = {
+    Stag:   { ...TIER_PRICE_DEFAULTS.Stag,   price: selectedEvent?.stagPrice   ?? TIER_PRICE_DEFAULTS.Stag.price },
+    Couple: { ...TIER_PRICE_DEFAULTS.Couple, price: selectedEvent?.couplePrice ?? TIER_PRICE_DEFAULTS.Couple.price },
+    Ladies: TIER_PRICE_DEFAULTS.Ladies,
+  };
 
   // ── Derived totals ────────────────────────────────────────────────────────
   // Buy Covers: tier price × tickets (Ladies always free regardless of qty).
   // Entry Only: entryPrice × tickets.
   // Guest List: free.
   // Group: min spend / deposit (single line item).
+  // Group pricing pulls from selected event (perHead / table4 / vip) so
+  // it stays in lockstep with hodclub.in. Falls back to defaults if the
+  // event hasn't set them yet (matches customer-site fallbacks line-for-line).
+  const groupPerHead = selectedEvent?.groupPerHeadPrice ?? 500;
+  const table4Flat   = selectedEvent?.table4Price       ?? 5000;
+  const vvipFlat     = selectedEvent?.vipPrice          ?? 15000;
+  const gf4Stock     = selectedEvent?.gf4Stock          ?? 4;
+  const vvipStock    = selectedEvent?.vvipStock         ?? 2;
+
+  const groupUnitFor = (m: "entry" | "table4" | "vvip") =>
+    m === "vvip" ? vvipFlat : m === "table4" ? table4Flat : groupPerHead;
+  const groupSeatsFor = (m: "entry" | "table4" | "vvip") =>
+    m === "vvip" ? 6 : m === "table4" ? 4 : partySize;
+
   const unit =
-    kind === "cover" ? TIER_PRICES[tier].price :
+    kind === "cover" ? tierPrices[tier].price :
     kind === "onlyentry" ? entryPrice :
-    kind === "group" ? groupMinSpend : 0;
-  const qty = kind === "group" ? 1 : tickets;
+    kind === "group" ? groupUnitFor(groupMode) : 0;
+  const qty =
+    kind === "group" ? (groupMode === "entry" ? partySize : 1) :
+    tickets;
   const total = Math.max(0, unit * qty);
   const eventTitle = events.find((e) => e.id === eventId)?.title || "";
 
@@ -2232,21 +2715,63 @@ function UnifiedWalkInModal({
     kind === "group" ? partySize :
     tickets;
 
+  // Payment validation helpers.
+  const splitTotal = (splitCash || 0) + (splitUpi || 0) + (splitCard || 0);
+  const splitOk = payMethod !== "split" || splitTotal === total;
+
+  // "+ NEXT WALK-IN" — preserves tab + event + payMethod, clears identity
+  // fields and counters so the next customer starts clean without making
+  // the door girl re-pick the booking type.
+  const resetForNext = () => {
+    setName(""); setEmail(""); setPhone("");
+    setTickets(1);
+    setSplitCash(0); setSplitUpi(0); setSplitCard(0);
+    setErr(""); setActionMsg(""); setDone(null); setBusy(false);
+  };
+
   const submit = async () => {
     setErr("");
     if (!name.trim()) { setErr("Enter guest name"); return; }
     const cleanPhone = phone.replace(/\D/g, "");
     if (cleanPhone.length < 10) { setErr("Enter a 10-digit phone number"); return; }
+    if (kind !== "guestlist" && total > 0 && payMethod === "split") {
+      if (splitCash < 0 || splitUpi < 0 || splitCard < 0) {
+        setErr("Split amounts cannot be negative"); return;
+      }
+      if (!splitOk) {
+        setErr(`Split adds to ₹${splitTotal.toLocaleString("en-IN")} — must equal ₹${total.toLocaleString("en-IN")}`);
+        return;
+      }
+    }
     setBusy(true);
     try {
+      let savedRef = "";
       if (kind === "guestlist") {
         const r = await createWalkInGuestlistEntry({
           name, email, phone, eventId, eventTitle,
           type: tier.toLowerCase(),
           staffName: agentName,
         });
-        setDone({ ref: r.ref });
+        savedRef = r.ref;
+        // 🔴 BUGFIX 2026-05-16 (Khushi) — auto-mint ₹0 wallet immediately so
+        // the customer's hodclub.in/?wallet=GL-XXX link from the WhatsApp
+        // confirmation opens directly into the wallet+menu view. Previously
+        // they were stuck on the "Guest List Confirmed" QR page until door
+        // staff clicked Activate Cover / Check In / Free Entry separately.
+        ensureZeroBalanceCoverForGuest({
+          bookingRef: r.ref,
+          sourceDocId: r.ref,
+          name: name.trim(),
+          phone: cleanPhone,
+          source: "guestlist",
+          eventId: eventId || "",
+          eventTitle: eventTitle || "",
+          staffName: agentName,
+        }).catch(() => {});
+        setDone({ ref: r.ref, phone: cleanPhone, isCover: false, total: 0 });
       } else {
+        // EDC machine prints its own receipt — we don't store a manual ref.
+        const paymentRef = "";
         const r = await createWalkInTicketBooking({
           kind: kind === "group" ? "group" : kind === "onlyentry" ? "onlyentry" : "cover",
           name, email, phone,
@@ -2255,13 +2780,52 @@ function UnifiedWalkInModal({
           tier: kind === "cover" ? tier : "",
           type: kind === "cover" ? tier.toLowerCase() : kind,
           eventId, eventTitle,
-          partySize: kind === "group" ? partySize : undefined,
-          tableType: kind === "group" ? tableType : undefined,
+          partySize: kind === "group" ? groupSeatsFor(groupMode) : undefined,
+          tableType: kind === "group"
+            ? (groupMode === "vvip" ? "VVIP" : groupMode === "table4" ? "TABLE4" : "")
+            : undefined,
           notes: "",
           staffName: agentName,
+          paymentMethod: total === 0 ? "comp" : payMethod,
+          paymentRef,
+          paymentSplit: payMethod === "split"
+            ? { cash: splitCash, upi: splitUpi, card: splitCard }
+            : undefined,
         });
-        setDone({ ref: r.ref });
+        savedRef = r.ref;
+        // 🔴 BUGFIX 2026-05-16 (Khushi) — entry-only walk-ins must also get a
+        // ₹0 wallet so the customer's wallet link opens to the menu (with ₹0
+        // balance + "TOP UP TO ORDER"), exactly like guestlist. Cover walk-ins
+        // mint a real wallet in their own activation flow downstream — don't
+        // duplicate here. Group/table walk-ins are handled by the captain.
+        if (kind === "onlyentry") {
+          ensureZeroBalanceCoverForGuest({
+            bookingRef: r.ref,
+            sourceDocId: r.ref,
+            name: name.trim(),
+            phone: cleanPhone,
+            source: "booking",
+            eventId: eventId || "",
+            eventTitle: eventTitle || "",
+            staffName: agentName,
+          }).catch(() => {});
+        }
+        setDone({ ref: r.ref, phone: cleanPhone, isCover: kind === "cover", total });
       }
+
+      // 2026-05-16 (Khushi v2): auto-fire WhatsApp confirmation as soon as
+      // the booking lands. Email is auto-sent server-side by the Cloud
+      // Function `sendBookingEmail` (see hod-functions-patch/DEPLOY-EMAIL.md).
+      // Fire-and-forget — never blocks the UI / next walk-in.
+      _autoFireBookingWhatsApp({
+        ref: savedRef, name: name.trim(), cleanPhone,
+        kind, eventTitle,
+        tier: kind === "cover" ? tier : (kind === "guestlist" ? tier : ""),
+        partySize: kind === "group" ? groupSeatsFor(groupMode) : partySize,
+        tableType: kind === "group"
+          ? (groupMode === "vvip" ? "VVIP TABLE FOR 6" : groupMode === "table4" ? "TABLE FOR 4" : "GROUP")
+          : "",
+      });
     } catch (e: any) {
       setErr(e?.message || "Could not save booking");
     } finally {
@@ -2269,10 +2833,16 @@ function UnifiedWalkInModal({
     }
   };
 
-  const ctaLabel =
-    kind === "guestlist" ? "✓ Add to Guest List" :
-    total === 0 ? "✓ Confirm (No Charge)" :
-    `💵 Collect ₹${total.toLocaleString("en-IN")} & Confirm`;
+  const ctaLabel = (() => {
+    if (kind === "guestlist") return "✓ Add to Guest List";
+    if (total === 0) return "✓ Confirm (No Charge)";
+    const verb = payMethod === "split" ? "Collect Split" : "Collect";
+    const icon =
+      payMethod === "cash"  ? "💵" :
+      payMethod === "upi"   ? "📱" :
+      payMethod === "card"  ? "💳" : "🪓";
+    return `${icon} ${verb} ₹${total.toLocaleString("en-IN")} & Confirm`;
+  })();
 
   // ── Reusable styles ──────────────────────────────────────────────────────
   const lbl: React.CSSProperties = { fontSize: 10, fontWeight: 800, color: "rgba(200,166,69,0.85)", letterSpacing: 1.2, marginBottom: 8 };
@@ -2282,7 +2852,10 @@ function UnifiedWalkInModal({
   const catCard = (active: boolean, mini = false): React.CSSProperties => ({
     padding: mini ? "12px 10px" : "16px 12px",
     borderRadius: 12,
-    border: active ? "2px solid #C8A645" : "1.5px solid rgba(255,255,255,.1)",
+    // 2026-05-16 (Khushi v3): all 4 tabs now have a soft gold outline so
+    // they read as "tappable cards" even when not selected. Active state
+    // promotes to a thicker solid gold border + filled background.
+    border: active ? "2px solid #C8A645" : "1.5px solid rgba(200,166,69,.45)",
     background: active ? "linear-gradient(160deg,rgba(242,199,68,.18),rgba(242,199,68,.06))" : "rgba(255,255,255,.025)",
     cursor: "pointer", color: "#fff", fontFamily: "inherit",
     textAlign: "center", transition: "transform .12s, border-color .12s",
@@ -2290,16 +2863,161 @@ function UnifiedWalkInModal({
 
   // Done screen (success confirmation, unchanged).
   if (done) {
+    // 2026-05-16 (Khushi v2): /menu page doesn't exist on hodclub.in yet —
+    // point at the customer site root which has menu + wallet inline.
+    // 2026-05-16 (Khushi v3): SEND MENU + SHOW QR now both use the WALLET
+    // link (https://hodclub.in/?wallet=REF), matching the auto-fired
+    // WhatsApp message exactly. The customer's wallet page on hodclub.in
+    // already shows the menu, so 1 link covers both. No more 2 messages.
+    const walletUrl = `https://hodclub.in/?wallet=${encodeURIComponent(done.ref)}`;
+
+    // 📲 RESEND WALLET — fallback in case the auto-fire WhatsApp didn't
+    // land (Meta rate limit / customer blocked etc). Re-uses the SAME
+    // approved template the auto-fire used — guarantees same message.
+    // FALLBACK: if Meta rejects we open the QR popup as offline path.
+    const sendMenu = async () => {
+      setActionMsg("Re-sending wallet link on WhatsApp…");
+      const tplName =
+        kind === "guestlist" ? "guestlist_confirmed" :
+        kind === "cover"     ? "cover_confirmed" :
+        "booking_confirmed";
+      const dateNice = formatBookingDateNice(TODAY_STR());
+      const entryLabel =
+        kind === "cover"     ? tier.toUpperCase() :
+        kind === "group"     ? (
+          groupMode === "vvip"   ? "VVIP TABLE FOR 6" :
+          groupMode === "table4" ? "TABLE FOR 4" :
+          `${partySize} GUESTS · GROUP`
+        ) :
+        kind === "onlyentry" ? "ENTRY ONLY" :
+        tier.toUpperCase();
+      const r = await sendWhatsAppViaMeta({
+        phone: done.phone,
+        template: { name: tplName, params: [name || "Guest", eventTitle || "Tonight at H.O.D", dateNice, entryLabel, walletUrl] },
+        fallbackText: `Hi ${name}, your HOD wallet is ready! 🎉\nView ticket: ${walletUrl}`,
+      });
+      if (r.ok) setActionMsg(`✅ Wallet link re-sent on WhatsApp (${r.via})`);
+      else { setActionMsg("⚠ WhatsApp failed — showing QR fallback"); setShowQrModal({ url: walletUrl, title: "📷 SCAN WALLET" }); }
+    };
+
+    // 📷 SHOW QR — instant offline path. Customer scans the WALLET URL
+    // (not menu) — opens their personal wallet page on hodclub.in.
+    const showMenuQr = () => setShowQrModal({ url: walletUrl, title: "📷 SCAN WALLET" });
+
+    // ⚡ ACTIVATE COVER / WALLET (Khushi v6 — 16 May 2026)
+    // ONE-CLICK INSTANT: no modal, no second amount prompt — just take the
+    // total she already collected on the previous screen and credit it
+    // straight into the wallet. Confirmation popup only.
+    //
+    // Wallet amount rules (per Khushi):
+    //   • cover / group   → wallet = total collected (₹999, ₹5000, etc.)
+    //   • entry-only      → wallet = ₹0 (entry fee, NOT redeemable)
+    //   • guestlist       → wallet = ₹0 (free entry; customer tops up later)
+    //
+    // Two write paths because activateCoverForBooking() rejects amount<1:
+    //   • amount > 0 → activateCoverForBooking() (full cover doc + audit)
+    //   • amount = 0 → ensureZeroBalanceCoverForGuest() (mints empty wallet,
+    //     bartender / customer can top up from there)
+    const activateCover = async () => {
+      if (activating) return;
+      setActivating(true);
+      try {
+        const cleanPh = (phone || "").replace(/\D/g, "").slice(-10);
+        const walletAmount = (kind === "cover" || kind === "group") ? (done.total || 0) : 0;
+        console.log("[door][activate] START", { ref: done.ref, kind, walletAmount, payMethod, name });
+
+        if (walletAmount > 0) {
+          const synthetic: HodBooking = {
+            id: done.ref, ref: done.ref, name, phone: cleanPh, email,
+            eventId, eventTitle, date: TODAY_STR(),
+            total: done.total || 0,
+            paymentId: payMethod === "cash" ? `cash_${done.ref}` : "",
+          } as HodBooking;
+          try {
+            const r = await activateCoverForBooking({
+              booking: synthetic, amount: walletAmount,
+              paymentMethod: payMethod as any, staffName: agentName,
+            });
+            console.log("[door][activate] WROTE COVER DOC", { docId: r.id, ref: r.cover.ref, balance: r.cover.coverBalance });
+          } catch (writeErr: any) {
+            const m = String(writeErr?.message || writeErr);
+            if (!/already activated/i.test(m)) throw writeErr;
+            console.warn("[door][activate] write said already-activated, will read-back", m);
+          }
+        } else {
+          await ensureZeroBalanceCoverForGuest({
+            bookingRef: done.ref, sourceDocId: done.ref,
+            name, phone: cleanPh,
+            source: kind === "guestlist" ? "guestlist" : "booking",
+            eventId, eventTitle, staffName: agentName,
+          });
+          console.log("[door][activate] WROTE ZERO-BALANCE COVER", { ref: done.ref });
+        }
+
+        // ✅ READ-BACK VERIFICATION — fetch the cover doc we just wrote and
+        // surface its REAL state in the popup. If the write silently failed
+        // (rules / network / auth) the read returns null and we say so loudly.
+        const verify = await getCoverForBooking(done.ref);
+        console.log("[door][activate] READ-BACK", verify ? {
+          id: verify.id, ref: (verify as any).ref, balance: verify.coverBalance,
+          activated: verify.coverActivated, name: verify.name,
+        } : "NULL — doc not found in Firestore!");
+
+        if (verify && (verify.coverBalance || 0) > 0) {
+          setActionMsg(`✅ WALLET LIVE · ₹${(verify.coverBalance || 0).toLocaleString("en-IN")} READY FOR ${name.toUpperCase()} · CUSTOMER CAN ORDER NOW`);
+        } else if (verify) {
+          setActionMsg(`✅ WALLET CREATED FOR ${name.toUpperCase()} (₹${(verify.coverBalance || 0).toLocaleString("en-IN")}) · TOP UP AT BAR / PHONE`);
+        } else {
+          setActionMsg(`⚠ WRITE FAILED — NO COVER DOC FOR ${done.ref}. CHECK INTERNET / FIREBASE RULES. RETRY OR ASK MANAGER.`);
+        }
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        console.error("[door][activate] FATAL", msg, e);
+        setActionMsg(`⚠ COULD NOT ACTIVATE: ${msg}`);
+      } finally {
+        setActivating(false);
+      }
+    };
+
     return (
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-        <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid #C8A645", borderRadius: 22, padding: 28, width: "100%", maxWidth: 380, textAlign: "center" }}>
-          <div style={{ fontSize: 64, marginBottom: 10 }}>✅</div>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 24, fontWeight: 900, color: "#C8A645", marginBottom: 6 }}>Booking Confirmed</div>
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginBottom: 4 }}>{name}</div>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,.5)", marginBottom: 18 }}>{done.ref}</div>
-          <button onClick={onClose} style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "none", color: "#0a0a0a", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>Done</button>
+      <>
+        <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid #C8A645", borderRadius: 22, padding: 24, width: "100%", maxWidth: 420, textAlign: "center" }}>
+            <div style={{ fontSize: 56, marginBottom: 6 }}>✅</div>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#C8A645", marginBottom: 4 }}>Booking Confirmed</div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginBottom: 2 }}>{name}{done.total > 0 ? ` · ₹${done.total.toLocaleString("en-IN")}` : ""}</div>
+            <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,.5)", marginBottom: 14 }}>{done.ref}</div>
+
+            {/* 4 action buttons (Khushi spec 16 May) */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+              <button onClick={sendMenu}     style={_actionBtn("#10B981")}>📲 RESEND WALLET</button>
+              <button onClick={showMenuQr}   style={_actionBtn("#3B82F6")}>📷 SHOW QR</button>
+              {/* ACTIVATE COVER / WALLET — shown for ALL booking kinds.
+                  Cover/group → credits wallet with collected total.
+                  Entry-only / guestlist → mints ₹0 wallet (top up later). */}
+              <button onClick={activateCover} disabled={activating} style={{
+                ..._actionBtn("#C8A645"), gridColumn: "1 / span 2",
+                opacity: activating ? .55 : 1, cursor: activating ? "wait" : "pointer",
+              }}>
+                {activating ? "⏳ ACTIVATING…" :
+                  ((kind === "cover" || kind === "group") && (done.total || 0) > 0
+                    ? `⚡ ACTIVATE WALLET · ₹${(done.total || 0).toLocaleString("en-IN")}`
+                    : "⚡ CREATE WALLET (₹0)")}
+              </button>
+              <button onClick={resetForNext} style={{ ..._actionBtn("#F59E0B"), gridColumn: "1 / span 2" }}>+ NEXT WALK-IN</button>
+            </div>
+
+            {actionMsg && (
+              <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(200,166,69,.25)", color: "rgba(255,255,255,.85)", padding: 10, borderRadius: 10, fontSize: 11.5, marginBottom: 12, lineHeight: 1.4 }}>
+                {actionMsg}
+              </div>
+            )}
+
+            <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.18)", color: "rgba(255,255,255,.7)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Close</button>
+          </div>
         </div>
-      </div>
+        {showQrModal && <QrPopup url={showQrModal.url} title={showQrModal.title} onClose={() => setShowQrModal(null)} />}
+      </>
     );
   }
 
@@ -2316,7 +3034,9 @@ function UnifiedWalkInModal({
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
           <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist")}>
             <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "guestlist" ? "#C8A645" : "rgba(255,255,255,.85)" }}>GUEST LIST</div>
-            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(252,165,165,.85)", fontWeight: 700, letterSpacing: .8 }}>CLOSED · 8PM</div>
+            {/* 2026-05-16 (Khushi v3): "CLOSED · 8PM" removed — door can
+                guestlist regulars/VIPs at the gate till 10 PM IST. */}
+            <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(0,200,100,.85)", fontWeight: 700, letterSpacing: .8 }}>FREE ENTRY</div>
           </button>
           <button onClick={() => setKind("onlyentry")} style={catCard(kind === "onlyentry")}>
             <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "onlyentry" ? "#C8A645" : "rgba(255,255,255,.85)" }}>ENTRY ONLY</div>
@@ -2337,19 +3057,6 @@ function UnifiedWalkInModal({
           ✅ Skip the queue · Cover charge 100% redeemable on F&amp;B
         </div>
 
-        {/* Optional event picker (door-only, not in customer modal) */}
-        {events.length > 0 && (
-          <div style={{ marginBottom: 14 }}>
-            <div style={lbl}>EVENT</div>
-            <select value={eventId} onChange={(e) => setEventId(e.target.value)} style={inp}>
-              <option value="">— No event —</option>
-              {events.slice(0, 12).map((e) => (
-                <option key={e.id} value={e.id}>{e.title}{e.date ? ` · ${e.date}` : ""}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
         {/* ENTRY TYPE — three pricing cards (cover + guestlist) */}
         {(kind === "cover" || kind === "guestlist") && (
           <div style={{ marginBottom: 16 }}>
@@ -2357,7 +3064,7 @@ function UnifiedWalkInModal({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
               {(["Stag", "Couple", "Ladies"] as const).map((t) => {
                 const active = tier === t;
-                const tp = TIER_PRICES[t];
+                const tp = tierPrices[t];
                 const isFree = tp.price === 0 || kind === "guestlist";
                 return (
                   <button key={t} onClick={() => setTier(t)} style={{
@@ -2384,40 +3091,103 @@ function UnifiedWalkInModal({
         {kind === "onlyentry" && (
           <div style={{ marginBottom: 16 }}>
             <div style={lbl}>PRICE PER ENTRY (₹)</div>
-            <input type="number" min={0} step={50} value={entryPrice}
-              onChange={(e) => setEntryPrice(Math.max(0, parseInt(e.target.value || "0")))} style={inp} />
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryPriceStr}
+              onChange={(e) => {
+                // Strip non-digits and leading zeros (so "0500" → "500").
+                const cleaned = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, "");
+                setEntryPriceStr(cleaned);
+              }}
+              style={inp} />
           </div>
         )}
         {kind === "group" && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
-              <div>
+            {/* 2026-05-16 (Khushi v5): EXACT 1:1 copy of hodclub.in's
+                "VIP TABLES / GROUP" tab — green hint banner, GROUP BOOKING
+                card, "OR BOOK A TABLE" divider, two stock-aware table cards.
+                Prices + stock pull from the selected event so anything you
+                change in Events Admin flows here automatically. */}
+
+            {/* Green hint banner (matches customer site line ~2530). */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 10,
+              background: "rgba(16,185,129,.10)", border: "1px solid rgba(16,185,129,.35)",
+              color: "#A7F3D0", fontSize: 12, fontWeight: 600, marginBottom: 14,
+            }}>
+              <span>👥</span>
+              <span>Group entry · ₹{groupPerHead.toLocaleString("en-IN")} per head · 100% redeemable on F&amp;B</span>
+            </div>
+
+            {/* GROUP BOOKING (per-head) ─────────────────────────────── */}
+            <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>GROUP BOOKING</div>
+            {(() => {
+              const active = groupMode === "entry";
+              return (
+                <button onClick={() => setGroupMode("entry")} style={{
+                  width: "100%", padding: "14px 12px", borderRadius: 10, cursor: "pointer", textAlign: "center",
+                  border: active ? "2px solid #C8A645" : "1.5px solid rgba(200,166,69,.45)",
+                  background: active ? "linear-gradient(160deg,rgba(242,199,68,.18),rgba(242,199,68,.06))" : "rgba(255,255,255,.025)",
+                  color: "#fff", fontFamily: "inherit", marginBottom: 14,
+                }}>
+                  <div style={{ fontWeight: 900, fontSize: 12.5, color: active ? "#C8A645" : "rgba(255,255,255,.9)", letterSpacing: .6 }}>GROUP · per head</div>
+                  <div style={{ fontSize: 18, fontWeight: 900, color: "#C8A645", margin: "4px 0 2px" }}>₹{groupPerHead.toLocaleString("en-IN")}<span style={{ fontSize: 11, color: "rgba(255,255,255,.55)", fontWeight: 600, marginLeft: 4 }}>/head</span></div>
+                  <div style={{ fontSize: 10.5, color: "rgba(255,255,255,.55)" }}>Cover Redeemable</div>
+                </button>
+              );
+            })()}
+
+            {/* OR BOOK A TABLE divider ─────────────────────────────── */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, marginBottom: 10,
+              fontSize: 10, fontWeight: 800, letterSpacing: 1, color: "rgba(255,255,255,.45)",
+            }}>
+              <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.12)" }} />
+              <span>OR BOOK A TABLE</span>
+              <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.12)" }} />
+            </div>
+
+            {/* TABLE FOR 4 + VVIP TABLE FOR 6 (with stock badges) ────── */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              {([
+                { id: "table4", label: "TABLE FOR 4",      price: table4Flat, stock: gf4Stock,  cap: 4 },
+                { id: "vvip",   label: "VVIP TABLE FOR 6", price: vvipFlat,   stock: vvipStock, cap: 6 },
+              ] as const).map((o) => {
+                const active = groupMode === o.id;
+                const sold = o.stock <= 0;
+                return (
+                  <button key={o.id} disabled={sold} onClick={() => !sold && setGroupMode(o.id)} style={{
+                    position: "relative", padding: "14px 10px 12px", borderRadius: 10, cursor: sold ? "not-allowed" : "pointer", textAlign: "left",
+                    border: active ? "2px solid #C8A645" : "1.5px solid rgba(200,166,69,.45)",
+                    background: active ? "linear-gradient(160deg,rgba(242,199,68,.18),rgba(242,199,68,.06))" : "rgba(255,255,255,.025)",
+                    color: "#fff", fontFamily: "inherit", opacity: sold ? .45 : 1,
+                  }}>
+                    {/* Stock badge (top-right) */}
+                    <div style={{
+                      position: "absolute", top: 6, right: 6,
+                      padding: "2px 6px", borderRadius: 6,
+                      background: sold ? "rgba(239,68,68,.18)" : "rgba(16,185,129,.18)",
+                      border: `1px solid ${sold ? "rgba(239,68,68,.5)" : "rgba(16,185,129,.5)"}`,
+                      color: sold ? "#FCA5A5" : "#A7F3D0", fontSize: 9, fontWeight: 800, letterSpacing: .5,
+                    }}>{sold ? "SOLD OUT" : `${o.stock} LEFT`}</div>
+                    <div style={{ fontWeight: 900, fontSize: 12, color: active ? "#C8A645" : "rgba(255,255,255,.9)", letterSpacing: .4, marginBottom: 4 }}>{o.label}</div>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>Fully redeemable on F&amp;B</div>
+                    <div style={{ fontSize: 14, fontWeight: 900, color: "#C8A645" }}>₹{o.price.toLocaleString("en-IN")}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginBottom: 14, textAlign: "center" }}>
+              Table booking includes entry for your group · Stock resets nightly at 6AM
+            </div>
+
+            {/* PARTY SIZE — only for the per-head GROUP option */}
+            {groupMode === "entry" && (
+              <div style={{ marginBottom: 14 }}>
                 <div style={lbl}>PARTY SIZE</div>
                 <input type="number" min={2} max={50} value={partySize}
                   onChange={(e) => setPartySize(Math.max(2, parseInt(e.target.value || "2")))} style={inp} />
               </div>
-              <div>
-                <div style={lbl}>TABLE</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                  {(["Standard", "VIP"] as const).map((t) => {
-                    const active = tableType === t;
-                    return (
-                      <button key={t} onClick={() => setTableType(t)} style={{
-                        padding: "13px 8px", borderRadius: 10, fontSize: 12, fontWeight: 800, cursor: "pointer",
-                        border: active ? "2px solid #C8A645" : "1px solid rgba(255,255,255,.12)",
-                        background: active ? "linear-gradient(135deg,#C8A645,#A07830)" : "rgba(255,255,255,.04)",
-                        color: active ? "#0a0a0a" : "rgba(255,255,255,.75)",
-                      }}>{t}</button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-            <div style={{ marginBottom: 14 }}>
-              <div style={lbl}>MIN SPEND / DEPOSIT (₹)</div>
-              <input type="number" min={0} step={500} value={groupMinSpend}
-                onChange={(e) => setGroupMinSpend(Math.max(0, parseInt(e.target.value || "0")))} style={inp} />
-            </div>
+            )}
           </>
         )}
 
@@ -2489,9 +3259,66 @@ function UnifiedWalkInModal({
           </div>
         )}
 
+        {/* PAYMENT METHOD ROW — only when there's actually money to collect.
+            Guestlist is free, comp covers (₹0) skip this. 4 chips:
+            Cash · UPI · Card · Split. UPI/Card use the EDC machine. */}
+        {kind !== "guestlist" && total > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={lbl}>HOW IS THE CUSTOMER PAYING?</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+              {([
+                { k: "cash"  as const, ic: "💵", txt: "CASH" },
+                { k: "upi"   as const, ic: "📱", txt: "UPI" },
+                { k: "card"  as const, ic: "💳", txt: "CARD" },
+                { k: "split" as const, ic: "🪓", txt: "SPLIT" },
+              ]).map((m) => {
+                const active = payMethod === m.k;
+                return (
+                  <button key={m.k} onClick={() => setPayMethod(m.k)} style={{
+                    padding: "10px 4px", borderRadius: 9, fontFamily: "inherit", cursor: "pointer",
+                    border: active ? "2px solid #C8A645" : "1px solid rgba(255,255,255,.12)",
+                    background: active ? "linear-gradient(160deg,rgba(242,199,68,.18),rgba(242,199,68,.04))" : "rgba(255,255,255,.04)",
+                    color: active ? "#C8A645" : "rgba(255,255,255,.7)", textAlign: "center",
+                  }}>
+                    <div style={{ fontSize: 16, lineHeight: 1 }}>{m.ic}</div>
+                    <div style={{ fontSize: 9, fontWeight: 800, marginTop: 4, letterSpacing: .5 }}>{m.txt}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {(payMethod === "upi" || payMethod === "card") && (
+              <div style={{ marginTop: 8, fontSize: 10.5, color: "rgba(200,166,69,.85)", fontWeight: 600, lineHeight: 1.4 }}>
+                💳 Use the EDC machine — receipt prints automatically. No need to type anything.
+              </div>
+            )}
+            {payMethod === "split" && (
+              <div style={{ marginTop: 8, padding: 10, borderRadius: 10, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.08)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: "rgba(255,255,255,.6)", marginBottom: 3 }}>💵 CASH</div>
+                    <input type="number" min={0} value={splitCash || ""} onChange={(e) => setSplitCash(parseInt(e.target.value || "0"))} placeholder="0" style={{ ...inp, padding: "10px 10px", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: "rgba(255,255,255,.6)", marginBottom: 3 }}>📱 UPI</div>
+                    <input type="number" min={0} value={splitUpi || ""} onChange={(e) => setSplitUpi(parseInt(e.target.value || "0"))} placeholder="0" style={{ ...inp, padding: "10px 10px", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: "rgba(255,255,255,.6)", marginBottom: 3 }}>💳 CARD</div>
+                    <input type="number" min={0} value={splitCard || ""} onChange={(e) => setSplitCard(parseInt(e.target.value || "0"))} placeholder="0" style={{ ...inp, padding: "10px 10px", fontSize: 13 }} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: splitOk ? "#00C864" : "#FCA5A5", textAlign: "right", fontWeight: 700 }}>
+                  Split: ₹{splitTotal.toLocaleString("en-IN")} / ₹{total.toLocaleString("en-IN")} {splitOk ? "✓" : "✗"}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {err && <div style={{ background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#FCA5A5", padding: 10, borderRadius: 10, fontSize: 12, marginBottom: 12 }}>{err}</div>}
 
-        {/* CTA — single full-width yellow button */}
+        {/* CTA — single full-width yellow button (label flips by payMethod) */}
         <button onClick={submit} disabled={busy} style={{
           width: "100%", padding: 16, borderRadius: 12,
           background: busy ? "rgba(242,199,68,.4)" : "linear-gradient(135deg,#C8A645,#A07830)",
@@ -2797,12 +3624,66 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     } catch { alert("Lookup failed"); }
   };
 
+  // 🔴 2026-05-16 (Khushi) — MINI DASHBOARD ON MAIN PAGE.
+  // Subscribe at parent level once so the tab buttons show live counts of
+  // tonight's bookings per category. Same data sources + filter rules as the
+  // child tabs (so the numbers match exactly what the door girl sees inside).
+  const [allBookings, setAllBookings] = useState<HodBooking[]>([]);
+  const [allGuests, setAllGuests] = useState<HodGuestlistEntry[]>([]);
+  // Per-date map so removals (cancellations / date edits) evict stale rows
+  // instead of sticking around forever in the accumulator.
+  const [tableResByDate, setTableResByDate] = useState<Record<string, HodTableReservation[]>>({});
+  useEffect(() => subscribeToBookings(setAllBookings), []);
+  useEffect(() => subscribeToGuestlist(setAllGuests), []);
+  useEffect(() => {
+    const t = TODAY_STR(); const c = CALENDAR_TODAY_STR();
+    const u1 = subscribeToHodReservations(t, (rows) => setTableResByDate((m) => ({ ...m, [t]: rows })));
+    const u2 = (t === c) ? () => {} : subscribeToHodReservations(c, (rows) => setTableResByDate((m) => ({ ...m, [c]: rows })));
+    return () => { u1(); u2(); };
+  }, []);
+
+  const tabCounts = (() => {
+    const todayDates = TODAY_DATE_SET();
+    // Bookings — match BookingsListTab filter rules exactly.
+    const today = allBookings.filter((b) => todayDates.has((b.date || "").slice(0, 10)) && !isGuestlistBooking(b));
+    const inEvent = (b: HodBooking) => selectedEventId === "all" || !b.eventId || b.eventId === selectedEventId;
+    // 🔴 Guestlist — match GuestlistTab logic: filter by today (joinedAt|entryTime)
+    // and dedupe against guestlist-typed bookings (line ~1590).
+    const todayGuests = allGuests.filter((g) => {
+      const ja = ((g as any).joinedAt || "").slice(0, 10);
+      const et = ((g as any).entryTime || "").slice(0, 10);
+      return todayDates.has(ja) || todayDates.has(et);
+    });
+    const glIds = new Set(todayGuests.map((g) => g.id));
+    const guestlistFromBookings = allBookings.filter((b) =>
+      isGuestlistBooking(b) &&
+      (todayDates.has((b.date || "").slice(0, 10)) || todayDates.has(((b as any).bookedAt || "").slice(0, 10))) &&
+      !glIds.has(b.id) &&
+      inEvent(b)
+    );
+    // 🔴 Tables — TablesTab ignores eventId, so the count must too.
+    // De-dupe across dual-date subscription via _docId.
+    const tableSeen = new Set<string>();
+    const allTables: HodTableReservation[] = [];
+    Object.values(tableResByDate).forEach((rows) => rows.forEach((r) => {
+      if (!r._docId || tableSeen.has(r._docId)) return;
+      tableSeen.add(r._docId); allTables.push(r);
+    }));
+    return {
+      tickets:   today.filter((b) => !isGroupBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b) && inEvent(b)).length,
+      guestlist: todayGuests.length + guestlistFromBookings.length,
+      tables:    allTables.filter((r) => (r as any).status !== "cancelled").length,
+      group:     today.filter((b) => isGroupBooking(b) && inEvent(b)).length,
+      onlyentry: today.filter((b) => isOnlyEntryBooking(b) && inEvent(b)).length,
+    };
+  })();
+
   const tabs = [
-    { key: "tickets" as const,   label: "TICKETS",        icon: "" },
-    { key: "guestlist" as const, label: "GUEST LIST",     icon: "" },
-    { key: "tables" as const,    label: "TABLES",         icon: "" },
-    { key: "group" as const,     label: "GROUP",          icon: "" },
-    { key: "onlyentry" as const, label: "ENTRY PASS",     icon: "" },
+    { key: "tickets" as const,   label: "TICKETS",        count: tabCounts.tickets },
+    { key: "guestlist" as const, label: "GUEST LIST",     count: tabCounts.guestlist },
+    { key: "tables" as const,    label: "TABLES",         count: tabCounts.tables },
+    { key: "group" as const,     label: "GROUP",          count: tabCounts.group },
+    { key: "onlyentry" as const, label: "ENTRY PASS",     count: tabCounts.onlyentry },
   ];
 
   return (
@@ -2937,16 +3818,18 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           </div>
         )}
 
-        <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 14, paddingBottom: 4, width: "100%" }}>
           {tabs.map((t) => {
             const on = tab === t.key;
             return (
               <button key={t.key} onClick={() => setTab(t.key)}
-                style={{ flexShrink: 0, padding: "12px 8px", borderRadius: 8, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
-                  letterSpacing: "0.8px", textTransform: "uppercase", border: "none",
+                style={{ flex: 1, minWidth: 0, padding: "8px 4px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap", border: "none",
                   background: on ? "#C8A645" : "#5C2525",
-                  color: on ? "#0A0A0A" : "#FFFFFF" }}>
-                {t.label}
+                  color: on ? "#0A0A0A" : "#FFFFFF",
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2, lineHeight: 1.1 }}>
+                <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.6px", textTransform: "uppercase" }}>{t.label}</span>
+                <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900,
+                  color: on ? "#0A0A0A" : "#F2C744" }}>{t.count}</span>
               </button>
             );
           })}
@@ -2970,7 +3853,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           onSendWhatsApp={(b) => sendBookingWhatsApp(b, setQrModal)}
         />
       )}
-      {walkInOpen && <NewWalkInModal agentName={agentName} onClose={() => setWalkInOpen(false)} />}
+      {walkInOpen && <NewWalkInModal agentName={agentName} onClose={() => setWalkInOpen(false)} onActivateCover={(b) => setCoverFor(b)} />}
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
       {qrModal && (
         <WalletQrModal
