@@ -69,6 +69,11 @@ interface TableRow {
   taxAmount: number;
   total: number;
   amountPaid: number;
+  /** 2026-05-15 — Khushi: ₹ slice of `amountPaid` settled via customer wallet
+   *  redemption(s) at table close. Cash drawer = amountPaid − walletPaidAmount. */
+  walletPaidAmount: number;
+  /** Per-wallet breakdown for audit (max 4 wallets per table in practice). */
+  walletRedemptionDetails: string;
   paymentStatus: string;
   paymentMethod: string;
   /** When paid via aggregator, the full aggregator-side amount (= total before
@@ -237,6 +242,20 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
     subtotal, discountPct: actDisc, discountAmount,
     taxAmount: Number(r.taxAmount || 0),
     total, amountPaid: Number(r.amountPaid || (r.paymentStatus === "paid" ? total : 0)),
+    // 2026-05-15 — wallet redemption columns. `walletPaidAmount` is the cached
+    // sum at markPaid (live filter); fall back to walking the array for legacy
+    // rows where markPaid happened before the cache field was added.
+    walletPaidAmount: Number(
+      (r as any).walletPaidAmount ??
+      (Array.isArray((r as any).walletRedemptions)
+        ? (r as any).walletRedemptions.reduce((s: number, w: any) => s + Number(w.amount || 0), 0)
+        : 0)
+    ),
+    walletRedemptionDetails: Array.isArray((r as any).walletRedemptions)
+      ? (r as any).walletRedemptions
+          .map((w: any) => `${w.walletRef}:₹${w.amount}${w.walletName ? ` (${w.walletName})` : ""}`)
+          .join(" | ")
+      : "",
     paymentStatus: r.paymentStatus || "open",
     paymentMethod, aggregatorPaidAmount, aggregatorVariance,
     // 🔴 2026-05-12 — Either trust the value the captain stamped at Mark
@@ -425,15 +444,48 @@ export default function Reports() {
       return dt.toISOString().split("T")[0];
     })();
     let aRes: HodTableReservation[] = []; let bRes: HodTableReservation[] = [];
+    let aHist: HodTableReservation[] = []; let bHist: HodTableReservation[] = [];
     const merge = () => {
       const seen = new Set<string>();
       const out: HodTableReservation[] = [];
-      for (const r of [...aRes, ...bRes]) { if (!seen.has(r._docId)) { seen.add(r._docId); out.push(r); } }
+      // Live reservations first → history rows for the SAME bookingRef are
+      // ignored (a fresh release would otherwise double-count). Live docs
+      // win on `_docId`; history docs win on `bookingRef` if no live match.
+      for (const r of [...aRes, ...bRes]) {
+        if (seen.has(r._docId)) continue;
+        seen.add(r._docId);
+        if (r.bookingRef) seen.add(`bref:${r.bookingRef}`);
+        out.push(r);
+      }
+      for (const r of [...aHist, ...bHist]) {
+        if (seen.has(r._docId)) continue;
+        if (r.bookingRef && seen.has(`bref:${r.bookingRef}`)) continue;
+        seen.add(r._docId);
+        if (r.bookingRef) seen.add(`bref:${r.bookingRef}`);
+        out.push(r);
+      }
       setReservations(out);
     };
     const u1 = subscribeToHodReservations(today, (r) => { aRes = r; merge(); });
     const u2 = subscribeToHodReservations(next, (r) => { bRes = r; merge(); });
-    return () => { u1(); u2(); };
+    // 🔴 2026-05-15 — released tables get archived to `tableHistory` and
+    // DELETED from `tableReservations` (releaseTable in firestore-hod.ts).
+    // Without this listener, Reports loses every paid+released table the
+    // moment the captain taps RELEASE — which is exactly when EOD
+    // reconciliation needs them most. Same date-pair logic as live res.
+    // Doc-id is prefixed `hist:` so it never collides with a live res _docId.
+    const subHist = (date: string, set: (r: HodTableReservation[]) => void) =>
+      onSnapshot(
+        query(collection(db, "tableHistory"), where("date", "==", date)),
+        (snap) => set(snap.docs.map((d) => ({
+          ...(d.data() as HodTableReservation),
+          _docId: `hist:${d.id}`,
+        }))),
+        (e) => { console.warn("[Reports] tableHistory subscribe failed", e); set([]); }
+      );
+    const u3 = subHist(today, (r) => { aHist = r; merge(); });
+    const u4 = subHist(next,  (r) => { bHist = r; merge(); });
+    return () => { u1(); u2(); u3(); u4(); };
   }, [today]);
   // 2) Bookings (real-time, all)
   useEffect(() => subscribeToBookings(setBookings), []);
@@ -761,6 +813,9 @@ export default function Reports() {
       "Tax ₹": r.taxAmount,
       "Total ₹": r.total,
       "Amount Paid ₹": r.amountPaid,
+      "Wallet Redeemed ₹": r.walletPaidAmount,
+      "Cash/Card/UPI Collected ₹": Math.max(0, (r.amountPaid || 0) - (r.walletPaidAmount || 0)),
+      "Wallet Redemption Details": r.walletRedemptionDetails,
       "Payment Status": r.paymentStatus,
       "Payment Method": r.paymentMethod,
       "Aggregator Paid ₹": r.aggregatorPaidAmount,
