@@ -746,6 +746,13 @@ export async function ensureCoverForAggregatorArrival(input: {
     source: `aggregator_arrival_${(input.source || "").toLowerCase()}`,
     aggregator: input.source,
     tableId: input.tableId || "",
+    // 🔴 2026-05-19 (Khushi CRITICAL — live tonight) — aggregator arrivals
+    // (Zomato/Swiggy/EazyDiner) AND WhatsApp-bot bookings (aggregator="whatsapp_bot")
+    // are ALWAYS table bookings. Without this flag the customer site's wallet
+    // page falls through to COVER-WALLET view (locked menu, "pay to top up")
+    // instead of TABLE-TAB view (open menu, order freely). Table guests should
+    // never see a cover wallet — they pay at the bill, not up-front.
+    isTableBooking: true,
   };
   await setDoc(ref, cover);
   return { created: true, docId };
@@ -1573,7 +1580,11 @@ export async function markTablePaid(
     upd.discountOverrideLog = [...existing, ...newEntries];
   }
   await updateDoc(doc(db, TABLE_RES_COL, docId), upd);
-  if (bookingRef) await setDoc(doc(db, COVERS_COL, bookingRef), upd, { merge: true }).catch(() => {});
+  // 🔴 2026-05-19 (Khushi LIVE FIX) — if no covers doc exists yet (race), this
+  // merge:true write would create a stub without isTableBooking, kicking the
+  // customer's wallet view back into cover-mode. Force the flag since this
+  // function is only called for TABLE bills.
+  if (bookingRef) await setDoc(doc(db, COVERS_COL, bookingRef), { ...upd, isTableBooking: true }, { merge: true }).catch(() => {});
 }
 
 /** V1 — Record a void event when items are removed from an already-activated
@@ -3478,4 +3489,118 @@ export async function acknowledgeWaiterCall(id: string, staffName: string): Prom
     acknowledgedAt: new Date().toISOString(),
     acknowledgedBy: staffName || "Staff",
   });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// MENU CRM — MenuCategory + MenuCategoryItem
+// Live menu categories with discount-aware item pricing for POS menu views.
+// Admin (8888) toggles a category LIVE → its items appear (with discount)
+// on Captain/Bar menus. NO live categories → ALL items show (fail-open).
+// ════════════════════════════════════════════════════════════════════════
+
+export interface MenuCategoryItem {
+  id: string;        // real HOD item id (e.g. "hod1") — used for stable cross-ref
+  name: string;      // exact item name from HOD_MENU_ITEMS
+  price: number;     // base price (pre-discount)
+  categoryType: "food" | "drink";
+  veg?: boolean;
+  alc?: boolean;
+}
+
+export interface MenuCategory {
+  id: string;
+  name: string;
+  discountPercent: number;
+  items: MenuCategoryItem[];
+  isLive: boolean;
+  createdAt?: any;
+  updatedAt?: any;
+}
+
+const MENU_CATEGORIES_COL = "menuCategories";
+
+export async function createMenuCategory(data: Omit<MenuCategory, "id">): Promise<MenuCategory> {
+  const now = new Date().toISOString();
+  const docRef = await addDoc(collection(db, MENU_CATEGORIES_COL), {
+    ...data,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return { id: docRef.id, ...data, createdAt: now, updatedAt: now };
+}
+
+export async function updateMenuCategory(id: string, data: Partial<Omit<MenuCategory, "id">>): Promise<void> {
+  await updateDoc(doc(db, MENU_CATEGORIES_COL, id), {
+    ...data,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteMenuCategory(id: string): Promise<void> {
+  await deleteDoc(doc(db, MENU_CATEGORIES_COL, id));
+}
+
+export async function toggleMenuCategoryLive(id: string, isLive: boolean): Promise<void> {
+  await updateDoc(doc(db, MENU_CATEGORIES_COL, id), { isLive, updatedAt: serverTimestamp() });
+}
+
+export async function listMenuCategories(): Promise<MenuCategory[]> {
+  const q = query(collection(db, MENU_CATEGORIES_COL), orderBy("name"));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as MenuCategory));
+}
+
+export function subscribeToMenuCategories(cb: (categories: MenuCategory[]) => void): Unsubscribe {
+  const q = query(collection(db, MENU_CATEGORIES_COL), orderBy("name"));
+  return onSnapshot(q, (snap) => {
+    cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as MenuCategory)));
+  }, () => cb([]));
+}
+
+export function subscribeToLiveMenuCategories(cb: (categories: MenuCategory[]) => void): Unsubscribe {
+  // No composite index needed: filter live + sort client-side.
+  const q = query(collection(db, MENU_CATEGORIES_COL), orderBy("name"));
+  return onSnapshot(q, (snap) => {
+    const all = snap.docs.map((d) => ({ id: d.id, ...d.data() } as MenuCategory));
+    cb(all.filter((c) => c.isLive));
+  }, () => cb([]));
+}
+
+/**
+ * Filter menu items to only those in LIVE categories AND apply discount.
+ * Generic over item shape: works for HodMenuItem, MenuItem, and MenuCategoryItem.
+ * Matching is by lowercased trimmed name (so HOD ids like "hod1" don't matter).
+ * Returns items with discounted prices; original objects are NOT mutated.
+ *
+ * NOTE: the caller should NO-OP when liveCategories.length === 0 to fail-open
+ * (show all items). This function strictly returns ONLY items in live cats.
+ */
+export function filterMenuByLiveCategories<T extends { name: string; price: number }>(
+  allItems: T[],
+  liveCategories: MenuCategory[],
+): T[] {
+  if (liveCategories.length === 0) return allItems;
+  // Build map: lowercased-name -> max discount % across categories the item appears in
+  const nameToDiscount = new Map<string, number>();
+  for (const cat of liveCategories) {
+    for (const it of cat.items || []) {
+      const key = (it.name || "").toLowerCase().trim();
+      if (!key) continue;
+      const prev = nameToDiscount.get(key) ?? -1;
+      if ((cat.discountPercent || 0) > prev) nameToDiscount.set(key, cat.discountPercent || 0);
+    }
+  }
+  if (nameToDiscount.size === 0) return [];
+  const out: T[] = [];
+  for (const it of allItems) {
+    const key = (it.name || "").toLowerCase().trim();
+    if (!nameToDiscount.has(key)) continue;
+    const disc = nameToDiscount.get(key) ?? 0;
+    if (disc > 0) {
+      out.push({ ...it, price: Math.round(it.price * (1 - disc / 100) * 100) / 100 } as T);
+    } else {
+      out.push(it);
+    }
+  }
+  return out;
 }
