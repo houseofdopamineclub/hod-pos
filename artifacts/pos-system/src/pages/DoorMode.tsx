@@ -1911,7 +1911,7 @@ const AGG_FILTERS: Array<{ key: string; label: string }> = [
   { key: "zomato",    label: "ZOMATO" },
 ];
 
-function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
+function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusConsumed }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; focusDocId?: string | null; onFocusConsumed?: () => void }) {
   const { toast } = useToast();
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [aggFilter, setAggFilter] = useState<string>("all");
@@ -1973,6 +1973,18 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
     setEditDate(r.date || "");
     setEditPhone(r.phone || "");
   }, [expandedDocId]);
+
+  // 🎯 2026-05-19 (Khushi LIVE-NIGHT) — open a specific table's detail modal
+  // when the parent search panel asks us to. Clears arrival/aggregator filters
+  // so the row is guaranteed visible underneath the modal, then consumes the
+  // token so it doesn't re-open if the user closes the modal.
+  useEffect(() => {
+    if (!focusDocId) return;
+    setAggFilter("all");
+    setArrivalFilter("");
+    setExpandedDocId(focusDocId);
+    onFocusConsumed?.();
+  }, [focusDocId, onFocusConsumed]);
 
   // 2026-05-16 diagnostic — log what tableReservations are loading and why filters drop them.
   // Helps Khushi confirm "0 tables" = no bookings today vs. date-format mismatch vs. status:cancelled.
@@ -3651,6 +3663,11 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     return () => clearTimeout(handle);
   }, [searchInput]);
   const [coverFor, setCoverFor] = useState<HodBooking | null>(null);
+  // 🎯 2026-05-19 (Khushi LIVE-NIGHT) — when search-panel TONIGHT MATCH for a
+  // table is tapped, we set this so TablesTab pops open the table's detail
+  // modal. Consumed (set null) by TablesTab once it opens, so closing the
+  // modal doesn't re-open it.
+  const [tablesFocusDocId, setTablesFocusDocId] = useState<string | null>(null);
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("all");
 
@@ -3859,7 +3876,11 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
               name: b.name || "(no name)", phone: b.phone || "",
               subtitle: `${b.eventTitle || ""} · ${b.ref || ""}`.replace(/^ · | · $/g, "").trim() || (b.ref || ""),
               ref: b.ref || b.id, tone: "#60A5FA",
-              onClick: () => { setTab(tabKey); /* keep query so per-tab filter narrows further */ },
+              // 2026-05-19 — Khushi: tapping a TONIGHT MATCH must open the
+              // full BookingDetailModal (Check-In · Activate Cover · WhatsApp
+              // · QR · Call) — same modal as tapping the card in its tab.
+              // Same path used by QR scans (`scanDetail`).
+              onClick: () => { setScanDetail(b); },
             });
           }
           // 2. GUESTLIST (today)
@@ -3868,6 +3889,13 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             const et = ((g as any).entryTime || "").slice(0, 10);
             return todayDates.has(ja) || todayDates.has(et);
           });
+          const adaptGuest = (g: any): HodBooking => ({
+            id: g.id, ref: g.ref || g.id, name: g.name, phone: g.phone,
+            eventId: g.eventId, eventTitle: g.eventTitle, type: g.type,
+            total: 0, checkedIn: !!g.checkedIn,
+            _isGuestList: true, _glDocId: g._bookingDocId || g.id,
+            date: (g.joinedAt || g.entryTime || "").slice(0, 10),
+          } as any);
           for (const g of todayGuests) {
             if (!matches(g.name, g.phone, (g as any).ref)) continue;
             hits.push({
@@ -3875,7 +3903,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
               name: g.name || "(no name)", phone: g.phone || "",
               subtitle: ((g as any).entryType || "guestlist").toString(),
               ref: (g as any).ref || g.id, tone: "#34D399",
-              onClick: () => { setTab("guestlist"); },
+              onClick: () => { setScanDetail(adaptGuest(g)); },
             });
           }
           // Also include guestlist-typed bookings (parity with GuestlistTab merge)
@@ -3889,7 +3917,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
               key: `gb-${b.id}`, tab: "guestlist", label: "GUEST LIST",
               name: b.name || "(no name)", phone: b.phone || "",
               subtitle: b.ref || "", ref: b.ref || b.id, tone: "#34D399",
-              onClick: () => { setTab("guestlist"); },
+              onClick: () => { setScanDetail(b); },
             });
           }
           // 3. TABLES (today, dedup by _docId)
@@ -3905,7 +3933,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                 name: (r as any).customerName || "(no name)", phone: (r as any).phone || "",
                 subtitle: `${(r as any).tableId || ""} · ${(r as any).floorLabel || (r as any).floor || ""} · ${(r as any).arrivalTime || ""}`.replace(/ +/g, " ").trim(),
                 ref: (r as any).bookingRef || r._docId, tone: "#F59E0B",
-                onClick: () => { setTab("tables"); },
+                onClick: () => { setTab("tables"); setTablesFocusDocId(r._docId!); },
               });
             }
           }
@@ -4046,7 +4074,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
 
         {tab === "tickets"   && <TicketsTab        agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} />}
+        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} />}
         {tab === "group"     && <GroupBookingsTab  agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
       </div>
