@@ -19,6 +19,12 @@ export function QrScanner({ onResult, onClose }: { onResult: (data: string) => v
   const rafRef = useRef(0);
   const [status, setStatus] = useState("Starting camera…");
   const [err, setErr] = useState("");
+  // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — manual entry fallback. If the
+  // iPhone camera refuses to start (permission denied, Chrome-on-iOS, broken
+  // lens, scratched screen, dim lighting), door staff can ALWAYS type the
+  // booking ref / paste the wallet URL and check the guest in. Never lose
+  // a guest at the door because the scanner is finicky.
+  const [manualRef, setManualRef] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +58,15 @@ export function QrScanner({ onResult, onClose }: { onResult: (data: string) => v
         const video = videoRef.current;
         if (!video) return;
         video.srcObject = stream;
-        video.setAttribute("playsinline", "true"); // iOS Safari: prevents fullscreen takeover
+        // 🔴 iOS BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — iPhone Safari needs
+        // BOTH `playsinline` AND legacy `webkit-playsinline`, PLUS `muted` as
+        // a real HTML attribute (not just a JSX prop), or video.play() rejects
+        // and the camera stays dark. Without these the scanner LOOKS like it
+        // opened but no frames ever reach the QR decoder on iPhone.
+        video.setAttribute("playsinline", "true");
+        video.setAttribute("webkit-playsinline", "true");
+        video.setAttribute("muted", "true");
+        video.muted = true;
         try { await video.play(); } catch {}
         setStatus("Point camera at QR code");
 
@@ -136,8 +150,37 @@ export function QrScanner({ onResult, onClose }: { onResult: (data: string) => v
       <div style={{ color: err ? "#FCA5A5" : "rgba(255,255,255,.65)", fontSize: 13, marginTop: 16, textAlign: "center", maxWidth: 360, lineHeight: 1.4 }}>
         {err || status}
       </div>
+      {/* 🔴 iOS-SAFE MANUAL ENTRY — always available, never blocks revenue. */}
+      <div style={{ marginTop: 16, width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.45)", letterSpacing: 1, textAlign: "center" }}>
+          OR TYPE BOOKING REF / PASTE WALLET LINK
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            value={manualRef}
+            onChange={(e) => setManualRef(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && manualRef.trim()) {
+                scanRef.current = false;
+                onResult(manualRef.trim());
+              }
+            }}
+            placeholder="e.g. HOD-XXXXX or TICKET-…"
+            autoCapitalize="characters"
+            autoCorrect="off"
+            spellCheck={false}
+            style={{ flex: 1, padding: "11px 12px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 13, outline: "none" }}
+          />
+          <button
+            onClick={() => { if (manualRef.trim()) { scanRef.current = false; onResult(manualRef.trim()); } }}
+            disabled={!manualRef.trim()}
+            style={{ padding: "11px 18px", borderRadius: 10, background: manualRef.trim() ? "#C8A645" : "rgba(255,255,255,.06)", border: "none", color: manualRef.trim() ? "#0A0A0A" : "rgba(255,255,255,.4)", fontSize: 12, fontWeight: 900, cursor: manualRef.trim() ? "pointer" : "not-allowed", letterSpacing: .3 }}>
+            FIND
+          </button>
+        </div>
+      </div>
       <button onClick={onClose}
-        style={{ marginTop: 20, padding: "12px 28px", borderRadius: 12, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+        style={{ marginTop: 14, padding: "12px 28px", borderRadius: 12, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
         Close Scanner
       </button>
     </div>
