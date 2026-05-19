@@ -176,7 +176,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     let cancelled = false;
     (async () => {
       try {
-        const cv = await getCoverForBooking(booking.id || booking.ref);
+        const cv = await getCoverForBooking(booking.ref || booking.id);
         if (!cancelled) { setExisting(cv); if (cv) setEditAmt(String(cv.coverActivated || 0)); }
       } catch {}
       if (!cancelled) setLoading(false);
@@ -311,7 +311,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     setBusy(true); setErr("");
     try {
       await editCoverAmount(existing.id, newAmt, agentName);
-      const cv = await getCoverForBooking(booking.id || booking.ref);
+      const cv = await getCoverForBooking(booking.ref || booking.id);
       if (cv) setExisting(cv);
       setEditMode(false);
     } catch (e: any) { setErr(e?.message || "Failed to edit"); }
@@ -397,7 +397,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               setBusy(true); setErr("");
               try {
                 await editCoverAmount(existing.id, used, `${agentName} VOID: ${reason}`);
-                const cv = await getCoverForBooking(booking.id || booking.ref);
+                const cv = await getCoverForBooking(booking.ref || booking.id);
                 setExisting(cv);
                 alert(`✅ Cover voided. Remaining ₹${remaining.toLocaleString("en-IN")} cleared.\nManager: please process the cash refund (if any).`);
               } catch (e: unknown) {
@@ -839,14 +839,24 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
       // For booking source, prefer docId (fast path); checkInGuest falls back to ref query.
       const key = source === "booking" ? (booking.id || booking.ref) : (booking.ref || booking.id);
       const { checkedInAt, wasNew } = await checkInGuest(key, source, agentName);
-      // 🔴 BUGFIX 2026-05-16 (Khushi) — auto-mint ₹0 cover wallet on every
-      // non-table check-in so the customer site's hodclub.in/?wallet=XXX URL
-      // flips from "Guest List Confirmed" QR page to the wallet+menu view
-      // immediately. Previously only the "🎁 Free Entry" button minted the
-      // wallet, so any guest who got check-in via lookup/search was stuck on
-      // the QR page with no menu access. Table bookings skip — their wallet
-      // lifecycle is handled by the captain seating flow.
-      if (source !== "table") {
+      // 🔴 BUGFIX 2026-05-16 (Khushi) — auto-mint ₹0 cover wallet so the
+      // customer site's hodclub.in/?wallet=XXX URL flips from "Guest List
+      // Confirmed" QR page to the wallet+menu view immediately.
+      //
+      // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — auto-mint ONLY for guests
+      // whose wallet is ALWAYS ₹0 at the door:
+      //   • guestlist  → ₹0 (free entry, top up at bar later)
+      //   • entry-only → ₹0 (entry fee, not redeemable)
+      // COVER bookings must NOT auto-mint — they need an explicit cover
+      // amount (e.g. ₹1000) entered via "💰 Activate Cover" button. A
+      // zero-stub here would (a) make the wallet show ₹0 on the customer
+      // phone, and (b) collide with the later activation write. TABLE
+      // bookings continue to be skipped — captain seating handles them.
+      const isEntryOnly = isOnlyEntryBooking(booking);
+      const shouldMintZero =
+        source === "guestlist" ||
+        (source === "booking" && isEntryOnly);
+      if (shouldMintZero) {
         const walletRef = booking.ref || booking.id;
         ensureZeroBalanceCoverForGuest({
           bookingRef: walletRef,
@@ -1372,7 +1382,17 @@ function isGroupBooking(b: HodBooking) {
   //     out of the Group tab while catching the explicit group marker.
   if ((b as any).bookMode === "group") return true;
   if ((b as any).entryType === "group_booking") return true;
+  // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — customer site (hodclub.in)
+  // does NOT persist `bookMode` on the bookings doc; instead it sets
+  //   • `entryType: "group"`  (per-head GROUP option)
+  //   • `tableType: "table4"` (TABLE FOR 4)
+  //   • `tableType: "vip"`    (VVIP TABLE FOR 6)
+  // Match those explicitly so customer-side group bookings land in the
+  // Group tab instead of falling through to the generic Tickets tab.
+  const et = String((b as any).entryType || "").toLowerCase();
+  if (et === "group") return true;
   const tt = String((b as any).tableType || "").toLowerCase();
+  if (tt === "table4" || tt === "vip" || tt === "vvip") return true;
   if (tt && tt.includes("group")) return true;
   return false;
 }
@@ -1779,10 +1799,11 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
 }
 
 const SRC_STYLES: Record<string, { label: string; color: string; bg: string; border: string }> = {
-  swiggy:    { label: "SWIGGY",    color: "#FC8019", bg: "rgba(252,128,25,.18)", border: "rgba(252,128,25,.5)" },
-  eazydiner: { label: "EAZYDINER", color: "#E73C7E", bg: "rgba(231,60,126,.18)", border: "rgba(231,60,126,.5)" },
-  zomato:    { label: "ZOMATO",    color: "#E23744", bg: "rgba(226,55,68,.18)",  border: "rgba(226,55,68,.5)" },
-  inhouse:   { label: "IN-HOUSE",  color: "rgba(255,255,255,.7)", bg: "rgba(255,255,255,.05)", border: "rgba(255,255,255,.18)" },
+  swiggy:       { label: "SWIGGY",      color: "#FC8019", bg: "rgba(252,128,25,.18)", border: "rgba(252,128,25,.5)" },
+  eazydiner:    { label: "EAZYDINER",   color: "#E73C7E", bg: "rgba(231,60,126,.18)", border: "rgba(231,60,126,.5)" },
+  zomato:       { label: "ZOMATO",      color: "#E23744", bg: "rgba(226,55,68,.18)",  border: "rgba(226,55,68,.5)" },
+  whatsapp_bot: { label: "WA BOT",      color: "#25D366", bg: "rgba(37,211,102,.18)", border: "rgba(37,211,102,.5)" },
+  inhouse:      { label: "IN-HOUSE",    color: "rgba(255,255,255,.7)", bg: "rgba(255,255,255,.05)", border: "rgba(255,255,255,.18)" },
 };
 
 function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
@@ -1951,13 +1972,17 @@ function TablesTab({ query, agentName, eventId, onShowQr }: { query: string; age
   // "swiggy-dineout" fell into IN-HOUSE — that's why SWIGGY=0 and IN-HOUSE
   // showed 23 inflated rows in the screenshot. canonicalAggKey collapses ALL
   // brand variants down to one of 4 buckets used by the chips + dashboard.
-  const AGG_KEYS = new Set(["swiggy", "eazydiner", "zomato"]);
-  const canonicalAggKey = (raw: string): "zomato" | "swiggy" | "eazydiner" | "inhouse" => {
+  // 2026-05-18 — `whatsapp_bot` added as a 4th aggregator-style source so bot
+  // bookings get the green WA BOT chip + auto cover-mint on arrival path
+  // instead of being misclassified as in-house in the source filter chips.
+  const AGG_KEYS = new Set(["swiggy", "eazydiner", "zomato", "whatsapp_bot"]);
+  const canonicalAggKey = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse" => {
     const s = (raw || "").toLowerCase().trim();
     if (!s) return "inhouse";
     if (s.includes("zomato")) return "zomato";
     if (s.includes("swiggy")) return "swiggy";          // catches swiggy-dineout, swiggy-scenes
     if (s.includes("eazy") || s.includes("easydiner")) return "eazydiner";
+    if (s.includes("whatsapp") || s === "wa_bot") return "whatsapp_bot";
     return "inhouse";
   };
   const effectiveSrc = (r: HodTableReservation) =>
@@ -2875,8 +2900,23 @@ function UnifiedWalkInModal({
     // land (Meta rate limit / customer blocked etc). Re-uses the SAME
     // approved template the auto-fire used — guarantees same message.
     // FALLBACK: if Meta rejects we open the QR popup as offline path.
+    //
+    // 🔴 2026-05-18 (Khushi CRITICAL) — wallet unlock CANNOT depend on WhatsApp.
+    // ALWAYS ensure the cover doc exists FIRST (idempotent — no-op if already
+    // there). After this, even if WhatsApp fails 100%, the QR popup + copy-link
+    // path will unlock the menu the moment the guest scans/opens the link.
     const sendMenu = async () => {
       setActionMsg("Re-sending wallet link on WhatsApp…");
+      // Guarantee wallet is unlocked — mint cover doc independent of WA outcome
+      try {
+        const cleanPh = (phone || "").replace(/\D/g, "").slice(-10);
+        await ensureZeroBalanceCoverForGuest({
+          bookingRef: done.ref, sourceDocId: done.ref,
+          name, phone: cleanPh,
+          source: kind === "guestlist" ? "guestlist" : "booking",
+          eventId, eventTitle, staffName: agentName,
+        });
+      } catch (e) { console.warn("[door][sendMenu] cover ensure failed (continuing)", e); }
       const tplName =
         kind === "guestlist" ? "guestlist_confirmed" :
         kind === "cover"     ? "cover_confirmed" :
