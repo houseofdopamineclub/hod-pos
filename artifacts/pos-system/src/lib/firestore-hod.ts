@@ -610,7 +610,13 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
   }
   if (!amount || amount < 1) throw new Error("Enter a valid cover amount");
   if (amount > 5000) throw new Error("Cover amount cannot exceed ₹5,000");
-  const bookingId = booking.id || booking.ref;
+  // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — PREFER booking.ref (HOD-XXX)
+  // over booking.id (firestore auto-uid). Customer site saves bookings with
+  // id=uid() and ref='HOD-XXX', and ALWAYS keys cover docs by ref. Wallet
+  // URL hodclub.in/?wallet=HOD-XXX reads `where ref==HOD-XXX`. If we key by
+  // booking.id (UUID), we write to a DIFFERENT doc and the wallet never
+  // updates (it keeps reading the cloud-function/customer-side 0-stub).
+  const bookingId = booking.ref || booking.id;
   if (!bookingId) throw new Error("Booking has no id/ref");
   const docId = coverDocIdFor(bookingId);
   const ref = doc(db, COVERS_COL, docId);
