@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Link } from "wouter";
 import {
   sha256, subscribeToHodReservations, diagnoseTableReservationDates, markGuestArrived, markRoundServed, markRoundActivated,
+  ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
@@ -15,6 +16,8 @@ import {
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
   redeemFromWalletAtTable, undoWalletRedemption, findCoverForRedemption,
   type WalletRedemption, type HodCover,
+  // 2026-05-18 — Live menu category filtering (admin Menu CRM controls visibility + discount)
+  subscribeToLiveMenuCategories, filterMenuByLiveCategories, type MenuCategory,
 } from "@/lib/firestore-hod";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
 import { QrScanner } from "@/components/QrScanner";
@@ -1695,6 +1698,11 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
   // Helper inline-redeclared (don't import to keep this section self-contained).
   const [menuOverrides, setMenuOverrides] = useState<Record<string, MenuOverride>>({});
   useEffect(() => subscribeToMenuOverrides(setMenuOverrides), []);
+  // 2026-05-18 — Live menu categories (admin Menu CRM). When empty → fail-open
+  // (show ALL items, no filtering). When non-empty → only those items show, with
+  // category discounts applied automatically.
+  const [liveCategories, setLiveCategories] = useState<MenuCategory[]>([]);
+  useEffect(() => subscribeToLiveMenuCategories(setLiveCategories), []);
   const ovKey = (name: string) =>
     name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const effectivePrice = (m: { name: string; price: number }) => {
@@ -1765,8 +1773,10 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
       }
       return false;
     };
+    // 2026-05-18 — Apply LIVE category filter first (admin Menu CRM). Fail-open when none live.
+    const menuForPicker = liveCategories.length > 0 ? filterMenuByLiveCategories(MENU_ITEMS, liveCategories) : MENU_ITEMS;
     // Drop items that admin marked OUT OF STOCK (live-synced via overrides).
-    let items = MENU_ITEMS.filter((m) => m.available !== false && !menuOverrides[ovKey(m.name)]?.outOfStock);
+    let items = menuForPicker.filter((m) => m.available !== false && !menuOverrides[ovKey(m.name)]?.outOfStock);
     // Always scope to the active wallet tab first, then optional sub-category.
     items = items.filter((m) => tabOf(m) === tab);
     if (category) items = items.filter((m) => m.category === category);
@@ -1779,7 +1789,7 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
       });
     }
     return items.slice(0, 80);
-  }, [search, category, menuOverrides, tab]);
+  }, [search, category, menuOverrides, tab, liveCategories]);
 
   // Accept any item shape with name+price+category+group — HodMenuItem widens
   // category to `string` while legacy MenuItem narrows it; both flow through
@@ -2043,7 +2053,32 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
   const handleArrive = async () => {
     if (!confirm(`Mark ${r.customerName || "this guest"} as arrived?`)) return;
     setBusy("arrive");
-    try { await markGuestArrived(r._docId, r.bookingRef); } catch {}
+    try {
+      await markGuestArrived(r._docId, r.bookingRef, captainName);
+      // 🔴 2026-05-18 (Khushi CRITICAL bug) — Captain arrival MUST mint the cover
+      // doc for ALL non-inhouse sources (WhatsApp bot, Zomato/Swiggy/EazyDiner),
+      // otherwise the customer wallet page at hodclub.in/?wallet=<ref> stays
+      // locked on "will be activated when you arrive" because checkedIn /
+      // coverActivated are never set. Mint is IDEMPOTENT (returns existing doc),
+      // so we run it even on a re-tap or already-arrived row — guarantees the
+      // wallet unlocks NO MATTER WHAT (independent of WhatsApp).
+      if (r.bookingRef) {
+        const src = (r.aggregator || (r as any).source || "inhouse").toLowerCase();
+        if (src !== "inhouse") {
+          try {
+            await ensureCoverForAggregatorArrival({
+              bookingRef: r.bookingRef,
+              name: r.customerName || "",
+              phone: (r as any).phone || (r as any).customerPhone || "",
+              source: src,
+              partySize: r.partySize,
+              tableId: r.tableId,
+              staffName: captainName,
+            });
+          } catch (e) { console.warn("[captain] cover mint on arrive failed", e); }
+        }
+      }
+    } catch {}
     setBusy("");
   };
 
@@ -2362,8 +2397,15 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     const ref = r.bookingRef || r._docId;
     const url = `https://hodclub.in/?wallet=${encodeURIComponent(ref)}`;
     const customerName = r.customerName || "Guest";
-    const tableLabel = r.tableId;
+    // 🔴 2026-05-19 (Khushi LIVE-NIGHT FIX) — fallback every interpolated field.
+    // Bot bookings & aggregator pre-arrival have no tableId / arrivalTime yet,
+    // and rendered "Table: undefined" / empty "Time:" lines in WhatsApp. Default
+    // to plain-language placeholders so the message ALWAYS reads cleanly.
+    const tableLabel = r.tableId || "Your table";
     const floorLabel = r.floorLabel || r.floor || "";
+    const dateLabel = r.date || new Date().toLocaleDateString("en-IN", { year: "numeric", month: "2-digit", day: "2-digit" });
+    const timeLabel = r.arrivalTime || "On arrival";
+    const guestsLabel = r.partySize || 2;
     // 2026-05-13 — fallback message format locked by Khushi. Order, emojis,
     // and spacing must match the spec exactly. Location link MUST be a plain
     // Google Maps URL — the previous `maps.app.goo.gl/...` short link routed
@@ -2371,13 +2413,39 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     // "Dynamic Link Not Found" when guests tapped it.
     const fallbackMessage =
       `Hi ${customerName}! 🎉 Your booking at HOD - House Of Dopamine is confirmed.\n\n` +
-      `📅 Date: ${r.date || ""}\n` +
-      `🕐 Time: ${r.arrivalTime || ""}\n` +
+      `📅 Date: ${dateLabel}\n` +
+      `🕐 Time: ${timeLabel}\n` +
       `🪑 Table: ${tableLabel}${floorLabel ? ` (${floorLabel})` : ""}\n` +
-      `👥 Guests: ${r.partySize || 2}\n\n` +
+      `👥 Guests: ${guestsLabel}\n\n` +
       `View menu & pre-order: ${url}\n\n` +
       `See you soon!\n\n` +
       `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+
+    // 🔴 2026-05-18 (Khushi CRITICAL — wallet unlock CANNOT depend on WhatsApp).
+    // BEFORE we touch WhatsApp at all, mint the covers doc for non-inhouse
+    // bookings (WA bot, Zomato, Swiggy, EazyDiner). This UNLOCKS the wallet at
+    // hodclub.in/?wallet=<ref> instantly. After this, even if WhatsApp fails
+    // 100% — the QR fallback below works, copy-link works, captain can share
+    // the link any way (SMS, AirDrop, hand over phone) and the menu will open.
+    // Mint is idempotent (no-op if cover already exists).
+    setBusy("wa");
+    if (r.bookingRef) {
+      const src = (r.aggregator || (r as any).source || "inhouse").toLowerCase();
+      if (src !== "inhouse") {
+        try {
+          await ensureCoverForAggregatorArrival({
+            bookingRef: r.bookingRef,
+            name: customerName,
+            phone: custPhone,
+            source: src,
+            partySize: r.partySize,
+            tableId: r.tableId,
+            staffName: captainName,
+          });
+          console.log("[captain][send-menu] cover doc ensured for", r.bookingRef);
+        } catch (e) { console.warn("[captain][send-menu] cover mint failed (continuing)", e); }
+      }
+    }
 
     // 🔴 2026-05-13 v2 (Khushi spec) — Send Menu must NOT open a wa.me tab
     // anymore. The previous wa.me-first flow popped open browser.whatsapp.com
@@ -2387,7 +2455,6 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     // sendWhatsApp): Meta Cloud API first (silent), success → ✓ tick alert,
     // failure → QR popup with the wallet link (reuses WhatsAppQrFallbackModal,
     // same pattern Door Mode uses for Cover/Guestlist). No wa.me tab ever.
-    setBusy("wa");
     try {
       // 2026-05-13 — order intentionally flipped. The Meta-approved
       // `table_ready` template body is LOCKED ("Your table is ready at HOD!
@@ -2797,6 +2864,7 @@ function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }
   url: string; reason: string; customerName: string; tableId: string; onClose: () => void;
 }) {
   const [qrDataUrl, setQrDataUrl] = useState("");
+  const [copied, setCopied] = useState(false);
   useEffect(() => {
     let cancelled = false;
     import("qrcode").then((QR) => {
@@ -2806,6 +2874,25 @@ function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }
     });
     return () => { cancelled = true; };
   }, [url]);
+
+  // 🔴 2026-05-18 (Khushi CRITICAL) — captain MUST have multiple ways to share
+  // the wallet link if WhatsApp from POS fails: (a) guest scans QR on tablet,
+  // (b) copy-link to paste in captain's own WhatsApp/SMS, (c) Web Share API
+  // (on a phone tablet, opens native share sheet — WhatsApp, SMS, AirDrop).
+  // Wallet itself is ALREADY unlocked at this point (cover doc was minted
+  // before WhatsApp was tried), so any of these paths opens the live menu.
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch { alert("Copy failed — long-press the URL below to copy manually."); }
+  };
+  const shareLink = async () => {
+    if (typeof navigator !== "undefined" && (navigator as any).share) {
+      try { await (navigator as any).share({ title: "HOD Wallet", text: `Hi ${customerName}, open your HOD wallet:`, url }); return; }
+      catch (e) { /* user cancelled or unsupported — fall through to copy */ }
+    }
+    copyLink();
+  };
+
   return (
     <div onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999,
@@ -2813,19 +2900,36 @@ function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }
       <div onClick={(e) => e.stopPropagation()}
         style={{ background: "#0d0d0d", border: "1px solid rgba(242,199,68,.35)", borderRadius: 16,
           maxWidth: 360, width: "100%", padding: 20, fontFamily: "'Space Grotesk', sans-serif", color: "#fff" }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#00C864", letterSpacing: .5, marginBottom: 4 }}>
+          ✓ WALLET UNLOCKED · Menu opens on any device
+        </div>
         <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744", marginBottom: 4, letterSpacing: .3 }}>
-          📱 Show this QR to {customerName}
+          📱 Share with {customerName}
         </div>
         <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
-          Table {tableId} · {reason}
+          Table {tableId} · WhatsApp from POS didn't go through: {reason}
         </div>
         <div style={{ background: "#fff", borderRadius: 12, padding: 12, display: "flex", justifyContent: "center", marginBottom: 14 }}>
           {qrDataUrl
             ? <img src={qrDataUrl} alt="Wallet QR" style={{ width: "100%", maxWidth: 280, display: "block" }} />
             : <div style={{ width: 280, height: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "#666", fontSize: 12 }}>Generating QR…</div>}
         </div>
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", textAlign: "center", marginBottom: 12, wordBreak: "break-all" }}>
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", textAlign: "center", marginBottom: 12, wordBreak: "break-all", padding: 8, background: "rgba(255,255,255,.04)", borderRadius: 8 }}>
           {url}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+          <button onClick={copyLink}
+            style={{ padding: "11px 10px", borderRadius: 9, background: "rgba(255,255,255,.06)",
+              border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 11, fontWeight: 800,
+              cursor: "pointer", letterSpacing: .4, fontFamily: "inherit", textTransform: "uppercase" }}>
+            {copied ? "✓ COPIED" : "📋 COPY LINK"}
+          </button>
+          <button onClick={shareLink}
+            style={{ padding: "11px 10px", borderRadius: 9, background: "rgba(37,211,102,.15)",
+              border: "1px solid rgba(37,211,102,.45)", color: "#25D366", fontSize: 11, fontWeight: 800,
+              cursor: "pointer", letterSpacing: .4, fontFamily: "inherit", textTransform: "uppercase" }}>
+            📤 SHARE
+          </button>
         </div>
         <button onClick={onClose}
           style={{ width: "100%", padding: "11px 14px", borderRadius: 9,
@@ -2948,7 +3052,29 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
               if (arriving) return;
               if (!confirm(`Mark ${r.customerName || "this guest"} as arrived?`)) return;
               setArriving(true);
-              try { await markGuestArrived(r._docId, r.bookingRef); } catch {}
+              try {
+                await markGuestArrived(r._docId, r.bookingRef, captainName);
+                // 🔴 2026-05-18 (Khushi CRITICAL) — inline arrival tap MUST also
+                // mint the cover doc for non-inhouse sources (WA bot, aggregators)
+                // or the customer wallet page stays locked. Idempotent — safe to
+                // run on re-tap or for an already-arrived row. Mirrors Door Mode.
+                if (r.bookingRef) {
+                  const src = (r.aggregator || (r as any).source || "inhouse").toLowerCase();
+                  if (src !== "inhouse") {
+                    try {
+                      await ensureCoverForAggregatorArrival({
+                        bookingRef: r.bookingRef,
+                        name: r.customerName || "",
+                        phone: (r as any).phone || (r as any).customerPhone || "",
+                        source: src,
+                        partySize: r.partySize,
+                        tableId: r.tableId,
+                        staffName: captainName,
+                      });
+                    } catch (e) { console.warn("[captain][inline-arrive] cover mint failed", e); }
+                  }
+                }
+              } catch {}
               setArriving(false);
             }}
             disabled={arriving}
