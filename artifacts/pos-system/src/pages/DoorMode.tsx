@@ -116,7 +116,27 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const today = getOperationalNightStr();
-  const isPast = !!booking.date && booking.date < today;
+  // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — bot-created tickets (e.g.
+  // TICKET-AJAY-19MAY-776) store date as "19/05/2026" / "19-05-2026" /
+  // "Tuesday, 19 May 2026". Naive string < comparison treats those as
+  // "past" (e.g. "19/05/2026" < "2026-05-19" → true) and the modal blocks
+  // activation with "⛔ Past event". Normalise to YYYY-MM-DD first; if we
+  // cannot parse the date at all, treat as NOT past (fail-open — door staff
+  // can always charge cover, never lose a ₹1000 sale to a string mismatch).
+  const parseAnyDate = (s?: string): string | null => {
+    if (!s) return null;
+    const t = String(s).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const m = t.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+    if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+    const d = new Date(t);
+    if (!isNaN(d.getTime())) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    }
+    return null;
+  };
+  const normalisedDate = parseAnyDate(booking.date);
+  const isPast = !!normalisedDate && normalisedDate < today;
 
   // Activation form state
   const isCash = booking.paymentId && booking.paymentId.startsWith("cash_");
@@ -177,7 +197,21 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     (async () => {
       try {
         const cv = await getCoverForBooking(booking.ref || booking.id);
-        if (!cancelled) { setExisting(cv); if (cv) setEditAmt(String(cv.coverActivated || 0)); }
+        if (!cancelled) {
+          // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — TWO things create an
+          // EMPTY covers stub doc BEFORE real activation:
+          //   1. Cloud-function `logNotificationOutcome` (auto-WA bookkeeping)
+          //   2. Door check-in auto-mint `ensureZeroBalanceCoverForGuest`
+          //      (guestlist + entry-only — added 2026-05-19 for wallet menu)
+          // Both leave coverActivated=0 / coverBalance=0. Without this guard
+          // the modal sees ANY existing doc and jumps to the ALREADY-ACTIVATED
+          // edit UI — door staff then have NO way to charge ₹1000 cover +
+          // collect cash/UPI/card. Treat empty stubs as "not yet activated"
+          // so the activation form (amount + payment method) renders instead.
+          const isRealActivation = !!cv && ((cv.coverActivated || 0) > 0 || (cv.coverBalance || 0) > 0);
+          setExisting(isRealActivation ? cv : null);
+          if (cv) setEditAmt(String(cv.coverActivated || 0));
+        }
       } catch {}
       if (!cancelled) setLoading(false);
     })();
@@ -3780,49 +3814,184 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           <LookupResult booking={lookupResult} agentName={agentName} onDone={() => setLookupResult(null)} />
         )}
 
-        {/* 🔎 Cross-collection Find Booking results (walk-up reservations) */}
-        {searchInput.trim().length >= 2 && !lookupResult && (
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.4)", letterSpacing: 1, marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span>🔎 FIND BOOKING (ALL DATES)</span>
-              {crossLoading && <span style={{ color: "rgba(242,199,68,.7)", fontWeight: 600 }}>searching…</span>}
-            </div>
-            {!crossLoading && crossResults.length === 0 && (
-              <div style={{ background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.08)", borderRadius: 10, padding: 10, fontSize: 11, color: "rgba(255,255,255,.45)" }}>
-                No bookings or aggregator reservations match "{searchInput.trim()}".
+        {/* 🔴 SEARCH PANEL — 2026-05-19 (Khushi LIVE-NIGHT) REWRITE.
+            OLD behaviour: only searched the CURRENT tab + a cross-collection
+            ALL-DATES list that surfaced 6-month-old bookings on top of
+            tonight's. Door staff typing "ajay" got last-month's Ajay instead
+            of tonight's Ajay sitting at the door right now.
+            NEW behaviour:
+              1. TONIGHT MATCHES — in-memory scan across ALL tabs (tickets,
+                 guestlist, tables, group, entry-pass) filtered to today's
+                 operational night. Tapping jumps the user straight to the
+                 right tab. Zero network — instant.
+              2. OTHER DATES — the existing Firestore cross-collection
+                 search, with tonight's matches subtracted (so no dupes).
+                 Hidden behind a smaller heading so it never out-competes
+                 tonight's data. */}
+        {searchInput.trim().length >= 2 && !lookupResult && (() => {
+          const q = searchInput.trim();
+          const ql = q.toLowerCase();
+          const qd = q.replace(/\D/g, "");
+          const matchText = (s?: string) => !!s && String(s).toLowerCase().includes(ql);
+          const matchPhone = (p?: string) => {
+            if (!qd || qd.length < 4) return false;
+            const pd = String(p || "").replace(/\D/g, "");
+            return !!pd && pd.includes(qd);
+          };
+          const matches = (name?: string, phone?: string, ref?: string) =>
+            matchText(name) || matchPhone(phone) || matchText(ref);
+
+          const todayDates = TODAY_DATE_SET();
+          const inDate = (d?: string) => todayDates.has((d || "").slice(0, 10));
+
+          // 1. TICKETS / GROUP / ENTRY PASS (bookings, today, non-guestlist)
+          const todayBookings = allBookings.filter((b) =>
+            (inDate(b.date) || inDate((b as any).bookedAt)) && !isGuestlistBooking(b)
+          );
+          type Hit = { key: string; tab: typeof tab; label: string; name: string; phone: string; subtitle: string; ref: string; onClick: () => void; tone: string };
+          const hits: Hit[] = [];
+          for (const b of todayBookings) {
+            if (!matches(b.name, b.phone, b.ref)) continue;
+            const tabKey: typeof tab = isGroupBooking(b) ? "group" : isOnlyEntryBooking(b) ? "onlyentry" : "tickets";
+            const tabLabel = tabKey === "group" ? "GROUP" : tabKey === "onlyentry" ? "ENTRY PASS" : "TICKETS";
+            hits.push({
+              key: `b-${b.id}`, tab: tabKey, label: tabLabel,
+              name: b.name || "(no name)", phone: b.phone || "",
+              subtitle: `${b.eventTitle || ""} · ${b.ref || ""}`.replace(/^ · | · $/g, "").trim() || (b.ref || ""),
+              ref: b.ref || b.id, tone: "#60A5FA",
+              onClick: () => { setTab(tabKey); /* keep query so per-tab filter narrows further */ },
+            });
+          }
+          // 2. GUESTLIST (today)
+          const todayGuests = allGuests.filter((g) => {
+            const ja = ((g as any).joinedAt || "").slice(0, 10);
+            const et = ((g as any).entryTime || "").slice(0, 10);
+            return todayDates.has(ja) || todayDates.has(et);
+          });
+          for (const g of todayGuests) {
+            if (!matches(g.name, g.phone, (g as any).ref)) continue;
+            hits.push({
+              key: `g-${g.id}`, tab: "guestlist", label: "GUEST LIST",
+              name: g.name || "(no name)", phone: g.phone || "",
+              subtitle: ((g as any).entryType || "guestlist").toString(),
+              ref: (g as any).ref || g.id, tone: "#34D399",
+              onClick: () => { setTab("guestlist"); },
+            });
+          }
+          // Also include guestlist-typed bookings (parity with GuestlistTab merge)
+          const glIds = new Set(todayGuests.map((g) => g.id));
+          for (const b of allBookings) {
+            if (!isGuestlistBooking(b)) continue;
+            if (!(inDate(b.date) || inDate((b as any).bookedAt))) continue;
+            if (glIds.has(b.id)) continue;
+            if (!matches(b.name, b.phone, b.ref)) continue;
+            hits.push({
+              key: `gb-${b.id}`, tab: "guestlist", label: "GUEST LIST",
+              name: b.name || "(no name)", phone: b.phone || "",
+              subtitle: b.ref || "", ref: b.ref || b.id, tone: "#34D399",
+              onClick: () => { setTab("guestlist"); },
+            });
+          }
+          // 3. TABLES (today, dedup by _docId)
+          const tableSeen = new Set<string>();
+          for (const rows of Object.values(tableResByDate)) {
+            for (const r of rows) {
+              if (!r._docId || tableSeen.has(r._docId)) continue;
+              tableSeen.add(r._docId);
+              if ((r as any).status === "cancelled") continue;
+              if (!matches((r as any).customerName, (r as any).phone, (r as any).bookingRef)) continue;
+              hits.push({
+                key: `t-${r._docId}`, tab: "tables", label: "TABLE",
+                name: (r as any).customerName || "(no name)", phone: (r as any).phone || "",
+                subtitle: `${(r as any).tableId || ""} · ${(r as any).floorLabel || (r as any).floor || ""} · ${(r as any).arrivalTime || ""}`.replace(/ +/g, " ").trim(),
+                ref: (r as any).bookingRef || r._docId, tone: "#F59E0B",
+                onClick: () => { setTab("tables"); },
+              });
+            }
+          }
+          // De-dup hits by ref so the same booking doesn't appear twice when
+          // the bookings + guestlist collections both contain it.
+          const seenRefs = new Set<string>();
+          const tonightHits = hits.filter((h) => {
+            const k = (h.ref || h.key).toLowerCase();
+            if (seenRefs.has(k)) return false;
+            seenRefs.add(k);
+            return true;
+          });
+          // OTHER DATES = cross-collection results minus tonight's refs
+          const otherDateHits = crossResults.filter((r) =>
+            !seenRefs.has((r.ref || r.id).toLowerCase()) && !inDate(r.date)
+          );
+
+          return (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: "#C8A645", letterSpacing: 1, marginBottom: 6 }}>
+                🎯 TONIGHT MATCHES ({tonightHits.length})
               </div>
-            )}
-            {crossResults.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {crossResults.map((r) => {
-                  const isAgg = r._src === "aggregator";
-                  return (
-                    <button key={`${r._src}-${r.id}`} onClick={() => setLookupResult(r)}
+              {tonightHits.length === 0 ? (
+                <div style={{ background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.08)", borderRadius: 10, padding: 10, fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 10 }}>
+                  No tonight bookings match "{q}" — check OTHER DATES below or use Find Booking.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                  {tonightHits.slice(0, 12).map((h) => (
+                    <button key={h.key} onClick={h.onClick}
                       style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
-                        background: isAgg ? "rgba(168,85,247,.06)" : "rgba(96,165,250,.06)",
-                        border: `1px solid ${isAgg ? "rgba(168,85,247,.25)" : "rgba(96,165,250,.25)"}`,
+                        background: `${h.tone}10`, border: `1px solid ${h.tone}40`,
                         color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                       <div style={{ minWidth: 0, flex: 1 }}>
                         <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {r.name || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {r.phone || "no phone"}</span>
+                          {h.name} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {h.phone || "no phone"}</span>
                         </div>
                         <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {r.eventTitle || r.ref}
+                          {h.subtitle || h.ref}
                         </div>
                       </div>
                       <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
-                        background: isAgg ? "rgba(168,85,247,.15)" : "rgba(96,165,250,.15)",
-                        color: isAgg ? "#A855F7" : "#60A5FA",
-                        border: `1px solid ${isAgg ? "rgba(168,85,247,.4)" : "rgba(96,165,250,.4)"}` }}>
-                        {isAgg ? (r._aggregator || "AGG").toUpperCase() : "BOOKING"}
+                        background: `${h.tone}20`, color: h.tone, border: `1px solid ${h.tone}60` }}>
+                        {h.label}
                       </span>
                     </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
+                  ))}
+                </div>
+              )}
+              {(otherDateHits.length > 0 || crossLoading) && (
+                <details>
+                  <summary style={{ cursor: "pointer", fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,.4)", letterSpacing: 1, marginBottom: 6, listStyle: "none" }}>
+                    📅 OTHER DATES ({otherDateHits.length}){crossLoading ? " · searching…" : ""}
+                  </summary>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                    {otherDateHits.map((r) => {
+                      const isAgg = r._src === "aggregator";
+                      return (
+                        <button key={`${r._src}-${r.id}`} onClick={() => setLookupResult(r)}
+                          style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
+                            background: isAgg ? "rgba(168,85,247,.06)" : "rgba(96,165,250,.06)",
+                            border: `1px solid ${isAgg ? "rgba(168,85,247,.25)" : "rgba(96,165,250,.25)"}`,
+                            color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {r.name || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {r.phone || "no phone"}</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {r.date || ""} · {r.eventTitle || r.ref}
+                            </div>
+                          </div>
+                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
+                            background: isAgg ? "rgba(168,85,247,.15)" : "rgba(96,165,250,.15)",
+                            color: isAgg ? "#A855F7" : "#60A5FA",
+                            border: `1px solid ${isAgg ? "rgba(168,85,247,.4)" : "rgba(96,165,250,.4)"}` }}>
+                            {isAgg ? (r._aggregator || "AGG").toUpperCase() : "BOOKING"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Event selector chips */}
         {eventChips.length > 0 && (
