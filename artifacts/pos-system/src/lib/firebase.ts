@@ -1,5 +1,10 @@
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, initializeFirestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 
 const firebaseConfig = {
@@ -16,9 +21,27 @@ const app = isFirstInit ? initializeApp(firebaseConfig) : getApps()[0];
 // `ignoreUndefinedProperties: true` prevents Firestore from rejecting writes that
 // contain undefined fields (e.g. optional KOT item fields like notes/modifiers).
 // Without this, printKOT() fails with code "invalid-argument".
-export const db = isFirstInit
-  ? initializeFirestore(app, { ignoreUndefinedProperties: true })
-  : getFirestore(app);
+//
+// `persistentLocalCache` enables IndexedDB-backed offline persistence:
+//   - every Firestore doc the tablet has ever read is cached locally
+//   - WiFi drop → tablet keeps showing covers/wallets/menu, writes queue locally
+//   - WiFi back → queued writes auto-sync, no data loss
+//   - `persistentMultipleTabManager` lets POS run in multiple tabs without conflict
+// Wrapped in try/catch because some browsers (Safari private mode, very old Android
+// WebView) reject IndexedDB — we fall back to in-memory cache so POS still loads.
+function initDb() {
+  if (!isFirstInit) return getFirestore(app);
+  try {
+    return initializeFirestore(app, {
+      ignoreUndefinedProperties: true,
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    });
+  } catch (e) {
+    console.warn("[firebase] persistent cache unavailable, falling back to memory-only", e);
+    return initializeFirestore(app, { ignoreUndefinedProperties: true });
+  }
+}
+export const db = initDb();
 export const auth = getAuth(app);
 
 // Firestore rules on `bookings` (and a few other collections) require `request.auth != null`

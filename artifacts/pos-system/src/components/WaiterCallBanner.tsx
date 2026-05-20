@@ -84,7 +84,13 @@ export function WaiterCallBanner({ staffName, role }: { staffName: string; role:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [calls]);
 
-  if (calls.length === 0) return null;
+  // 🆕 2026-05-20 (Khushi) — once a call is ACKed, drop it from the banner
+  // entirely. Captain complained the green "✓ ACK · sujatha" rows stayed
+  // pinned at the top of CaptainMode forever after acknowledgement. The
+  // ack action already stamps `acknowledgedBy` on the Firestore doc for
+  // audit — the banner does NOT need to keep showing it.
+  const visibleCalls = calls.filter((c) => c.status !== "acknowledged");
+  if (visibleCalls.length === 0) return null;
 
   const ack = async (id: string) => {
     setBusyId(id);
@@ -101,7 +107,7 @@ export function WaiterCallBanner({ staffName, role }: { staffName: string; role:
       background: "linear-gradient(180deg,#0A0A0A 0%, rgba(10,10,10,.96) 100%)",
       borderBottom: "1px solid rgba(184,50,39,.5)",
     }}>
-      {calls.map((c) => {
+      {visibleCalls.map((c) => {
         const isAck = c.status === "acknowledged";
         return (
           <div key={c.id}

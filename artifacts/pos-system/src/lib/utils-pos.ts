@@ -83,6 +83,24 @@ export const SERVICE_CHARGE_RATE = 10;
 export const CGST_RATE = 2.5;
 export const SGST_RATE = 2.5;
 export const GST_RATE = 5;
+
+/** 2026-05-20 (Khushi spec) — DISPLAY-ONLY tax-inclusive helper. Returns the
+ *  rounded "what the customer sees" price for a single menu item. Underlying
+ *  Firestore data + reports continue to store the raw price; this is render
+ *  layer only. Mirrors `computeHodBreakdown` exactly:
+ *    SC 10% on ALL items.
+ *    GST 5% on (food + non-alc + SC). Alcohol exempt from GST base.
+ *  ⇒ food / non-alc drink: price × 1.155
+ *  ⇒ alcohol             : price × 1.105
+ *  Use this for menu list price chips and per-row cart amounts in Bar /
+ *  Captain mode. Cart / round totals already use computeHodBreakdown
+ *  (multi-item aware) and don't need this helper.                          */
+export function priceWithTax(price: number, isAlcohol: boolean): number {
+  const sc = price * 0.10;
+  const gstBase = isAlcohol ? sc : (price + sc);
+  const gst = gstBase * 0.05;
+  return Math.round(price + sc + gst);
+}
 export const BOTTLE_DISCOUNT_PERCENT = 20;
 export const GSTIN = "29AARFH2309E1ZC";
 export const VENUE_NAME = "House of Dopamine";
