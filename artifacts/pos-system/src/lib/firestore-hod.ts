@@ -2573,11 +2573,15 @@ export async function recordBillPrint(
 export async function createWalkInTable(
   tableId: string, floor: string, floorLabel: string,
   customerName: string, phone: string, partySize: number, captainName: string,
-  aggregator = "inhouse", aggregatorDiscount = 0
+  aggregator = "inhouse", aggregatorDiscount = 0,
+  // 🆕 2026-05-20 (Khushi) — optional email + arrival time captured by the
+  // simplified floor-plan walk-in modal. Empty/blank values fall through to
+  // the existing auto-now arrivalTime so legacy callers are unaffected.
+  email = "", arrivalTimeOverride = ""
 ): Promise<string> {
   const now = new Date();
   const date = now.toISOString().split("T")[0];
-  const arrTime = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = `WALK-${tableId}-${Date.now().toString(36).toUpperCase()}`;
 
   const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tableId), where("date", "==", date), limit(1));
@@ -2593,6 +2597,7 @@ export async function createWalkInTable(
   await setDoc(doc(db, COVERS_COL, ref), {
     isTableBooking: true, tableId, floor, floorLabel,
     customerName, name: customerName, phone: phone || "", partySize: partySize || 2,
+    ...(email.trim() ? { email: email.trim() } : {}),
     arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, ref, isWalkIn: true,
   }, { merge: true });
@@ -2600,6 +2605,7 @@ export async function createWalkInTable(
   const d = doc(db, TABLE_RES_COL, ref);
   await setDoc(d, {
     tableId, floor, floorLabel, date, customerName, phone: phone || "",
+    ...(email.trim() ? { email: email.trim() } : {}),
     partySize: partySize || 2, arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, bookedAt: now.toISOString(), source: aggregator,
     aggregator, aggregatorDiscount, tabRounds: [], tabTotal: 0,
@@ -3194,22 +3200,26 @@ export async function reassignTable(
 export async function createProxyTable(
   proxyName: string, floor: string, floorLabel: string,
   customerName: string, phone: string, partySize: number, captainName: string,
-  aggregator = "inhouse", aggregatorDiscount = 0
+  aggregator = "inhouse", aggregatorDiscount = 0,
+  // 🆕 2026-05-20 (Khushi) — see createWalkInTable.
+  email = "", arrivalTimeOverride = ""
 ): Promise<string> {
   const now = new Date();
   const date = now.toISOString().split("T")[0];
-  const arrTime = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = `PROXY-${proxyName.replace(/\s+/g, "-")}-${Date.now().toString(36).toUpperCase()}`;
   // Write covers doc FIRST (see createWalkInTable for rationale).
   await setDoc(doc(db, COVERS_COL, ref), {
     isTableBooking: true, tableId: proxyName, floor, floorLabel,
     customerName, name: customerName, phone: phone || "", partySize: partySize || 2,
+    ...(email.trim() ? { email: email.trim() } : {}),
     arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, ref, isWalkIn: true, isProxy: true,
   }, { merge: true });
   const d = doc(db, TABLE_RES_COL, ref);
   await setDoc(d, {
     tableId: proxyName, floor, floorLabel, date, customerName, phone: phone || "",
+    ...(email.trim() ? { email: email.trim() } : {}),
     partySize: partySize || 2, arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, bookedAt: now.toISOString(), source: aggregator,
     aggregator, aggregatorDiscount, tabRounds: [], tabTotal: 0,
@@ -3590,6 +3600,17 @@ export function subscribeToBookings(cb: (bookings: HodBooking[]) => void): Unsub
 export function subscribeToGuestlist(cb: (guests: HodGuestlistEntry[]) => void): Unsubscribe {
   return onSnapshot(collection(db, GUESTLIST_COL), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry)));
+  }, () => cb([]));
+}
+
+// 🔴 2026-05-20 (Khushi LIVE REPORTS) — subscribe to ALL covers so the Door
+// Live Reports dashboard can show: total cover charges collected + total
+// amount redeemed (= activated − balance) across BOTH linked-table covers
+// AND walk-in bar covers. Returns the full covers collection — caller is
+// responsible for date-filtering. Fail-open: on error returns [].
+export function subscribeToAllCovers(cb: (covers: HodCover[]) => void): Unsubscribe {
+  return onSnapshot(collection(db, COVERS_COL), (snap) => {
+    cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodCover)));
   }, () => cb([]));
 }
 
@@ -4283,4 +4304,103 @@ export function findBestWaitlistMatch(
     if (w.partySize <= freedTableCapacity) return w;
   }
   return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🆕 2026-05-20 — DOOR PRICING OVERRIDE (Khushi-requested)
+// Singleton doc at appSettings/doorPricing.
+//   { priceOverrideEnabled: boolean, updatedAt: ts, updatedBy: string }
+// When true, door staff can edit per-walk-in prices (cover / entry-only /
+// group / table-4 / vvip-6) to handle Koramangala bargain customers. When
+// false (default), prices lock to the event's published values. Manager
+// toggles this from Admin → 💰 Door Pricing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface DoorPricingSettings {
+  priceOverrideEnabled: boolean;
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+const APP_SETTINGS_COL = "appSettings";
+const DOOR_PRICING_DOC = "doorPricing";
+// 🛟 2026-05-20 (Khushi bug — "Missing or insufficient permissions"):
+// Prod Firestore rules don't allow writes to `appSettings/*`, so the toggle
+// failed and stayed OFF. Adding a rule on Khushi's Mac would fix this server-
+// side, but in the meantime we dual-write to localStorage so the admin tablet
+// still works end-to-end. localStorage is the source of truth for "did this
+// tablet flip it?"; Firestore is the source of truth for "did any tablet flip
+// it cross-device?". Whichever returns ON, we honor ON (failing-open toward
+// the staff's most recent intent on this device).
+const DOOR_PRICING_LS_KEY = "hod.doorPricing.priceOverrideEnabled";
+const lsGet = (): boolean | null => {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    const v = window.localStorage.getItem(DOOR_PRICING_LS_KEY);
+    if (v === "1") return true;
+    if (v === "0") return false;
+    return null;
+  } catch { return null; }
+};
+const lsSet = (v: boolean) => {
+  try { if (typeof window !== "undefined" && window.localStorage) window.localStorage.setItem(DOOR_PRICING_LS_KEY, v ? "1" : "0"); } catch {}
+};
+
+export function subscribeToDoorPricingSettings(
+  cb: (s: DoorPricingSettings) => void
+): () => void {
+  // Seed from localStorage immediately so the UI doesn't flash OFF→ON.
+  const seeded = lsGet();
+  if (seeded !== null) cb({ priceOverrideEnabled: seeded });
+  try {
+    return onSnapshot(
+      doc(db, APP_SETTINGS_COL, DOOR_PRICING_DOC),
+      (snap) => {
+        const data = snap.exists() ? (snap.data() as Partial<DoorPricingSettings>) : {};
+        const fsVal = !!data.priceOverrideEnabled;
+        const lsVal = lsGet();
+        // If both sources exist, OR them (most-recent-intent wins). If only
+        // localStorage exists (rules blocked write), honor that.
+        const merged = lsVal === null ? fsVal : (fsVal || lsVal);
+        cb({ priceOverrideEnabled: merged });
+      },
+      (err) => {
+        // 🛟 Firestore subscription rejected → fall back to localStorage.
+        console.warn("[doorPricing] subscribe failed, using localStorage:", err?.message);
+        cb({ priceOverrideEnabled: lsGet() ?? false });
+      }
+    );
+  } catch (e: any) {
+    console.warn("[doorPricing] subscribe threw, using localStorage:", e?.message);
+    cb({ priceOverrideEnabled: lsGet() ?? false });
+    return () => {};
+  }
+}
+
+export async function updateDoorPricingSettings(
+  patch: Partial<DoorPricingSettings>,
+  updatedBy?: string
+): Promise<void> {
+  // Always persist locally so the toggle reflects on THIS tablet immediately,
+  // even if Firestore rejects (prod rules may not allow appSettings writes).
+  if (typeof patch.priceOverrideEnabled === "boolean") {
+    lsSet(patch.priceOverrideEnabled);
+  }
+  try {
+    await setDoc(
+      doc(db, APP_SETTINGS_COL, DOOR_PRICING_DOC),
+      { ...patch, updatedAt: serverTimestamp(), updatedBy: updatedBy || "" },
+      { merge: true }
+    );
+  } catch (e: any) {
+    // 🛟 Permission-denied is expected until Khushi deploys the appSettings
+    // rule on Mac. Don't throw — localStorage already has the new value, so
+    // this tablet works end-to-end. Other tablets won't sync until rules ship.
+    const msg = String(e?.message || e || "");
+    if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
+      console.warn("[doorPricing] Firestore write blocked by rules (using local only):", msg);
+      return;
+    }
+    throw e;
+  }
 }
