@@ -155,6 +155,14 @@ export interface HodTableReservation {
   date: string;
   customerName?: string;
   phone?: string;
+  email?: string;
+  companyName?: string;
+  amenities?: Array<{ name: string; price: number; qty: number }>;
+  amenitiesTotal?: number;
+  advanceAmount?: number;
+  advanceMode?: string;
+  advanceRef?: string;
+  advancePaidAt?: string;
   partySize?: number;
   arrivalTime?: string;
   actualArrivalTime?: string;
@@ -223,6 +231,54 @@ export interface HodTableReservation {
   /** Convenience: sum of `walletRedemptions[].amount` cached at markPaid time
    *  so Reports can sort/filter without unrolling the array. */
   walletPaidAmount?: number;
+  // ── 2026-05-20 — COVER+TABLE LINKED WALLET (Khushi spec) ──
+  /** TRUE when door girl created this table via "💰 ACTIVATE COVER + TABLE"
+   *  flow and the linked cover doc was successfully written. Drives captain
+   *  UX: gold badge on table card + banner in bill drawer + 1-tap redeem
+   *  button in Mark Paid modal (skips QR scan / phone lookup). */
+  hasLinkedCover?: boolean;
+  /** Public ref of the linked cover (HOD-XXX) — surfaced in captain UI. */
+  linkedCoverRef?: string;
+  /** Firestore doc id of the linked cover. Used by 1-tap redeem to call
+   *  redeemFromWalletAtTable without lookup. */
+  linkedCoverDocId?: string;
+  /** Initial wallet balance at link time — used as cheap fallback display
+   *  when the live cover doc hasn't loaded yet. */
+  linkedCoverInitial?: number;
+  /** ISO timestamp of when link was committed. */
+  linkedCoverLinkedAt?: string;
+  /** TRUE between table-create and cover-activate; FALSE once linked. The
+   *  door flow flips this to FALSE inside linkCoverToTable. */
+  linkedCoverPending?: boolean;
+  // ── 2026-05-20 — CUSTOMER-CALLS-CAPTAIN (Khushi spec) ──
+  /** Set by the customer site when a LINKED-WALLET guest taps the "🍽 I'M AT
+   *  MY TABLE — CALL MY CAPTAIN" button on hodclub.in/?wallet=XXX. Captain
+   *  tablet pulses RED on the table card with "🔔 CUSTOMER CALLING" until
+   *  captain taps "✓ ON IT" (which clears the field).
+   *
+   *  Fail-open: if write fails, customer site shows a fallback hint; if
+   *  read fails on captain tablet, table card just doesn't pulse (same as
+   *  before this feature). Customer can still walk over / wave. */
+  customerCallRequest?: {
+    /** ISO timestamp of when customer tapped CALL CAPTAIN. */
+    at: string;
+    /** Optional cart preview ("2× Kingfisher, 1× Fries") for context. */
+    itemsPreview?: string;
+    /** Optional cart total in rupees. */
+    total?: number;
+  } | null;
+  /** 2026-05-20 — append-only log of every customer call captain dismissed.
+   *  Captain can re-read what the customer wanted AFTER tapping ✓ ON IT, so
+   *  they never lose context if they forget the items between dismiss and
+   *  walking to the table. UI shows the most-recent entry as a yellow
+   *  "📜 LAST CALL · N MIN AGO" strip for 30 min after dismissal. */
+  customerCallHistory?: Array<{
+    at: string;
+    itemsPreview?: string;
+    total?: number;
+    dismissedAt: string;
+    dismissedBy?: string;
+  }>;
 }
 
 /** 2026-05-15 — One redemption hit against a customer wallet at table close.
@@ -1235,6 +1291,22 @@ export async function updateRoundItems(
         await updateDoc(cRef, { tabRounds: rounds, tabTotal });
       }
     }
+    // 🔴 2026-05-20 (Khushi Bug 2 fix) — COVER+TABLE flow stores the linked
+    // wallet under `linkedCoverDocId` (NOT `bookingRef`). The legacy mirror
+    // above only handles in-house HOD- bookings → captain edits on linked
+    // wallets weren't reaching the customer phone. Mirror to that doc too so
+    // the customer wallet's tabRounds reflect the captain's edit live.
+    // 🛟 FALLBACK: try/catch keeps the captain edit alive even if the cover
+    // doc was deleted / wallet expired — captain's local bill is the source
+    // of truth, this is best-effort sync only.
+    const linkedRef = (data as { linkedCoverDocId?: string }).linkedCoverDocId;
+    if (linkedRef && linkedRef !== data.bookingRef) {
+      const cRef = doc(db, COVERS_COL, linkedRef);
+      const cs = await getDoc(cRef);
+      if (cs.exists()) {
+        await updateDoc(cRef, { tabRounds: rounds, tabTotal });
+      }
+    }
   } catch {}
 }
 
@@ -1263,6 +1335,77 @@ export async function updateRoundItems(
 // `verifyRechargePayment` BEFORE the rules-lock deploy. Same logic as below,
 // just executed server-side. Until then this client-side path works.
 // ════════════════════════════════════════════════════════════════════════
+
+/** 2026-05-20 — Live-subscribe to ONE cover doc by Firestore id. Used by
+ *  Captain Mode (TableCard + MarkPaidModal) to render the linked-cover
+ *  balance badge / 1-tap redeem button with live balance (auto-updates
+ *  when customer also spent at the bar). Returns the unsubscribe fn. */
+export function subscribeToCoverById(
+  docId: string,
+  onChange: (cover: HodCover | null) => void
+): Unsubscribe {
+  if (!docId) { onChange(null); return () => {}; }
+  return onSnapshot(
+    doc(db, COVERS_COL, docId),
+    (snap) => {
+      if (!snap.exists()) { onChange(null); return; }
+      onChange({ id: snap.id, ...(snap.data() as Omit<HodCover, "id">) });
+    },
+    (err) => {
+      console.warn("[subscribeToCoverById] snapshot error", err);
+      onChange(null);
+    }
+  );
+}
+
+/** 2026-05-20 — Clear a customer's CALL CAPTAIN ping after captain
+ *  acknowledges it. Writes `customerCallRequest: null` on the reservation.
+ *  Fail-open: errors are logged but not thrown — the worst case is the
+ *  banner stays on screen and captain re-taps "✓ ON IT". */
+export async function clearCustomerCallRequest(
+  reservationDocId: string,
+  dismissedBy?: string,
+  /** ISO timestamp of the call the UI is dismissing. Required for safety:
+   *  if a NEW call arrived between render and tap, we must NOT clear it.
+   *  Captain will see the new banner appear and can re-tap. */
+  expectedAt?: string
+): Promise<void> {
+  if (!reservationDocId) return;
+  try {
+    // 🔴 2026-05-20 (Khushi Bug 1) — push dismissed call into `customerCallHistory`
+    // so captain can re-read items AFTER tapping ✓ ON IT. Done inside a
+    // runTransaction so a concurrent NEW customerCallRequest write between
+    // read and write is detected (Firestore retries) — and we only clear
+    // when the in-doc call's `at` still matches the UI's `expectedAt`.
+    // Without that guard, a brand-new call could be silently cleared.
+    const ref = doc(db, TABLE_RES_COL, reservationDocId);
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return;
+      const data = snap.data() as Partial<HodTableReservation>;
+      const cr = data.customerCallRequest;
+      // Guard: if the in-doc call's `at` doesn't match what the captain
+      // saw on screen, a new call has landed — leave it alone.
+      if (expectedAt && cr && cr.at && cr.at !== expectedAt) return;
+      // Guard: if no call at all, nothing to do.
+      if (!cr || !cr.at) return;
+      const history = Array.isArray(data.customerCallHistory) ? data.customerCallHistory : [];
+      const entry: { at: string; dismissedAt: string; itemsPreview?: string; total?: number; dismissedBy?: string } = {
+        at: cr.at,
+        dismissedAt: new Date().toISOString(),
+      };
+      if (cr.itemsPreview) entry.itemsPreview = cr.itemsPreview;
+      if (typeof cr.total === "number") entry.total = cr.total;
+      if (dismissedBy) entry.dismissedBy = dismissedBy;
+      tx.update(ref, {
+        customerCallRequest: null,
+        customerCallHistory: [...history, entry].slice(-20),
+      });
+    });
+  } catch (e) {
+    console.warn("[clearCustomerCallRequest] failed (non-fatal)", e);
+  }
+}
 
 /** Find a cover wallet by ref (HOD-XXX), bookingId, or phone. Returns the
  *  best match (highest balance, checked-in preferred) or a clear failure
@@ -1453,7 +1596,36 @@ export async function redeemFromWalletAtTable(
       walletPhone: String(cover.phone || ""),
       amount: amountRedeemed, redeemedAt: at, redeemedBy: captainName, txId,
     };
-    tx.update(coverRef, {
+    // 🔴 2026-05-20 (Khushi Bug 2 fix) — when captain settles bill against
+    // this wallet, ALSO mark customer self-order rounds (status
+    // "preparing"/"activated") as "served". Without this, the customer site
+    // keeps subtracting those old rounds from coverBalance forever and shows
+    // "INSUFFICIENT BALANCE · need ₹X more" on the customer's next order,
+    // even though the captain has already taken the money. Single source of
+    // truth: coverBalance after this update.
+    //
+    // ⚠️ Concurrency guard (architect 2026-05-20): only convert rounds that
+    // existed BEFORE this transaction started (placedAt <= txStartAt). If a
+    // customer self-orders a NEW round while captain is settling, Firestore
+    // will retry the transaction and the new round will appear here too —
+    // we MUST NOT serve it, because it wasn't in the captain's bill cap.
+    // The new round stays "preparing" so customer site still subtracts it
+    // and bartender/captain settles it later.
+    const existingRounds: Array<{ status?: string; servedAt?: string; servedBy?: string; placedAt?: string }> = Array.isArray(cover.tabRounds) ? cover.tabRounds : [];
+    const txStartAt = at; // ISO captured before tx — see line ~1467
+    let roundsTouched = false;
+    const settledRounds = existingRounds.map((r) => {
+      if (r && (r.status === "preparing" || r.status === "activated")) {
+        // If placedAt is missing (legacy round) treat as pre-existing.
+        const placedAt = r.placedAt || "";
+        if (!placedAt || placedAt <= txStartAt) {
+          roundsTouched = true;
+          return { ...r, status: "served", servedAt: at, servedBy: captainName };
+        }
+      }
+      return r;
+    });
+    const coverUpdate: Record<string, unknown> = {
       coverBalance: newWalletBalance,
       coverUsed: Math.round((oldUsed + amountRedeemed) * 100) / 100,
       transactions: arrayUnion({
@@ -1464,7 +1636,9 @@ export async function redeemFromWalletAtTable(
         staff: captainName,
         paymentId: txId,
       }),
-    });
+    };
+    if (roundsTouched) coverUpdate.tabRounds = settledRounds;
+    tx.update(coverRef, coverUpdate);
     tx.update(resvRef, { walletRedemptions: [...existing, redemption] });
   });
   return { amountRedeemed, newWalletBalance, redemption: redemption! };
@@ -2624,11 +2798,71 @@ export async function createWalkInGuestlistEntry(input: {
   return { ref };
 }
 
+// 🔴 2026-05-19 (Khushi LIVE-NIGHT) — shared amenity row shape used by all 3
+// booking creators (in-house, aggregator, corporate). `price` is per unit in
+// INR; `qty` defaults to 1. Door staff can tick from a default catalog or
+// type a custom row. Totals roll up into `amenitiesTotal` for Reports.
+export interface BookingAmenity {
+  name: string;
+  price: number;
+  qty: number;
+}
+function sumAmenities(items?: BookingAmenity[]): number {
+  if (!items || !items.length) return 0;
+  return items.reduce((s, a) => s + (Number(a.price) || 0) * (Number(a.qty) || 1), 0);
+}
+
+// 🔴 2026-05-19 — shared time-window conflict check used by all 3 creators.
+// Matches the UI's `doorTableOccupantAt` logic in DoorMode.tsx so the green/red
+// picker can't disagree with the write-time gate. Returns the conflicting
+// reservation if the slot collides, else null. Paid bookings are released.
+// Reservations with no parseable arrivalTime are conservatively treated as
+// blocking (matches old date-only behaviour).
+const SLOT_MIN_DEFAULT = 120;
+const SLOT_LEAD_IN_DEFAULT = 30;
+function parseClock(t?: string): number | null {
+  if (!t) return null;
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (Number.isNaN(h) || Number.isNaN(mm)) return null;
+  const ampm = m[3]?.toUpperCase();
+  if (ampm === "PM" && h < 12) h += 12;
+  if (ampm === "AM" && h === 12) h = 0;
+  return h * 60 + mm;
+}
+async function findTableSlotConflict(
+  tableId: string, date: string, arrivalTime?: string
+): Promise<{ customerName?: string; arrivalTime?: string } | null> {
+  const q2 = query(collection(db, TABLE_RES_COL),
+    where("tableId", "==", tableId), where("date", "==", date));
+  const snap = await getDocs(q2);
+  if (snap.empty) return null;
+  const target = parseClock(arrivalTime);
+  for (const d of snap.docs) {
+    const r = d.data() as any;
+    if (r.paymentStatus === "paid") continue;
+    const start = parseClock(r.arrivalTime);
+    if (start == null || target == null) {
+      // Unknown time on either side → fall back to old date-only blocking.
+      return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+    }
+    const winStart = start - SLOT_LEAD_IN_DEFAULT;
+    const winEnd   = start + SLOT_MIN_DEFAULT;
+    if (target >= winStart && target <= winEnd) {
+      return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+    }
+  }
+  return null;
+}
+
 export async function createAggregatorTableBooking(input: {
   aggregator: string;          // "zomato" | "swiggy-dineout" | "swiggy-scenes" | "eazydiner"
   discountPercent?: number;    // override aggregator default if door staff agrees a different %
   customerName: string;
   phone: string;
+  email?: string;
   partySize: number;
   date: string;                // YYYY-MM-DD
   arrivalTime: string;         // "HH:MM" or e.g. "10:30 PM"
@@ -2637,19 +2871,19 @@ export async function createAggregatorTableBooking(input: {
   floorLabel?: string;
   externalRef?: string;        // e.g. Zomato booking ID, if known
   notes?: string;
+  amenities?: BookingAmenity[];
   staffName: string;
 }): Promise<string> {
-  const { aggregator, discountPercent, customerName, phone, partySize, date, arrivalTime,
-    tableId, floor, floorLabel, externalRef, notes, staffName } = input;
+  const { aggregator, discountPercent, customerName, phone, email, partySize, date, arrivalTime,
+    tableId, floor, floorLabel, externalRef, notes, amenities, staffName } = input;
   if (!aggregator || aggregator === "inhouse") throw new Error("Pick an aggregator");
   if (!customerName?.trim()) throw new Error("Enter customer name");
   if (!date) throw new Error("Pick a date");
 
-  // If a table was assigned, ensure it's free for that date
+  // If a table was assigned, ensure it's free for that date + slot.
   if (tableId) {
-    const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tableId), where("date", "==", date), limit(1));
-    const existing = await getDocs(q2);
-    if (!existing.empty) throw new Error(`Table ${tableId} is already booked on ${date}`);
+    const conflict = await findTableSlotConflict(tableId, date, arrivalTime);
+    if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
   }
 
   const aggShort = aggregator.split("-")[0].toUpperCase();
@@ -2674,6 +2908,9 @@ export async function createAggregatorTableBooking(input: {
     aggregatorDiscount: aggDiscount,
     externalRef: externalRef || "",
     notes: notes || "",
+    email: (email || "").trim(),
+    amenities: amenities || [],
+    amenitiesTotal: sumAmenities(amenities),
     tabRounds: [],
     tabTotal: 0,
     status: "confirmed",
@@ -2682,6 +2919,204 @@ export async function createAggregatorTableBooking(input: {
   });
   return ref;
 }
+
+// 🔴 2026-05-19 (Khushi LIVE-NIGHT) — door staff walk-in TABLE booking.
+// In-house (non-aggregator) reservation written straight to tableReservations.
+// Mirrors createAggregatorTableBooking shape but with source="inhouse" and
+// no aggregator discount. Validates that the chosen table is free for `date`.
+export async function createWalkInTableReservation(input: {
+  customerName: string;
+  phone: string;
+  email?: string;
+  partySize: number;
+  date: string;                // YYYY-MM-DD
+  arrivalTime: string;         // "HH:MM" or "10:30 PM"
+  tableId?: string;            // optional — leave blank if not yet assigned
+  floor?: string;
+  floorLabel?: string;
+  notes?: string;
+  amenities?: BookingAmenity[];
+  staffName: string;
+  // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. Marks that this reservation
+  // is paired with a cover/wallet so captain UI shows "wallet available" hint.
+  // Linked cover ref is patched in via linkCoverToTable() after activation.
+  hasLinkedCover?: boolean;
+}): Promise<string> {
+  const { customerName, phone, email, partySize, date, arrivalTime,
+    tableId, floor, floorLabel, notes, amenities, staffName, hasLinkedCover } = input;
+  if (!customerName?.trim()) throw new Error("Enter customer name");
+  if (!date) throw new Error("Pick a date");
+  if (!arrivalTime?.trim()) throw new Error("Enter arrival time");
+
+  if (tableId) {
+    const conflict = await findTableSlotConflict(tableId, date, arrivalTime);
+    if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
+  }
+
+  const ref = `WALK-${Date.now().toString(36).toUpperCase()}`;
+  await setDoc(doc(db, TABLE_RES_COL, ref), {
+    tableId: tableId || "",
+    floor: floor || "",
+    floorLabel: floorLabel || "",
+    date,
+    customerName: customerName.trim(),
+    phone: (phone || "").replace(/\D/g, "").slice(-10),
+    partySize: partySize || 2,
+    arrivalTime,
+    bookingRef: ref,
+    bookedAt: new Date().toISOString(),
+    source: "inhouse",
+    notes: notes || "",
+    email: (email || "").trim(),
+    amenities: amenities || [],
+    amenitiesTotal: sumAmenities(amenities),
+    tabRounds: [],
+    tabTotal: 0,
+    status: "confirmed",
+    createdBy: staffName,
+    isWalkIn: true,
+    walkInBy: staffName,
+    ...(hasLinkedCover ? { hasLinkedCover: true, linkedCoverPending: true } : {}),
+  });
+  return ref;
+}
+
+// 🔴 2026-05-20 (Khushi) — COVER+TABLE LINK. Patches both docs so:
+//   • table reservation knows its linked wallet ref + initial balance
+//   • cover doc knows which table it belongs to (so captain wallet redeem
+//     can offer this wallet by table id, and bar can offer by cover ref).
+// Idempotent — safe to call multiple times.
+//
+// Returns per-doc status. Throws iff BOTH patches fail (so the caller can
+// distinguish "no link at all" — operator must retry — from a partial
+// link, where one side is correct and bar/captain can still find the
+// wallet by phone/ref). Caller is responsible for surfacing partial state.
+export type CoverTableLinkResult = {
+  tableOk: boolean;
+  coverOk: boolean;
+  tableError?: string;
+  coverError?: string;
+};
+export async function linkCoverToTable(
+  tableResDocId: string, coverRef: string, coverDocId: string, initialBalance: number,
+  tableInfo: { tableId?: string; floorLabel?: string },
+): Promise<CoverTableLinkResult> {
+  await authReady;
+  const now = new Date().toISOString();
+  const out: CoverTableLinkResult = { tableOk: false, coverOk: false };
+  // Update table reservation
+  try {
+    await updateDoc(doc(db, TABLE_RES_COL, tableResDocId), {
+      hasLinkedCover: true,
+      linkedCoverRef: coverRef,
+      linkedCoverDocId: coverDocId,
+      linkedCoverInitial: initialBalance,
+      linkedCoverLinkedAt: now,
+      linkedCoverPending: false,
+    });
+    out.tableOk = true;
+  } catch (e: any) {
+    out.tableError = String(e?.message || e);
+    console.warn("[linkCoverToTable] table patch failed", e);
+  }
+  // Update cover doc with table back-reference
+  try {
+    await updateDoc(doc(db, COVERS_COL, coverDocId), {
+      linkedTableRef: tableResDocId,
+      linkedTableId: tableInfo.tableId || "",
+      linkedFloorLabel: tableInfo.floorLabel || "",
+      linkedAt: now,
+      source: "walkin_door_cover_table",
+    });
+    out.coverOk = true;
+  } catch (e: any) {
+    out.coverError = String(e?.message || e);
+    console.warn("[linkCoverToTable] cover patch failed", e);
+  }
+  if (!out.tableOk && !out.coverOk) {
+    throw new Error(`Both link writes failed — table: ${out.tableError || "?"} · cover: ${out.coverError || "?"}`);
+  }
+  return out;
+}
+
+// 🔴 2026-05-19 (Khushi LIVE-NIGHT) — door-side CORPORATE / GROUP table booking.
+// Writes to tableReservations with source="corporate" and companyName for
+// reporting. Same shape as walk-in but tagged corporate so Reports can split
+// in-house vs corporate revenue. Optional eventTitle for themed nights.
+export async function createCorporateTableBooking(input: {
+  customerName: string;
+  phone: string;
+  email?: string;
+  companyName: string;
+  partySize: number;
+  date: string;                // YYYY-MM-DD
+  arrivalTime: string;
+  tableId?: string;
+  floor?: string;
+  floorLabel?: string;
+  notes?: string;
+  amenities?: BookingAmenity[];
+  // 🔴 2026-05-20 (Khushi) — corporate groups often pay an ADVANCE before
+  // the night. Captured here, stored on the reservation, and surfaced in
+  // Captain/Admin so it can be deducted from the final bill.
+  advanceAmount?: number;
+  advanceMode?: "cash" | "upi" | "bank-transfer" | "card" | "other" | "";
+  advanceRef?: string;
+  staffName: string;
+}): Promise<string> {
+  const { customerName, phone, email, companyName, partySize, date, arrivalTime,
+    tableId, floor, floorLabel, notes, amenities,
+    advanceAmount, advanceMode, advanceRef, staffName } = input;
+  if (!customerName?.trim()) throw new Error("Enter contact name");
+  if (!companyName?.trim()) throw new Error("Enter company name");
+  if (!date) throw new Error("Pick a date");
+  if (!arrivalTime?.trim()) throw new Error("Enter arrival time");
+
+  if (tableId) {
+    const conflict = await findTableSlotConflict(tableId, date, arrivalTime);
+    if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
+  }
+
+  const ref = `CORP-${Date.now().toString(36).toUpperCase()}`;
+  await setDoc(doc(db, TABLE_RES_COL, ref), {
+    tableId: tableId || "",
+    floor: floor || "",
+    floorLabel: floorLabel || "",
+    date,
+    customerName: customerName.trim(),
+    companyName: companyName.trim(),
+    phone: (phone || "").replace(/\D/g, "").slice(-10),
+    partySize: partySize || 2,
+    arrivalTime,
+    bookingRef: ref,
+    bookedAt: new Date().toISOString(),
+    source: "corporate",
+    bookMode: "group",
+    notes: notes || "",
+    email: (email || "").trim(),
+    amenities: amenities || [],
+    amenitiesTotal: sumAmenities(amenities),
+    advanceAmount: Math.max(0, Number(advanceAmount) || 0),
+    advanceMode: advanceMode || "",
+    advanceRef: (advanceRef || "").trim(),
+    advancePaidAt: (Number(advanceAmount) || 0) > 0 ? new Date().toISOString() : "",
+    tabRounds: [],
+    tabTotal: 0,
+    status: "confirmed",
+    createdBy: staffName,
+    isCorporateBooking: true,
+  });
+  return ref;
+}
+
+// 🔴 2026-05-19 (Khushi LIVE-NIGHT) — default amenity catalog. Door staff can
+// tick any of these (price is editable per booking) and/or add a custom row.
+export const DEFAULT_BOOKING_AMENITIES: BookingAmenity[] = [
+  { name: "Valet Parking",   price: 200,  qty: 1 },
+  { name: "Special Decor",   price: 2500, qty: 1 },
+  { name: "Celebration Cake", price: 1500, qty: 1 },
+  { name: "Custom DJ Request", price: 5000, qty: 1 },
+];
 
 // 🔴 2026-05-16 (Khushi) — door staff need to FIX aggregator bookings whose
 // parser-extracted data is incomplete (Zomato emails only give us the
@@ -2860,6 +3295,28 @@ export async function addRoundToTable(
     const bRef = fd?.bookingRef;
     if (bRef) {
       const cRef = doc(db, COVERS_COL, bRef);
+      const cs = await getDoc(cRef);
+      if (cs.exists()) {
+        await updateDoc(cRef, {
+          tabRounds: fd!.tabRounds || [],
+          tabTotal: fd!.tabTotal || 0,
+        });
+      }
+    }
+    // 🔴 2026-05-20 (Khushi LIVE BUG — customer wallet showed ₹0 after captain
+    // edited a customer-self-ordered round and re-added a different item) —
+    // mirror to covers/{linkedCoverDocId} too. Same pattern as
+    // updateRoundItems Bug 2 fix: COVER+TABLE flow stores the customer wallet
+    // under `linkedCoverDocId`, NOT `bookingRef`, so the legacy bookingRef
+    // mirror above never reached the customer's phone. Without this, every
+    // captain "ADD ORDER" tap on a linked-wallet table left the cover stale
+    // (showed ₹0 / old items) on the customer wallet screen.
+    // 🛟 FALLBACK: try/catch — captain's tableReservations write already
+    // succeeded inside the transaction above, so the captain's bill is the
+    // source of truth even if this mirror fails.
+    const linkedRef = (fd as { linkedCoverDocId?: string } | null)?.linkedCoverDocId;
+    if (linkedRef && linkedRef !== fd?.bookingRef) {
+      const cRef = doc(db, COVERS_COL, linkedRef);
       const cs = await getDoc(cRef);
       if (cs.exists()) {
         await updateDoc(cRef, {
@@ -3609,4 +4066,221 @@ export function filterMenuByLiveCategories<T extends { name: string; price: numb
     }
   }
   return out;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🔴 2026-05-20 (Khushi) — WAITLIST FEATURE
+// First-come-first-served queue for parties when no table fits.
+// Hybrid algorithm: capacity-efficient match by default; any party waiting
+// > WAITLIST_PRIORITY_MIN (20 min default) jumps the queue and gets the
+// next table they fit on, regardless of efficiency.
+// Same Firestore subscription strategy as tableReservations so Captain,
+// Door, and Admin all stay in sync.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Authoritative table capacity map — extracted from hodclub-patched/index.html
+// and corrected per Khushi 20 May 2026 (GF = only C1-C4 + 2 VVIP).
+export const TABLE_CAPACITY: Record<string, number> = {
+  // Ground Floor (dance) — Khushi confirmed: C1-C4 + 2 VVIP only
+  C1: 4, C2: 4, C3: 4, C4: 4,
+  CVIP1: 8, CVIP2: 8,
+  // First Floor / Dining
+  FD1: 4, FD2: 4, FD3: 3, FD4: 6, FD5: 4, FD6: 6,
+  FD7: 3, FD8: 2, FD9: 2, FD10: 2, FD11: 2, FD12: 4,
+  FD14: 4, FD15: 4, FD16: 3, FD17: 3, FD18: 3,
+  // 2F Smoking (lives on first-floor/dining)
+  SMK1: 4, SMK2: 8, SMK4: 2, SMK5: 2, SMK6: 2, SMK7: 2, SMK8: 4,
+  // Rooftop
+  T1: 2, T2: 2, T3: 2, T4: 4, T5: 4, T6: 4, T7: 4, T11: 4,
+  T8: 5, T9: 5, T10: 6,
+  TEX1: 2, TVIP7: 2,
+  TVIP1: 6, TVIP2: 6, TVIP5: 6, TVIP6: 6,
+  TVIP3: 7, TVIP4: 7,
+};
+
+export function getTableCapacity(tableId: string): number {
+  return TABLE_CAPACITY[tableId] || 0;
+}
+
+export type HodWaitlistStatus = "waiting" | "offered" | "seated" | "no-show" | "cancelled";
+
+export interface HodWaitlistEntry {
+  _docId?: string;
+  customerName: string;
+  phone: string;
+  partySize: number;
+  notes?: string;
+  preferredFloor?: string;
+  date: string;                // YYYY-MM-DD (IST calendar date)
+  bookingRef: string;          // short ref shown to customer
+  joinedAt: string;            // ISO timestamp — used for FCFS sort
+  status: HodWaitlistStatus;
+  offeredTableId?: string;
+  offeredAt?: string;
+  seatedTableId?: string;
+  seatedAt?: string;
+  skipCount?: number;
+  staffName: string;
+}
+
+const WAITLIST_COL = "tableWaitlist";
+export const WAITLIST_PRIORITY_MIN = 20;   // hybrid threshold
+
+// Add a party to the waitlist.
+export async function addToWaitlist(input: {
+  customerName: string;
+  phone: string;
+  partySize: number;
+  notes?: string;
+  preferredFloor?: string;
+  date: string;
+  staffName: string;
+}): Promise<{ id: string; ref: string }> {
+  if (!input.customerName?.trim()) throw new Error("Enter guest name");
+  if (!input.phone?.trim() || input.phone.replace(/\D/g, "").length < 10) throw new Error("Enter valid 10-digit phone");
+  if (!input.partySize || input.partySize < 1) throw new Error("Enter party size");
+  if (!input.date) throw new Error("Pick a date");
+  const ref = "WL-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+  await authReady;
+  const docRef = await addDoc(collection(db, WAITLIST_COL), {
+    customerName: input.customerName.trim(),
+    phone: input.phone.trim(),
+    partySize: Math.max(1, Math.min(50, input.partySize | 0)),
+    notes: (input.notes || "").trim(),
+    preferredFloor: (input.preferredFloor || "").trim(),
+    date: input.date,
+    bookingRef: ref,
+    joinedAt: new Date().toISOString(),
+    status: "waiting" as HodWaitlistStatus,
+    skipCount: 0,
+    staffName: input.staffName || "DOOR",
+  });
+  return { id: docRef.id, ref };
+}
+
+export function subscribeWaitlist(date: string, cb: (rows: HodWaitlistEntry[]) => void): Unsubscribe {
+  const q = query(collection(db, WAITLIST_COL), where("date", "==", date));
+  return onSnapshot(q, (snap) => {
+    const all: HodWaitlistEntry[] = [];
+    snap.forEach((d) => all.push({ _docId: d.id, ...(d.data() as any) }));
+    // FCFS — oldest first
+    all.sort((a, b) => (a.joinedAt || "").localeCompare(b.joinedAt || ""));
+    cb(all);
+  }, () => cb([]));
+}
+
+export async function removeFromWaitlist(id: string, reason: "cancelled" | "no-show" = "cancelled"): Promise<void> {
+  await authReady;
+  await updateDoc(doc(db, WAITLIST_COL, id), { status: reason, removedAt: new Date().toISOString() });
+}
+
+export async function markWaitlistSeated(id: string, tableId: string): Promise<void> {
+  await authReady;
+  await updateDoc(doc(db, WAITLIST_COL, id), {
+    status: "seated" as HodWaitlistStatus,
+    seatedTableId: tableId,
+    seatedAt: new Date().toISOString(),
+  });
+}
+
+export async function bumpWaitlistSkip(id: string): Promise<void> {
+  await authReady;
+  const snap = await getDoc(doc(db, WAITLIST_COL, id));
+  const cur = (snap.data()?.skipCount as number) || 0;
+  await updateDoc(doc(db, WAITLIST_COL, id), { skipCount: cur + 1, lastSkipAt: new Date().toISOString() });
+}
+
+// 🔴 2026-05-20 (Khushi) — RACE-SAFE CLAIM. Two door tablets can both watch
+// the same freed table; only ONE may open the offer popup. Transactionally
+// flips waiting→offered and stamps tablet owner. Returns false if another
+// tablet already claimed (caller must NOT show the popup in that case).
+export async function tryClaimWaitlistOffer(
+  entryId: string, tableId: string, tabletOwner: string,
+): Promise<boolean> {
+  await authReady;
+  const ref = doc(db, WAITLIST_COL, entryId);
+  try {
+    return await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data() as any;
+      if (data.status !== "waiting") return false;
+      tx.update(ref, {
+        status: "offered" as HodWaitlistStatus,
+        offeredTableId: tableId,
+        offeredAt: new Date().toISOString(),
+        offeredBy: tabletOwner,
+      });
+      return true;
+    });
+  } catch { return false; }
+}
+
+// Revert offered→waiting (skip / timeout / user cancel). Only succeeds if
+// the offer is still owned by us — protects against late revert after
+// another tablet has already seated the party.
+export async function releaseWaitlistOffer(
+  entryId: string, tabletOwner: string,
+): Promise<void> {
+  await authReady;
+  const ref = doc(db, WAITLIST_COL, entryId);
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      if (data.status !== "offered" || data.offeredBy !== tabletOwner) return;
+      tx.update(ref, {
+        status: "waiting" as HodWaitlistStatus,
+        offeredTableId: null,
+        offeredAt: null,
+        offeredBy: null,
+        skipCount: (data.skipCount || 0) + 1,
+        lastSkipAt: new Date().toISOString(),
+      });
+    });
+  } catch {}
+}
+
+export async function updateWaitlistEntry(id: string, patch: Partial<HodWaitlistEntry>): Promise<void> {
+  await authReady;
+  await updateDoc(doc(db, WAITLIST_COL, id), patch as any);
+}
+
+// HYBRID match algorithm (Khushi-approved Option C).
+// Given: freed table capacity + active waitlist (sorted oldest first).
+// Returns the entry that should be offered the table, or null.
+//
+// Rules:
+//   1. Anyone waiting > WAITLIST_PRIORITY_MIN minutes → priority queue.
+//      Walk priority queue oldest first; first party that fits, gets it.
+//   2. Otherwise → walk full queue oldest first; first party where
+//      table capacity is "efficient" (capacity ≤ pax + 2 wasted seats)
+//      AND fits (pax ≤ capacity). If none "efficient", fall back to
+//      first-fits in FCFS order so we never starve the queue.
+export function findBestWaitlistMatch(
+  freedTableCapacity: number,
+  waiting: HodWaitlistEntry[],
+  nowIso: string = new Date().toISOString(),
+): HodWaitlistEntry | null {
+  const active = waiting.filter((w) => w.status === "waiting");
+  if (active.length === 0 || freedTableCapacity <= 0) return null;
+  const nowMs = new Date(nowIso).getTime();
+  const minutesWaiting = (w: HodWaitlistEntry) =>
+    Math.max(0, Math.floor((nowMs - new Date(w.joinedAt).getTime()) / 60000));
+
+  // 1) Priority override — anyone over the threshold gets next-fit
+  const priority = active.filter((w) => minutesWaiting(w) > WAITLIST_PRIORITY_MIN);
+  for (const w of priority) {
+    if (w.partySize <= freedTableCapacity) return w;
+  }
+  // 2) Efficient match — pax ≤ cap ≤ pax + 2
+  for (const w of active) {
+    if (w.partySize <= freedTableCapacity && freedTableCapacity <= w.partySize + 2) return w;
+  }
+  // 3) Fallback — first FCFS fit (never starve)
+  for (const w of active) {
+    if (w.partySize <= freedTableCapacity) return w;
+  }
+  return null;
 }
