@@ -1003,7 +1003,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   <button onClick={() => adjust(1)} disabled={editBusy}
                     style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: editBusy ? "not-allowed" : "pointer" }}>+</button>
                 </div>
-                <div style={{ minWidth: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#F2C744" }}>₹{it.p * it.qty}</div>
+                <div style={{ minWidth: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#F2C744" }}>₹{computeHodBreakdown([it]).grandTotal}</div>
                 <button onClick={remove} disabled={editBusy} title="Out of stock — remove"
                   style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 12, cursor: editBusy ? "not-allowed" : "pointer" }}>🗑</button>
               </div>
@@ -1072,13 +1072,20 @@ function WalletOverlay({ cover, staffName, onClose }: {
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
                   </div>
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 1, fontWeight: 600, lineHeight: 1.2 }}>
+                    {/* 🔴 2026-05-20 (Khushi Bug 4) — DISPLAY-ONLY tax-inclusive.
+                        Show the customer-facing rounded ₹ (SC + GST baked in)
+                        so bar / captain / customer all match. Underlying menu
+                        data (item.price) is unchanged — reports stay raw. */}
+                    {/* 🔴 2026-05-20 (Khushi clarification) — menu list shows
+                        RAW menu price (matches the printed bar menu). Tax-
+                        inclusive only kicks in once item enters the cart. */}
                     {hasDisc ? (
                       <>
-                        <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 4 }}>₹{item.price.toFixed(0)}</span>
-                        <span style={{ color: "#22c55e" }}>₹{eff.toFixed(0)}</span>
+                        <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 4 }}>₹{item.price}</span>
+                        <span style={{ color: "#22c55e" }}>₹{eff}</span>
                       </>
                     ) : (
-                      <>₹{item.price.toFixed(0)}</>
+                      <>₹{item.price}</>
                     )}
                   </div>
                 </div>
@@ -1111,7 +1118,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                 {Object.entries(cart).map(([key, it]) => (
                   <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 14, padding: "3px 4px 3px 9px", fontSize: 11, fontWeight: 700, color: "#F2C744" }}>
-                    <span>{it.qty}× {it.n} ₹{it.p * it.qty}</span>
+                    <span>{it.qty}× {it.n} ₹{computeHodBreakdown([it]).grandTotal}</span>
                     <button onClick={() => removeFromCart(key)} title="Remove from cart"
                       style={{ width: 18, height: 18, borderRadius: "50%", background: "rgba(239,68,68,.25)", border: "1px solid rgba(239,68,68,.5)", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer", padding: 0, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
                   </span>

@@ -8,7 +8,9 @@ import {
   subscribeToHodEvents, type HodEvent,
   getCoverForBooking, activateCoverForBooking, editCoverAmount,
   ensureCoverForAggregatorArrival, createAggregatorTableBooking,
-  createWalkInTicketBooking, createWalkInGuestlistEntry,
+  createWalkInTicketBooking, createWalkInGuestlistEntry, createWalkInTableReservation,
+  createCorporateTableBooking,
+  DEFAULT_BOOKING_AMENITIES, type BookingAmenity,
   AGGREGATOR_OPTIONS, getAggregatorDiscount, recordWalkInDiscountOverride,
   logNotificationOutcome, subscribeToWalletScan,
   searchBookingsAndAggregators, type CrossSourceBooking,
@@ -37,7 +39,9 @@ import {
   type EdcVendor, type EdcTransactionDoc,
 } from "@/lib/edc-charge";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { unmarkGuestArrived, markGuestArrived } from "@/lib/firestore-hod";
+import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable } from "@/lib/firestore-hod";
+import WaitlistView from "@/components/WaitlistView";
+import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
 import { useToast } from "@/hooks/use-toast";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
@@ -2570,6 +2574,775 @@ type WalkInChoice = "guestlist" | "cover" | "onlyentry" | "group" | "agg";
 // Switching categories preserves name/email/phone. Aggregator stays
 // reachable via a small link below the CTA (kept out of the 2×2 grid
 // because the customer-facing modal only shows 4 cards).
+// 🔴 2026-05-19 (Khushi LIVE-NIGHT) — door-side WALK-IN TABLE BOOKING modal.
+// Quick capture: name, phone, party size, arrival time, optional table picker.
+// Writes via createWalkInTableReservation -> tableReservations (source=inhouse).
+// Fallback: leave table blank if customer hasn't picked one; Captain can
+// assign it from Captain Mode later. Date defaults to operational night.
+// 🔴 2026-05-20 (Khushi LIVE-NIGHT) — authoritative floor layout per Khushi
+// GF: C1-C4 + 2 VVIP only. FF/DINING: all FD* + SMK*. ROOFTOP: T1-T11 +
+// TVIP* + TEX1. Removed phantom FD13 + SMK3 which don't exist on venue.
+const DOOR_TABLE_OPTIONS = [
+  { floor: "dance",   label: "Ground Floor",     tables: ["C1","C2","C3","C4","CVIP1","CVIP2"] },
+  { floor: "dining",  label: "First Floor / Dining", tables: ["FD1","FD2","FD3","FD4","FD5","FD6","FD7","FD8","FD9","FD10","FD11","FD12","FD14","FD15","FD16","FD17","FD18","SMK1","SMK2","SMK4","SMK5","SMK6","SMK7","SMK8"] },
+  { floor: "rooftop", label: "Rooftop",          tables: ["T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","TVIP1","TVIP2","TVIP3","TVIP4","TVIP5","TVIP6","TVIP7","TEX1"] },
+];
+
+// Time-aware occupancy — mirrors CaptainMode.tsx so a table booked for an
+// unrelated slot (e.g. 7pm dinner) doesn't block a fresh 11pm booking on
+// the same table. Paid bookings are released immediately.
+const DOOR_SLOT_MINUTES = 120;
+const DOOR_SLOT_LEAD_IN_MIN = 30;
+function doorParseClockToMinutes(t?: string): number | null {
+  if (!t) return null;
+  const s = String(t).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (Number.isNaN(h) || Number.isNaN(mm)) return null;
+  const ampm = m[3]?.toUpperCase();
+  if (ampm === "PM" && h < 12) h += 12;
+  if (ampm === "AM" && h === 12) h = 0;
+  return h * 60 + mm;
+}
+function doorNowMinutesIST(): number {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+function doorTableOccupantAt(
+  tableId: string, targetMin: number, reservations: HodTableReservation[]
+): HodTableReservation | null {
+  for (const r of reservations) {
+    if (r.tableId !== tableId) continue;
+    if ((r as any).paymentStatus === "paid") continue;
+    const start = doorParseClockToMinutes(r.arrivalTime);
+    if (start == null) return r;
+    const winStart = start - DOOR_SLOT_LEAD_IN_MIN;
+    const winEnd   = start + DOOR_SLOT_MINUTES;
+    if (targetMin >= winStart && targetMin <= winEnd) return r;
+  }
+  return null;
+}
+
+type TableBookingTab = "tables" | "aggregator" | "corporate";
+
+function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
+  agentName: string;
+  onClose: () => void;
+  // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. Door girl creates the table
+  // AND opens the standard wallet layout to recharge cover. Parent opens
+  // UnifiedWalkInModal pre-filled + linked to the just-created table ref.
+  onActivateCoverTable: (ctx: {
+    tableResRef: string;
+    prefill: { name: string; phone: string; email: string; pax: number };
+    tableInfo: { tableId?: string; floorLabel?: string };
+  }) => void;
+}) {
+  const [tab, setTab] = useState<TableBookingTab>("tables");
+
+  // Shared fields across all 3 tabs
+  const [name, setName]   = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [pax, setPax]     = useState(2);
+  // 🔴 2026-05-19 — editable booking date (defaults to tonight's operational
+  // night). Khushi: door can take a phone reservation for a future night.
+  // 🔴 2026-05-20 (Khushi) — must use IST calendar date, not operational-night.
+  // TODAY_STR() shifts back to yesterday before noon IST (operational night
+  // logic) which made the booking calendar show 19th when India was already
+  // on the 20th. CALENDAR_TODAY_STR() = true IST date.
+  const [bookingDate, setBookingDate] = useState<string>(() => CALENDAR_TODAY_STR());
+  const [arrival, setArrival] = useState(() => {
+    const d = new Date();
+    let mins = d.getHours() * 60 + d.getMinutes();
+    mins = Math.ceil(mins / 5) * 5;
+    const h24 = Math.floor(mins / 60) % 24;
+    const m = mins % 60;
+    const ampm = h24 >= 12 ? "PM" : "AM";
+    const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+    return `${String(h12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${ampm}`;
+  });
+  const [floor, setFloor]   = useState("");
+  const [tableId, setTable] = useState("");
+  const [notes, setNotes]   = useState("");
+
+  // AGGREGATOR-only fields
+  const [aggregator, setAggregator] = useState<string>("zomato");
+  const [aggDiscount, setAggDiscount] = useState<number>(30);
+  const [externalRef, setExternalRef] = useState("");
+
+  // CORPORATE-only fields
+  const [companyName, setCompanyName] = useState("");
+  // 🔴 2026-05-20 (Khushi) — advance paid by the group BEFORE the night
+  const [advanceAmount, setAdvanceAmount] = useState<number>(0);
+  const [advanceMode, setAdvanceMode]     = useState<"" | "cash" | "upi" | "bank-transfer" | "card" | "other">("");
+  const [advanceRef, setAdvanceRef]       = useState("");
+
+  // 🔴 2026-05-19 (Khushi LIVE-NIGHT) — Special Amenities checklist (Valet,
+  // Decor, Cake, DJ, …). Tick to include, edit price/qty, add custom row.
+  // Same UI for all 3 tabs — stored in `amenities[]` + `amenitiesTotal` so
+  // Reports can attribute add-on revenue per booking source.
+  type AmRow = { name: string; price: number; qty: number; included: boolean };
+  const [amenitiesOpen, setAmenitiesOpen] = useState(false);
+  const [amenities, setAmenities] = useState<AmRow[]>(() =>
+    DEFAULT_BOOKING_AMENITIES.map((a) => ({ ...a, included: false }))
+  );
+  const [customAmName, setCustomAmName] = useState("");
+  const [customAmPrice, setCustomAmPrice] = useState<number>(0);
+  const updateAm = (i: number, patch: Partial<AmRow>) =>
+    setAmenities((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const removeAm = (i: number) =>
+    setAmenities((rows) => rows.filter((_, idx) => idx !== i));
+  const addCustomAm = () => {
+    const n = customAmName.trim();
+    if (!n) return;
+    setAmenities((rows) => [...rows, { name: n, price: Math.max(0, customAmPrice || 0), qty: 1, included: true }]);
+    setCustomAmName(""); setCustomAmPrice(0);
+  };
+  const includedAmenities: BookingAmenity[] = amenities
+    .filter((r) => r.included)
+    .map((r) => ({ name: r.name, price: Math.max(0, Number(r.price) || 0), qty: Math.max(1, Number(r.qty) || 1) }));
+  const amenitiesTotal = includedAmenities.reduce((s, a) => s + a.price * a.qty, 0);
+
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const floorOpt = DOOR_TABLE_OPTIONS.find((g) => g.floor === floor);
+
+  // 🔴 2026-05-19 (Khushi LIVE-NIGHT) — live table availability across all
+  // 3 tabs. Subscribes to the picked booking date (not "today"), so future
+  // reservations honor the chosen night. Same time-window logic as CaptainMode.
+  const [liveReservations, setLiveReservations] = useState<HodTableReservation[]>([]);
+  useEffect(() => {
+    if (!bookingDate) return;
+    const unsub = subscribeToHodReservations(bookingDate, (rows) => setLiveReservations(rows));
+    return () => unsub();
+  }, [bookingDate]);
+  const targetMin = doorParseClockToMinutes(arrival) ?? doorNowMinutesIST();
+
+  // Aggregator dropdown options (exclude in-house — that's the Tables tab)
+  const aggOptions = AGGREGATOR_OPTIONS.filter((a) => a.value !== "inhouse");
+
+  const switchTab = (t: TableBookingTab) => {
+    setErr("");
+    setTab(t);
+    // Reset aggregator default discount when switching to aggregator tab
+    if (t === "aggregator") {
+      setAggDiscount(getAggregatorDiscount(aggregator));
+    }
+  };
+
+  const submit = async () => {
+    setErr("");
+    if (!name.trim())  { setErr(tab === "corporate" ? "Enter contact name" : "Enter guest name"); return; }
+    if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
+    if (!bookingDate) { setErr("Pick a booking date"); return; }
+    if (!arrival.trim()) { setErr("Enter arrival time"); return; }
+    if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
+    if (tab === "corporate" && !companyName.trim()) { setErr("Enter company name"); return; }
+    if (tab === "corporate" && advanceAmount > 0 && !advanceMode) { setErr("Pick how the advance was paid"); return; }
+    setBusy(true);
+    try {
+      let refId = "";
+      let summary = "";
+      const sharedExtras = {
+        email: email.trim() || undefined,
+        amenities: includedAmenities.length ? includedAmenities : undefined,
+      };
+      if (tab === "tables") {
+        refId = await createWalkInTableReservation({
+          customerName: name.trim(), phone: phone.trim(), partySize: pax,
+          date: bookingDate, arrivalTime: arrival.trim(),
+          tableId: tableId || undefined, floor: floor || undefined,
+          floorLabel: floorOpt?.label || undefined,
+          notes: notes.trim() || undefined, staffName: agentName,
+          ...sharedExtras,
+        });
+        summary = "TABLE BOOKING (IN-HOUSE)";
+      } else if (tab === "aggregator") {
+        refId = await createAggregatorTableBooking({
+          aggregator,
+          discountPercent: aggDiscount,
+          customerName: name.trim(), phone: phone.trim(), partySize: pax,
+          date: bookingDate, arrivalTime: arrival.trim(),
+          tableId: tableId || undefined, floor: floor || undefined,
+          floorLabel: floorOpt?.label || undefined,
+          externalRef: externalRef.trim() || undefined,
+          notes: notes.trim() || undefined, staffName: agentName,
+          ...sharedExtras,
+        });
+        const aggLabel = aggOptions.find((a) => a.value === aggregator)?.label || aggregator;
+        summary = `AGGREGATOR (${aggLabel.toUpperCase()})`;
+      } else {
+        refId = await createCorporateTableBooking({
+          customerName: name.trim(), phone: phone.trim(),
+          companyName: companyName.trim(), partySize: pax,
+          date: bookingDate, arrivalTime: arrival.trim(),
+          tableId: tableId || undefined, floor: floor || undefined,
+          floorLabel: floorOpt?.label || undefined,
+          notes: notes.trim() || undefined, staffName: agentName,
+          advanceAmount: advanceAmount > 0 ? advanceAmount : undefined,
+          advanceMode: advanceAmount > 0 ? (advanceMode || undefined) : undefined,
+          advanceRef: advanceAmount > 0 ? (advanceRef.trim() || undefined) : undefined,
+          ...sharedExtras,
+        });
+        summary = `CORPORATE (${companyName.trim().toUpperCase()})${advanceAmount > 0 ? ` · ADVANCE ₹${advanceAmount.toLocaleString("en-IN")}` : ""}`;
+      }
+      const amLine = includedAmenities.length
+        ? `\nAdd-ons: ₹${amenitiesTotal.toLocaleString("en-IN")} (${includedAmenities.length} item${includedAmenities.length > 1 ? "s" : ""})`
+        : "";
+      alert(`✅ ${summary}\n\nRef: ${refId}\nDate: ${bookingDate}\nGuest: ${name}\nPax: ${pax}\nArrival: ${arrival}${tableId ? `\nTable: ${tableId}` : "\n(Table not assigned — Captain can assign later)"}${amLine}`);
+      onClose();
+    } catch (e: any) {
+      setErr(e?.message || "Could not create booking");
+    } finally { setBusy(false); }
+  };
+
+  // 🔴 2026-05-20 (Khushi) — high-visibility theme: gold outlines + gold text
+  // on every field so all 3 tabs (Tables / Aggregator / Corporate) are clearly
+  // legible in low light at the door. Applied via shared styles so all inputs
+  // and labels update together.
+  // 🔴 2026-05-20 (Khushi) — keep gold OUTLINES for visibility, but text is
+  // WHITE (not yellow) and a touch larger so it reads cleanly at the door.
+  const inputStyle: React.CSSProperties = {
+    width: "100%", padding: 13, borderRadius: 8,
+    background: "rgba(200,166,69,0.06)", border: "1.5px solid #C8A645",
+    color: "#FFFFFF", fontSize: 16, fontWeight: 700, marginTop: 4, boxSizing: "border-box",
+    outline: "none",
+  };
+  // 🔴 2026-05-20 (Khushi) — field labels (GUEST NAME, PHONE, PAX, EMAIL,
+  // ARRIVAL TIME, BOOKING DATE, ASSIGN TABLE) bumped to gold + bigger so
+  // they read as bold headings instead of muted whispers.
+  const labelStyle: React.CSSProperties = {
+    fontSize: 13, fontWeight: 900, letterSpacing: "1.2px", textTransform: "uppercase",
+    color: "#F2C744", marginBottom: 6, textShadow: "0 1px 0 rgba(0,0,0,.4)",
+  };
+  // 🔴 2026-05-20 (Khushi) — classic "file-folder" tab look. Each tab has
+  // rounded TOP corners only; the active tab bleeds into the heading bar
+  // below (no bottom border) for a real tabbed-folder feel.
+  const tabBtn = (active: boolean): React.CSSProperties => ({
+    flex: 1, padding: "12px 4px",
+    borderTopLeftRadius: 10, borderTopRightRadius: 10,
+    borderBottomLeftRadius: 0, borderBottomRightRadius: 0,
+    background: active ? "#C8A645" : "rgba(200,166,69,0.06)",
+    borderTop: "2px solid #C8A645",
+    borderLeft: "2px solid #C8A645",
+    borderRight: "2px solid #C8A645",
+    borderBottom: active ? "2px solid #C8A645" : "2px solid #C8A645",
+    marginBottom: active ? -2 : 0,
+    color: active ? "#0A0A0A" : "#FFFFFF",
+    fontSize: 13, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.6px",
+    cursor: "pointer",
+    boxShadow: active ? "0 -2px 8px rgba(200,166,69,0.35)" : "none",
+    position: "relative",
+    zIndex: active ? 2 : 1,
+  });
+
+  const subtitle =
+    tab === "tables"     ? "In-house / walk-in / phone reservation" :
+    tab === "aggregator" ? "Zomato · Swiggy Dineout · Swiggy Scenes · EazyDiner" :
+                           "Corporate / group booking (company event)";
+
+  const nameLabel = tab === "corporate" ? "Contact Name" : "Guest Name";
+  const ctaLabel  =
+    tab === "tables"     ? "✅ Create Table Booking"     :
+    tab === "aggregator" ? "✅ Create Aggregator Booking" :
+                           "✅ Create Corporate Booking";
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0A0A0A", border: "2px solid #C8A645", borderRadius: 14, padding: 18, maxWidth: 460, width: "100%", marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h2 style={{ fontFamily: "'Playfair Display',serif", color: "#F2C744", fontSize: 22, fontWeight: 900, margin: 0 }}>🍽 NEW TABLE BOOKING</h2>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}>×</button>
+        </div>
+
+        {/* 🔴 2026-05-20 (Khushi) — file-folder tab look. The 3 tabs sit on
+            top of a gold heading bar; active tab connects into the bar so it
+            visually reads as one continuous "open folder". */}
+        <div style={{ display: "flex", gap: 4, alignItems: "flex-end" }}>
+          <button onClick={() => switchTab("tables")}     style={tabBtn(tab === "tables")}>🍽 Tables</button>
+          <button onClick={() => switchTab("aggregator")} style={tabBtn(tab === "aggregator")}>📲 Aggregator</button>
+          <button onClick={() => switchTab("corporate")}  style={tabBtn(tab === "corporate")}>🏢 Corporate</button>
+        </div>
+
+        {/* Folder "open page" — heading bar with the active tab name */}
+        <div style={{
+          border: "2px solid #C8A645", borderTop: "2px solid #C8A645",
+          borderBottomLeftRadius: 12, borderBottomRightRadius: 12,
+          borderTopLeftRadius: 0, borderTopRightRadius: 12,
+          background: "linear-gradient(180deg, rgba(200,166,69,0.18) 0%, rgba(200,166,69,0.04) 100%)",
+          padding: "12px 14px", marginBottom: 12, position: "relative", zIndex: 1,
+        }}>
+          <div style={{
+            fontFamily: "'Playfair Display', serif",
+            fontSize: 20, fontWeight: 900, color: "#F2C744",
+            letterSpacing: "0.5px", lineHeight: 1.1,
+          }}>
+            {tab === "tables"     && "🍽 IN-HOUSE / WALK-IN"}
+            {tab === "aggregator" && "📲 AGGREGATOR BOOKING"}
+            {tab === "corporate"  && "🏢 CORPORATE / GROUP"}
+          </div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", marginTop: 4, fontWeight: 600 }}>
+            {subtitle}
+          </div>
+        </div>
+
+        {/* 🔴 2026-05-20 (Khushi) — big tappable calendar field + quick-pick
+            chips (TONIGHT / TMRW / DAY AFTER / +1 WEEK). Native browser
+            calendar pops up on tap; chips are the fallback if she's in a hurry. */}
+        {(() => {
+          // 🔴 IST calendar date — see note on bookingDate state above.
+          const today = CALENDAR_TODAY_STR();
+          const addDays = (n: number) => {
+            // Parse today as IST noon, add days, then re-render in IST.
+            const d = new Date(today + "T12:00:00+05:30");
+            d.setDate(d.getDate() + n);
+            return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+          };
+          const fmtPretty = (s: string) => {
+            try {
+              const d = new Date(s + "T12:00:00+05:30");
+              return d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" });
+            } catch { return s; }
+          };
+          const chips = [
+            { label: "TONIGHT",   value: addDays(0) },
+            { label: "TMRW",      value: addDays(1) },
+            { label: "DAY AFTER", value: addDays(2) },
+          ];
+          const chipBtn = (active: boolean): React.CSSProperties => ({
+            flex: 1, padding: "8px 4px", borderRadius: 8, cursor: "pointer",
+            background: active ? "#C8A645" : "rgba(200,166,69,0.06)",
+            border: "1.5px solid #C8A645",
+            color: active ? "#0A0A0A" : "#FFFFFF",
+            fontSize: 11, fontWeight: 900, letterSpacing: "0.5px",
+          });
+          // 🔴 2026-05-20 (Khushi) — opens the native calendar. showPicker()
+          // can throw inside Replit's iframe preview (NotAllowedError), so we
+          // wrap in try/catch and fall back to focus+click. Either way the
+          // big <input> below is fully visible & tappable as the last resort.
+          const openCalendar = () => {
+            const el = document.getElementById("door-booking-date") as HTMLInputElement | null;
+            if (!el) return;
+            try { (el as any).showPicker?.(); } catch {}
+            try { el.focus(); el.click(); } catch {}
+          };
+          return (
+            <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+              <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>📅 Booking Date</span>
+                <span style={{ color: "#F2C744", fontSize: 11, letterSpacing: 0 }}>{fmtPretty(bookingDate)}</span>
+              </div>
+              {/* Quick-pick chips + PICK DATE (opens calendar) */}
+              <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+                {chips.map((c) => (
+                  <button key={c.label} type="button"
+                    onClick={() => setBookingDate(c.value)}
+                    style={chipBtn(bookingDate === c.value)}>{c.label}</button>
+                ))}
+                <button type="button" onClick={openCalendar}
+                  style={{ ...chipBtn(false), background: "rgba(242,199,68,0.15)" }}>
+                  📅 PICK
+                </button>
+              </div>
+              {/* 🔴 2026-05-20 (Khushi) — REAL visible native input. The old
+                  fancy overlay trick (transparent input on top of a div) broke
+                  inside Replit's sandboxed iframe — taps reached the wrapper,
+                  not the input. Now the input itself is the big tappable
+                  control, styled gold, so the browser handles opening
+                  natively (rock-solid on iPad/Chrome/Safari). */}
+              <div style={{ marginTop: 8, position: "relative" }}>
+                <span style={{
+                  position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
+                  fontSize: 22, pointerEvents: "none", zIndex: 1,
+                }}>🗓️</span>
+                <input id="door-booking-date" type="date" value={bookingDate} min={today}
+                  onChange={(e) => setBookingDate(e.target.value || today)}
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    padding: "14px 14px 14px 44px",
+                    border: "2px solid #C8A645", borderRadius: 8,
+                    background: "rgba(0,0,0,0.5)",
+                    color: "#FFFFFF", fontSize: 16, fontWeight: 800,
+                    letterSpacing: "0.3px", cursor: "pointer",
+                    colorScheme: "dark",
+                    fontFamily: "inherit",
+                  } as React.CSSProperties} />
+                <div style={{ marginTop: 4, fontSize: 11, color: "#F2C744", fontWeight: 700 }}>
+                  → {fmtPretty(bookingDate)}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", marginTop: 6, lineHeight: 1.5 }}>
+                Defaults to tonight. Use chips above for fast pick, or tap the box for a full calendar.
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* AGGREGATOR-only: pick source + discount */}
+        {tab === "aggregator" && (
+          <>
+            <div style={{ marginBottom: 10 }}>
+              <div style={labelStyle}>Aggregator Source</div>
+              <select value={aggregator}
+                onChange={(e) => { setAggregator(e.target.value); setAggDiscount(getAggregatorDiscount(e.target.value)); }}
+                style={inputStyle as any}>
+                {aggOptions.map((a) => (
+                  <option key={a.value} value={a.value}>{a.label} (default {a.discount}% off)</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+              <div>
+                <div style={labelStyle}>Discount %</div>
+                <input value={aggDiscount}
+                  onChange={(e) => setAggDiscount(Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0)))}
+                  inputMode="numeric" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>Aggregator Booking ID</div>
+                <input value={externalRef} onChange={(e) => setExternalRef(e.target.value)} placeholder="optional" style={inputStyle} />
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* CORPORATE-only: company name + advance */}
+        {tab === "corporate" && (
+          <>
+            <div style={{ marginBottom: 10 }}>
+              <div style={labelStyle}>Company / Group Name</div>
+              <input value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="Acme Corp, Bengaluru Bachelor Party, etc." style={inputStyle} />
+            </div>
+
+            {/* 🔴 2026-05-20 (Khushi) — ADVANCE captured at booking time */}
+            <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+              <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between" }}>
+                <span>💰 Advance Paid (optional)</span>
+                <span style={{ color: advanceAmount > 0 ? "#22C55E" : "rgba(255,255,255,0.4)", letterSpacing: 0 }}>
+                  ₹{advanceAmount.toLocaleString("en-IN")}
+                </span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
+                <div>
+                  <div style={{ ...labelStyle, fontSize: 10 }}>Amount (₹)</div>
+                  <input type="number" min={0} value={advanceAmount}
+                    onChange={(e) => setAdvanceAmount(Math.max(0, parseInt(e.target.value || "0", 10) || 0))}
+                    placeholder="0" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ ...labelStyle, fontSize: 10 }}>Mode</div>
+                  <select value={advanceMode} onChange={(e) => setAdvanceMode(e.target.value as any)}
+                    style={inputStyle as any} disabled={advanceAmount <= 0}>
+                    <option value="">— Pick —</option>
+                    <option value="cash">Cash</option>
+                    <option value="upi">UPI</option>
+                    <option value="bank-transfer">Bank Transfer</option>
+                    <option value="card">Card</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <div style={{ ...labelStyle, fontSize: 10 }}>Reference / Receipt # (optional)</div>
+                <input value={advanceRef} onChange={(e) => setAdvanceRef(e.target.value)}
+                  placeholder="UPI ref, cheque #, etc." style={inputStyle} disabled={advanceAmount <= 0} />
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", marginTop: 6, lineHeight: 1.5 }}>
+                Saved on the reservation — Captain & Admin will see it and deduct from final bill.
+              </div>
+            </div>
+          </>
+        )}
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={labelStyle}>{nameLabel}</div>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" style={inputStyle} />
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 10 }}>
+          <div>
+            <div style={labelStyle}>Phone (10-digit)</div>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="numeric" placeholder="98XXXXXXXX" style={inputStyle} />
+          </div>
+          <div>
+            <div style={labelStyle}>Pax</div>
+            <input value={pax} onChange={(e) => setPax(Math.max(1, Math.min(50, parseInt(e.target.value || "0", 10) || 0)))} inputMode="numeric" style={inputStyle} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={labelStyle}>Email (optional)</div>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="guest@example.com" style={inputStyle} />
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={labelStyle}>Arrival Time (e.g. 10:30 PM)</div>
+          <input value={arrival} onChange={(e) => setArrival(e.target.value)} placeholder="10:30 PM" style={inputStyle} />
+        </div>
+
+        {/* 🔴 2026-05-20 (Khushi) — ASSIGN TABLE section. Floor dropdown +
+            live table grid in ONE gold-outlined card so it reads as a single
+            step. Khushi missed this earlier because the floor select looked
+            optional/skippable. */}
+        <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+          <div style={labelStyle}>🪑 Assign Table</div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", marginTop: 2, marginBottom: 8 }}>
+            Step 1 — pick floor · Step 2 — tap a green table
+          </div>
+
+          <div style={{ ...labelStyle, fontSize: 10 }}>1️⃣ Floor</div>
+          <select value={floor} onChange={(e) => { setFloor(e.target.value); setTable(""); }} style={inputStyle as any}>
+            <option value="">— Pick a floor —</option>
+            {DOOR_TABLE_OPTIONS.map((g) => (
+              <option key={g.floor} value={g.floor}>{g.label}</option>
+            ))}
+          </select>
+
+          {!floorOpt && (
+            <div style={{ marginTop: 10, padding: 10, border: "1px dashed rgba(200,166,69,0.5)", borderRadius: 8,
+              background: "rgba(0,0,0,0.3)", fontSize: 11, color: "rgba(255,255,255,0.65)", textAlign: "center" }}>
+              👆 Pick a floor above to see live table availability.<br/>
+              <span style={{ fontSize: 10, opacity: 0.7 }}>Or leave unassigned — Captain can assign later.</span>
+            </div>
+          )}
+        </div>
+
+        {floorOpt && (() => {
+          // 🔴 2026-05-20 (Khushi) — split tables into AVAILABLE vs BLOCKED so
+          // the door girl sees only what she can actually give out at the top.
+          // Same Firestore subscription as CaptainMode → instant sync both ways.
+          const rows = floorOpt.tables.map((t) => {
+            const occupant = doorTableOccupantAt(t, targetMin, liveReservations);
+            return { t, occupant, occupied: !!occupant };
+          });
+          const available = rows.filter((r) => !r.occupied);
+          const blocked   = rows.filter((r) => r.occupied);
+          const renderBtn = ({ t, occupant, occupied }: typeof rows[number]) => {
+            const isSelected = tableId === t;
+            const bg = isSelected ? "#F2C744" : occupied ? "#DC2626" : "#16A34A";
+            const border = isSelected ? "#F2C744" : occupied ? "#B91C1C" : "#15803D";
+            const color = isSelected ? "#0A0A0A" : "#FFFFFF";
+            const title = occupied && occupant
+              ? `BLOCKED — ${occupant.customerName || ""}${occupant.arrivalTime ? " @ " + occupant.arrivalTime : ""}${occupant.partySize ? " · " + occupant.partySize + " pax" : ""}${occupant.source ? " · " + occupant.source : ""}`.trim()
+              : "Available — tap to assign";
+            return (
+              <button key={t} type="button" disabled={occupied}
+                onClick={() => setTable(isSelected ? "" : t)} title={title}
+                style={{ padding: "10px 12px", borderRadius: 8, fontSize: 13, fontWeight: 900,
+                  cursor: occupied ? "not-allowed" : "pointer",
+                  background: bg, border: `2px solid ${border}`, color,
+                  opacity: occupied ? 0.9 : 1, minWidth: 56 }}>
+                {t}{occupied ? " 🔒" : ""}
+              </button>
+            );
+          };
+          return (
+            <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+              <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between" }}>
+                <span>🪑 Assign Table · LIVE</span>
+                <span style={{ letterSpacing: 0, fontSize: 11 }}>
+                  <span style={{ color: "#22C55E" }}>✅ {available.length} FREE</span>
+                  &nbsp;·&nbsp;
+                  <span style={{ color: "#EF4444" }}>🔒 {blocked.length} BLOCKED</span>
+                </span>
+              </div>
+
+              <div style={{ marginTop: 8, fontSize: 10, fontWeight: 800, color: "#22C55E", letterSpacing: "0.5px" }}>
+                ✅ AVAILABLE NOW ({available.length})
+              </div>
+              <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 5 }}>
+                {available.length === 0
+                  ? <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", padding: "6px 0" }}>None free in {floorOpt.label} for this slot</div>
+                  : available.map(renderBtn)}
+              </div>
+
+              {blocked.length > 0 && (
+                <>
+                  <div style={{ marginTop: 10, fontSize: 10, fontWeight: 800, color: "#EF4444", letterSpacing: "0.5px" }}>
+                    🔒 BLOCKED ({blocked.length}) — hover to see who
+                  </div>
+                  <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {blocked.map(renderBtn)}
+                  </div>
+                </>
+              )}
+
+              {tableId && (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#F2C744", fontWeight: 800 }}>
+                  ✓ Selected: {tableId} · tap again to clear
+                </div>
+              )}
+              <div style={{ marginTop: 6, fontSize: 10, color: "rgba(255,255,255,0.45)", lineHeight: 1.5 }}>
+                🔄 Live from Firestore — syncs instantly with Captain & Admin. Refreshed for arrival {arrival || "now"}. Same table can be booked for a different slot (e.g. 7 PM dinner + 11 PM party).
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* 🔴 2026-05-20 (Khushi) — WAITLIST alt-path moved ABOVE amenities so
+            door girl sees it before scrolling past the add-ons block. */}
+        {tab === "tables" && (
+          <button
+            onClick={async () => {
+              setErr("");
+              if (!name.trim())  { setErr("Enter guest name"); return; }
+              if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
+              if (!bookingDate) { setErr("Pick a booking date"); return; }
+              setBusy(true);
+              try {
+                const { ref } = await addToWaitlist({
+                  customerName: name.trim(), phone: phone.trim(), partySize: pax,
+                  notes: notes.trim() || undefined,
+                  preferredFloor: floorOpt?.label || undefined,
+                  date: bookingDate, staffName: agentName,
+                });
+                alert(`✅ ADDED TO WAITLIST\n\nREF: ${ref}\n\nWHEN A TABLE FITTING ${pax} PAX OPENS, A POPUP WILL APPEAR.\n\n🛟 FALLBACK: IF NO POPUP — CHECK THE 'WAITLIST' TAB.`);
+                onClose();
+              } catch (e: any) {
+                setErr(e?.message || "Failed to add to waitlist");
+              } finally { setBusy(false); }
+            }}
+            disabled={busy}
+            style={{ width: "100%", padding: 12, borderRadius: 10, background: "transparent", border: "2px dashed #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.5px", cursor: busy ? "wait" : "pointer", marginBottom: 12, opacity: busy ? 0.6 : 1 }}>
+            ADD TO WAITLIST
+          </button>
+        )}
+
+        {/* 🔴 2026-05-19 — Special Amenities checklist (Valet, Decor, Cake, DJ, custom)
+            🔴 2026-05-20 — collapsed into a dropdown (closed by default) so the
+            modal stays short. Click the header row to toggle. */}
+        <div style={{ marginBottom: 12, border: "1px solid rgba(200,166,69,0.25)", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+          <button type="button" onClick={() => setAmenitiesOpen((v) => !v)}
+            style={{ ...labelStyle, display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "transparent", border: "none", padding: 0, margin: 0, cursor: "pointer", color: "rgba(255,255,255,0.85)" }}>
+            <span>✨ Special Amenities {amenitiesOpen ? "▾" : "▸"}</span>
+            <span style={{ color: amenitiesTotal > 0 ? "#F2C744" : "rgba(255,255,255,0.4)", letterSpacing: 0 }}>
+              {includedAmenities.length > 0 ? `${includedAmenities.length} added · ` : ""}Total: ₹{amenitiesTotal.toLocaleString("en-IN")}
+            </span>
+          </button>
+          {amenitiesOpen && (<>
+          <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+            {amenities.map((row, i) => {
+              const lineTotal = (Number(row.price) || 0) * (Number(row.qty) || 1);
+              return (
+                <div key={i} style={{
+                  display: "grid", gridTemplateColumns: "auto 1fr 70px 50px auto auto", gap: 6,
+                  alignItems: "center",
+                  background: row.included ? "rgba(34,197,94,0.08)" : "rgba(255,255,255,0.02)",
+                  border: `1px solid ${row.included ? "rgba(34,197,94,0.35)" : "rgba(255,255,255,0.08)"}`,
+                  borderRadius: 8, padding: "6px 8px",
+                }}>
+                  <input type="checkbox" checked={row.included} onChange={(e) => updateAm(i, { included: e.target.checked })}
+                    style={{ width: 16, height: 16, cursor: "pointer" }} />
+                  <input value={row.name} onChange={(e) => updateAm(i, { name: e.target.value })}
+                    style={{ background: "transparent", border: "none", color: "#fff", fontSize: 12, fontWeight: 700, padding: 0, outline: "none" }} />
+                  <input type="number" min={0} value={row.price}
+                    onChange={(e) => updateAm(i, { price: Math.max(0, parseInt(e.target.value || "0", 10) || 0) })}
+                    style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", color: "#fff", borderRadius: 6, padding: "4px 6px", fontSize: 11, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" min={1} value={row.qty}
+                    onChange={(e) => updateAm(i, { qty: Math.max(1, parseInt(e.target.value || "1", 10) || 1) })}
+                    title="Quantity"
+                    style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", color: "#fff", borderRadius: 6, padding: "4px 6px", fontSize: 11, width: "100%", boxSizing: "border-box" }} />
+                  <span style={{ fontSize: 11, fontWeight: 800, color: row.included ? "#F2C744" : "rgba(255,255,255,0.3)", minWidth: 56, textAlign: "right" }}>
+                    ₹{lineTotal.toLocaleString("en-IN")}
+                  </span>
+                  <button type="button" onClick={() => removeAm(i)} title="Remove row"
+                    style={{ background: "transparent", border: "none", color: "rgba(239,68,68,0.7)", fontSize: 16, cursor: "pointer", padding: "0 4px" }}>×</button>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 80px auto", gap: 6 }}>
+            <input value={customAmName} onChange={(e) => setCustomAmName(e.target.value)} placeholder="+ Add custom add-on…"
+              style={{ ...inputStyle, marginTop: 0, padding: "8px 10px", fontSize: 12 }} />
+            <input type="number" min={0} value={customAmPrice}
+              onChange={(e) => setCustomAmPrice(Math.max(0, parseInt(e.target.value || "0", 10) || 0))}
+              placeholder="₹"
+              style={{ ...inputStyle, marginTop: 0, padding: "8px 10px", fontSize: 12 }} />
+            <button type="button" onClick={addCustomAm} disabled={!customAmName.trim()}
+              style={{ background: customAmName.trim() ? "#C8A645" : "rgba(255,255,255,0.06)", border: "none", color: customAmName.trim() ? "#0A0A0A" : "rgba(255,255,255,0.3)", borderRadius: 8, padding: "8px 12px", fontSize: 11, fontWeight: 900, cursor: customAmName.trim() ? "pointer" : "not-allowed" }}>
+              ADD
+            </button>
+          </div>
+          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.35)", marginTop: 6, lineHeight: 1.5 }}>
+            Tick to include · prices & qty editable · custom rows allowed. Total rolls up into Reports as `amenitiesTotal`.
+          </div>
+          </>)}
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={labelStyle}>Notes (optional)</div>
+          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Birthday, VIP, etc." style={inputStyle} />
+        </div>
+
+        {err && (
+          <div style={{ background: "rgba(239,68,68,0.12)", border: "1px solid #EF4444", color: "#FCA5A5", padding: 10, borderRadius: 8, fontSize: 12, marginBottom: 10 }}>
+            ⚠ {err}
+          </div>
+        )}
+
+        <button onClick={submit} disabled={busy}
+          style={{ width: "100%", padding: 14, borderRadius: 10, background: "#C8A645", border: "none", color: "#0A0A0A", fontSize: 14, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.5px", cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Creating..." : ctaLabel}
+        </button>
+
+        {/* 🔴 2026-05-20 — WAITLIST button moved ABOVE Special Amenities (see top of modal). */}
+
+        {/* 🔴 2026-05-20 (Khushi) — COVER + TABLE combo. Books the table now,
+            then opens the SAME wallet layout (BUY COVER) to recharge cover.
+            Customer can redeem at GF BAR (bar redeem flow) OR at the TABLE
+            (captain redeem flow). TABLES tab only. */}
+        {tab === "tables" && (
+          <button
+            onClick={async () => {
+              setErr("");
+              if (!name.trim())  { setErr("Enter guest name"); return; }
+              if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
+              if (!bookingDate) { setErr("Pick a booking date"); return; }
+              if (!arrival.trim()) { setErr("Enter arrival time"); return; }
+              if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
+              setBusy(true);
+              try {
+                const refId = await createWalkInTableReservation({
+                  customerName: name.trim(), phone: phone.trim(), partySize: pax,
+                  date: bookingDate, arrivalTime: arrival.trim(),
+                  tableId: tableId || undefined, floor: floor || undefined,
+                  floorLabel: floorOpt?.label || undefined,
+                  notes: notes.trim() || undefined, staffName: agentName,
+                  email: email.trim() || undefined,
+                  amenities: includedAmenities.length ? includedAmenities : undefined,
+                  hasLinkedCover: true,
+                });
+                onClose();
+                // Open the standard wallet recharge modal (same UI as BUY COVER)
+                // pre-filled + linked back to this reservation so activation
+                // patches both docs.
+                onActivateCoverTable({
+                  tableResRef: refId,
+                  prefill: { name: name.trim(), phone: phone.trim(), email: email.trim(), pax },
+                  tableInfo: { tableId: tableId || undefined, floorLabel: floorOpt?.label || undefined },
+                });
+              } catch (e: any) {
+                setErr(e?.message || "Could not create table");
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+            style={{ width: "100%", padding: 14, borderRadius: 10, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "2px solid #F2C744", color: "#0A0A0A", fontSize: 14, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.5px", cursor: busy ? "wait" : "pointer", marginTop: 10, opacity: busy ? 0.6 : 1, boxShadow: "0 4px 14px rgba(200,166,69,0.35)" }}>
+            💰 Activate Cover + Table (Wallet)
+          </button>
+        )}
+
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 10, lineHeight: 1.5 }}>
+          🛟 FALLBACK: If the table is already taken or you skip it, the booking still saves — Captain can assign / reassign the table from Captain Mode.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NewWalkInModal({ agentName, onClose, onActivateCover }: { agentName: string; onClose: () => void; onActivateCover: (b: HodBooking) => void }) {
   const [showAgg, setShowAgg] = useState(false);
   if (showAgg) {
@@ -2678,14 +3451,29 @@ type WalkInPayMethod = "cash" | "upi" | "card" | "split";
 
 function UnifiedWalkInModal({
   agentName, onClose, onAggregator, onActivateCover,
-}: { agentName: string; onClose: () => void; onAggregator: () => void; onActivateCover: (b: HodBooking) => void }) {
+  prefill, linkToTable,
+}: {
+  agentName: string;
+  onClose: () => void;
+  onAggregator: () => void;
+  onActivateCover: (b: HodBooking) => void;
+  // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. When set:
+  //   • kind is locked to "cover" (no tab switcher shown)
+  //   • a gold banner shows the linked table info at the top
+  //   • after the wallet is activated, the cover doc is bidirectionally
+  //     linked to the table reservation via linkCoverToTable().
+  prefill?: { name: string; phone: string; email: string };
+  linkToTable?: { tableResRef: string; tableId?: string; floorLabel?: string };
+}) {
   // Default tab = Buy Covers (matches the screenshot's active state).
+  // Cover+Table flow locks to "cover" so door girl can't change category.
   const [kind, setKind] = useState<WalkInKind>("cover");
 
   // Shared identity fields persist across tab switches.
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
+  // Prefill from caller (COVER+TABLE flow) so door girl doesn't re-type.
+  const [name, setName] = useState(prefill?.name || "");
+  const [email, setEmail] = useState(prefill?.email || "");
+  const [phone, setPhone] = useState(prefill?.phone || "");
 
   const [tier, setTier] = useState<"Stag" | "Couple" | "Ladies">("Stag");
   const [tickets, setTickets] = useState(1);
@@ -3056,6 +3844,37 @@ function UnifiedWalkInModal({
         } else {
           setActionMsg(`⚠ WRITE FAILED — NO COVER DOC FOR ${done.ref}. CHECK INTERNET / FIREBASE RULES. RETRY OR ASK MANAGER.`);
         }
+
+        // 🔴 2026-05-20 (Khushi) — COVER+TABLE LINK. If this wallet flow was
+        // opened from the "ACTIVATE COVER + TABLE" door button, patch both
+        // docs so captain (at the table) AND bar (at GF) can find this
+        // wallet by ref OR by table id. Fail-open: link failure logs a
+        // warning but never blocks the wallet — customer can still redeem
+        // at the bar by ref/phone (the wallet is already live).
+        if (linkToTable && verify) {
+          const tblBit = linkToTable.tableId ? ` TABLE ${linkToTable.tableId}` : " TABLE";
+          try {
+            const lr = await linkCoverToTable(
+              linkToTable.tableResRef, done.ref, verify.id, (verify.coverBalance || 0),
+              { tableId: linkToTable.tableId, floorLabel: linkToTable.floorLabel },
+            );
+            if (lr.tableOk && lr.coverOk) {
+              setActionMsg(`✅ WALLET +${tblBit} LINKED · CUSTOMER CAN REDEEM AT GF BAR OR AT${tblBit} (CAPTAIN)`);
+            } else if (lr.coverOk && !lr.tableOk) {
+              // Cover doc knows its table — captain finds by phone/ref so
+              // redemption still works at the table. Table doc just won't
+              // surface a "WALLET ATTACHED" hint in TablesTab.
+              setActionMsg(`✅ WALLET LIVE · ⚠ PARTIAL LINK (TABLE DOC NOT TAGGED · ${String(lr.tableError||"").slice(0,40)}) · 🛟 FALLBACK: CAPTAIN CAN STILL FIND THE WALLET BY PHONE / REF AT${tblBit}`);
+            } else {
+              // Table doc tagged but cover doc not back-linked — bar/captain
+              // both find wallet by phone/ref so redemption still works.
+              setActionMsg(`✅ WALLET LIVE · ⚠ PARTIAL LINK (COVER NOT BACK-TAGGED · ${String(lr.coverError||"").slice(0,40)}) · 🛟 FALLBACK: REDEMPTION STILL WORKS AT BAR + AT${tblBit} VIA WALLET QR / PHONE`);
+            }
+          } catch (linkErr: any) {
+            console.warn("[door][cover+table] link failed (both sides)", linkErr);
+            setActionMsg(`✅ WALLET LIVE · ⚠ TABLE LINK FAILED — ${String(linkErr?.message || linkErr).slice(0,60)} · 🛟 FALLBACK: CUSTOMER CAN STILL REDEEM AT BAR BY WALLET QR / PHONE · ASK MANAGER TO RETRY LINK FROM ADMIN`);
+          }
+        }
       } catch (e: any) {
         const msg = String(e?.message || e);
         console.error("[door][activate] FATAL", msg, e);
@@ -3116,7 +3935,31 @@ function UnifiedWalkInModal({
           <button onClick={onClose} style={{ background: "transparent", border: "none", color: "rgba(255,255,255,.55)", fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 4 }}>✕</button>
         </div>
 
-        {/* 2×2 CATEGORY GRID — matches hodclub.in modal exactly */}
+        {/* 🔴 2026-05-20 (Khushi) — COVER+TABLE flow: gold banner showing
+            the linked table at the top. Replaces the 2×2 category grid so
+            the door girl can't accidentally switch out of "BUY COVER". */}
+        {linkToTable && (
+          <div style={{
+            background: "linear-gradient(135deg,rgba(200,166,69,0.18),rgba(200,166,69,0.06))",
+            border: "1.5px solid #C8A645", borderRadius: 12, padding: "12px 14px", marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.2, color: "#C8A645", marginBottom: 4 }}>
+              💰 ACTIVATE COVER + TABLE
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>
+              {linkToTable.tableId ? `TABLE ${linkToTable.tableId}` : "TABLE (UNASSIGNED)"}
+              {linkToTable.floorLabel ? ` · ${linkToTable.floorLabel}` : ""}
+            </div>
+            <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.65)", marginTop: 4, lineHeight: 1.45 }}>
+              CUSTOMER PAYS COVER NOW · REDEEM AT GF BAR OR AT THE TABLE.<br />
+              🛟 FALLBACK: IF THIS SCREEN FAILS, WALLET STILL WORKS AT BAR — TABLE LINK CAN BE ADDED LATER.
+            </div>
+          </div>
+        )}
+
+        {/* 2×2 CATEGORY GRID — matches hodclub.in modal exactly.
+            Hidden in COVER+TABLE flow (locked to "cover" by design). */}
+        {!linkToTable && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
           <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist")}>
             <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: kind === "guestlist" ? "#C8A645" : "rgba(255,255,255,.85)" }}>GUEST LIST</div>
@@ -3137,11 +3980,15 @@ function UnifiedWalkInModal({
             <div style={{ fontSize: 9.5, marginTop: 4, color: "rgba(255,255,255,.5)", fontWeight: 700, letterSpacing: .8 }}>FULLY REDEEMABLE</div>
           </button>
         </div>
+        )}
 
-        {/* Reassuring caption */}
+        {/* Reassuring caption — hidden in COVER+TABLE flow (the gold banner
+            above already explains what's happening). */}
+        {!linkToTable && (
         <div style={{ fontSize: 11.5, color: "rgba(0,200,100,.95)", marginBottom: 16, fontWeight: 600 }}>
           ✅ Skip the queue · Cover charge 100% redeemable on F&amp;B
         </div>
+        )}
 
         {/* ENTRY TYPE — three pricing cards (cover + guestlist) */}
         {(kind === "cover" || kind === "guestlist") && (
@@ -3639,10 +4486,11 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
 }
 
 function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: () => void }) {
-  const [tab, setTab] = useState<"tickets" | "guestlist" | "tables" | "group" | "onlyentry">("tickets");
+  const [tab, setTab] = useState<"tickets" | "guestlist" | "tables" | "group" | "onlyentry" | "waitlist">("tickets");
   const [qrModal, setQrModal] = useState<{ bookingRef: string; walletUrl: string; customerName: string; reason: string } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [walkInOpen, setWalkInOpen] = useState(false);
+  const [tableBookingOpen, setTableBookingOpen] = useState(false);
   const [lookupResult, setLookupResult] = useState<HodBooking | null>(null);
   const [searchInput, setSearchInput] = useState("");
   // 🔎 v3.4 — cross-collection Find Booking results (debounced, queries
@@ -3663,6 +4511,15 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     return () => clearTimeout(handle);
   }, [searchInput]);
   const [coverFor, setCoverFor] = useState<HodBooking | null>(null);
+  // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. When set, opens UnifiedWalkInModal
+  // pre-filled and locked to "cover" so door girl can recharge the wallet
+  // attached to the table she just created. Bidirectional doc link is
+  // patched in after the wallet is activated (see linkCoverToTable).
+  const [coverTableCtx, setCoverTableCtx] = useState<{
+    tableResRef: string;
+    prefill: { name: string; phone: string; email: string; pax: number };
+    tableInfo: { tableId?: string; floorLabel?: string };
+  } | null>(null);
   // 🎯 2026-05-19 (Khushi LIVE-NIGHT) — when search-panel TONIGHT MATCH for a
   // table is tapped, we set this so TablesTab pops open the table's detail
   // modal. Consumed (set null) by TablesTab once it opens, so closing the
@@ -3775,6 +4632,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     { key: "tables" as const,    label: "TABLES",         count: tabCounts.tables },
     { key: "group" as const,     label: "GROUP",          count: tabCounts.group },
     { key: "onlyentry" as const, label: "ENTRY PASS",     count: tabCounts.onlyentry },
+    { key: "waitlist" as const,  label: "WAITLIST",       count: 0 },
   ];
 
   return (
@@ -3815,8 +4673,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           )}
         </div>
 
-        {/* Action row: Scan + New Walk-in */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+        {/* Action row: Scan + New Walk-in + (below) New Table Booking */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
           <button onClick={() => setScanning(true)}
             style={{ padding: 14, borderRadius: 10, background: "transparent", border: "2px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.5px", cursor: "pointer" }}>
             Scan QR
@@ -3826,6 +4684,12 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             New Walk-in
           </button>
         </div>
+        {/* 🔴 2026-05-19 (Khushi LIVE-NIGHT) — NEW TABLE BOOKING button, full
+            width, sits directly under NEW WALK IN per door staff request. */}
+        <button onClick={() => setTableBookingOpen(true)}
+          style={{ width: "100%", padding: 14, borderRadius: 10, background: "transparent", border: "2px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.5px", cursor: "pointer", marginBottom: 14 }}>
+          🍽 New Table Booking
+        </button>
 
         {lookupResult && (
           <LookupResult booking={lookupResult} agentName={agentName} onDone={() => setLookupResult(null)} />
@@ -3862,8 +4726,16 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           const inDate = (d?: string) => todayDates.has((d || "").slice(0, 10));
 
           // 1. TICKETS / GROUP / ENTRY PASS (bookings, today, non-guestlist)
+          // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — STRICT date match only.
+          // Was: inDate(b.date) || inDate(b.bookedAt). Problem: `bookedAt` is
+          // when the guest PAID, not when their event is. A booking paid today
+          // for next Saturday was leaking into TONIGHT MATCHES. Now we match
+          // ONLY against the event date `b.date`, same as the actual Tickets
+          // tab filter at line ~1495. If `b.date` is missing, the booking is
+          // ignored — it can still be found via "OTHER DATES" below or the
+          // explicit ref/phone lookup.
           const todayBookings = allBookings.filter((b) =>
-            (inDate(b.date) || inDate((b as any).bookedAt)) && !isGuestlistBooking(b)
+            inDate(b.date) && !isGuestlistBooking(b)
           );
           type Hit = { key: string; tab: typeof tab; label: string; name: string; phone: string; subtitle: string; ref: string; onClick: () => void; tone: string };
           const hits: Hit[] = [];
@@ -3884,7 +4756,14 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             });
           }
           // 2. GUESTLIST (today)
+          // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — also enforce date if
+          // present on the guestlist doc. Some legacy entries have only
+          // `joinedAt` (creation timestamp). If the entry has an explicit
+          // `date` field, use THAT as the gate so future-night guests added
+          // today don't leak into tonight.
           const todayGuests = allGuests.filter((g) => {
+            const d = ((g as any).date || "").slice(0, 10);
+            if (d) return todayDates.has(d);
             const ja = ((g as any).joinedAt || "").slice(0, 10);
             const et = ((g as any).entryTime || "").slice(0, 10);
             return todayDates.has(ja) || todayDates.has(et);
@@ -3907,10 +4786,13 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
             });
           }
           // Also include guestlist-typed bookings (parity with GuestlistTab merge)
+          // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — same fix as above: drop
+          // the `bookedAt` fallback so future-date guestlist bookings paid
+          // today don't show under TONIGHT.
           const glIds = new Set(todayGuests.map((g) => g.id));
           for (const b of allBookings) {
             if (!isGuestlistBooking(b)) continue;
-            if (!(inDate(b.date) || inDate((b as any).bookedAt))) continue;
+            if (!inDate(b.date)) continue;
             if (glIds.has(b.id)) continue;
             if (!matches(b.name, b.phone, b.ref)) continue;
             hits.push({
@@ -4077,7 +4959,12 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} />}
         {tab === "group"     && <GroupBookingsTab  agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
       </div>
+
+      {/* 🔴 2026-05-20 (Khushi LIVE-NIGHT) — auto-match popup mounted at
+          dashboard level so it fires regardless of which tab is active. */}
+      <WaitlistAutoMatch date={CALENDAR_TODAY_STR()} />
 
       {scanning && <QrScanner onResult={handleQrResult} onClose={() => setScanning(false)} />}
       {scanDetail && (
@@ -4091,6 +4978,23 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         />
       )}
       {walkInOpen && <NewWalkInModal agentName={agentName} onClose={() => setWalkInOpen(false)} onActivateCover={(b) => setCoverFor(b)} />}
+      {tableBookingOpen && <NewTableBookingModal
+        agentName={agentName}
+        onClose={() => setTableBookingOpen(false)}
+        onActivateCoverTable={(ctx) => setCoverTableCtx(ctx)}
+      />}
+      {coverTableCtx && <UnifiedWalkInModal
+        agentName={agentName}
+        onClose={() => setCoverTableCtx(null)}
+        onAggregator={() => { /* not used in cover+table flow */ }}
+        onActivateCover={() => { /* not used — wallet activation is inline */ }}
+        prefill={{ name: coverTableCtx.prefill.name, phone: coverTableCtx.prefill.phone, email: coverTableCtx.prefill.email }}
+        linkToTable={{
+          tableResRef: coverTableCtx.tableResRef,
+          tableId: coverTableCtx.tableInfo.tableId,
+          floorLabel: coverTableCtx.tableInfo.floorLabel,
+        }}
+      />}
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
       {qrModal && (
         <WalletQrModal

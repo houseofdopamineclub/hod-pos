@@ -16,6 +16,10 @@ import {
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
   redeemFromWalletAtTable, undoWalletRedemption, findCoverForRedemption,
   type WalletRedemption, type HodCover,
+  // 2026-05-20 — COVER+TABLE linked-wallet live subscription (1-tap redeem path)
+  subscribeToCoverById,
+  // 2026-05-20 — Customer-calls-captain: clear ping after captain acknowledges
+  clearCustomerCallRequest,
   // 2026-05-18 — Live menu category filtering (admin Menu CRM controls visibility + discount)
   subscribeToLiveMenuCategories, filterMenuByLiveCategories, type MenuCategory,
 } from "@/lib/firestore-hod";
@@ -158,57 +162,57 @@ function VoidReasonModal({ voided, valueLost, roundNum, onCancel, onConfirm }: {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ background: "rgba(20,18,30,1)", border: "2px solid rgba(239,68,68,.4)", borderRadius: 20, padding: 22, width: "100%", maxWidth: 420, maxHeight: "92vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 17, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID FROM PRINTED KOT</div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 14 }}>Round {roundNum} · Bar/Kitchen will be auto-notified</div>
+        <div style={{ fontSize: 20, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID FROM PRINTED KOT</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 14 }}>Round {roundNum} · Bar/Kitchen will be auto-notified</div>
 
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
           {voided.map((v, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#fff", padding: "3px 0" }}>
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, color: "#F2EBD3", padding: "3px 0" }}>
               <span>{v.qty}× {v.n}</span>
               <span style={{ color: "#EF4444", fontWeight: 700 }}>−₹{v.p * v.qty}</span>
             </div>
           ))}
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTop: "1px dashed rgba(255,255,255,.1)", fontSize: 13, fontWeight: 900 }}>
-            <span style={{ color: "#fff" }}>VALUE LOST</span>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTop: "1px dashed rgba(255,255,255,.1)", fontSize: 16, fontWeight: 900 }}>
+            <span style={{ color: "#F2EBD3" }}>VALUE LOST</span>
             <span style={{ color: "#EF4444" }}>−₹{valueLost}</span>
           </div>
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 6, fontWeight: 700 }}>REASON *</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 6, fontWeight: 700 }}>REASON *</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
           {VOID_REASONS.map((r) => (
             <button key={r} onClick={() => setReason(r)} disabled={busy}
-              style={{ padding: "7px 11px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
-                background: reason === r ? "rgba(242,199,68,.18)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${reason === r ? "rgba(242,199,68,.6)" : "rgba(255,255,255,.1)"}`,
-                color: reason === r ? "#F2C744" : "rgba(255,255,255,.65)" }}>
+              style={{ padding: "7px 11px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
+                background: reason === r ? "rgba(229,168,42,.18)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${reason === r ? "rgba(229,168,42,.6)" : "rgba(255,255,255,.1)"}`,
+                color: reason === r ? "#E5A82A" : "rgba(242,235,211,.9)" }}>
               {r}
             </button>
           ))}
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 6, fontWeight: 700 }}>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 6, fontWeight: 700 }}>
           NOTES {reason === "OTHER" ? "*" : "(optional)"}
         </div>
         <input value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy}
           placeholder={reason === "OTHER" ? "Required — describe what happened" : "e.g. table 5 sent it back"}
-          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 16, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 6, fontWeight: 700 }}>🔒 MANAGER PIN *</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 6, fontWeight: 700 }}>🔒 MANAGER PIN *</div>
         <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
           autoFocus disabled={busy} placeholder="4-digit PIN"
           onKeyDown={(e) => e.key === "Enter" && submit()}
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 18, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 21, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
 
-        {err && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10, textAlign: "center" }}>{err}</div>}
+        {err && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10, textAlign: "center" }}>{err}</div>}
 
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={onCancel} disabled={busy}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)", fontSize: 13, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer" }}>
+            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(242,235,211,.88)", fontSize: 16, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer" }}>
             Cancel
           </button>
           <button onClick={submit} disabled={busy}
-            style={{ flex: 1.4, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 13, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer" }}>
+            style={{ flex: 1.4, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 16, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer" }}>
             {busy ? "Voiding..." : "🚫 CONFIRM VOID"}
           </button>
         </div>
@@ -243,45 +247,45 @@ function VoidBillModal({ tableId, customerName, billTotal, onCancel, onConfirm }
   };
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 5000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#0A0A0A", border: "2px solid rgba(239,68,68,.5)", borderRadius: 14, padding: 20, color: "#fff" }}>
-        <div style={{ fontSize: 17, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID PRINTED BILL</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginBottom: 10 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#0A0A0A", border: "2px solid rgba(239,68,68,.5)", borderRadius: 14, padding: 20, color: "#F2EBD3" }}>
+        <div style={{ fontSize: 20, fontWeight: 900, color: "#EF4444", marginBottom: 6 }}>🚫 VOID PRINTED BILL</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.88)", marginBottom: 10 }}>
           Use ONLY when the bill was printed but the customer cannot/will not pay. The bill stays on record for audit; the table is freed.
         </div>
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 10, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>TABLE / CUSTOMER</div>
-          <div style={{ fontSize: 14, fontWeight: 800, color: "#F2C744", marginBottom: 8 }}>{tableId} · {customerName || "—"}</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>BILL TOTAL TO BE VOIDED (LEAKAGE)</div>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444" }}>₹{Math.round(billTotal)}</div>
+          <div style={{ fontSize: 13, color: "rgba(242,235,211,.84)", marginBottom: 4 }}>TABLE / CUSTOMER</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: "#E5A82A", marginBottom: 8 }}>{tableId} · {customerName || "—"}</div>
+          <div style={{ fontSize: 13, color: "rgba(242,235,211,.84)", marginBottom: 4 }}>BILL TOTAL TO BE VOIDED (LEAKAGE)</div>
+          <div style={{ fontSize: 26, fontWeight: 900, color: "#EF4444" }}>₹{Math.round(billTotal)}</div>
         </div>
 
-        <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>REASON</label>
+        <label style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 4, display: "block" }}>REASON</label>
         <select value={reason} onChange={(e) => setReason(e.target.value)}
-          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, marginBottom: 12, boxSizing: "border-box" }}>
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 16, marginBottom: 12, boxSizing: "border-box" }}>
           {BILL_VOID_REASONS.map((r) => <option key={r} value={r} style={{ background: "#0A0A0A" }}>{r}</option>)}
         </select>
 
-        <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>
+        <label style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 4, display: "block" }}>
           NOTES {reason === "OTHER" ? "(REQUIRED)" : "(OPTIONAL)"}
         </label>
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
           placeholder="What happened? (Will be stored in the audit trail.)"
-          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, marginBottom: 12, boxSizing: "border-box", resize: "vertical" }} />
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 16, marginBottom: 12, boxSizing: "border-box", resize: "vertical" }} />
 
-        <label style={{ fontSize: 11, color: "rgba(255,255,255,.6)", marginBottom: 4, display: "block" }}>MANAGER PIN (8888)</label>
+        <label style={{ fontSize: 13, color: "rgba(242,235,211,.88)", marginBottom: 4, display: "block" }}>MANAGER PIN (8888)</label>
         <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={4}
           value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 18, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 21, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
 
-        {err && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10, textAlign: "center" }}>{err}</div>}
+        {err && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10, textAlign: "center" }}>{err}</div>}
 
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={onCancel} disabled={busy}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)", fontSize: 13, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer" }}>
+            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(242,235,211,.88)", fontSize: 16, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer" }}>
             Cancel
           </button>
           <button onClick={submit} disabled={busy}
-            style={{ flex: 1.4, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 13, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer" }}>
+            style={{ flex: 1.4, padding: 12, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 16, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer" }}>
             {busy ? "Voiding..." : "🚫 CONFIRM VOID BILL"}
           </button>
         </div>
@@ -303,7 +307,7 @@ async function requireAdminPin(reason: string): Promise<boolean> {
 // Brand-color palette for the booking-source pills (champagne gold for in-house,
 // authentic brand colors for each aggregator). Used in the Source/Discount UI.
 const AGG_BRAND: Record<string, { fg: string; bg: string; border: string }> = {
-  inhouse:         { fg: "#F2C744", bg: "rgba(242,199,68,.14)", border: "rgba(242,199,68,.55)" },
+  inhouse:         { fg: "#E5A82A", bg: "rgba(229,168,42,.14)", border: "rgba(229,168,42,.55)" },
   // 🔴 2026-05-12 — Brand palette intentionally collapsed to the venue's
   // 4 in-house colours (yellow / black / white / red). External brand reds
   // / oranges removed per owner request; aggregator identity is conveyed
@@ -311,7 +315,7 @@ const AGG_BRAND: Record<string, { fg: string; bg: string; border: string }> = {
   zomato:          { fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
   "swiggy-dineout":{ fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
   "swiggy-scenes": { fg: "#EF4444", bg: "rgba(239,68,68,.14)",  border: "rgba(239,68,68,.55)"  },
-  eazydiner:       { fg: "#F2C744", bg: "rgba(242,199,68,.10)", border: "rgba(242,199,68,.45)" },
+  eazydiner:       { fg: "#E5A82A", bg: "rgba(229,168,42,.10)", border: "rgba(229,168,42,.45)" },
 };
 
 const TABLE_OPTIONS = [
@@ -433,17 +437,17 @@ function CaptainLogin({ onLogin }: { onLogin: (name: string) => void }) {
   return (
     <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, padding: "32px 28px", width: "100%", maxWidth: 360, textAlign: "center" }}>
-        <div style={{ fontSize: 32, marginBottom: 12 }}>🪩</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 6 }}>Captain Login</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 24 }}>HOD — House of Dopamine</div>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>🪩</div>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 23, fontWeight: 900, color: "#E5A82A", marginBottom: 6 }}>Captain Login</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 24 }}>HOD — House of Dopamine</div>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name (e.g. Ravi)"
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 10, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 18, outline: "none", marginBottom: 10, boxSizing: "border-box" }} />
         <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="Enter captain password"
           onKeyDown={(e) => e.key === "Enter" && tryLogin()}
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
+          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 18, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+        {error && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
         <button onClick={tryLogin}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 18, fontWeight: 900, cursor: "pointer" }}>
           Enter
         </button>
       </div>
@@ -512,7 +516,12 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
   ) => {
     setSaving(true);
     try {
-      const total = items.reduce((s, it) => s + it.p * it.qty, 0);
+      // 🔴 2026-05-20 (Khushi LIVE BUG fix) — use computeHodBreakdown so the
+      // saved roundTotal is TAX-INCLUSIVE, matching addRoundToTable +
+      // customer wallet math. Before: this stored raw subtotal (185) while
+      // every other code path stored inclusive (214) — so editing a round
+      // silently DOWNGRADED its total on the customer phone.
+      const total = computeHodBreakdown(items).grandTotal;
       await updateRoundItems(docId, roundIndex, items, total, captainName);
       // V3 anti-fraud #A1 — pre-print silent reductions get LOGGED (no PIN,
       // no friction) so an audit trail exists for "added 5, dropped 2 before
@@ -587,27 +596,29 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400 }}>
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744", marginBottom: 16 }}>Edit Round {round.roundNum}</div>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400 }}>
+        <div style={{ fontSize: 19, fontWeight: 900, color: "#E5A82A", marginBottom: 16 }}>Edit Round {round.roundNum}</div>
         {items.map((it, i) => (
           <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
-            <div style={{ flex: 1, fontSize: 13, color: "#fff" }}>{it.n}</div>
+            <div style={{ flex: 1, fontSize: 16, color: "#F2EBD3" }}>{it.n}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button onClick={() => updateQty(i, -1)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", cursor: "pointer" }}>−</button>
-              <span style={{ fontSize: 14, fontWeight: 800, color: "#F2C744", minWidth: 20, textAlign: "center" }}>{it.qty}</span>
-              <button onClick={() => updateQty(i, 1)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", cursor: "pointer" }}>+</button>
-              <span style={{ fontSize: 13, color: "#F2C744", minWidth: 50, textAlign: "right" }}>₹{it.p * it.qty}</span>
-              <button onClick={() => removeItem(i)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", cursor: "pointer", fontSize: 14 }}>×</button>
+              <button onClick={() => updateQty(i, -1)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", cursor: "pointer" }}>−</button>
+              <span style={{ fontSize: 17, fontWeight: 800, color: "#E5A82A", minWidth: 20, textAlign: "center" }}>{it.qty}</span>
+              <button onClick={() => updateQty(i, 1)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", cursor: "pointer" }}>+</button>
+              {/* 🔴 2026-05-20 (Khushi Bug 4) — inclusive ₹ via computeHodBreakdown
+                  so this line matches the Total below to the rupee. */}
+              <span style={{ fontSize: 16, color: "#E5A82A", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([it]).grandTotal}</span>
+              <button onClick={() => removeItem(i)} style={{ width: 28, height: 28, borderRadius: 6, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", cursor: "pointer", fontSize: 17 }}>×</button>
             </div>
           </div>
         ))}
-        <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", fontWeight: 900, fontSize: 15 }}>
-          <span style={{ color: "#fff" }}>Total</span>
-          <span style={{ color: "#F2C744" }}>₹{items.reduce((s, it) => s + it.p * it.qty, 0)}</span>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", fontWeight: 900, fontSize: 18 }}>
+          <span style={{ color: "#F2EBD3" }}>Total <span style={{ fontSize: 12, fontWeight: 600, opacity: .55 }}>inc. tax</span></span>
+          <span style={{ color: "#E5A82A" }}>₹{computeHodBreakdown(items).grandTotal}</span>
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-          <button onClick={save} disabled={saving} style={{ flex: 1, padding: 12, borderRadius: 10, background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+          <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(242,235,211,.8)", fontSize: 16, cursor: "pointer" }}>Cancel</button>
+          <button onClick={save} disabled={saving} style={{ flex: 1, padding: 12, borderRadius: 10, background: "rgba(229,168,42,.15)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 16, fontWeight: 800, cursor: "pointer" }}>
             {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
@@ -650,18 +661,18 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>🔄 Reassign Table</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 4 }}>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A", marginBottom: 4 }}>🔄 Reassign Table</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 4 }}>
           Moving <b>{reservation.customerName}</b> from <span style={{ color: "#EF4444", fontWeight: 800 }}>{reservation.tableId}</span>
         </div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.3)", marginBottom: 16 }}>All orders move with the booking</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.6)", marginBottom: 16 }}>All orders move with the booking</div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Select New Table *</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Select New Table *</div>
         <div style={{ marginBottom: 16 }}>
           {TABLE_OPTIONS.map((group) => (
             <div key={group.floor} style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+              <div style={{ fontSize: 12, color: "rgba(242,235,211,.6)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                 {group.tables.map((t) => {
                   // Time-aware: a table booked for an unrelated slot should
@@ -674,19 +685,19 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
                   // Filled green = available for this slot; filled red = taken
                   // for this slot. Yellow ring = your current pick. Orange =
                   // the reservation's existing table.
-                  const bg = isSelected ? "#F2C744"
-                    : isCurrent ? "rgba(242,199,68,.18)"
+                  const bg = isSelected ? "#E5A82A"
+                    : isCurrent ? "rgba(229,168,42,.18)"
                     : occupied ? "#DC2626" : "#16A34A";
-                  const border = isSelected ? "#F2C744"
-                    : isCurrent ? "#F2C744"
+                  const border = isSelected ? "#E5A82A"
+                    : isCurrent ? "#E5A82A"
                     : occupied ? "#B91C1C" : "#15803D";
                   const color = isSelected ? "#0A0A0A"
-                    : isCurrent ? "#F2C744"
+                    : isCurrent ? "#E5A82A"
                     : "#FFFFFF";
                   return (
                     <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(t)} disabled={occupied || isCurrent}
                       title={occupied && occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : ""}
-                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800,
+                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800,
                         cursor: occupied || isCurrent ? "not-allowed" : "pointer",
                         background: bg, border: `1px solid ${border}`, color,
                         opacity: occupied && !isCurrent ? 0.85 : 1 }}>
@@ -700,17 +711,17 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
         </div>
 
         {newTable && (
-          <div style={{ background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.2)", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 12, color: "#F2C744" }}>
+          <div style={{ background: "rgba(229,168,42,.06)", border: "1px solid rgba(229,168,42,.2)", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 14, color: "#E5A82A" }}>
             {reservation.tableId} → {newTable} ({TABLE_OPTIONS.find(g => g.tables.includes(newTable))?.label})
           </div>
         )}
 
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
+        {error && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
         <button onClick={doReassign} disabled={saving || !newTable}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: newTable ? "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))" : "rgba(255,255,255,.06)", border: "none", color: newTable ? "#fff" : "rgba(255,255,255,.3)", fontSize: 15, fontWeight: 900, cursor: newTable ? "pointer" : "not-allowed", marginBottom: 10 }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: newTable ? "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,40,32,.8))" : "rgba(255,255,255,.06)", border: "none", color: newTable ? "#fff" : "rgba(242,235,211,.6)", fontSize: 18, fontWeight: 900, cursor: newTable ? "pointer" : "not-allowed", marginBottom: 10 }}>
           {saving ? "Reassigning..." : "Confirm Reassignment"}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(242,235,211,.72)", fontSize: 16, cursor: "pointer" }}>Cancel</button>
       </div>
     </div>
   );
@@ -806,22 +817,22 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 20, padding: 22, width: "100%", maxWidth: 400, maxHeight: "92vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 17, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>🎫 REDEEM FROM WALLET</div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>
-          Table {reservation.tableId} · Bill remaining: <span style={{ color: "#F2C744", fontWeight: 800 }}>{formatINR(remaining)}</span>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.4)", borderRadius: 20, padding: 22, width: "100%", maxWidth: 400, maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 20, fontWeight: 900, color: "#E5A82A", marginBottom: 4 }}>🎫 REDEEM FROM WALLET</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 16 }}>
+          Table {reservation.tableId} · Bill remaining: <span style={{ color: "#E5A82A", fontWeight: 800 }}>{formatINR(remaining)}</span>
         </div>
 
         {success ? (
           <>
             <div style={{ background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.5)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
-              <div style={{ fontSize: 22, fontWeight: 900, color: "#22C55E", marginBottom: 6 }}>✅ REDEEMED {formatINR(success.amount)}</div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,.7)" }}>From <b>{success.name}</b>'s wallet</div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,.7)", marginTop: 4 }}>New balance: <b>{formatINR(success.newBalance)}</b></div>
+              <div style={{ fontSize: 26, fontWeight: 900, color: "#22C55E", marginBottom: 6 }}>✅ REDEEMED {formatINR(success.amount)}</div>
+              <div style={{ fontSize: 14, color: "rgba(242,235,211,.94)" }}>From <b>{success.name}</b>'s wallet</div>
+              <div style={{ fontSize: 14, color: "rgba(242,235,211,.94)", marginTop: 4 }}>New balance: <b>{formatINR(success.newBalance)}</b></div>
             </div>
             <button onClick={onClose}
-              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
-              ← Back to Mark Paid
+              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,40,32,.8))", border: "none", color: "#F2EBD3", fontSize: 17, fontWeight: 900, cursor: "pointer" }}>
+              ← Back to Settle Bill
             </button>
           </>
         ) : (
@@ -834,9 +845,9 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
                 { k: "ref", label: "🎟 REF" },
               ] as const).map((t) => (
                 <button key={t.k} onClick={() => { setTab(t.k); setError(""); setFound(null); setNeedle(""); }}
-                  style={{ flex: 1, padding: "8px 4px", borderRadius: 7, fontSize: 11, fontWeight: 800, cursor: "pointer", border: "none",
-                    background: tab === t.k ? "rgba(242,199,68,.18)" : "transparent",
-                    color: tab === t.k ? "#F2C744" : "rgba(255,255,255,.5)" }}>
+                  style={{ flex: 1, padding: "8px 4px", borderRadius: 7, fontSize: 13, fontWeight: 800, cursor: "pointer", border: "none",
+                    background: tab === t.k ? "rgba(229,168,42,.18)" : "transparent",
+                    color: tab === t.k ? "#E5A82A" : "rgba(242,235,211,.8)" }}>
                   {t.label}
                 </button>
               ))}
@@ -844,7 +855,7 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
 
             {tab === "scan" && (
               <button onClick={() => { setError(""); setFound(null); setShowCamera(true); }}
-                style={{ width: "100%", padding: 18, borderRadius: 12, background: "rgba(242,199,68,.1)", border: "2px dashed rgba(242,199,68,.4)", color: "#F2C744", fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 14 }}>
+                style={{ width: "100%", padding: 18, borderRadius: 12, background: "rgba(229,168,42,.1)", border: "2px dashed rgba(229,168,42,.4)", color: "#E5A82A", fontSize: 17, fontWeight: 800, cursor: "pointer", marginBottom: 14 }}>
                 📷 OPEN CAMERA · POINT AT QR
               </button>
             )}
@@ -858,35 +869,35 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
                   placeholder={tab === "phone" ? "9611111261" : "HOD-MP6KSRBR"}
                   inputMode={tab === "phone" ? "numeric" : "text"}
                   autoFocus
-                  style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
+                  style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.15)", color: "#F2EBD3", fontSize: 18, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
                 <button onClick={() => lookup(needle)} disabled={busy || !needle.trim()}
-                  style={{ width: "100%", padding: 12, borderRadius: 10, background: needle.trim() ? "rgba(242,199,68,.2)" : "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.4)", color: needle.trim() ? "#F2C744" : "rgba(255,255,255,.3)", fontSize: 13, fontWeight: 800, cursor: needle.trim() ? "pointer" : "not-allowed" }}>
+                  style={{ width: "100%", padding: 12, borderRadius: 10, background: needle.trim() ? "rgba(229,168,42,.2)" : "rgba(255,255,255,.04)", border: "1px solid rgba(229,168,42,.4)", color: needle.trim() ? "#E5A82A" : "rgba(242,235,211,.6)", fontSize: 16, fontWeight: 800, cursor: needle.trim() ? "pointer" : "not-allowed" }}>
                   {busy ? "Searching…" : "🔍 LOOK UP WALLET"}
                 </button>
               </div>
             )}
 
             {error && (
-              <div style={{ padding: 10, marginBottom: 12, borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 12, fontWeight: 600 }}>
+              <div style={{ padding: 10, marginBottom: 12, borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 14, fontWeight: 600 }}>
                 ⚠ {error}
               </div>
             )}
 
             {found && (
               <div style={{ padding: 14, marginBottom: 14, borderRadius: 12, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.3)" }}>
-                <div style={{ fontSize: 14, fontWeight: 900, color: "#fff", marginBottom: 4 }}>{found.name || "—"}</div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 2 }}>📱 {found.phone || "—"}</div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginBottom: 8, fontFamily: "monospace" }}>{found.ref || found.id}</div>
+                <div style={{ fontSize: 17, fontWeight: 900, color: "#F2EBD3", marginBottom: 4 }}>{found.name || "—"}</div>
+                <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 2 }}>📱 {found.phone || "—"}</div>
+                <div style={{ fontSize: 12, color: "rgba(242,235,211,.72)", marginBottom: 8, fontFamily: "monospace" }}>{found.ref || found.id}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "rgba(0,0,0,.3)", borderRadius: 8 }}>
-                  <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Available balance</span>
-                  <span style={{ fontSize: 18, fontWeight: 900, color: "#22C55E" }}>{formatINR(found.coverBalance || 0)}</span>
+                  <span style={{ fontSize: 13, color: "rgba(242,235,211,.8)" }}>Available balance</span>
+                  <span style={{ fontSize: 21, fontWeight: 900, color: "#22C55E" }}>{formatINR(found.coverBalance || 0)}</span>
                 </div>
                 {(nameMismatch || phoneMismatch) && (
-                  <div style={{ marginTop: 10, padding: 8, borderRadius: 6, background: "rgba(245,158,11,.15)", border: "1px solid rgba(245,158,11,.5)", color: "#FBBF24", fontSize: 10, fontWeight: 700, lineHeight: 1.4 }}>
+                  <div style={{ marginTop: 10, padding: 8, borderRadius: 6, background: "rgba(245,158,11,.15)", border: "1px solid rgba(245,158,11,.5)", color: "#FBBF24", fontSize: 12, fontWeight: 700, lineHeight: 1.4 }}>
                     ⚠ NAME/PHONE DOESN'T MATCH TABLE ({reservation.customerName || "—"} · {reservation.phone || "—"}). Confirm with customer this is THEIR wallet before redeeming.
                   </div>
                 )}
-                <div style={{ marginTop: 12, padding: "8px 10px", background: "rgba(242,199,68,.1)", borderRadius: 6, fontSize: 11, color: "#F2C744", fontWeight: 700, textAlign: "center" }}>
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "rgba(229,168,42,.1)", borderRadius: 6, fontSize: 13, color: "#E5A82A", fontWeight: 700, textAlign: "center" }}>
                   Will deduct {formatINR(Math.min(remaining, found.coverBalance || 0))} ({remaining > (found.coverBalance || 0) ? "full balance" : "bill remaining"})
                 </div>
               </div>
@@ -894,13 +905,13 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
 
             {found && (
               <button onClick={confirmRedeem} disabled={busy}
-                style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#22C55E,#15803D)", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+                style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#22C55E,#15803D)", border: "none", color: "#F2EBD3", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
                 {busy ? "Redeeming…" : `✅ REDEEM ${formatINR(Math.min(remaining, found.coverBalance || 0))}`}
               </button>
             )}
 
             <button onClick={onClose}
-              style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.5)", fontSize: 13, cursor: "pointer" }}>
+              style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(242,235,211,.8)", fontSize: 16, cursor: "pointer" }}>
               Cancel
             </button>
           </>
@@ -995,9 +1006,58 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // Q6 — aggregator BOOKINGS block wallet redemption entirely (separate
   // accounting — Zomato/Swiggy/EazyDiner already collected/discounted at the
   // platform). Source-level check (not just payMethod) so a captain switching
-  // payChannel from aggregator → in-house can't bypass the block. (Architect
-  // review 2026-05-15.)
+  // payChannel from aggregator → in-house can't bypass the block. Hoisted
+  // above the linked-wallet block (2026-05-20) so showOneTap can read it.
   const walletAllowed = !isAggregator && payMethod !== "aggregator";
+  // ── 2026-05-20 — COVER+TABLE LINKED WALLET 1-TAP REDEEM (Khushi spec) ──
+  // Live-subscribe to the linked cover doc so the button shows the CURRENT
+  // balance (auto-refreshes if customer also spent at the bar between
+  // arrival and bill close). One-tap path skips the scanner / phone lookup
+  // entirely — uses linkedCoverDocId directly.
+  const [linkedCover, setLinkedCover] = useState<HodCover | null>(null);
+  const [oneTapBusy, setOneTapBusy] = useState(false);
+  useEffect(() => {
+    if (!reservation.linkedCoverDocId) { setLinkedCover(null); return; }
+    const u = subscribeToCoverById(reservation.linkedCoverDocId, setLinkedCover);
+    return () => u();
+  }, [reservation.linkedCoverDocId]);
+  const linkedBal = linkedCover ? (linkedCover.coverBalance || 0) : (reservation.linkedCoverInitial || 0);
+  // Has the linked wallet already been redeemed against THIS bill? (Prevents
+  // double-tap. Captain can still hit "SCAN ANOTHER WALLET" for guest #2.)
+  // Match against EVERY identifier we know about — doc id (most reliable),
+  // stored linkedCoverRef, AND the live cover's ref (catches legacy
+  // redemptions written before walletDocId existed, plus the rare case where
+  // stored linkedCoverRef is stale/missing while the live doc has the truth).
+  const linkedRefCandidates = new Set<string>([
+    reservation.linkedCoverRef || "",
+    linkedCover?.ref || "",
+    reservation.linkedCoverDocId || "",
+  ].filter(Boolean));
+  const linkedAlreadyRedeemed = walletRedemptions.some(
+    (e) => (e.walletDocId && e.walletDocId === reservation.linkedCoverDocId) ||
+           (e.walletRef && linkedRefCandidates.has(e.walletRef))
+  );
+  const showOneTap = walletAllowed && !!reservation.linkedCoverDocId && !reservation.linkedCoverPending;
+  const oneTapDisabled = oneTapBusy || payable <= 0 || linkedBal <= 0 || linkedAlreadyRedeemed;
+  const oneTapAmount = Math.min(payable, linkedBal);
+  const oneTapRedeem = async () => {
+    if (oneTapDisabled || !reservation.linkedCoverDocId) return;
+    setOneTapBusy(true); setWalletErr("");
+    try {
+      const billCap = payable + walletPaidSoFar;
+      await redeemFromWalletAtTable(
+        reservation._docId,
+        reservation.linkedCoverDocId,
+        payable,
+        captainName,
+        billCap
+      );
+    } catch (e: any) {
+      setWalletErr(e?.message || String(e));
+    }
+    setOneTapBusy(false);
+  };
+  // walletAllowed hoisted above linked-wallet block (see 2026-05-20 note).
 
   const splitTotal = splitCash + splitCard + splitUpi;
   // Split must equal `payable` (NOT finalAmount) — the wallet slice already
@@ -1146,19 +1206,41 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#fff", marginBottom: 4 }}>Mark Table Paid</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 20 }}>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 21, fontWeight: 900, color: "#F2EBD3", marginBottom: 4 }}>Mark Table Paid</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 20 }}>
           {reservation.tableId} · {reservation.customerName}
         </div>
 
-        <div style={{ background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.15)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-            <span style={{ color: "rgba(255,255,255,.5)" }}>Tab Total</span>
-            <span style={{ fontWeight: 800, color: "#F2C744" }}>{formatINR(tabTotal)}</span>
+        {/* ── 2026-05-20 — COVER+TABLE LINKED WALLET BANNER (Khushi spec) ──
+            Surfaces the door-linked wallet at the TOP of Mark Paid so the
+            captain can't miss it. Live balance · auto-hides once redeemed. */}
+        {showOneTap && !linkedAlreadyRedeemed && linkedBal > 0 && (
+          <div style={{ marginBottom: 16, padding: "10px 12px", borderRadius: 10,
+            background: "linear-gradient(135deg,rgba(34,197,94,.14),rgba(34,197,94,.06))",
+            border: "1px solid rgba(34,197,94,.45)",
+            display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 900, color: "#22C55E", letterSpacing: 0.5, marginBottom: 2 }}>
+                💰 WALLET LINKED AT DOOR
+              </div>
+              <div style={{ fontSize: 12, color: "rgba(242,235,211,.84)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {(linkedCover?.name || reservation.customerName || "—")} · {reservation.linkedCoverRef || ""}
+              </div>
+            </div>
+            <div style={{ fontSize: 21, fontWeight: 900, color: "#22C55E", whiteSpace: "nowrap" }}>
+              {formatINR(linkedBal)}
+            </div>
+          </div>
+        )}
+
+        <div style={{ background: "rgba(229,168,42,.06)", border: "1px solid rgba(229,168,42,.15)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, marginBottom: 6 }}>
+            <span style={{ color: "rgba(242,235,211,.8)" }}>Tab Total</span>
+            <span style={{ fontWeight: 800, color: "#E5A82A" }}>{formatINR(tabTotal)}</span>
           </div>
           {discountPct > 0 && (
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, marginBottom: 6 }}>
               <span style={{ color: "#A02820" }}>Discount ({discountPct}%)</span>
               <span style={{ fontWeight: 800, color: "#A02820" }}>-{formatINR(discountAmt)}</span>
             </div>
@@ -1168,38 +1250,38 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           {payMethod === "aggregator" && aggDiscount > 0 && (
             <div style={{ marginTop: 4, padding: "6px 8px", borderRadius: 4,
               background: "rgba(160,40,32,.10)", border: "1px solid rgba(160,40,32,.35)",
-              fontSize: 10, color: "#FCA5A5", lineHeight: 1.5 }}>
+              fontSize: 12, color: "#FCA5A5", lineHeight: 1.5 }}>
               ℹ {aggName.toUpperCase()} discount ({aggDiscount}%) is NOT applied
               to the customer bill — full ₹{formatINR(subtotal)} is billed.
               Reports will show venue net ≈ {formatINR(aggregatorNetAmount || 0)}.
             </div>
           )}
           {serviceCharge && (
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-              <span style={{ color: "rgba(255,255,255,.5)" }}>Service Charge (10%)</span>
-              <span style={{ fontWeight: 700, color: "rgba(255,255,255,.6)" }}>+{formatINR(scAmt)}</span>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, marginBottom: 6 }}>
+              <span style={{ color: "rgba(242,235,211,.8)" }}>Service Charge (10%)</span>
+              <span style={{ fontWeight: 700, color: "rgba(242,235,211,.88)" }}>+{formatINR(scAmt)}</span>
             </div>
           )}
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-            <span style={{ color: "rgba(255,255,255,.5)" }}>GST (5%)</span>
-            <span style={{ fontWeight: 700, color: "rgba(255,255,255,.6)" }}>+{formatINR(taxAmt)}</span>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, marginBottom: 6 }}>
+            <span style={{ color: "rgba(242,235,211,.8)" }}>GST (5%)</span>
+            <span style={{ fontWeight: 700, color: "rgba(242,235,211,.88)" }}>+{formatINR(taxAmt)}</span>
           </div>
-          <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 8, display: "flex", justifyContent: "space-between", fontSize: 16 }}>
-            <span style={{ fontWeight: 900, color: "#fff" }}>Final Amount</span>
-            <span style={{ fontWeight: 900, color: "#F2C744" }}>{formatINR(finalAmount)}</span>
+          <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 8, display: "flex", justifyContent: "space-between", fontSize: 19 }}>
+            <span style={{ fontWeight: 900, color: "#F2EBD3" }}>Final Amount</span>
+            <span style={{ fontWeight: 900, color: "#E5A82A" }}>{formatINR(finalAmount)}</span>
           </div>
         </div>
 
         {/* ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ── */}
         <div style={{ marginBottom: 16, padding: 12, borderRadius: 12,
-          background: walletPaidSoFar > 0 ? "rgba(34,197,94,.06)" : "rgba(242,199,68,.04)",
-          border: `1px solid ${walletPaidSoFar > 0 ? "rgba(34,197,94,.3)" : "rgba(242,199,68,.2)"}` }}>
+          background: walletPaidSoFar > 0 ? "rgba(34,197,94,.06)" : "rgba(229,168,42,.04)",
+          border: `1px solid ${walletPaidSoFar > 0 ? "rgba(34,197,94,.3)" : "rgba(229,168,42,.2)"}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: walletRedemptions.length > 0 ? 10 : 0 }}>
-            <span style={{ fontSize: 11, fontWeight: 800, color: walletPaidSoFar > 0 ? "#22C55E" : "#F2C744", letterSpacing: 0.5 }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: walletPaidSoFar > 0 ? "#22C55E" : "#E5A82A", letterSpacing: 0.5 }}>
               🎫 CUSTOMER WALLET
             </span>
             {walletPaidSoFar > 0 && (
-              <span style={{ fontSize: 11, fontWeight: 800, color: "#22C55E" }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: "#22C55E" }}>
                 {formatINR(walletPaidSoFar)} REDEEMED
               </span>
             )}
@@ -1208,28 +1290,28 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           {walletRedemptions.map((w) => (
             <div key={w.txId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", marginBottom: 4, borderRadius: 6, background: "rgba(0,0,0,.25)" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {w.walletName || "—"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {w.walletPhone || "—"}</span>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#F2EBD3", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {w.walletName || "—"} <span style={{ color: "rgba(242,235,211,.72)", fontWeight: 500 }}>· {w.walletPhone || "—"}</span>
                 </div>
-                <div style={{ fontSize: 9, color: "rgba(255,255,255,.4)", fontFamily: "monospace" }}>{w.walletRef}</div>
+                <div style={{ fontSize: 11, color: "rgba(242,235,211,.72)", fontFamily: "monospace" }}>{w.walletRef}</div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 900, color: "#22C55E" }}>−{formatINR(w.amount)}</div>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#22C55E" }}>−{formatINR(w.amount)}</div>
               <button onClick={() => undoWallet(w.txId)} disabled={undoBusy === w.txId}
                 title="Refund this wallet hit"
-                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
+                style={{ padding: "4px 8px", borderRadius: 6, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#FCA5A5", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
                 {undoBusy === w.txId ? "…" : "↶ UNDO"}
               </button>
             </div>
           ))}
 
           {walletErr && (
-            <div style={{ marginTop: 6, padding: 6, borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#FCA5A5", fontSize: 10, fontWeight: 600 }}>⚠ {walletErr}</div>
+            <div style={{ marginTop: 6, padding: 6, borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#FCA5A5", fontSize: 12, fontWeight: 600 }}>⚠ {walletErr}</div>
           )}
 
           {walletPaidSoFar > 0 && (
             payable === 0 ? (
-              <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.4)", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
-                <span style={{ color: "rgba(255,255,255,.7)", fontWeight: 700 }}>Remaining</span>
+              <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.4)", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 16 }}>
+                <span style={{ color: "rgba(242,235,211,.94)", fontWeight: 700 }}>Remaining</span>
                 <span style={{ fontWeight: 900, color: "#22C55E" }}>✅ FULLY PAID BY WALLET</span>
               </div>
             ) : (
@@ -1239,15 +1321,15 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               // bartenders/captains in a noisy floor don't accidentally close
               // a bill thinking the wallet covered everything.
               <div style={{ marginTop: 10, padding: "14px 16px", borderRadius: 10,
-                background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.12))",
-                border: "2px solid rgba(242,199,68,.7)",
-                boxShadow: "0 0 0 3px rgba(242,199,68,.08), 0 4px 16px rgba(242,199,68,.15)" }}>
+                background: "linear-gradient(135deg,rgba(229,168,42,.18),rgba(160,40,32,.12))",
+                border: "2px solid rgba(229,168,42,.7)",
+                boxShadow: "0 0 0 3px rgba(229,168,42,.08), 0 4px 16px rgba(229,168,42,.15)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: "#F2C744", letterSpacing: 0.6 }}>STILL TO COLLECT</span>
-                    <span style={{ fontSize: 10, color: "rgba(255,255,255,.55)", fontWeight: 600 }}>from customer · cash / card / UPI</span>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: "#E5A82A", letterSpacing: 0.6 }}>STILL TO COLLECT</span>
+                    <span style={{ fontSize: 12, color: "rgba(242,235,211,.84)", fontWeight: 600 }}>from customer · cash / card / UPI</span>
                   </div>
-                  <span style={{ fontSize: 28, fontWeight: 900, color: "#F2C744", lineHeight: 1, letterSpacing: -0.5 }}>
+                  <span style={{ fontSize: 32, fontWeight: 900, color: "#E5A82A", lineHeight: 1, letterSpacing: -0.5 }}>
                     {formatINR(payable)}
                   </span>
                 </div>
@@ -1255,17 +1337,58 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             )
           )}
 
+          {/* ── 2026-05-20 — COVER+TABLE LINKED WALLET 1-TAP REDEEM (Khushi spec) ──
+              Door girl already linked a wallet to this table. Show a BIG green
+              1-tap button that calls redeemFromWalletAtTable directly with the
+              known linkedCoverDocId — no QR scan, no phone lookup. The scanner
+              button still appears below as a fallback (guest #2's wallet, or if
+              the linked wallet is empty / already redeemed). */}
+          {showOneTap && payable > 0 && !linkedAlreadyRedeemed && linkedBal > 0 && (
+            <button onClick={oneTapRedeem} disabled={oneTapDisabled}
+              style={{ marginTop: walletRedemptions.length > 0 ? 10 : 0, width: "100%", padding: 14, borderRadius: 10,
+                background: oneTapDisabled
+                  ? "rgba(34,197,94,.18)"
+                  : "linear-gradient(135deg,#22C55E,#15803D)",
+                border: "1px solid rgba(34,197,94,.6)", color: "#F2EBD3",
+                fontSize: 17, fontWeight: 900, cursor: oneTapDisabled ? "not-allowed" : "pointer",
+                boxShadow: oneTapDisabled ? "none" : "0 0 16px rgba(34,197,94,.25)",
+                fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: 0.3 }}>
+              {oneTapBusy
+                ? "Redeeming…"
+                : `💰 USE LINKED WALLET · ${formatINR(oneTapAmount)} (1 TAP)`}
+              <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.85, marginTop: 3, letterSpacing: 0.5 }}>
+                {(linkedCover?.name || reservation.customerName || "—").toUpperCase()} · BAL {formatINR(linkedBal)}
+              </div>
+            </button>
+          )}
+          {showOneTap && linkedAlreadyRedeemed && (
+            <div style={{ marginTop: walletRedemptions.length > 0 ? 10 : 0, padding: "8px 10px", borderRadius: 8,
+              background: "rgba(34,197,94,.08)", border: "1px dashed rgba(34,197,94,.4)",
+              fontSize: 12, color: "rgba(242,235,211,.88)", textAlign: "center", fontWeight: 600 }}>
+              ✓ LINKED WALLET ALREADY APPLIED TO THIS BILL
+            </div>
+          )}
+          {showOneTap && linkedBal <= 0 && !linkedAlreadyRedeemed && (
+            <div style={{ marginTop: walletRedemptions.length > 0 ? 10 : 0, padding: "8px 10px", borderRadius: 8,
+              background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.15)",
+              fontSize: 12, color: "rgba(255,255,255,.45)", textAlign: "center", fontWeight: 600 }}>
+              💰 LINKED WALLET FULLY SPENT (likely at GF BAR) — use scanner below for any other wallet
+            </div>
+          )}
+
           {payable > 0 && walletAllowed && (
             <button onClick={() => { setWalletErr(""); setShowWalletScan(true); }}
-              style={{ marginTop: walletRedemptions.length > 0 ? 10 : 0, width: "100%", padding: 12, borderRadius: 10,
-                background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.18))",
-                border: "1px solid rgba(242,199,68,.5)", color: "#F2C744", fontSize: 13, fontWeight: 900, cursor: "pointer" }}>
-              {walletRedemptions.length === 0 ? `🎫 REDEEM FROM WALLET (${formatINR(payable)})` : "🎫 SCAN ANOTHER WALLET"}
+              style={{ marginTop: (walletRedemptions.length > 0 || showOneTap) ? 10 : 0, width: "100%", padding: 12, borderRadius: 10,
+                background: "linear-gradient(135deg,rgba(229,168,42,.18),rgba(160,40,32,.18))",
+                border: "1px solid rgba(229,168,42,.5)", color: "#E5A82A", fontSize: 16, fontWeight: 900, cursor: "pointer" }}>
+              {walletRedemptions.length === 0 && !showOneTap
+                ? `🎫 REDEEM FROM WALLET (${formatINR(payable)})`
+                : "🎫 SCAN ANOTHER WALLET"}
             </button>
           )}
 
           {!walletAllowed && (
-            <div style={{ marginTop: 8, padding: 8, borderRadius: 6, background: "rgba(160,40,32,.1)", border: "1px dashed rgba(160,40,32,.4)", fontSize: 10, color: "rgba(255,255,255,.5)", textAlign: "center", fontWeight: 600 }}>
+            <div style={{ marginTop: 8, padding: 8, borderRadius: 6, background: "rgba(160,40,32,.1)", border: "1px dashed rgba(160,40,32,.4)", fontSize: 12, color: "rgba(242,235,211,.8)", textAlign: "center", fontWeight: 600 }}>
               Wallet redemption blocked on aggregator bills (Q6 spec)
             </div>
           )}
@@ -1274,23 +1397,23 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <button onClick={() => setServiceCharge(!serviceCharge)}
             style={{ width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer", position: "relative",
-              background: serviceCharge ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.15)", transition: "background .2s" }}>
+              background: serviceCharge ? "rgba(229,168,42,.5)" : "rgba(255,255,255,.15)", transition: "background .2s" }}>
             <div style={{ width: 16, height: 16, borderRadius: 8, background: "#fff", position: "absolute", top: 3,
               left: serviceCharge ? 21 : 3, transition: "left .2s" }} />
           </button>
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Service Charge (10%)</span>
+          <span style={{ fontSize: 14, color: "rgba(242,235,211,.8)" }}>Service Charge (10%)</span>
         </div>
 
         {isAggregator && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 8 }}>Payment Channel</div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 8 }}>Payment Channel</div>
             <div style={{ display: "flex", gap: 8 }}>
               {["aggregator", "inhouse"].map((ch) => (
                 <button key={ch} onClick={() => setPayMethod(ch === "inhouse" ? "cash" : "aggregator")}
-                  style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "1px solid",
-                    background: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-                    borderColor: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)",
-                    color: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#F2C744" : "rgba(255,255,255,.4)" }}>
+                  style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", border: "1px solid",
+                    background: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "rgba(229,168,42,.15)" : "rgba(255,255,255,.04)",
+                    borderColor: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "rgba(229,168,42,.5)" : "rgba(255,255,255,.08)",
+                    color: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#E5A82A" : "rgba(242,235,211,.72)" }}>
                   {ch === "aggregator" ? `Pay via ${aggName}` : "Pay In-House"}
                 </button>
               ))}
@@ -1301,12 +1424,12 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         {payMethod !== "aggregator" && payable > 0 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>Payment Method · ₹{payable} owed</span>
+              <span style={{ fontSize: 13, color: "rgba(242,235,211,.8)" }}>Payment Method · ₹{payable} owed</span>
               <button onClick={() => { setSplitMode(!splitMode); setError(""); if (!splitMode) { setSplitCash(payable); setSplitCard(0); setSplitUpi(0); } }}
-                style={{ padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: "pointer",
+                style={{ padding: "4px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800, cursor: "pointer",
                   background: splitMode ? "rgba(239,68,68,.2)" : "rgba(255,255,255,.04)",
                   border: `1px solid ${splitMode ? "rgba(239,68,68,.6)" : "rgba(255,255,255,.1)"}`,
-                  color: splitMode ? "#EF4444" : "rgba(255,255,255,.5)" }}>
+                  color: splitMode ? "#EF4444" : "rgba(242,235,211,.8)" }}>
                 {splitMode ? "✓ SPLIT MODE ON" : "🔀 SPLIT PAYMENT"}
               </button>
             </div>
@@ -1314,10 +1437,10 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                 {methods.map((m) => (
                   <button key={m.key} onClick={() => setPayMethod(m.key)}
-                    style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                      background: payMethod === m.key ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-                      border: `1px solid ${payMethod === m.key ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-                      color: payMethod === m.key ? "#F2C744" : "rgba(255,255,255,.4)" }}>
+                    style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                      background: payMethod === m.key ? "rgba(229,168,42,.15)" : "rgba(255,255,255,.04)",
+                      border: `1px solid ${payMethod === m.key ? "rgba(229,168,42,.5)" : "rgba(255,255,255,.08)"}`,
+                      color: payMethod === m.key ? "#E5A82A" : "rgba(242,235,211,.72)" }}>
                     {m.label}
                   </button>
                 ))}
@@ -1331,22 +1454,22 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                   { k: "upi",  label: "📱 UPI",  val: splitUpi,  set: setSplitUpi  },
                 ] as const).map((row) => (
                   <div key={row.k} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                    <span style={{ width: 70, fontSize: 12, fontWeight: 700, color: "#fff" }}>{row.label}</span>
-                    <span style={{ fontSize: 14, color: "rgba(255,255,255,.4)" }}>₹</span>
+                    <span style={{ width: 70, fontSize: 14, fontWeight: 700, color: "#F2EBD3" }}>{row.label}</span>
+                    <span style={{ fontSize: 17, color: "rgba(242,235,211,.72)" }}>₹</span>
                     <input type="number" value={row.val || ""} onChange={(e) => row.set(Math.max(0, Math.round(Number(e.target.value) || 0)))}
                       placeholder="0" min={0}
-                      style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+                      style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
                   </div>
                 ))}
-                <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid rgba(239,68,68,.2)", fontSize: 12 }}>
-                  <span style={{ color: "rgba(255,255,255,.5)" }}>Split sum</span>
-                  <span style={{ fontWeight: 800, color: splitDiff === 0 ? "#F2C744" : "#EF4444" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: "1px solid rgba(239,68,68,.2)", fontSize: 14 }}>
+                  <span style={{ color: "rgba(242,235,211,.8)" }}>Split sum</span>
+                  <span style={{ fontWeight: 800, color: splitDiff === 0 ? "#E5A82A" : "#EF4444" }}>
                     ₹{splitTotal} / ₹{payable} {splitDiff !== 0 && `(${splitDiff > 0 ? "short" : "over"} ₹${Math.abs(splitDiff)})`}
                   </span>
                 </div>
               </div>
             )}
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 8 }}>Discount %</div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 8 }}>Discount %</div>
             {/* 🔴 2026-05-12 — D4: input cap is 15%, blur fires the PIN gate. */}
             <input type="number" value={manualDiscount || ""}
               onChange={(e) => setManualDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
@@ -1361,11 +1484,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 setManualDiscount(clamped);
               }}
               placeholder={`max ${CAPTAIN_DISCOUNT_MAX}%`} min={0} max={CAPTAIN_DISCOUNT_MAX}
-              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
+              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
           </>
         )}
 
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
+        {error && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
 
         <button onClick={() => {
             // 🔴 2026-05-15 (Khushi spec) — when wallet only partially covers
@@ -1376,10 +1499,10 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             if (payable > 0 && walletPaidSoFar > 0) { setShowCollectConfirm(true); return; }
             confirm();
           }} disabled={saving}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,40,32,.8))", border: "none", color: "#F2EBD3", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
           {saving ? "Saving..." : (payable === 0 && walletPaidSoFar > 0 ? "✅ Close Bill (Wallet Paid)" : "✅ Confirm Payment")}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(242,235,211,.72)", fontSize: 16, cursor: "pointer" }}>Cancel</button>
       </div>
 
       {showWalletScan && (
@@ -1402,47 +1525,47 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10001, padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ width: "100%", maxWidth: 420, background: "linear-gradient(155deg,#1a0d0a 0%,#0a0606 70%,#030305 100%)",
-              border: "2px solid rgba(242,199,68,.6)", borderRadius: 16,
-              boxShadow: "0 0 0 4px rgba(242,199,68,.1), 0 20px 60px rgba(160,40,32,.4), 0 0 80px rgba(242,199,68,.15)",
-              padding: 24, color: "#fff", fontFamily: "inherit" }}>
+              border: "2px solid rgba(229,168,42,.6)", borderRadius: 16,
+              boxShadow: "0 0 0 4px rgba(229,168,42,.1), 0 20px 60px rgba(160,40,32,.4), 0 0 80px rgba(229,168,42,.15)",
+              padding: 24, color: "#F2EBD3", fontFamily: "inherit" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
-              <span style={{ fontSize: 22 }}>⚠️</span>
-              <span style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", letterSpacing: 1.2, textTransform: "uppercase" }}>Collect From Customer</span>
+              <span style={{ fontSize: 26 }}>⚠️</span>
+              <span style={{ fontSize: 16, fontWeight: 900, color: "#E5A82A", letterSpacing: 1.2, textTransform: "uppercase" }}>Collect From Customer</span>
             </div>
 
             <div style={{ padding: "22px 16px", marginBottom: 16, borderRadius: 12,
-              background: "linear-gradient(135deg,rgba(242,199,68,.18),rgba(160,40,32,.18))",
-              border: "1px solid rgba(242,199,68,.45)", textAlign: "center" }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,.6)", letterSpacing: 0.8, marginBottom: 6 }}>STILL TO COLLECT</div>
-              <div style={{ fontSize: 44, fontWeight: 900, color: "#F2C744", lineHeight: 1, letterSpacing: -1, textShadow: "0 0 20px rgba(242,199,68,.4)" }}>
+              background: "linear-gradient(135deg,rgba(229,168,42,.18),rgba(160,40,32,.18))",
+              border: "1px solid rgba(229,168,42,.45)", textAlign: "center" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "rgba(242,235,211,.88)", letterSpacing: 0.8, marginBottom: 6 }}>STILL TO COLLECT</div>
+              <div style={{ fontSize: 48, fontWeight: 900, color: "#E5A82A", lineHeight: 1, letterSpacing: -1, textShadow: "0 0 20px rgba(229,168,42,.4)" }}>
                 {formatINR(payable)}
               </div>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", fontWeight: 600, marginTop: 8 }}>
+              <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", fontWeight: 600, marginTop: 8 }}>
                 via {splitMode ? "SPLIT" : (payMethod || "cash").toUpperCase()}
               </div>
             </div>
 
             <div style={{ padding: "10px 12px", marginBottom: 14, borderRadius: 8,
               background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.25)",
-              fontSize: 11, color: "rgba(255,255,255,.7)", fontWeight: 600, textAlign: "center" }}>
+              fontSize: 13, color: "rgba(242,235,211,.94)", fontWeight: 600, textAlign: "center" }}>
               Wallet already covered <span style={{ color: "#22C55E", fontWeight: 900 }}>{formatINR(walletPaidSoFar)}</span>
             </div>
 
-            <div style={{ fontSize: 13, color: "rgba(255,255,255,.85)", fontWeight: 700, lineHeight: 1.5, marginBottom: 18, textAlign: "center" }}>
-              Have you actually collected <span style={{ color: "#F2C744", fontWeight: 900 }}>{formatINR(payable)}</span> from the customer?
+            <div style={{ fontSize: 16, color: "rgba(255,255,255,.85)", fontWeight: 700, lineHeight: 1.5, marginBottom: 18, textAlign: "center" }}>
+              Have you actually collected <span style={{ color: "#E5A82A", fontWeight: 900 }}>{formatINR(payable)}</span> from the customer?
             </div>
 
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setShowCollectConfirm(false)}
                 style={{ flex: 1, padding: 14, borderRadius: 10, background: "rgba(255,255,255,.05)",
                   border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.8)",
-                  fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
+                  fontSize: 16, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
                 ❌ NOT YET
               </button>
               <button onClick={() => { setShowCollectConfirm(false); confirm(); }}
                 style={{ flex: 1.4, padding: 14, borderRadius: 10,
-                  background: "linear-gradient(135deg,#F2C744 0%,#A02820 100%)",
-                  border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5,
+                  background: "linear-gradient(135deg,#E5A82A 0%,#A02820 100%)",
+                  border: "none", color: "#F2EBD3", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5,
                   boxShadow: "0 4px 14px rgba(160,40,32,.4)" }}>
                 ✅ YES — CLOSE BILL
               </button>
@@ -1544,35 +1667,35 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>🚶 Seat Walk-In Guest</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>Create a new table for a walk-in customer</div>
+      <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A", marginBottom: 4 }}>🚶 Seat Walk-In Guest</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 16 }}>Create a new table for a walk-in customer</div>
 
         <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
           <button onClick={() => setIsProxy(false)}
-            style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-              background: !isProxy ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-              border: `1px solid ${!isProxy ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-              color: !isProxy ? "#F2C744" : "rgba(255,255,255,.5)" }}>
+            style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+              background: !isProxy ? "rgba(229,168,42,.15)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${!isProxy ? "rgba(229,168,42,.5)" : "rgba(255,255,255,.08)"}`,
+              color: !isProxy ? "#E5A82A" : "rgba(242,235,211,.8)" }}>
             🪑 Regular Table
           </button>
           <button onClick={() => setIsProxy(true)}
-            style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
+            style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
               background: isProxy ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
               border: `1px solid ${isProxy ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
-              color: isProxy ? "#EF4444" : "rgba(255,255,255,.5)" }}>
+              color: isProxy ? "#EF4444" : "rgba(242,235,211,.8)" }}>
             📦 Proxy / Extra
           </button>
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Customer Name *</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Customer Name *</div>
         <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="e.g. Karan"
-          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Phone * (for WhatsApp menu link)</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Phone * (for WhatsApp menu link)</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
           <select value={countryCode} onChange={(e) => setCountryCode(e.target.value)}
-            style={{ width: 100, padding: "10px 8px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 13, outline: "none", fontFamily: "inherit", cursor: "pointer" }}>
+            style={{ width: 100, padding: "10px 8px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 16, outline: "none", fontFamily: "inherit", cursor: "pointer" }}>
             <option value="91">🇮🇳 +91</option>
             <option value="1">🇺🇸 +1</option>
             <option value="44">🇬🇧 +44</option>
@@ -1591,29 +1714,29 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
             <option value="86">🇨🇳 +86</option>
           </select>
           <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" type="tel" inputMode="tel"
-            style={{ flex: 1, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            style={{ flex: 1, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
         </div>
 
         <div style={{ width: 100, marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Guests</div>
+          <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Guests</div>
           <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
-            style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", boxSizing: "border-box" }} />
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
         </div>
 
         {isProxy ? (
           <>
             <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginBottom: 4 }}>Auto-assigned Name</div>
-              <div style={{ fontSize: 20, fontWeight: 900, color: "#EF4444" }}>{proxyName}</div>
+              <div style={{ fontSize: 13, color: "rgba(242,235,211,.72)", marginBottom: 4 }}>Auto-assigned Name</div>
+              <div style={{ fontSize: 23, fontWeight: 900, color: "#EF4444" }}>{proxyName}</div>
             </div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Floor *</div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Floor *</div>
             <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
               {TABLE_OPTIONS.map(g => (
                 <button key={g.floor} onClick={() => setProxyFloor(g.floor)}
-                  style={{ flex: 1, padding: "8px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                  style={{ flex: 1, padding: "8px 10px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
                     background: proxyFloor === g.floor ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.04)",
                     border: `1px solid ${proxyFloor === g.floor ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
-                    color: proxyFloor === g.floor ? "#EF4444" : "rgba(255,255,255,.5)" }}>
+                    color: proxyFloor === g.floor ? "#EF4444" : "rgba(242,235,211,.8)" }}>
                   {g.label}
                 </button>
               ))}
@@ -1621,11 +1744,11 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
           </>
         ) : (
           <>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Select Table *</div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Select Table *</div>
             <div style={{ marginBottom: 12 }}>
               {TABLE_OPTIONS.map((group) => (
                 <div key={group.floor} style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+                  <div style={{ fontSize: 12, color: "rgba(242,235,211,.6)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {group.tables.map((t) => {
                       // Walk-in is "now" — colour boxes by who occupies the
@@ -1634,15 +1757,15 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
                       const occupant = tableOccupantAt(t, nowMinutesIST(), allReservations);
                       const occupied = !!occupant;
                       const isSelected = selectedTable === t;
-                      const bg = isSelected ? "#F2C744"
+                      const bg = isSelected ? "#E5A82A"
                         : occupied ? "#DC2626" : "#16A34A";
-                      const border = isSelected ? "#F2C744"
+                      const border = isSelected ? "#E5A82A"
                         : occupied ? "#B91C1C" : "#15803D";
                       const color = isSelected ? "#0A0A0A" : "#FFFFFF";
                       return (
                         <button key={t} onClick={() => !occupied && setSelectedTable(t)} disabled={occupied}
                           title={occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : "Available now"}
-                          style={{ padding: "6px 10px", borderRadius: 8, fontSize: 11, fontWeight: 800, cursor: occupied ? "not-allowed" : "pointer",
+                          style={{ padding: "6px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800, cursor: occupied ? "not-allowed" : "pointer",
                             background: bg, border: `1px solid ${border}`, color,
                             opacity: occupied ? 0.85 : 1 }}>
                           {t}
@@ -1661,20 +1784,20 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
             in via the booking import path with their discount pre-stamped.
             Discount default is 0 and capped at WALKIN_DISCOUNT_MAX (10%) —
             anything higher needs a manager override on the bill. */}
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6 }}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%)</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%)</div>
         <input type="number" value={customDiscount || ""}
           onChange={(e) => setCustomDiscount(Math.min(WALKIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
           placeholder="0"
           min={0} max={WALKIN_DISCOUNT_MAX}
-          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
 
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
+        {error && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
 
         <button onClick={create} disabled={saving}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
           {saving ? "Creating..." : isProxy ? `📦 Create ${proxyName}` : "🪑 Create Table"}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(255,255,255,.4)", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "rgba(242,235,211,.72)", fontSize: 16, cursor: "pointer" }}>Cancel</button>
       </div>
     </div>
   );
@@ -1832,12 +1955,12 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.9)", zIndex: 9999, display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(242,199,68,.2)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(229,168,42,.2)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744" }}>Add Order — {tableId}</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>Captain: {captainName}</div>
+          <div style={{ fontSize: 19, fontWeight: 900, color: "#E5A82A" }}>Add Order — {tableId}</div>
+          <div style={{ fontSize: 13, color: "rgba(242,235,211,.72)" }}>Captain: {captainName}</div>
         </div>
-        <button onClick={onClose} style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 18, cursor: "pointer" }}>×</button>
+        <button onClick={onClose} style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", fontSize: 21, cursor: "pointer" }}>×</button>
       </div>
 
       {/* 🔴 2026-05-12 — Wallet-style search bar + 4 big tabs (FOOD/LIQUOR/NAB/SMOKE)
@@ -1845,17 +1968,17 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
           see the same shape the customer sees on hodclub.in. */}
       <div style={{ padding: "10px 16px 0", background: "#0E0B14" }}>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search"
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "1px solid #F2C744", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "1px solid #E5A82A", color: "#F2EBD3", fontSize: 16, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 8 }}>
           {(["food", "liquor", "nab", "smoke"] as const).map((t) => {
             const active = tab === t;
             return (
               <button key={t} onClick={() => setTab(t)}
                 style={{
-                  padding: "14px 6px", borderRadius: 4, fontSize: 12, fontWeight: 800, letterSpacing: 1, cursor: "pointer",
-                  background: active ? "#F2C744" : "#7A1F18",
+                  padding: "14px 6px", borderRadius: 4, fontSize: 14, fontWeight: 800, letterSpacing: 1, cursor: "pointer",
+                  background: active ? "#E5A82A" : "#7A1F18",
                   color: active ? "#1a1410" : "#F4D7A8",
-                  border: "1px solid " + (active ? "#F2C744" : "#5A150F"),
+                  border: "1px solid " + (active ? "#E5A82A" : "#5A150F"),
                   textTransform: "uppercase",
                 }}>{t}</button>
             );
@@ -1864,16 +1987,16 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
         {tabCategories.length > 1 && (
           <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, flexWrap: "wrap" }}>
             <button onClick={() => setCategory("")}
-              style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+              style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
                 background: !category ? "transparent" : "transparent",
-                border: `1px solid ${!category ? "#F2C744" : "transparent"}`,
-                color: !category ? "#F2C744" : "rgba(255,255,255,.55)" }}>ALL</button>
+                border: `1px solid ${!category ? "#E5A82A" : "transparent"}`,
+                color: !category ? "#E5A82A" : "rgba(242,235,211,.84)" }}>ALL</button>
             {tabCategories.map((c) => (
               <button key={c} onClick={() => setCategory(c)}
-                style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: 0.5,
+                style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: 0.5,
                   background: "transparent",
-                  border: `1px solid ${category === c ? "#F2C744" : "transparent"}`,
-                  color: category === c ? "#F2C744" : "rgba(255,255,255,.55)" }}>{prettyCat(c)}</button>
+                  border: `1px solid ${category === c ? "#E5A82A" : "transparent"}`,
+                  color: category === c ? "#E5A82A" : "rgba(242,235,211,.84)" }}>{prettyCat(c)}</button>
             ))}
           </div>
         )}
@@ -1882,12 +2005,12 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
 
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px", background: "#0E0B14" }}>
         {category && (
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#fff", padding: "10px 0", letterSpacing: 0.5 }}>
+          <div style={{ fontSize: 21, fontWeight: 800, color: "#F2EBD3", padding: "10px 0", letterSpacing: 0.5 }}>
             {prettyCat(category)}
           </div>
         )}
         {filtered.length === 0 && (
-          <div style={{ padding: 40, textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 12 }}>
+          <div style={{ padding: 40, textAlign: "center", color: "rgba(242,235,211,.72)", fontSize: 14 }}>
             No items{search ? ` matching "${search}"` : ""}.
           </div>
         )}
@@ -1904,7 +2027,7 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
             <div key={`${m.id || ""}-${m.category}-${m.name}`}
               style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
               <div style={{ flex: 1, paddingRight: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 16, color: "#F2EBD3", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
                   {showVeg && (
                     <span style={{
                       display: "inline-block", width: 12, height: 12, border: `1.5px solid ${m.isVeg ? "#22c55e" : "#dc2626"}`,
@@ -1918,24 +2041,28 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
                   )}
                   {m.name}
                 </div>
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4, fontWeight: 600 }}>
+                <div style={{ fontSize: 14, color: "rgba(242,235,211,.84)", marginTop: 4, fontWeight: 600 }}>
+                  {/* 🔴 2026-05-20 (Khushi clarification) — menu list shows
+                      RAW menu price (matches the printed menu the customer
+                      sees in their hand). Tax-inclusive only kicks in once
+                      item enters the cart / bill — same as the customer site. */}
                   {hasDisc ? (
                     <>
-                      <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{(m.price || 0).toFixed(2)}</span>
-                      <span style={{ color: "#22c55e" }}>₹{eff.toFixed(2)}</span>
+                      <span style={{ textDecoration: "line-through", color: "rgba(255,255,255,.35)", marginRight: 6 }}>₹{m.price || 0}</span>
+                      <span style={{ color: "#22c55e" }}>₹{eff}</span>
                     </>
                   ) : (
-                    <>₹{(m.price || 0).toFixed(2)}</>
+                    <>₹{m.price || 0}</>
                   )}
                   {hasDisc && ov?.discountReason && (
-                    <span style={{ marginLeft: 6, color: "rgba(255,255,255,.4)", fontWeight: 500 }}>· {ov.discountReason}</span>
+                    <span style={{ marginLeft: 6, color: "rgba(242,235,211,.72)", fontWeight: 500 }}>· {ov.discountReason}</span>
                   )}
                 </div>
               </div>
               <button onClick={() => addToCart(m)}
                 style={{
                   padding: "8px 18px", borderRadius: 4, background: "#A02820", border: "none",
-                  color: "#fff", fontSize: 12, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer",
+                  color: "#F2EBD3", fontSize: 14, fontWeight: 800, letterSpacing: 0.5, cursor: "pointer",
                 }}>ADD +</button>
             </div>
           );
@@ -1943,28 +2070,28 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
       </div>
 
       {cart.length > 0 && (
-        <div style={{ borderTop: "2px solid rgba(242,199,68,.3)", background: "rgba(20,18,30,1)", padding: "12px 16px" }}>
+        <div style={{ borderTop: "2px solid rgba(229,168,42,.3)", background: "rgba(20,18,30,1)", padding: "12px 16px" }}>
           <div style={{ maxHeight: 150, overflowY: "auto", marginBottom: 8 }}>
             {cart.map((c, i) => (
               <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
-                <span style={{ fontSize: 12, color: "#fff", flex: 1 }}>{c.n}</span>
+                <span style={{ fontSize: 14, color: "#F2EBD3", flex: 1 }}>{c.n}</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, -1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", cursor: "pointer", fontSize: 12 }}>−</button>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: "#F2C744", minWidth: 16, textAlign: "center" }}>{c.qty}</span>
-                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, 1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", cursor: "pointer", fontSize: 12 }}>+</button>
-                  <span style={{ fontSize: 12, color: "#F2C744", minWidth: 50, textAlign: "right" }}>₹{c.p * c.qty}</span>
+                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, -1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", cursor: "pointer", fontSize: 14 }}>−</button>
+                  <span style={{ fontSize: 16, fontWeight: 800, color: "#E5A82A", minWidth: 16, textAlign: "center" }}>{c.qty}</span>
+                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, 1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.1)", color: "#F2EBD3", cursor: "pointer", fontSize: 14 }}>+</button>
+                  <span style={{ fontSize: 14, color: "#E5A82A", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([c]).grandTotal}</span>
                 </div>
               </div>
             ))}
           </div>
           <details style={{ borderTop: "1px solid rgba(255,255,255,.07)", paddingTop: 6, marginBottom: 10 }}>
             <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", listStyle: "none", cursor: "pointer" }}>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.55)", fontStyle: "italic" }}>
-                Subtotal · SC + GST added at pay <span style={{ opacity: 0.6, fontSize: 9 }}>▾ view tax breakdown</span>
+              <span style={{ fontSize: 13, color: "rgba(242,235,211,.84)", fontStyle: "italic" }}>
+                Total · inclusive of all taxes <span style={{ opacity: 0.6, fontSize: 11 }}>▾ view tax breakdown</span>
               </span>
-              <span style={{ fontSize: 16, fontWeight: 900, color: "#F2C744" }}>{fmt(cartTotal)}</span>
+              <span style={{ fontSize: 19, fontWeight: 900, color: "#E5A82A" }}>{fmt(cartTotal)}</span>
             </summary>
-            <div style={{ fontSize: 11, lineHeight: 1.7, paddingTop: 6, marginTop: 5, borderTop: "1px dashed rgba(255,255,255,.06)", color: "rgba(255,255,255,.6)" }}>
+            <div style={{ fontSize: 13, lineHeight: 1.7, paddingTop: 6, marginTop: 5, borderTop: "1px dashed rgba(255,255,255,.06)", color: "rgba(242,235,211,.88)" }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Sub Total</span><span>{fmt(cartBreakdown.subtotal)}</span></div>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span>Service Charge (10%)</span><span>{fmt(cartBreakdown.serviceCharge)}</span></div>
               {cartBreakdown.cgst > 0 && (
@@ -1976,14 +2103,14 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
               {Math.abs(cartBreakdown.roundOff) >= 0.01 && (
                 <div style={{ display: "flex", justifyContent: "space-between" }}><span>Round Off</span><span>{cartBreakdown.roundOff >= 0 ? "+" : ""}{fmt(cartBreakdown.roundOff)}</span></div>
               )}
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginTop: 4, color: "rgba(255,255,255,.4)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4, color: "rgba(242,235,211,.72)" }}>
                 <span>{cart.reduce((s, c) => s + c.qty, 0)} item(s)</span>
                 <span>Total {fmt(cartBreakdown.grandTotal)}</span>
               </div>
             </div>
           </details>
           <button onClick={submit} disabled={saving}
-            style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
+            style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,40,32,.8))", border: "none", color: "#F2EBD3", fontSize: 18, fontWeight: 900, cursor: "pointer" }}>
             {saving ? "Adding..." : `📝 Add Round · ${formatINR(cartBreakdown.grandTotal)} (${cart.reduce((s, c) => s + c.qty, 0)} items)`}
           </button>
         </div>
@@ -2000,8 +2127,23 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [showReassign, setShowReassign] = useState(false);
   const [showVoidBill, setShowVoidBill] = useState(false);
+  // 🆕 2026-05-20 (Khushi) — bill preview state. Captain sees the EXACT bill
+  // before the printer fires. CANCEL → nothing printed, no bill # consumed,
+  // no audit row. CONFIRM → existing recordBillPrint + printBill flow.
+  const [previewBill, setPreviewBill] = useState<null | {
+    items: HodOrderItem[]; subtotal: number; discountPct: number; discountAmt: number;
+    afterDiscount: number; scAmt: number; cgst: number; sgst: number; taxAmt: number;
+    finalAmount: number; aggName: string; floor: TabletFloor; isReprint: boolean;
+    reprintNumber: number; stale: boolean;
+  }>(null);
   const [busy, setBusy] = useState("");
   const [qrFallback, setQrFallback] = useState<{ url: string; reason: string } | null>(null);
+  // 🆕 2026-05-20 (Khushi spec) — captain always needs a way to share the
+  // wallet/menu link in case Meta WhatsApp delivery fails. This opens a
+  // local QR popup with the hodclub.in/?wallet=<ref> URL the customer can
+  // scan or the captain can copy/share via the device share sheet.
+  // Fallback layers: copy-link button + WhatsApp deep-link button.
+  const [shareWalletQr, setShareWalletQr] = useState(false);
   const [aggOpen, setAggOpen] = useState(false);
   const [customDiscInput, setCustomDiscInput] = useState<string>(() =>
     String(r.aggregatorDiscount ?? getAggregatorDiscount(r.aggregator || r.source || "inhouse"))
@@ -2009,6 +2151,21 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
 
   const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
   const billReq = r.paymentStatus === "bill_requested";
+  // ── 2026-05-20 — COVER+TABLE LINKED WALLET (Khushi spec) ──
+  // Door girl's "💰 ACTIVATE COVER + TABLE" path writes linkedCoverDocId on
+  // this reservation. We live-subscribe to that cover doc so the badge
+  // shows the LIVE balance (auto-updates if customer also redeems at GF
+  // bar). Fallback: linkedCoverInitial if the live subscription hasn't
+  // fired yet or the cover doc is unreadable.
+  const [linkedCover, setLinkedCover] = useState<HodCover | null>(null);
+  useEffect(() => {
+    if (!r.linkedCoverDocId) { setLinkedCover(null); return; }
+    const u = subscribeToCoverById(r.linkedCoverDocId, setLinkedCover);
+    return () => u();
+  }, [r.linkedCoverDocId]);
+  const linkedCoverBalance = linkedCover ? (linkedCover.coverBalance || 0) : (r.linkedCoverInitial || 0);
+  const linkedCoverActive = !!r.linkedCoverDocId && !r.linkedCoverPending && linkedCoverBalance > 0;
+  const linkedCoverEmpty = !!r.linkedCoverDocId && !r.linkedCoverPending && linkedCoverBalance <= 0;
   // 🩹 v3.4 belt-and-suspenders: orphan zomato-txn-* payment doc fallback.
   // Captain Mode polls for a sibling pending-booking doc that matches this
   // guest's first name when the booking itself isn't yet PAID, so the green
@@ -2043,12 +2200,30 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     (s, rd) => s + (rd.items || []).reduce((ss, it) => ss + (it.p || 0) * (it.qty || 0), 0),
     0
   );
+  // 🔴 2026-05-20 (Khushi Bug 3+4) — DISPLAY-ONLY tax-inclusive total for the
+  // table card. The raw `tabTotal` above stays untouched (used by anti-fraud
+  // caps, discount math, reports). `tabTotalInclusive` is shown on the card
+  // header so captain ₹X = customer wallet ₹X = bar screen ₹X from the
+  // moment the order is placed (instead of only matching at Mark-Paid).
+  const tabTotalInclusive = (() => {
+    const allItems = (r.tabRounds || []).flatMap((rd) => rd.items || []);
+    if (!allItems.length) return 0;
+    return computeHodBreakdown(allItems).grandTotal;
+  })();
   const aggName = r.aggregator || r.source || "inhouse";
   const aggDiscount = r.aggregatorDiscount ?? getAggregatorDiscount(aggName);
   const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName;
   const isAgg = aggName !== "inhouse";
 
-  const borderColor = billReq ? "rgba(239,68,68,.6)" : pending > 0 ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)";
+  const borderColor = billReq
+    ? "rgba(239,68,68,.6)"
+    : pending > 0
+      ? "rgba(229,168,42,.5)"
+      // 2026-05-20 — gold glow on tables with an active linked wallet so the
+      // captain spots them at a glance walking up to the floor.
+      : linkedCoverActive
+        ? "rgba(229,168,42,.55)"
+        : "rgba(255,255,255,.08)";
 
   const handleArrive = async () => {
     if (!confirm(`Mark ${r.customerName || "this guest"} as arrived?`)) return;
@@ -2236,27 +2411,22 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     setBusy("");
   };
 
-  const handleThermalBill = async (_legacyIsDuplicate?: boolean) => {
+  // 🆕 2026-05-20 (Khushi) — split into TWO steps:
+  //   1. openBillPreview() — compute totals, open preview modal (NO print, NO Firestore write).
+  //   2. confirmAndPrint() — fired by the modal's CONFIRM button; runs the original
+  //      recordBillPrint + printBill path.
+  // 🛟 FALLBACK: if the preview modal crashes for any reason, captain still has the
+  // "🖨 PRINT WITHOUT PREVIEW" link inside the modal that bypasses preview and prints
+  // directly (same as old behavior).
+  const computeBillSnapshot = () => {
     const allItems: HodOrderItem[] = ((r.tabRounds || []).flatMap((rd) => rd.items || []) as HodOrderItem[])
       .filter((it) => it && it.qty > 0);
-    if (allItems.length === 0) { alert("No items to print on bill."); return; }
-    // L6 — debounce/confirm rapid reprints.
-    const prevCount = r.billPrintCount || 0;
-    const lastAt = r.lastBillPrintedAt ? new Date(r.lastBillPrintedAt).getTime() : 0;
-    if (prevCount > 0 && Date.now() - lastAt < BILL_REPRINT_DEBOUNCE_MS) {
-      const secs = Math.ceil((BILL_REPRINT_DEBOUNCE_MS - (Date.now() - lastAt)) / 1000);
-      if (!window.confirm(`⚠ A bill was just printed ${Math.ceil((Date.now()-lastAt)/1000)}s ago.\n\nReprint anyway? (Wait ${secs}s to skip this prompt.)`)) return;
-    }
-    // Derive floor from tableId prefix: C*/CVIP* = ground, FD*/SMK* = first, T*/TVIP*/TEX* = rooftop.
+    if (allItems.length === 0) return null;
     const id = (r.tableId || "").toUpperCase();
     let floor: TabletFloor = "first";
     if (id.startsWith("C")) floor = "ground";
     else if (id.startsWith("T")) floor = "rooftop";
     else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
-    // Mirror MarkPaidModal math EXACTLY so the printed bill matches what's
-    // charged. Uses computeHodBreakdown which (1) bases SC on subtotal,
-    // (2) bases GST on (food + non-alc + SC) — alcohol is GST-exempt per
-    // Indian liquor licence rules — and (3) rounds correctly.
     const subtotal = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
     const aggName = (r as any).aggregator || (r as any).source || "inhouse";
     const discountPct: number = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName) ?? 0;
@@ -2270,33 +2440,66 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     const cgst = Math.round((taxAmt / 2) * 100) / 100;
     const sgst = Math.round((taxAmt / 2) * 100) / 100;
     const finalAmount = afterDiscount + scAmt + taxAmt;
+    const prevCount = r.billPrintCount || 0;
+    return {
+      items: allItems, subtotal, discountPct, discountAmt, afterDiscount,
+      scAmt, cgst, sgst, taxAmt, finalAmount, aggName, floor,
+      isReprint: prevCount > 0, reprintNumber: prevCount + 1, stale: !!r.billStale,
+    };
+  };
+
+  const handleThermalBill = async (_legacyIsDuplicate?: boolean) => {
+    const snap = computeBillSnapshot();
+    if (!snap) { alert("No items to print on bill."); return; }
+    // L6 — debounce/confirm rapid reprints (kept BEFORE the preview opens
+    // so captain doesn't accidentally double-fire within 10s).
+    const prevCount = r.billPrintCount || 0;
+    const lastAt = r.lastBillPrintedAt ? new Date(r.lastBillPrintedAt).getTime() : 0;
+    if (prevCount > 0 && Date.now() - lastAt < BILL_REPRINT_DEBOUNCE_MS) {
+      const secs = Math.ceil((BILL_REPRINT_DEBOUNCE_MS - (Date.now() - lastAt)) / 1000);
+      if (!window.confirm(`⚠ A bill was just printed ${Math.ceil((Date.now()-lastAt)/1000)}s ago.\n\nReprint anyway? (Wait ${secs}s to skip this prompt.)`)) return;
+    }
+    setPreviewBill(snap);
+  };
+
+  const confirmAndPrint = async () => {
+    const snap = previewBill;
+    if (!snap) return;
+    // 🛡 2026-05-20 (architect) — FRESHNESS GUARD. If the tab changed between
+    // preview-open and confirm (another captain edited a round, kitchen marked
+    // served, etc.), the live `r` prop will have moved on via the Firestore
+    // subscription. Recompute and compare item signatures + total. On drift,
+    // abort with a clear alert and force the captain to re-open preview so
+    // the printed paper reflects the current order.
+    const fresh = computeBillSnapshot();
+    const sig = (s: typeof snap | null) => s ? s.items.map(i => `${i.n}|${i.p}|${i.qty}`).join("§") + `=${s.finalAmount}` : "";
+    if (!fresh || sig(fresh) !== sig(snap)) {
+      setPreviewBill(null);
+      alert("⚠ BILL CHANGED SINCE YOU OPENED PREVIEW\n\nItems or totals were updated. Please tap PRINT BILL again to see the current bill.");
+      return;
+    }
     setBusy("printbill");
     try {
-      // L3/L4/L5 — atomic record (count++, append log, snapshot lock, clear stale).
       const rec = await recordBillPrint(r._docId, {
-        by: captainName, total: finalAmount, discountPct,
-        aggregator: aggName, billNumberBase: r._docId.slice(-6).toUpperCase(),
+        by: captainName, total: snap.finalAmount, discountPct: snap.discountPct,
+        aggregator: snap.aggName, billNumberBase: r._docId.slice(-6).toUpperCase(),
       });
       const ok = await printBill({
-        tableId: r.tableId,
-        floorLabel: r.floorLabel,
-        customerName: r.customerName,
-        partySize: (r as any).partySize,
-        staff: captainName,
-        items: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
-        amounts: { subtotal, serviceCharge: scAmt, cgst, sgst,
-          discount: discountAmt, roundOff: 0, total: finalAmount },
-        paymentMethod: (r as any).paymentMethod || (discountPct > 0 ? aggName : undefined),
-        billNumber: rec.billNumber,            // L3 — always suffixed (-1, -2, -3…)
-        isDuplicate: rec.isDuplicate,          // L4 — true on every reprint
-        tabletFloor: floor,
+        tableId: r.tableId, floorLabel: r.floorLabel,
+        customerName: r.customerName, partySize: (r as any).partySize, staff: captainName,
+        items: snap.items.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
+        amounts: { subtotal: snap.subtotal, serviceCharge: snap.scAmt, cgst: snap.cgst, sgst: snap.sgst,
+          discount: snap.discountAmt, roundOff: 0, total: snap.finalAmount },
+        paymentMethod: (r as any).paymentMethod || (snap.discountPct > 0 ? snap.aggName : undefined),
+        billNumber: rec.billNumber, isDuplicate: rec.isDuplicate, tabletFloor: snap.floor,
       });
-      const floorName = floor === "ground" ? "GROUND FLOOR" : floor === "first" ? "FIRST FLOOR" : "ROOFTOP";
+      const floorName = snap.floor === "ground" ? "GROUND FLOOR" : snap.floor === "first" ? "FIRST FLOOR" : "ROOFTOP";
       alert(ok
         ? `🖨 Bill #${rec.billNumber} sent to: ${floorName} BILL PRINTER${rec.isDuplicate ? "\n\n⚠ DUPLICATE REPRINT" : ""}\n\n(Floor derived from table ${r.tableId})`
         : "❌ Bill print failed — check console / Firestore.");
     } catch (e: any) { alert("❌ Bill print failed: " + e.message); }
     setBusy("");
+    setPreviewBill(null);
   };
 
   const handleAggChange = async (value: string, customDisc?: number) => {
@@ -2515,18 +2718,108 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
 
   return (
     <>
-      <div style={{ background: "rgba(255,255,255,.04)", border: `2px solid ${borderColor}`, borderRadius: 16, marginBottom: 14, overflow: "hidden", ...(billReq ? { boxShadow: "0 0 20px rgba(239,68,68,.15)" } : {}) }}>
-        <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: billReq ? "rgba(239,68,68,.08)" : pending > 0 ? "rgba(242,199,68,.05)" : "" }}>
+      <div style={{ background: "rgba(255,255,255,.04)", border: `2px solid ${(r.customerCallRequest ? "#EF4444" : borderColor)}`, borderRadius: 16, marginBottom: 14, overflow: "hidden",
+        ...(r.customerCallRequest
+          // 2026-05-20 — customer pinged "🍽 I'M AT MY TABLE" from the
+          // wallet site → take precedence over all other glow states so the
+          // captain can't miss it. Pulses via inline keyframes below.
+          ? { boxShadow: "0 0 24px rgba(239,68,68,.55)", animation: "hodCallPulse 1.2s ease-in-out infinite" }
+          : billReq
+            ? { boxShadow: "0 0 20px rgba(239,68,68,.15)" }
+            // 2026-05-20 — gold glow when a linked wallet is active (matches
+            // the gold border) so captain spots wallet-attached tables at a
+            // glance. billReq red glow takes precedence.
+            : linkedCoverActive
+              ? { boxShadow: "0 0 18px rgba(229,168,42,.18)" }
+              : {}) }}>
+        {/* 🔔 CUSTOMER CALLING banner — pulsing red, shown ONLY when the
+            customer tapped "I'M AT MY TABLE" on their wallet page. Sits at
+            the very top so it's the first thing captain sees. "✓ ON IT"
+            clears the ping (writes null on the reservation doc).
+            🛟 Fallback: if clear fails, the banner stays — captain can
+            re-tap, or it auto-clears next time the customer pings. */}
+        {r.customerCallRequest && (() => {
+          const cr = r.customerCallRequest;
+          const mins = Math.max(0, Math.floor((Date.now() - new Date(cr.at).getTime()) / 60000));
+          return (
+            <div style={{ background: "linear-gradient(90deg,#7f1d1d,#dc2626,#7f1d1d)", color: "#F2EBD3", padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, borderBottom: "1px solid rgba(0,0,0,.3)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 2 }}>🔔 CUSTOMER CALLING · {mins === 0 ? "JUST NOW" : `${mins} MIN AGO`}</div>
+                <div style={{ fontSize: 13, opacity: 0.92, lineHeight: 1.4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  Wants to order{cr.itemsPreview ? `: ${cr.itemsPreview}` : ""}{cr.total ? ` · ₹${cr.total.toLocaleString("en-IN")}` : ""}
+                </div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); if (r._docId) clearCustomerCallRequest(r._docId, captainName, cr.at); }}
+                style={{ background: "#fff", color: "#dc2626", border: "none", padding: "8px 14px", borderRadius: 8, fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", flexShrink: 0, textTransform: "uppercase" }}
+              >✓ ON IT</button>
+            </div>
+          );
+        })()}
+        {/* 🔴 2026-05-20 (Khushi Bug 1 fix) — LAST CALL RECAP strip.
+            Shows the MOST RECENT dismissed customer call for 30 min after
+            captain tapped ✓ ON IT, so the captain doesn't lose the item
+            list while walking to the table. Only shown when there is NO
+            active call (the red banner above takes precedence). Auto-hides
+            after 30 min so the card doesn't get cluttered. */}
+        {!r.customerCallRequest && Array.isArray(r.customerCallHistory) && r.customerCallHistory.length > 0 && (() => {
+          const last = r.customerCallHistory[r.customerCallHistory.length - 1];
+          if (!last || !last.dismissedAt) return null;
+          const ageMin = Math.floor((Date.now() - new Date(last.dismissedAt).getTime()) / 60000);
+          if (ageMin > 30) return null;
+          return (
+            <div style={{ background: "rgba(229,168,42,.10)", borderBottom: "1px solid rgba(229,168,42,.25)", padding: "7px 14px", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#E5A82A" }}>
+              <span style={{ fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", flexShrink: 0 }}>📜 LAST CALL · {ageMin === 0 ? "JUST NOW" : `${ageMin} MIN AGO`}</span>
+              <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", opacity: 0.9 }}>
+                {last.itemsPreview || "—"}{last.total ? ` · ₹${last.total.toLocaleString("en-IN")}` : ""}
+              </span>
+            </div>
+          );
+        })()}
+        {/* 🔴 2026-05-20 (Khushi Bug 1 fix) — CUSTOMER SELF-ORDERED panel.
+            Lists every round the customer placed from their phone (the wallet
+            link) with status: 🟡 ORDERED (preparing) / ✅ SERVED. Captain can
+            see the full self-order history at a glance without needing the
+            banner. Only renders when a linked wallet exists and has rounds. */}
+        {linkedCover && Array.isArray(linkedCover.tabRounds) && linkedCover.tabRounds.length > 0 && (() => {
+          const rounds = linkedCover.tabRounds;
+          const recent = rounds.slice(-3);
+          const anyPreparing = recent.some((rd) => rd && (rd.status === "preparing" || rd.status === "activated"));
+          return (
+            <div style={{ background: anyPreparing ? "rgba(229,168,42,.06)" : "rgba(255,255,255,.02)", borderBottom: "1px solid rgba(255,255,255,.06)", padding: "8px 14px" }}>
+              <div style={{ fontSize: 12, fontWeight: 900, letterSpacing: 1, textTransform: "uppercase", color: anyPreparing ? "#E5A82A" : "rgba(242,235,211,.8)", marginBottom: 4 }}>📜 CUSTOMER SELF-ORDERED · {rounds.length} ROUND{rounds.length === 1 ? "" : "S"}</div>
+              {recent.map((rd, idx) => {
+                const isPreparing = rd && (rd.status === "preparing" || rd.status === "activated");
+                const itemsStr = Array.isArray(rd?.items) ? rd.items.map((it: { qty?: number; n?: string }) => `${it.qty || 1}× ${it.n || "?"}`).join(", ") : "";
+                return (
+                  <div key={idx} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: isPreparing ? "#E5A82A" : "rgba(242,235,211,.84)", lineHeight: 1.5 }}>
+                    <span style={{ flexShrink: 0, fontWeight: 800 }}>{isPreparing ? "🟡" : "✅"}</span>
+                    <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{itemsStr || "—"}</span>
+                    <span style={{ flexShrink: 0, fontWeight: 800 }}>₹{(() => {
+                      // 🔴 2026-05-20 (Khushi Bug 4) — show tax-inclusive ₹ so
+                      // this strip matches the customer's wallet screen.
+                      try {
+                        const items = Array.isArray(rd?.items) ? rd.items : [];
+                        return items.length ? computeHodBreakdown(items).grandTotal.toLocaleString("en-IN") : Number(rd?.roundTotal || 0).toLocaleString("en-IN");
+                      } catch { return Number(rd?.roundTotal || 0).toLocaleString("en-IN"); }
+                    })()}</span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+        <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: billReq ? "rgba(239,68,68,.08)" : pending > 0 ? "rgba(229,168,42,.05)" : "" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-              <span style={{ fontSize: 18, fontWeight: 900, color: "#F2C744" }}>{r.tableId}</span>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>{r.floorLabel || r.floor}</span>
+              <span style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A" }}>{r.tableId}</span>
+              <span style={{ fontSize: 13, color: "rgba(242,235,211,.72)" }}>{r.floorLabel || r.floor}</span>
               {r.actualArrivalTime ? (
-                <span style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>✓ ARRIVED {r.actualArrivalTime}</span>
+                <span style={{ background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>✓ ARRIVED {r.actualArrivalTime}</span>
               ) : (
-                <span style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>⏳ NOT ARRIVED</span>
+                <span style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>⏳ NOT ARRIVED</span>
               )}
-              {voided && <span title={`Bill voided by ${(r as any).voidedBy || "?"} — ${(r as any).voidReason || ""}${(r as any).voidNotes ? ` (${(r as any).voidNotes})` : ""}`} style={{ background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 10, cursor: "help" }}>🚫 BILL VOIDED · ₹{Math.round((r as any).voidedBillTotal || 0)}</span>}
+              {voided && <span title={`Bill voided by ${(r as any).voidedBy || "?"} — ${(r as any).voidReason || ""}${(r as any).voidNotes ? ` (${(r as any).voidNotes})` : ""}`} style={{ background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 12, fontWeight: 900, padding: "3px 8px", borderRadius: 10, cursor: "help" }}>🚫 BILL VOIDED · ₹{Math.round((r as any).voidedBillTotal || 0)}</span>}
               {paid && (() => {
                 // ── 2026-05-13 round 9 (Khushi spec): when the customer
                 // paid via the wallet's "Pay Online" button, Razorpay
@@ -2546,28 +2839,76 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                   : (orphanPay && r.paymentStatus !== "paid"
                       ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.`
                       : "Marked paid by the captain.");
-                const bg = isOnline ? "rgba(0,200,100,.18)" : "rgba(242,199,68,.12)";
-                const bd = isOnline ? "rgba(0,200,100,.55)" : "rgba(242,199,68,.3)";
-                const fg = isOnline ? "#00C864" : "#F2C744";
+                const bg = isOnline ? "rgba(0,200,100,.18)" : "rgba(229,168,42,.12)";
+                const bd = isOnline ? "rgba(0,200,100,.55)" : "rgba(229,168,42,.3)";
+                const fg = isOnline ? "#00C864" : "#E5A82A";
                 const label = isOnline
                   ? "✅ PAID ONLINE"
                   : ("✅ PAID" + (isAgg ? ` · ${pm.toUpperCase()}` : ""));
                 const showWarn = orphanPay && r.paymentStatus !== "paid" && !isOnline;
                 return (
-                  <span title={tip} style={{ background: bg, border: `1px solid ${bd}`, color: fg, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: showWarn || isOnline ? "help" : "default" }}>
+                  <span title={tip} style={{ background: bg, border: `1px solid ${bd}`, color: fg, fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: showWarn || isOnline ? "help" : "default" }}>
                     {label}{showWarn ? " ⚠︎" : ""}
                   </span>
                 );
               })()}
-              {billReq && <span style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🧾 BILL DUE</span>}
-              {pending > 0 && <span style={{ background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
+              {billReq && <span style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🧾 BILL DUE</span>}
+              {pending > 0 && <span style={{ background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
             </div>
-            <div style={{ fontSize: 12, color: "#fff", fontWeight: 700 }}>{r.customerName}</div>
-            <div style={{ display: "flex", gap: 12, fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 3 }}>
+            <div style={{ fontSize: 14, color: "#F2EBD3", fontWeight: 700 }}>{r.customerName}</div>
+            <div style={{ display: "flex", gap: 12, fontSize: 13, color: "rgba(242,235,211,.72)", marginTop: 3 }}>
               <span>👥 {r.partySize || "?"}p</span>
               <span>🕐 {r.arrivalTime}</span>
               <span>📱 {r.phone}</span>
             </div>
+            {/* 2026-05-20 — COVER+TABLE LINKED-WALLET BADGE (Khushi spec).
+                Surfaces the linked wallet so captain knows BEFORE taking the
+                order that ₹X is pre-paid at the door. Two visual states:
+                  • ACTIVE (balance > 0)  → bold gold pill, captain spots it
+                  • USED UP (balance = 0) → dim grey pill, no glow, but still
+                    shown so captain knows a wallet WAS attached (audit). */}
+            {linkedCoverActive && (
+              <div title={`Wallet ${r.linkedCoverRef || ""} linked at door. Available to redeem at Settle Bill in 1 tap.`}
+                style={{ marginTop: 6, display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 6,
+                  background: "linear-gradient(135deg,rgba(229,168,42,.22),rgba(160,40,32,.18))",
+                  border: "1px solid rgba(229,168,42,.6)",
+                  fontSize: 12, fontWeight: 900, color: "#E5A82A",
+                  letterSpacing: 0.5, textTransform: "uppercase",
+                  fontFamily: "'Manrope','Space Grotesk',sans-serif",
+                  boxShadow: "0 0 12px rgba(229,168,42,.18)" }}>
+                💰 WALLET ATTACHED · {formatINR(linkedCoverBalance)} AVAILABLE
+              </div>
+            )}
+            {linkedCoverEmpty && (
+              <div title={`Wallet ${r.linkedCoverRef || ""} was linked at door but is now fully spent (likely redeemed at GF bar).`}
+                style={{ marginTop: 6, display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 6,
+                  background: "rgba(255,255,255,.04)",
+                  border: "1px dashed rgba(255,255,255,.18)",
+                  fontSize: 12, fontWeight: 800, color: "rgba(242,235,211,.72)",
+                  letterSpacing: 0.5, textTransform: "uppercase",
+                  fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
+                💰 WALLET USED UP
+              </div>
+            )}
+            {/* 🆕 2026-05-20 (Khushi spec) — ALWAYS-VISIBLE SHARE-WALLET-QR
+                button so captain can hand customer the wallet link even when
+                Meta WhatsApp delivery fails. Shows whenever ANY ref exists
+                (linkedCoverRef from COVER+TABLE flow, or bookingRef). */}
+            {(r.linkedCoverRef || r.bookingRef) && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setShareWalletQr(true); }}
+                style={{ marginTop: 6, marginLeft: 6, display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 6, cursor: "pointer",
+                  background: "linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+                  border: "1px solid rgba(96,165,250,.6)",
+                  fontSize: 12, fontWeight: 900, color: "#F2EBD3",
+                  letterSpacing: 0.5, textTransform: "uppercase",
+                  fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
+                📲 SHARE WALLET QR
+              </button>
+            )}
             {isAgg && (
               <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {/* 🔴 2026-05-12 — Solid-red badge styled to match the menu's
@@ -2577,10 +2918,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                     when settling — even though the door-printed bill is
                     the FULL amount. */}
                 <div title={`Aggregator deducts ${aggDiscount}% commission. Door bill prints the FULL invoice; venue nets ${100 - aggDiscount}% after settlement.`}
-                  style={{ fontSize: 10, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
-                    background: "#A02820", border: "1px solid #A02820", color: "#fff",
+                  style={{ fontSize: 12, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
+                    background: "#A02820", border: "1px solid #A02820", color: "#F2EBD3",
                     letterSpacing: ".5px", textTransform: "uppercase",
-                    fontFamily: "'Space Grotesk', sans-serif" }}>
+                    fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
                   {aggLabel}{aggDiscount > 0 ? ` · ${aggDiscount}%` : ""}
                 </div>
               </div>
@@ -2589,9 +2930,9 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                 small red pill so the captain knows the bill carries a
                 manual discount that WILL be applied at Mark-Paid. */}
             {!isAgg && aggDiscount > 0 && r.discountModifiedByCaptain && (
-              <div style={{ marginTop: 6, fontSize: 10, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
-                background: "#A02820", color: "#fff", letterSpacing: ".5px",
-                fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase" }}>
+              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 800, padding: "4px 10px", borderRadius: 4, display: "inline-block",
+                background: "#A02820", color: "#F2EBD3", letterSpacing: ".5px",
+                fontFamily: "'Manrope','Space Grotesk',sans-serif", textTransform: "uppercase" }}>
                 In-House · {aggDiscount}% discount
               </div>
             )}
@@ -2599,14 +2940,14 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           <div style={{ textAlign: "right" }}>
             {tabTotal > 0 && (
               <>
-                <div style={{ fontSize: 18, fontWeight: 900, color: "#F2C744" }}>₹{tabTotal}</div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)" }}>subtotal · +SC/GST at pay</div>
+                <div style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A" }}>₹{tabTotalInclusive}</div>
+                <div style={{ fontSize: 12, color: "rgba(242,235,211,.72)" }}>inclusive of all taxes</div>
                 {/* 🔴 2026-05-12 — Discount preview ONLY for non-aggregator
                     tabs that the captain has explicitly modified. Aggregator
                     bookings never preview a discount here because the
                     customer bill is printed at the FULL amount. */}
                 {!isAgg && aggDiscount > 0 && r.discountModifiedByCaptain && (
-                  <div style={{ fontSize: 10, color: "#A02820", fontWeight: 700 }}>-{aggDiscount}% = ₹{Math.round(tabTotal * (1 - aggDiscount / 100))}</div>
+                  <div style={{ fontSize: 12, color: "#A02820", fontWeight: 700 }}>-{aggDiscount}% = ₹{Math.round(tabTotalInclusive * (1 - aggDiscount / 100))}</div>
                 )}
               </>
             )}
@@ -2619,7 +2960,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           return (
             <div style={{ padding: "8px 16px 0" }}>
               <button onClick={handleServeAll} disabled={busy === "serve-all"}
-                style={{ width: "100%", padding: 12, borderRadius: 10, background: "linear-gradient(135deg,rgba(242,199,68,.9),rgba(160,40,32,.8))", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
+                style={{ width: "100%", padding: 12, borderRadius: 10, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,40,32,.8))", border: "none", color: "#F2EBD3", fontSize: 17, fontWeight: 900, cursor: "pointer" }}>
                 {busy === "serve-all" ? "..." : `🖨 PRINT ALL ${pendingCount} PENDING KOTs`}
               </button>
             </div>
@@ -2634,12 +2975,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               const isServed = rd.status === "served";
               const needsAction = isPending || isActivated;
               return (
-                <div key={idx} style={{ borderTop: "1px solid rgba(255,255,255,.06)", padding: "8px 0", ...(needsAction ? { background: isPending ? "rgba(242,199,68,.02)" : "rgba(242,199,68,.02)" } : { opacity: 0.6 }) }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, gap: 8 }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: "#F2C744" }}>Round {rd.roundNum}</span>
+                <div key={idx} style={{ borderTop: "2px dashed rgba(229,168,42,.35)", padding: "12px 0 10px", marginTop: idx === 0 ? 0 : 4, ...(needsAction ? { background: isPending ? "rgba(229,168,42,.04)" : "rgba(229,168,42,.04)" } : { opacity: 0.85 }) }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
+                    <span style={{ fontSize: 17, fontWeight: 900, color: "#E5A82A", letterSpacing: .6, textTransform: "uppercase" }}>● ROUND {rd.roundNum}</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 11, color: "#F2C744" }}>
-                        {isPending ? "🔴 Preparing" : isActivated ? "🔵 Ready to Serve" : "✅ Served"}
+                      <span style={{ fontSize: 14, fontWeight: 800, color: isPending ? "#E5A82A" : isActivated ? "#60A5FA" : "#22c55e", letterSpacing: .3 }}>
+                        {isPending ? "🔴 PREPARING" : isActivated ? "🔵 READY TO SERVE" : "✅ SERVED"}
                       </span>
                       {needsAction && (
                         // 🔴 2026-05-13 — Khushi: pencil icon was too cryptic;
@@ -2649,16 +2990,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                         // firestore-hod) so customer wallet sees the change.
                         <button onClick={() => setEditRound({ round: rd, index: idx })}
                           title="Edit this round"
-                          style={{ padding: "5px 10px", borderRadius: 6, background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 10, fontWeight: 800, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .4, textTransform: "uppercase", lineHeight: 1 }}>
+                          style={{ padding: "5px 10px", borderRadius: 6, background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.4)", color: "#E5A82A", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .4, textTransform: "uppercase", lineHeight: 1 }}>
                           ✏️ Edit Order
                         </button>
                       )}
                     </div>
                   </div>
                   {(rd.items || []).map((it, ii) => (
-                    <div key={ii} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0" }}>
-                      <span style={{ color: "#fff" }}>{it.qty}× {it.n}</span>
-                      <span style={{ color: "#F2C744" }}>₹{it.p * it.qty}</span>
+                    <div key={ii} style={{ display: "flex", justifyContent: "space-between", fontSize: 15, padding: "4px 0", fontWeight: 600 }}>
+                      <span style={{ color: "#F2EBD3" }}>{it.qty}× {it.n}</span>
+                      {/* 🔴 2026-05-20 — inclusive ₹ matching round total. */}
+                      <span style={{ color: "#E5A82A", fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>₹{computeHodBreakdown([it]).grandTotal}</span>
                     </div>
                   ))}
                   {/* 🔴 2026-05-13 — Khushi: Print KOT was wrongly flipping
@@ -2669,17 +3011,27 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                           actually reached the table)
                       The wallet now matches reality. */}
                   {isPending && (
-                    <div style={{ marginTop: 8 }}>
+                    <div style={{ marginTop: 10 }}>
+                      {/* 🆕 2026-05-20 (Khushi) — blinking GREEN Print KOT.
+                          As soon as a round exists in preparing state (customer
+                          self-order OR captain add-order), this button pulses
+                          green to demand immediate attention. */}
                       <button onClick={() => handleServe(idx)} disabled={busy === `serve-${idx}`}
-                        style={{ width: "100%", padding: 9, borderRadius: 8, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
-                        {busy === `serve-${idx}` ? "..." : "🖨 Print KOT"}
+                        className={busy === `serve-${idx}` ? "" : "pulse-green"}
+                        style={{ width: "100%", padding: 13, borderRadius: 10,
+                          background: "linear-gradient(135deg,#22c55e,#16a34a)",
+                          border: "2px solid #4ade80", color: "#FFFFFF",
+                          fontSize: 16, fontWeight: 900, cursor: "pointer",
+                          fontFamily: "'Manrope','Space Grotesk',sans-serif",
+                          letterSpacing: ".6px", textTransform: "uppercase" }}>
+                        {busy === `serve-${idx}` ? "..." : "🖨 PRINT KOT NOW"}
                       </button>
                     </div>
                   )}
                   {isActivated && (
                     <div style={{ marginTop: 8 }}>
                       <button onClick={() => handleMarkServed(idx)} disabled={busy === `served-${idx}`}
-                        style={{ width: "100%", padding: 9, borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.45)", color: "#22c55e", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
+                        style={{ width: "100%", padding: 9, borderRadius: 8, background: "rgba(34,197,94,.12)", border: "1px solid rgba(34,197,94,.45)", color: "#22c55e", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
                         {busy === `served-${idx}` ? "..." : "✅ Mark Served"}
                       </button>
                     </div>
@@ -2689,25 +3041,25 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             })}
           </div>
         ) : (
-          <div style={{ padding: "8px 16px 10px", fontSize: 12, color: "rgba(255,255,255,.4)" }}>No orders yet</div>
+          <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "rgba(242,235,211,.72)" }}>No orders yet</div>
         )}
 
         {r.billStale && !paid && (
           <div style={{ margin: "6px 16px 8px", padding: "10px 12px", borderRadius: 10,
             background: "linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.08))",
             border: "1px solid rgba(239,68,68,.55)",
-            color: "#FCA5A5", fontSize: 11, fontWeight: 800, letterSpacing: ".4px",
+            color: "#FCA5A5", fontSize: 13, fontWeight: 800, letterSpacing: ".4px",
             display: "flex", alignItems: "center", gap: 8,
             boxShadow: "0 0 16px rgba(239,68,68,.18)" }}
             data-testid="banner-bill-stale">
-            <span style={{ fontSize: 16 }}>⚠</span>
-            <span>ITEMS CHANGED SINCE LAST BILL · REPRINT REQUIRED before Mark Paid</span>
+            <span style={{ fontSize: 19 }}>⚠</span>
+            <span>ITEMS CHANGED SINCE LAST BILL · REPRINT REQUIRED before Settle Bill</span>
           </div>
         )}
         {(r.billPrintCount || 0) > 0 && !r.billStale && !paid && (
           <div style={{ margin: "6px 16px 8px", padding: "6px 10px", borderRadius: 8,
-            background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.25)",
-            color: "rgba(242,199,68,.85)", fontSize: 10, fontWeight: 700, letterSpacing: ".4px" }}>
+            background: "rgba(229,168,42,.08)", border: "1px solid rgba(229,168,42,.25)",
+            color: "rgba(229,168,42,.85)", fontSize: 12, fontWeight: 700, letterSpacing: ".4px" }}>
             🔒 Bill #{r.billPrintCount} printed at {new Date(r.lastBillPrintedAt || "").toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} · source LOCKED to {r.billLockedSource || r.aggregator || "inhouse"} ({r.billLockedDiscount ?? r.aggregatorDiscount ?? 0}%)
           </div>
         )}
@@ -2721,18 +3073,18 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             actions (Void Bill, Release Table) use the same solid-red
             #A02820 + white-text treatment as the aggregator badge so the
             captain reads "red box = serious action". */}
-        <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap", fontFamily: "'Space Grotesk', sans-serif" }}>
+        <div style={{ padding: "6px 16px 14px", display: "flex", gap: 8, flexWrap: "wrap", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
           {/* 🔴 2026-05-13 — Guest Arrived button removed from modal; it now lives
               inline on the BookingRow itself (one-tap arrival without opening the
               full booking detail). Modal kept clean for ordering / billing actions. */}
           {!paid && (
             <button onClick={() => setShowAddOrder(true)}
-              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(229,168,42,.1)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 13, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               📝 Add Order
             </button>
           )}
           <button onClick={sendWhatsApp}
-            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.25)", color: "#F2C744", fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+            style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(229,168,42,.06)", border: "1px solid rgba(229,168,42,.25)", color: "#E5A82A", fontSize: 13, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             📲 Send Menu
           </button>
           {(tabTotal > 0 || (r.tabRounds || []).length > 0) && (() => {
@@ -2748,10 +3100,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             return (
               <button onClick={() => handleThermalBill(paid)} disabled={busy === "printbill"}
                 style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9,
-                  background: stale ? "#A02820" : "rgba(242,199,68,.15)",
-                  border: `1px solid ${stale ? "#A02820" : "rgba(242,199,68,.45)"}`,
-                  color: stale ? "#fff" : "#F2C744",
-                  fontSize: 11, fontWeight: 800, letterSpacing: ".5px",
+                  background: stale ? "#A02820" : "rgba(229,168,42,.15)",
+                  border: `1px solid ${stale ? "#A02820" : "rgba(229,168,42,.45)"}`,
+                  color: stale ? "#fff" : "#E5A82A",
+                  fontSize: 13, fontWeight: 800, letterSpacing: ".5px",
                   fontFamily: "inherit", textTransform: "uppercase",
                   cursor: busy === "printbill" ? "wait" : "pointer",
                   boxShadow: stale ? "0 0 12px rgba(160,40,32,.4)" : "none" }}
@@ -2762,8 +3114,8 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           })()}
           {!paid && !voided && (tabTotal > 0 || billReq) && (
             <button onClick={handleOpenMarkPaid}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
-              💰 Mark Paid
+              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "linear-gradient(135deg,#E5A82A,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+              💰 Settle Bill
             </button>
           )}
           {!paid && !voided && (r.billPrintCount || 0) > 0 && (
@@ -2774,12 +3126,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               setShowVoidBill(true);
             }}
               title="Use ONLY when bill was printed but customer cannot/will not pay (Manager PIN required)"
-              style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+              style={{ flex: 1, minWidth: 110, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#F2EBD3", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               🚫 Void Bill
             </button>
           )}
           <button onClick={handleRelease} disabled={busy === "release"}
-            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+            style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#A02820", border: "1px solid #A02820", color: "#F2EBD3", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             {busy === "release" ? "..." : "🔓 Release Table"}
           </button>
         </div>
@@ -2788,7 +3140,23 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
       {editRound && <EditOrderModal round={editRound.round} roundIndex={editRound.index} docId={r._docId} captainName={captainName} bookingRef={r.bookingRef} tableId={r.tableId} floorLabel={r.floorLabel} customerName={r.customerName} onClose={() => setEditRound(null)} />}
       {showPaid && <MarkPaidModal reservation={r} captainName={captainName} onClose={() => setShowPaid(false)} />}
       {showAddOrder && <AddOrderModal docId={r._docId} tableId={r.tableId} captainName={captainName} onClose={() => setShowAddOrder(false)} />}
+      {previewBill && (
+        <BillPreviewModal
+          r={r} captainName={captainName} snap={previewBill} busy={busy === "printbill"}
+          onCancel={() => setPreviewBill(null)}
+          onConfirm={confirmAndPrint}
+        />
+      )}
       {qrFallback && <WhatsAppQrFallbackModal url={qrFallback.url} reason={qrFallback.reason} customerName={r.customerName || "Guest"} tableId={r.tableId} onClose={() => setQrFallback(null)} />}
+      {shareWalletQr && (r.linkedCoverRef || r.bookingRef) && (
+        <WhatsAppQrFallbackModal
+          url={`https://hodclub.in/?wallet=${encodeURIComponent(r.linkedCoverRef || r.bookingRef || "")}`}
+          reason="captain shared on demand"
+          customerName={r.customerName || "Guest"}
+          tableId={r.tableId}
+          onClose={() => setShareWalletQr(false)}
+        />
+      )}
       {showReassign && <ReassignTableModal reservation={r} existingTables={existingTables} allReservations={allReservations} captainName={captainName} onClose={() => setShowReassign(false)} />}
       {showVoidBill && (() => {
         // Recompute the same final total the bill printer used so leakage in
@@ -2860,6 +3228,100 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
 }
 
 
+// 🆕 2026-05-20 (Khushi) — BILL PREVIEW MODAL.
+// Shows the EXACT bill that will print. CONFIRM → real print + Firestore write.
+// CANCEL → nothing happens (no bill # consumed, no audit row).
+// 🛟 FALLBACK: "PRINT WITHOUT PREVIEW" link bypasses the modal — fires the
+// same confirm path directly. Use if the preview ever looks wrong.
+function BillPreviewModal({ r, captainName, snap, busy, onCancel, onConfirm }: {
+  r: HodTableReservation;
+  captainName: string;
+  snap: {
+    items: HodOrderItem[]; subtotal: number; discountPct: number; discountAmt: number;
+    afterDiscount: number; scAmt: number; cgst: number; sgst: number; taxAmt: number;
+    finalAmount: number; aggName: string; floor: TabletFloor; isReprint: boolean;
+    reprintNumber: number; stale: boolean;
+  };
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const floorName = snap.floor === "ground" ? "GROUND FLOOR" : snap.floor === "first" ? "FIRST FLOOR" : "ROOFTOP";
+  const billNumPreview = `${r._docId.slice(-6).toUpperCase()}-${snap.reprintNumber}`;
+  const row = (label: string, val: string, bold = false) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: bold ? 16 : 14, fontWeight: bold ? 900 : 600, color: bold ? "#F2EBD3" : "rgba(242,235,211,.85)" }}>
+      <span>{label}</span><span>{val}</span>
+    </div>
+  );
+  return (
+    <div onClick={() => { if (!busy) onCancel(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.75)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#0A0A0A", border: "2px solid #E5A82A", borderRadius: 14, maxWidth: 460, width: "100%", maxHeight: "92vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,.6)" }}>
+        {/* HEADER */}
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid rgba(229,168,42,.3)" }}>
+          <div style={{ fontSize: 12, color: "#E5A82A", fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>📋 BILL PREVIEW · NOT YET PRINTED</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#F2EBD3", fontFamily: "'Playfair Display',serif" }}>HOUSE OF DOPAMINE</div>
+          <div style={{ fontSize: 11, color: "rgba(242,235,211,.6)", marginTop: 2 }}>{floorName} · BILL # {billNumPreview}{snap.isReprint ? ` · REPRINT #${snap.reprintNumber}` : ""}</div>
+        </div>
+        {/* WARNING BANNERS */}
+        {snap.stale && (
+          <div style={{ background: "#A02820", color: "#fff", padding: "10px 18px", fontSize: 13, fontWeight: 800, letterSpacing: .5, textAlign: "center" }}>
+            ⚠ BILL CHANGED — RE-CHECK ITEMS BEFORE PRINTING
+          </div>
+        )}
+        {snap.isReprint && !snap.stale && (
+          <div style={{ background: "rgba(229,168,42,.15)", color: "#E5A82A", padding: "8px 18px", fontSize: 12, fontWeight: 700, letterSpacing: .5, textAlign: "center" }}>
+            ⚠ REPRINT — bill #{snap.reprintNumber} for this table
+          </div>
+        )}
+        {/* META */}
+        <div style={{ padding: "12px 18px", borderBottom: "1px dashed rgba(242,235,211,.2)", fontSize: 13, color: "rgba(242,235,211,.85)" }}>
+          <div><b style={{ color: "#F2EBD3" }}>TABLE:</b> {r.tableId} · {r.floorLabel || ""}</div>
+          <div><b style={{ color: "#F2EBD3" }}>GUEST:</b> {r.customerName || "—"}{(r as any).partySize ? ` · ${(r as any).partySize} PAX` : ""}</div>
+          <div><b style={{ color: "#F2EBD3" }}>CAPTAIN:</b> {captainName}</div>
+          {snap.aggName && snap.aggName !== "inhouse" && (
+            <div><b style={{ color: "#F2EBD3" }}>SOURCE:</b> {snap.aggName.toUpperCase()} ({snap.discountPct}% off)</div>
+          )}
+        </div>
+        {/* ITEMS */}
+        <div style={{ padding: "12px 18px", borderBottom: "1px dashed rgba(242,235,211,.2)" }}>
+          <div style={{ fontSize: 12, color: "#E5A82A", fontWeight: 700, letterSpacing: 1, marginBottom: 8 }}>ITEMS</div>
+          {snap.items.map((it, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", fontSize: 14, color: "#F2EBD3" }}>
+              <span style={{ flex: 1, paddingRight: 8 }}>{it.qty} × {it.n}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>₹{Math.round((it.p || 0) * (it.qty || 0))}</span>
+            </div>
+          ))}
+        </div>
+        {/* TOTALS */}
+        <div style={{ padding: "12px 18px", borderBottom: "1px dashed rgba(242,235,211,.2)" }}>
+          {row("Subtotal", `₹${Math.round(snap.subtotal)}`)}
+          {snap.discountAmt > 0 && row(`Discount (${snap.discountPct}%)`, `−₹${Math.round(snap.discountAmt)}`)}
+          {row("Service Charge (10%)", `₹${snap.scAmt}`)}
+          {row("CGST", `₹${snap.cgst.toFixed(2)}`)}
+          {row("SGST", `₹${snap.sgst.toFixed(2)}`)}
+          <div style={{ height: 1, background: "rgba(229,168,42,.4)", margin: "8px 0" }} />
+          {row("GRAND TOTAL", `₹${Math.round(snap.finalAmount)}`, true)}
+        </div>
+        {/* BUTTONS */}
+        <div style={{ padding: 14, display: "flex", gap: 10, flexDirection: "column" }}>
+          <button onClick={onConfirm} disabled={busy}
+            data-testid="button-confirm-print-bill"
+            style={{ padding: "16px", borderRadius: 10, background: "linear-gradient(135deg,#E5A82A,#B8951F)", border: "none", color: "#0A0A0A", fontSize: 17, fontWeight: 900, letterSpacing: 1, cursor: busy ? "wait" : "pointer", textTransform: "uppercase", boxShadow: "0 4px 14px rgba(229,168,42,.4)" }}>
+            {busy ? "PRINTING..." : "✓ CONFIRM & PRINT"}
+          </button>
+          <button onClick={onCancel} disabled={busy}
+            style={{ padding: "12px", borderRadius: 10, background: "transparent", border: "1px solid rgba(242,235,211,.3)", color: "#F2EBD3", fontSize: 14, fontWeight: 700, letterSpacing: .5, cursor: busy ? "wait" : "pointer", textTransform: "uppercase" }}>
+            ✗ CANCEL
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }: {
   url: string; reason: string; customerName: string; tableId: string; onClose: () => void;
 }) {
@@ -2898,43 +3360,43 @@ function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999,
         display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ background: "#0d0d0d", border: "1px solid rgba(242,199,68,.35)", borderRadius: 16,
-          maxWidth: 360, width: "100%", padding: 20, fontFamily: "'Space Grotesk', sans-serif", color: "#fff" }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: "#00C864", letterSpacing: .5, marginBottom: 4 }}>
+        style={{ background: "#0d0d0d", border: "1px solid rgba(229,168,42,.35)", borderRadius: 16,
+          maxWidth: 360, width: "100%", padding: 20, fontFamily: "'Manrope','Space Grotesk',sans-serif", color: "#F2EBD3" }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#00C864", letterSpacing: .5, marginBottom: 4 }}>
           ✓ WALLET UNLOCKED · Menu opens on any device
         </div>
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#F2C744", marginBottom: 4, letterSpacing: .3 }}>
+        <div style={{ fontSize: 19, fontWeight: 900, color: "#E5A82A", marginBottom: 4, letterSpacing: .3 }}>
           📱 Share with {customerName}
         </div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.84)", marginBottom: 14 }}>
           Table {tableId} · WhatsApp from POS didn't go through: {reason}
         </div>
         <div style={{ background: "#fff", borderRadius: 12, padding: 12, display: "flex", justifyContent: "center", marginBottom: 14 }}>
           {qrDataUrl
             ? <img src={qrDataUrl} alt="Wallet QR" style={{ width: "100%", maxWidth: 280, display: "block" }} />
-            : <div style={{ width: 280, height: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "#666", fontSize: 12 }}>Generating QR…</div>}
+            : <div style={{ width: 280, height: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "#666", fontSize: 14 }}>Generating QR…</div>}
         </div>
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", textAlign: "center", marginBottom: 12, wordBreak: "break-all", padding: 8, background: "rgba(255,255,255,.04)", borderRadius: 8 }}>
+        <div style={{ fontSize: 12, color: "rgba(242,235,211,.8)", textAlign: "center", marginBottom: 12, wordBreak: "break-all", padding: 8, background: "rgba(255,255,255,.04)", borderRadius: 8 }}>
           {url}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
           <button onClick={copyLink}
             style={{ padding: "11px 10px", borderRadius: 9, background: "rgba(255,255,255,.06)",
-              border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 11, fontWeight: 800,
+              border: "1px solid rgba(255,255,255,.18)", color: "#F2EBD3", fontSize: 13, fontWeight: 800,
               cursor: "pointer", letterSpacing: .4, fontFamily: "inherit", textTransform: "uppercase" }}>
             {copied ? "✓ COPIED" : "📋 COPY LINK"}
           </button>
           <button onClick={shareLink}
             style={{ padding: "11px 10px", borderRadius: 9, background: "rgba(37,211,102,.15)",
-              border: "1px solid rgba(37,211,102,.45)", color: "#25D366", fontSize: 11, fontWeight: 800,
+              border: "1px solid rgba(37,211,102,.45)", color: "#25D366", fontSize: 13, fontWeight: 800,
               cursor: "pointer", letterSpacing: .4, fontFamily: "inherit", textTransform: "uppercase" }}>
             📤 SHARE
           </button>
         </div>
         <button onClick={onClose}
           style={{ width: "100%", padding: "11px 14px", borderRadius: 9,
-            background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none",
-            color: "#0a0a0a", fontSize: 12, fontWeight: 900, cursor: "pointer",
+            background: "linear-gradient(135deg,#E5A82A,#B8951F)", border: "none",
+            color: "#0a0a0a", fontSize: 14, fontWeight: 900, cursor: "pointer",
             letterSpacing: .5, fontFamily: "inherit", textTransform: "uppercase" }}>
           ✓ Done
         </button>
@@ -2961,24 +3423,44 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   const voided = (r as any).status === "voided";
   const arrived = !!r.actualArrivalTime;
   const canReassign = !paid && !voided;
+  // 🔴 2026-05-20 (Khushi) — customer-calling outranks bill_due AND pending
+  // for visual priority. Captain must see this from the LIST, not just after
+  // opening the card.
+  const calling = !!r.customerCallRequest;
+  // 🆕 2026-05-20 (Khushi) — DOUBLE-BOOKING WARNING.
+  // Same table assigned across different time slots (12:40 → 02:50 → 06:35)
+  // is BY DESIGN — sequential parties across the night. But if TWO of those
+  // are simultaneously active (arrived but not paid/voided), that's a real
+  // double-seating conflict. Surface it as a red badge so captain can resolve.
+  const activeOnSameTable = (allReservations || []).filter((x) =>
+    x.tableId === r.tableId && x._docId !== r._docId &&
+    !!x.actualArrivalTime &&
+    x.paymentStatus !== "paid" &&
+    (x as any).status !== "voided"
+  ).length;
+  const hasOverlap = arrived && !paid && !voided && activeOnSameTable > 0;
 
-  const borderColor = billReq ? "rgba(239,68,68,.55)"
-    : pending > 0 ? "rgba(242,199,68,.45)"
+  const borderColor = calling ? "#EF4444"
+    : hasOverlap ? "#EF4444"
+    : billReq ? "rgba(239,68,68,.55)"
+    : pending > 0 ? "rgba(229,168,42,.45)"
     : voided ? "rgba(239,68,68,.4)"
     : "rgba(255,255,255,.08)";
-  const bg = billReq ? "rgba(239,68,68,.06)"
-    : pending > 0 ? "rgba(242,199,68,.04)"
+  const bg = calling ? "rgba(239,68,68,.14)"
+    : hasOverlap ? "rgba(239,68,68,.10)"
+    : billReq ? "rgba(239,68,68,.06)"
+    : pending > 0 ? "rgba(229,168,42,.04)"
     : "rgba(255,255,255,.03)";
 
   return (
     <>
     <div onClick={onClick}
-      className={billReq ? "pulse-red" : pending > 0 ? "pulse-gold" : ""}
+      className={calling || billReq ? "pulse-red" : pending > 0 ? "pulse-gold" : ""}
       style={{
         display: "flex", alignItems: "center", gap: 10,
         padding: "10px 12px", marginBottom: 6, borderRadius: 10,
         background: bg, border: `1px solid ${borderColor}`,
-        cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif",
+        cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif",
         transition: "background .15s",
       }}>
       {/* Table id pill — also tap-to-reassign */}
@@ -2986,65 +3468,77 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
         onClick={(e) => { e.stopPropagation(); if (canReassign) setShowReassign(true); }}
         disabled={!canReassign}
         title={canReassign ? "Tap to reassign table" : ""}
-        style={{ flexShrink: 0, minWidth: 46, textAlign: "center",
-          padding: "6px 6px", borderRadius: 6,
-          background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.25)",
-          color: "#F2C744", fontSize: 11, fontWeight: 900, letterSpacing: .3,
+        style={{ flexShrink: 0, minWidth: 66, textAlign: "center",
+          padding: "10px 8px", borderRadius: 10,
+          background: "linear-gradient(135deg,#E5A82A,#B8951F)",
+          border: "2px solid #F2C744",
+          color: "#0A0A0A", fontSize: 20, fontWeight: 900, letterSpacing: .5,
           cursor: canReassign ? "pointer" : "default",
-          fontFamily: "inherit", lineHeight: 1.1 }}>
+          fontFamily: "inherit", lineHeight: 1.1,
+          boxShadow: "0 3px 10px rgba(229,168,42,.45)" }}>
         {r.tableId}
-        {canReassign && <div style={{ fontSize: 8, fontWeight: 600, opacity: .7, marginTop: 2 }}>🔄 swap</div>}
+        {canReassign && <div style={{ fontSize: 9, fontWeight: 800, opacity: .85, marginTop: 3, letterSpacing: .5 }}>🔄 SWAP</div>}
       </button>
 
       {/* Name + meta line */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: "#fff",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{ fontSize: 18, fontWeight: 900, color: "#FFFFFF",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            letterSpacing: .3 }}>
             {r.customerName || "—"}
           </span>
           {isAgg && (
-            <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 3,
-              background: "#A02820", color: "#fff", letterSpacing: .4, textTransform: "uppercase" }}>
+            <span style={{ fontSize: 11, fontWeight: 800, padding: "2px 6px", borderRadius: 3,
+              background: "#A02820", color: "#F2EBD3", letterSpacing: .4, textTransform: "uppercase" }}>
               {aggLabel}{aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
             </span>
           )}
           {!isAgg && (
-            <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
-              background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.55)",
+            <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+              background: "rgba(255,255,255,.06)", color: "rgba(242,235,211,.84)",
               letterSpacing: .4, textTransform: "uppercase" }}>
               In-House
             </span>
           )}
         </div>
-        <div style={{ display: "flex", gap: 8, fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>
+        <div style={{ display: "flex", gap: 10, fontSize: 13, color: "#F2EBD3", marginTop: 3, fontWeight: 600 }}>
           <span>👥 {r.partySize || "?"}p</span>
           <span>🕐 {r.arrivalTime || "—"}</span>
           {r.phone && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📱 {r.phone}</span>}
         </div>
+        {hasOverlap && (
+          <div style={{ marginTop: 4, fontSize: 11, fontWeight: 900, color: "#FCA5A5", letterSpacing: .4, textTransform: "uppercase" }}>
+            ⚠ {activeOnSameTable + 1} GUESTS ACTIVE ON {r.tableId} — REASSIGN ONE
+          </div>
+        )}
       </div>
 
       {/* Status badges (right side) */}
       <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+        {calling && (
+          <span style={{ fontSize: 12, fontWeight: 900, padding: "3px 8px", borderRadius: 4,
+            background: "#EF4444", color: "#F2EBD3", letterSpacing: .4, boxShadow: "0 0 10px rgba(239,68,68,.6)" }}>🔔 CALLING</span>
+        )}
         {voided ? (
-          <span style={{ fontSize: 9, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
-            background: "#A02820", color: "#fff", letterSpacing: .3 }}>🚫 VOIDED</span>
+          <span style={{ fontSize: 11, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
+            background: "#A02820", color: "#F2EBD3", letterSpacing: .3 }}>🚫 VOIDED</span>
         ) : paid ? (
-          <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
-            background: "rgba(242,199,68,.15)", border: "1px solid rgba(242,199,68,.3)",
-            color: "#F2C744", letterSpacing: .3 }}>✅ PAID</span>
+          <span style={{ fontSize: 11, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(229,168,42,.15)", border: "1px solid rgba(229,168,42,.3)",
+            color: "#E5A82A", letterSpacing: .3 }}>✅ PAID</span>
         ) : billReq ? (
-          <span style={{ fontSize: 9, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
+          <span style={{ fontSize: 11, fontWeight: 900, padding: "2px 6px", borderRadius: 4,
             background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)",
             color: "#EF4444", letterSpacing: .3 }}>🧾 BILL DUE</span>
         ) : pending > 0 ? (
-          <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
-            background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)",
-            color: "#F2C744", letterSpacing: .3 }}>🔴 {pending} PENDING</span>
+          <span style={{ fontSize: 11, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+            background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.3)",
+            color: "#E5A82A", letterSpacing: .3 }}>🔴 {pending} PENDING</span>
         ) : arrived ? (
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 4,
+          <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 6px", borderRadius: 4,
             background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)",
-            color: "rgba(255,255,255,.6)", letterSpacing: .3 }}>✓ ARRIVED</span>
+            color: "rgba(242,235,211,.88)", letterSpacing: .3 }}>✓ ARRIVED</span>
         ) : (
           <button
             onClick={async (e) => {
@@ -3078,17 +3572,17 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
               setArriving(false);
             }}
             disabled={arriving}
-            style={{ fontSize: 10, fontWeight: 900, padding: "5px 9px", borderRadius: 6,
-              background: "linear-gradient(135deg,#F2C744,#B8951F)", border: "none",
+            style={{ fontSize: 12, fontWeight: 900, padding: "5px 9px", borderRadius: 6,
+              background: "linear-gradient(135deg,#E5A82A,#B8951F)", border: "none",
               color: "#0A0A0A", letterSpacing: .4, cursor: arriving ? "default" : "pointer",
-              fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase",
+              fontFamily: "'Manrope','Space Grotesk',sans-serif", textTransform: "uppercase",
               opacity: arriving ? .6 : 1, lineHeight: 1.1 }}
             title="Tap to mark this guest as arrived"
           >
             {arriving ? "..." : "🚶 Guest Arrived"}
           </button>
         )}
-        <span style={{ fontSize: 9, color: "rgba(255,255,255,.3)" }}>tap →</span>
+        <span style={{ fontSize: 11, color: "rgba(242,235,211,.6)" }}>tap →</span>
       </div>
     </div>
     {showReassign && (
@@ -3110,7 +3604,11 @@ function BookingDetailModal({ r, captainName, playAlert, existingTables, allRese
 }) {
   return (
     <div onClick={onClose}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9998,
+      style={{ position: "fixed", inset: 0,
+        background: "rgba(3,3,5,.97)",
+        backdropFilter: "blur(14px) saturate(120%)",
+        WebkitBackdropFilter: "blur(14px) saturate(120%)",
+        zIndex: 9998,
         display: "flex", alignItems: "flex-start", justifyContent: "center",
         padding: "20px 12px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
@@ -3118,9 +3616,9 @@ function BookingDetailModal({ r, captainName, playAlert, existingTables, allRese
         <button onClick={onClose}
           style={{ position: "sticky", top: 0, marginLeft: "auto", display: "block",
             padding: "8px 14px", borderRadius: 8, background: "#0A0A0A",
-            border: "1px solid rgba(242,199,68,.4)", color: "#F2C744",
-            fontSize: 12, fontWeight: 800, cursor: "pointer", marginBottom: 8,
-            fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .5,
+            border: "1px solid rgba(229,168,42,.4)", color: "#E5A82A",
+            fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 8,
+            fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .5,
             zIndex: 1 }}>
           ✕ CLOSE
         </button>
@@ -3137,14 +3635,19 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [showWalkIn, setShowWalkIn] = useState(false);
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
   const [allReservations, setAllReservations] = useState<HodTableReservation[]>([]);
-  const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" });
-  const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill">("");
+  const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" });
+  const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill" | "calling">("");
   const [customerSearch, setCustomerSearch] = useState("");
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
-  const prevSnapshot = useRef<Record<string, { rounds: number; status: string }>>({});
+  // 🔴 2026-05-20 (Khushi) — track customerCallRequest in prev snapshot so we
+  // fire a LOUD alert + badge flash + red border on the list row + dashboard
+  // tile + auto-jump to that table. Without this, the red banner only shows
+  // INSIDE the opened card — captain never sees it from the dashboard view.
+  const prevSnapshot = useRef<Record<string, { rounds: number; status: string; calling: boolean }>>({});
   const playAlert = useAudioAlert();
   const pendingCountRef = useRef(0);
   const billCountRef = useRef(0);
+  const callingCountRef = useRef(0);
   const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 2026-05-16 one-shot diagnostic — on mount, dump ALL tableReservations
@@ -3163,17 +3666,25 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
       all.forEach((r) => {
         const prev = prevSnapshot.current[r._docId];
-        const curr = { rounds: (r.tabRounds || []).length, status: r.paymentStatus || "" };
+        const curr = { rounds: (r.tabRounds || []).length, status: r.paymentStatus || "", calling: !!r.customerCallRequest };
         if (prev) {
           if (curr.rounds > prev.rounds) {
             playAlert(false);
-            setAlertBadge({ text: `🛎 NEW ORDER — ${r.tableId}`, color: "#F2C744", bg: "rgba(242,199,68,.2)" });
-            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" }), 5000);
+            setAlertBadge({ text: `🛎 NEW ORDER — ${r.tableId}`, color: "#E5A82A", bg: "rgba(229,168,42,.2)" });
+            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 5000);
           }
           if (curr.status === "bill_requested" && prev.status !== "bill_requested") {
             playAlert(true);
             setAlertBadge({ text: `🧾 BILL REQUESTED — ${r.tableId}`, color: "#EF4444", bg: "rgba(239,68,68,.3)" });
-            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#F2C744", bg: "rgba(242,199,68,.12)" }), 5000);
+            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 5000);
+          }
+          // 🔴 2026-05-20 (Khushi) — LOUD alert + 8-sec red top-bar flash when
+          // a customer-at-table self-orders and pings captain. Fires only on
+          // transition (no-call → call) so it doesn't re-beep on every snapshot.
+          if (curr.calling && !prev.calling) {
+            playAlert(true);
+            setAlertBadge({ text: `🔔 CUSTOMER CALLING — ${r.tableId} · ${r.customerName || "Guest"}`, color: "#EF4444", bg: "rgba(239,68,68,.35)" });
+            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 8000);
           }
         }
         prevSnapshot.current[r._docId] = curr;
@@ -3181,6 +3692,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
       pendingCountRef.current = all.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
       billCountRef.current = all.filter((r) => r.paymentStatus === "bill_requested").length;
+      callingCountRef.current = all.filter((r) => !!r.customerCallRequest).length;
 
       const filtered = floor ? all.filter((r) => r.floor === floor) : all;
       setReservations(filtered);
@@ -3191,7 +3703,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   useEffect(() => {
     if (beepIntervalRef.current) clearInterval(beepIntervalRef.current);
     beepIntervalRef.current = setInterval(() => {
-      if (billCountRef.current > 0) playAlert(true);
+      // 🔴 2026-05-20 (Khushi) — customer-calling outranks bill_due AND pending.
+      // Captain must walk to that table NOW.
+      if (callingCountRef.current > 0) playAlert(true);
+      else if (billCountRef.current > 0) playAlert(true);
       else if (pendingCountRef.current > 0) playAlert(false);
     }, 12000);
     return () => { if (beepIntervalRef.current) clearInterval(beepIntervalRef.current); };
@@ -3199,11 +3714,17 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
   const pending = reservations.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
   const billDue = reservations.filter((r) => r.paymentStatus === "bill_requested").length;
+  const calling = reservations.filter((r) => !!r.customerCallRequest).length;
 
   const displayedReservations = useMemo(() => {
     let list = reservations;
     if (pendingFilter === "pending") list = list.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
     else if (pendingFilter === "bill") list = list.filter(r => r.paymentStatus === "bill_requested");
+    else if (pendingFilter === "calling") list = list.filter(r => !!r.customerCallRequest);
+    // 🔴 2026-05-20 (Khushi) — always sort customer-calling tables to the TOP
+    // of the list regardless of filter, so a ping is impossible to miss even
+    // if dozens of tables are open. Stable sort preserves prior order otherwise.
+    list = [...list].sort((a, b) => Number(!!b.customerCallRequest) - Number(!!a.customerCallRequest));
     // 2026-05-13 — Khushi spec: customer search across name/phone/table/ref.
     // Case-insensitive substring match on any of the four fields so a
     // captain can find a guest by typing 4 digits of their phone, the
@@ -3220,27 +3741,27 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   }, [reservations, pendingFilter, customerSearch]);
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0A0A0A", color: "#fff", fontFamily: "'Space Grotesk', sans-serif" }}>
+    <div className="captain-v2" style={{ minHeight: "100vh", background: "#050507", color: "#F2EBD3", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
       <WaiterCallBanner staffName={captainName} role="captain" />
-      <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(242,199,68,.25)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10, gap: 8 }}>
+      <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(229,168,42,.25)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10, gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
-            style={{ padding: "8px 12px", borderRadius: 10, background: "#F2C744", border: "1.5px solid #F2C744", color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
+            style={{ padding: "8px 12px", borderRadius: 10, background: "#E5A82A", border: "1.5px solid #E5A82A", color: "#0A0A0A", fontSize: 14, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
             ← POS
           </Link>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 900, color: "#F2C744", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🪩 CAPTAIN</div>
+          <div style={{ fontFamily: "'Manrope','Space Grotesk',sans-serif", fontSize: 18, fontWeight: 900, color: "#E5A82A", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🪩 CAPTAIN</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>👤 {captainName}</div>
-          <div style={{ fontSize: 11, background: alertBadge.bg, border: `1px solid ${alertBadge.color}40`, color: alertBadge.color, padding: "4px 10px", borderRadius: 20 }}>{alertBadge.text}</div>
+          <div style={{ fontSize: 13, color: "rgba(242,235,211,.72)" }}>👤 {captainName}</div>
+          <div style={{ fontSize: 13, background: alertBadge.bg, border: `1px solid ${alertBadge.color}40`, color: alertBadge.color, padding: "4px 10px", borderRadius: 20 }}>{alertBadge.text}</div>
         </div>
       </div>
 
       <div style={{ padding: "10px 16px", display: "flex", gap: 8, background: "rgba(255,255,255,.02)", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
-          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#fff", fontSize: 12, outline: "none" }} />
+          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }} />
         <select value={floor} onChange={(e) => setFloor(e.target.value)}
-          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#fff", fontSize: 12, outline: "none" }}>
+          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }}>
           <option value="">All Floors</option>
           <option value="dance">Dance Floor</option>
           <option value="dining">Dining</option>
@@ -3248,26 +3769,30 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </select>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, padding: "10px 16px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, padding: "10px 16px" }}>
         {[
-          { label: "Tables", value: reservations.length, color: "#F2C744", filter: "" as const },
-          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#F2C744", filter: "pending" as const },
-          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#F2C744" : "rgba(255,255,255,.4)", filter: "bill" as const },
+          { label: "Tables", value: reservations.length, color: "#E5A82A", filter: "" as const, pulse: false },
+          { label: "Calling", value: calling, color: calling > 0 ? "#EF4444" : "rgba(242,235,211,.72)", filter: "calling" as const, pulse: calling > 0 },
+          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#E5A82A", filter: "pending" as const, pulse: false },
+          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#E5A82A" : "rgba(242,235,211,.72)", filter: "bill" as const, pulse: false },
         ].map((s) => (
           <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
-            style={{ background: pendingFilter === s.filter && s.filter ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.04)",
-              border: `1px solid ${pendingFilter === s.filter && s.filter ? s.color + "60" : "rgba(255,255,255,.08)"}`,
+            className={s.pulse ? "pulse-red" : ""}
+            style={{ background: pendingFilter === s.filter && s.filter ? "rgba(239,68,68,.12)" : s.pulse ? "rgba(239,68,68,.08)" : "rgba(255,255,255,.04)",
+              border: `1.5px solid ${pendingFilter === s.filter && s.filter ? s.color + "80" : s.pulse ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
               borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s" }}>
-            <div style={{ fontSize: 20, fontWeight: 900, color: s.color }}>{s.value}</div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{s.label}</div>
+            <div style={{ fontSize: 23, fontWeight: 900, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 12, color: s.pulse ? "#EF4444" : "rgba(242,235,211,.72)", marginTop: 2, fontWeight: s.pulse ? 800 : 400, letterSpacing: s.pulse ? .5 : 0 }}>
+              {s.pulse && "🔔 "}{s.label}
+            </div>
           </div>
         ))}
       </div>
       {pendingFilter && (
         <div style={{ padding: "0 16px", marginBottom: 4 }}>
           <button onClick={() => setPendingFilter("")}
-            style={{ fontSize: 11, color: "#F2C744", background: "rgba(242,199,68,.08)", border: "1px solid rgba(242,199,68,.2)", borderRadius: 8, padding: "4px 12px", cursor: "pointer" }}>
-            Showing {pendingFilter === "pending" ? "Pending" : "Bill Due"} only — tap to clear ✕
+            style={{ fontSize: 13, color: "#E5A82A", background: "rgba(229,168,42,.08)", border: "1px solid rgba(229,168,42,.2)", borderRadius: 8, padding: "4px 12px", cursor: "pointer" }}>
+            Showing {pendingFilter === "pending" ? "Pending" : pendingFilter === "calling" ? "🔔 Customer Calling" : "Bill Due"} only — tap to clear ✕
           </button>
         </div>
       )}
@@ -3279,12 +3804,12 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           value={customerSearch}
           onChange={(e) => setCustomerSearch(e.target.value)}
           placeholder="🔎 Search customer name, phone, table, or ref"
-          style={{ width: "100%", boxSizing: "border-box", padding: "10px 36px 10px 14px", borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(242,199,68,.18)", color: "#fff", fontSize: 13, outline: "none", fontFamily: "'Space Grotesk', sans-serif" }}
+          style={{ width: "100%", boxSizing: "border-box", padding: "10px 36px 10px 14px", borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(229,168,42,.18)", color: "#F2EBD3", fontSize: 16, outline: "none", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}
         />
         {customerSearch && (
           <button onClick={() => setCustomerSearch("")}
             aria-label="Clear search"
-            style={{ position: "absolute", right: 22, top: 16, background: "transparent", border: "none", color: "rgba(255,255,255,.6)", fontSize: 16, cursor: "pointer", padding: 4 }}>
+            style={{ position: "absolute", right: 22, top: 16, background: "transparent", border: "none", color: "rgba(242,235,211,.88)", fontSize: 19, cursor: "pointer", padding: 4 }}>
             ✕
           </button>
         )}
@@ -3292,14 +3817,14 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
       <div style={{ padding: "10px 16px 0" }}>
         <button onClick={() => setShowWalkIn(true)}
-          style={{ width: "100%", padding: 12, borderRadius: 12, background: "linear-gradient(135deg,rgba(242,199,68,.15),rgba(242,199,68,.08))", border: "1px solid rgba(242,199,68,.3)", color: "#F2C744", fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
+          style={{ width: "100%", padding: 12, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.15),rgba(229,168,42,.08))", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 16, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
           🚶 + Seat Walk-In Guest
         </button>
       </div>
 
       <div style={{ padding: "10px 16px 120px" }}>
         {displayedReservations.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 60, color: "rgba(255,255,255,.4)" }}>{customerSearch ? `No matches for "${customerSearch}".` : pendingFilter ? "No matching tables." : "No reservations today."}</div>
+          <div style={{ textAlign: "center", padding: 60, color: "rgba(242,235,211,.72)" }}>{customerSearch ? `No matches for "${customerSearch}".` : pendingFilter ? "No matching tables." : "No reservations today."}</div>
         ) : (
           displayedReservations.map((r) => (
             <BookingRow key={r._docId} r={r}
