@@ -3960,16 +3960,61 @@ function FloorPlanView({
       const points = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
       shape = <polygon points={points} {...shapeProps} />;
     }
+    // 🆕 2026-05-20 (Khushi) — badge updates:
+    //   RED   → "Q#N" (was "#N") so captain reads "Queue #1" without guessing
+    //   ORANGE → running tab ₹ + mins-since-KOT, e.g. "₹1185 · 29m"
+    //   GREEN  → running tab ₹ if there's a bill, else "A" (assigned, customer
+    //            not arrived yet) so captain can tell an assigned-but-empty
+    //            table from one that's actively eating with no order yet.
     let badge = "";
-    if (s.state === "free") badge = "+";
-    else if (s.state === "red" && (s as any).queue) badge = `#${(s as any).queue}`;
-    else if (s.state === "orange") badge = fmtMins((s as any).since);
-    else if (s.state === "green" && (s as any).tab > 0) badge = `₹${(s as any).tab}`;
+    // 🆕 2026-05-20 (Khushi) — free tiles show pax capacity ("2p", "4p", "6p")
+    // so captain reads seat counts at a glance without tapping in.
+    if (s.state === "free") badge = `${t.seats}p`;
+    else if (s.state === "red" && (s as any).queue) badge = `#Q${(s as any).queue}`;
+    else if (s.state === "orange") {
+      // 🆕 2026-05-20 (Khushi) — orange: timer in the middle slot, ₹ moves to
+      // top-right corner (rendered separately below as `cornerPrice`).
+      badge = fmtMins((s as any).since);
+    }
+    else if (s.state === "green") {
+      const r = (s as any).r as HodTableReservation;
+      const tab = (s as any).tab;
+      if (tab > 0) badge = `₹${tab}`;
+      // 🆕 2026-05-20 (Khushi) — any green tile WITHOUT an order = "A"
+      // (assigned). Don't show "4p" for "arrived but not ordered" — Khushi
+      // found it confusing vs "FD2: A" / "SMK8: 4p" on the same screen.
+      else badge = "A";
+    }
 
     const onClick = () => {
       if (s.state === "free") onSelectFreeTable(t.id, activeFloor, floorData.label);
       else onSelectReservation(((s as any).r as HodTableReservation)._docId);
     };
+
+    // 🆕 2026-05-20 (Khushi) — top-right ₹ corner label for ORANGE tables.
+    // Captain sees running tab ₹ even while the timer occupies the middle slot.
+    let cornerPrice = "";
+    let cornerX = cx, cornerY = cy;
+    if (s.state === "orange") {
+      const orgR = (s as any).r as HodTableReservation;
+      const items = (orgR.tabRounds || []).flatMap(rd => rd.items || []);
+      const tab = items.length ? computeHodBreakdown(items).grandTotal : 0;
+      if (tab > 0) {
+        cornerPrice = `₹${tab}`;
+        if (t.sh === "rect") {
+          cornerX = (t.x || 0) + (t.w || 0) - 3;
+          cornerY = (t.y || 0) + 9;
+        } else if (t.sh === "circle") {
+          const rad = t.r || 0;
+          cornerX = cx + rad * 0.62;
+          cornerY = cy - rad * 0.55;
+        } else {
+          const rad = t.r || 0;
+          cornerX = cx + rad * 0.45;
+          cornerY = cy - rad * 0.35;
+        }
+      }
+    }
 
     return (
       <g key={t.id} onClick={onClick} className={blink ? "hod-flash" : undefined} style={{ cursor: "pointer", opacity: dimmed ? 0.28 : 1, transition: "opacity .2s" }}>
@@ -3981,9 +4026,17 @@ function FloorPlanView({
           {t.id}
         </text>
         <text x={cx} y={cy + 12} textAnchor="middle" fontSize="10" fontWeight={800}
-          fill={c.text} fontFamily="'Manrope','Space Grotesk',sans-serif" opacity={0.95} style={{ pointerEvents: "none" }}>
+          fill={s.state === "green" && badge.startsWith("₹") ? "#FFFFFF" : c.text}
+          fontFamily="'Manrope','Space Grotesk',sans-serif" opacity={0.95} style={{ pointerEvents: "none" }}>
           {badge || `${t.seats}p`}
         </text>
+        {cornerPrice && (
+          // 🆕 2026-05-20 (Khushi) — ₹ in BOLD WHITE for max contrast on orange.
+          <text x={cornerX} y={cornerY} textAnchor="end" fontSize="9" fontWeight={900}
+            fill="#FFFFFF" fontFamily="'Space Grotesk','Manrope',sans-serif" style={{ pointerEvents: "none" }}>
+            {cornerPrice}
+          </text>
+        )}
       </g>
     );
   };
@@ -4016,10 +4069,10 @@ function FloorPlanView({
 
       {/* Legend */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 10, fontWeight: 800, color: "rgba(242,235,211,.65)", padding: "0 2px 8px", letterSpacing: 0.4 }}>
-        <span><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(255,255,255,.05)", border: "1.5px solid #FFFFFF", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />FREE</span>
-        <span style={{ color: "#FCA5A5" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(239,68,68,.22)", border: "1.5px solid #EF4444", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />BILL / CALLING</span>
-        <span style={{ color: "#FDE68A" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(245,158,11,.22)", border: "1.5px solid #F59E0B", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />KOT PENDING</span>
-        <span style={{ color: "#86EFAC" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(34,197,94,.14)", border: "1.5px solid #22C55E", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />EATING</span>
+        <span><span style={{ display: "inline-block", width: 12, height: 12, background: "#FFFFFF", border: "1.5px solid #FFFFFF", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />TABLE AVAILABLE</span>
+        <span style={{ color: "#FCA5A5" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#EF4444", border: "1.5px solid #EF4444", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />TAKE ORDER / BILL</span>
+        <span style={{ color: "#FDE68A" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#F59E0B", border: "1.5px solid #F59E0B", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />WAITING FOR F&amp;B</span>
+        <span style={{ color: "#86EFAC" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#22C55E", border: "1.5px solid #22C55E", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />RUNNING TABLE</span>
       </div>
 
       {/* SVG floor plan */}
@@ -4045,17 +4098,37 @@ function FloorPlanView({
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {offMapReservations.map(r => {
+              // 🆕 2026-05-20 (Khushi) — proxy / off-map tables now use the
+              // SAME 3-color logic as on-map tables so captain reads the strip
+              // like a priority queue:
+              //   RED    = customer calling, bill requested, OR KOT pending
+              //   ORANGE = KOT printed, kitchen cooking (activated rounds)
+              //   GREEN  = served / assigned / no action needed
               const callOrBill = !!r.customerCallRequest || r.paymentStatus === "bill_requested";
-              const pending = (r.tabRounds || []).some(rd => rd.status === "preparing");
-              const ringColor = callOrBill ? "#EF4444" : pending ? "#F59E0B" : "#22C55E";
+              const preparing = (r.tabRounds || []).some(rd => rd.status === "preparing");
+              const activated = (r.tabRounds || []).some(rd => rd.status === "activated");
+              let state: "red" | "orange" | "green" = "green";
+              if (callOrBill || preparing) state = "red";
+              else if (activated) state = "orange";
+              const ringColor = state === "red" ? "#EF4444" : state === "orange" ? "#F59E0B" : "#22C55E";
+              const fillBg = state === "red" ? "rgba(239,68,68,.18)" : state === "orange" ? "rgba(245,158,11,.18)" : "rgba(34,197,94,.10)";
+              const allItems = (r.tabRounds || []).flatMap(rd => rd.items || []);
+              const tab = allItems.length ? computeHodBreakdown(allItems).grandTotal : 0;
+              let tail = "";
+              if (state === "red" && callOrBill) tail = r.paymentStatus === "bill_requested" ? " · BILL" : " · CALLING";
+              else if (state === "red") tail = " · KOT PENDING";
+              else if (state === "orange" && tab > 0) tail = ` · ₹${tab}`;
+              else if (state === "green" && tab > 0) tail = ` · ₹${tab}`;
+              else if (state === "green") tail = " · A";
               return (
                 <button key={r._docId} onClick={() => onSelectReservation(r._docId)}
-                  className={callOrBill || pending ? "hod-flash" : undefined}
+                  className={state !== "green" ? "hod-flash" : undefined}
                   style={{
-                    background: "rgba(0,0,0,.4)", border: `1.5px solid ${ringColor}`,
+                    background: fillBg, border: `1.5px solid ${ringColor}`,
                     borderRadius: 8, padding: "6px 10px", color: "#F2EBD3", fontSize: 12, fontWeight: 800, cursor: "pointer",
+                    boxShadow: state !== "green" ? `0 0 6px ${ringColor}` : undefined,
                   }}>
-                  {r.tableId} · {r.customerName || "Guest"}
+                  {r.tableId} · {r.customerName || "Guest"}{tail}
                 </button>
               );
             })}
