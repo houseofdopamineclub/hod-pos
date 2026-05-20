@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactElement } from "react";
 import { Link } from "wouter";
 import {
-  sha256, subscribeToHodReservations, diagnoseTableReservationDates, markGuestArrived, markRoundServed, markRoundActivated,
+  sha256, subscribeToHodReservations, subscribeActiveWaiterCalls, diagnoseTableReservationDates, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
@@ -23,6 +23,10 @@ import {
   // 2026-05-18 — Live menu category filtering (admin Menu CRM controls visibility + discount)
   subscribeToLiveMenuCategories, filterMenuByLiveCategories, type MenuCategory,
 } from "@/lib/firestore-hod";
+// 🆕 2026-05-20 (Khushi) — Floor-plan dashboard replaces the list view. The
+// HOD_TABLES const is ported from hodclub-patched/index.html so what captain
+// taps == what the customer booked. Floor keys: dance/dining/rooftop.
+import { HOD_TABLES, type FloorKey, type FloorTable } from "@/lib/floor-plan";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
 import { QrScanner } from "@/components/QrScanner";
 // 🔴 2026-05-09 — switched from menu-data.ts (314 legacy items) to canonical
@@ -1577,14 +1581,33 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   );
 }
 
-function WalkInModal({ captainName, existingTables, allReservations, onClose }: {
+function WalkInModal({ captainName, existingTables, allReservations, onClose, prefillTable }: {
   captainName: string; existingTables: string[]; allReservations: HodTableReservation[]; onClose: () => void;
+  // 🆕 2026-05-20 (Khushi) — when captain taps a FREE table on the floor-plan
+  // dashboard, jump straight to walk-in modal with the table pre-selected.
+  // Captain can still change the table if they typed by mistake.
+  prefillTable?: string;
 }) {
   const [customerName, setCustomerName] = useState("");
   const [countryCode, setCountryCode] = useState("91");
   const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [partySize, setPartySize] = useState(2);
-  const [selectedTable, setSelectedTable] = useState("");
+  // 🆕 2026-05-20 (Khushi) — arrival time captured up-front (defaults to "now"
+  // in IST HH:MM). Captain can edit if the guest is being seated late.
+  const [arrivalTime, setArrivalTime] = useState(() => {
+    const d = new Date();
+    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+  });
+  const [selectedTable, setSelectedTable] = useState(prefillTable || "");
+  // If captain came from the floor-plan "+" tap, lock the table list out of
+  // the UI — they already chose. Proxy tab still works (overrides selectedTable).
+  const tablePrefilled = !!prefillTable;
+  const prefillFloorLabel = useMemo(() => {
+    if (!prefillTable) return "";
+    const g = TABLE_OPTIONS.find(o => o.tables.includes(prefillTable));
+    return g?.label || "";
+  }, [prefillTable]);
   // 🔴 2026-05-13 (Khushi spec, round 6) — walk-in modal is in-house only.
   // Aggregator bookings come in pre-tagged from Zomato/Swiggy/EazyDiner via
   // the booking import path, never via captain-side seat-now. Hardcoding to
@@ -1642,14 +1665,14 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
         createdRef = await createProxyTable(
           proxyName, proxyFloor, floorOpt?.label || proxyFloor,
           customerName.trim(), fullPhone, partySize, captainName,
-          aggValue, discountPct
+          aggValue, discountPct, email.trim(), arrivalTime.trim()
         );
       } else {
         const opt = TABLE_OPTIONS.find((g) => g.tables.includes(selectedTable));
         createdRef = await createWalkInTable(
           selectedTable, opt?.floor || "", opt?.label || "",
           customerName.trim(), fullPhone, partySize, captainName,
-          aggValue, discountPct
+          aggValue, discountPct, email.trim(), arrivalTime.trim()
         );
       }
       // D3 — log the over-threshold walk-in discount approval (best-effort,
@@ -1669,8 +1692,14 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ background: "rgba(20,18,30,1)", border: "1px solid rgba(229,168,42,.3)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
         <div style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A", marginBottom: 4 }}>🚶 Seat Walk-In Guest</div>
-        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 16 }}>Create a new table for a walk-in customer</div>
+        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 16 }}>
+          {tablePrefilled ? "Fill in the guest details below — table already chosen." : "Create a new table for a walk-in customer"}
+        </div>
 
+        {/* Regular / Proxy tab toggle stays on top — captain might tap "+" on a
+            real table but realise the guest needs a Proxy-N instead (e.g. table
+            is held for a VIP coming in 10 min). Switching to Proxy clears the
+            prefilled table since proxies don't live on the map. */}
         <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
           <button onClick={() => setIsProxy(false)}
             style={{ flex: 1, padding: "8px 12px", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
@@ -1688,11 +1717,38 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
           </button>
         </div>
 
+        {/* 🆕 Prefilled-table banner — replaces the entire table-picker grid
+            when captain came from a "+" tap on the floor plan. Keeps modal
+            short and prevents accidental re-selection. */}
+        {tablePrefilled && !isProxy && (
+          <div style={{ background: "linear-gradient(135deg,rgba(229,168,42,.18),rgba(229,168,42,.08))", border: "1.5px solid rgba(229,168,42,.55)", borderRadius: 12, padding: 14, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,235,211,.7)", letterSpacing: 1, marginBottom: 2 }}>SEATING AT</div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: "#E5A82A", fontFamily: "'Playfair Display',serif", lineHeight: 1 }}>
+                {selectedTable || prefillTable}
+              </div>
+              {prefillFloorLabel && (
+                <div style={{ fontSize: 12, fontWeight: 700, color: "rgba(242,235,211,.75)", marginTop: 3, letterSpacing: 0.6 }}>
+                  {prefillFloorLabel.toUpperCase()}
+                </div>
+              )}
+            </div>
+            <button onClick={onClose}
+              style={{ background: "transparent", border: "1px solid rgba(242,235,211,.25)", color: "rgba(242,235,211,.7)", fontSize: 11, fontWeight: 800, padding: "6px 10px", borderRadius: 8, cursor: "pointer", letterSpacing: 0.5 }}>
+              CHANGE
+            </button>
+          </div>
+        )}
+
         <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Customer Name *</div>
         <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="e.g. Karan"
           style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
 
-        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Phone * (for WhatsApp menu link)</div>
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Email <span style={{ color: "rgba(242,235,211,.45)", fontWeight: 400 }}>(optional)</span></div>
+        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="guest@example.com" type="email" inputMode="email" autoCapitalize="none"
+          style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+
+        <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Phone * <span style={{ color: "rgba(242,235,211,.45)", fontWeight: 400 }}>(for WhatsApp menu link)</span></div>
         <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
           <select value={countryCode} onChange={(e) => setCountryCode(e.target.value)}
             style={{ width: 100, padding: "10px 8px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 16, outline: "none", fontFamily: "inherit", cursor: "pointer" }}>
@@ -1717,10 +1773,19 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
             style={{ flex: 1, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
         </div>
 
-        <div style={{ width: 100, marginBottom: 12 }}>
-          <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Guests</div>
-          <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
-            style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
+        {/* Guests + Arrival Time side-by-side — keeps the form short on phones
+            and groups the "when + how many" fields visually. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Guests *</div>
+            <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
+              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box" }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Arrival Time *</div>
+            <input type="time" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)}
+              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 17, outline: "none", boxSizing: "border-box", fontFamily: "inherit" }} />
+          </div>
         </div>
 
         {isProxy ? (
@@ -1742,7 +1807,7 @@ function WalkInModal({ captainName, existingTables, allReservations, onClose }: 
               ))}
             </div>
           </>
-        ) : (
+        ) : tablePrefilled ? null : (
           <>
             <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 6 }}>Select Table *</div>
             <div style={{ marginBottom: 12 }}>
@@ -2811,13 +2876,29 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
         })()}
         <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: billReq ? "rgba(239,68,68,.08)" : pending > 0 ? "rgba(229,168,42,.05)" : "" }}>
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-              <span style={{ fontSize: 21, fontWeight: 900, color: "#E5A82A" }}>{r.tableId}</span>
-              <span style={{ fontSize: 13, color: "rgba(242,235,211,.72)" }}>{r.floorLabel || r.floor}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+              {/* 🆕 2026-05-20 (Khushi) — header meta enlarged: tableId 26px gold,
+                  floor 15px white, arrival chip 13px. */}
+              {/* 🆕 2026-05-20 (Khushi) — tableId uses Space Grotesk (sans, not
+                  the cursive Playfair) so digits read as clean block numbers. */}
+              <span style={{ fontSize: 26, fontWeight: 900, color: "#E5A82A", letterSpacing: 0.4, fontFamily: "'Space Grotesk','Manrope',sans-serif" }}>{r.tableId}</span>
+              <span style={{ fontSize: 15, color: "#FFFFFF", fontWeight: 700, letterSpacing: 0.3 }}>{r.floorLabel || r.floor}</span>
               {r.actualArrivalTime ? (
-                <span style={{ background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>✓ ARRIVED {r.actualArrivalTime}</span>
+                <span style={{ background: "rgba(34,197,94,.18)", border: "1.5px solid rgba(34,197,94,.55)", color: "#86EFAC", fontSize: 13, fontWeight: 900, padding: "4px 10px", borderRadius: 10, letterSpacing: 0.5 }}>✓ ARRIVED {r.actualArrivalTime}</span>
               ) : (
-                <span style={{ background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>⏳ NOT ARRIVED</span>
+                // 🆕 2026-05-20 (Khushi) — restored the clickable "GUEST ARRIVED"
+                // button (was previously a passive ⏳ chip). Now captain can mark
+                // arrival in one tap from the booking detail modal. 🛟 FALLBACK:
+                // failures are swallowed silently so a network blip never blocks
+                // captain from moving on to taking the order.
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try { await markGuestArrived(r._docId, r.bookingRef, captainName); } catch (err) { console.warn("markGuestArrived failed", err); }
+                  }}
+                  style={{ background: "linear-gradient(135deg,#16A34A,#15803D)", border: "1.5px solid rgba(34,197,94,.7)", color: "#FFFFFF", fontSize: 13, fontWeight: 900, padding: "6px 12px", borderRadius: 10, cursor: "pointer", letterSpacing: 0.6, boxShadow: "0 2px 8px rgba(34,197,94,.3)", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
+                  ✓ GUEST ARRIVED
+                </button>
               )}
               {voided && <span title={`Bill voided by ${(r as any).voidedBy || "?"} — ${(r as any).voidReason || ""}${(r as any).voidNotes ? ` (${(r as any).voidNotes})` : ""}`} style={{ background: "rgba(239,68,68,.18)", border: "1px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 12, fontWeight: 900, padding: "3px 8px", borderRadius: 10, cursor: "help" }}>🚫 BILL VOIDED · ₹{Math.round((r as any).voidedBillTotal || 0)}</span>}
               {paid && (() => {
@@ -2855,8 +2936,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               {billReq && <span style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🧾 BILL DUE</span>}
               {pending > 0 && <span style={{ background: "rgba(229,168,42,.12)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10 }}>🔴 {pending} PENDING</span>}
             </div>
-            <div style={{ fontSize: 14, color: "#F2EBD3", fontWeight: 700 }}>{r.customerName}</div>
-            <div style={{ display: "flex", gap: 12, fontSize: 13, color: "rgba(242,235,211,.72)", marginTop: 3 }}>
+            {/* 🆕 2026-05-20 (Khushi) — guest name + meta enlarged to BOLD WHITE
+                so captain reads them from across the floor without squinting. */}
+            <div style={{ fontSize: 22, color: "#FFFFFF", fontWeight: 900, letterSpacing: 0.2, lineHeight: 1.15, marginTop: 2 }}>{r.customerName}</div>
+            <div style={{ display: "flex", gap: 16, fontSize: 16, color: "#FFFFFF", fontWeight: 800, marginTop: 6, flexWrap: "wrap" }}>
               <span>👥 {r.partySize || "?"}p</span>
               <span>🕐 {r.arrivalTime}</span>
               <span>📱 {r.phone}</span>
@@ -3622,17 +3705,378 @@ function BookingDetailModal({ r, captainName, playAlert, existingTables, allRese
             zIndex: 1 }}>
           ✕ CLOSE
         </button>
-        <TableCard r={r} captainName={captainName} playAlert={playAlert} existingTables={existingTables} allReservations={allReservations} />
+        {/* 🆕 2026-05-20 (Khushi) — soft gold glow ONLY, no outer border.
+            TableCard already paints its own 2px status-driven border; adding
+            another here caused the dual-outline Khushi flagged. */}
+        <div style={{ boxShadow: "0 8px 32px rgba(229,168,42,.22)", borderRadius: 16 }}>
+          <TableCard r={r} captainName={captainName} playAlert={playAlert} existingTables={existingTables} allReservations={allReservations} />
+        </div>
       </div>
+    </div>
+  );
+}
+
+// 🆕 2026-05-20 (Khushi spec) — Floor-plan dashboard replaces the list view.
+// 3 tabs (Ground/Dining/Rooftop) over the SAME SVG layout the customer site
+// uses, with 4 status states per table:
+//   WHITE  + plus    = free  (tap → walk-in modal pre-filled w/ tableId+floor)
+//   RED    blinking  = bill due / customer calling (shows queue # by oldest-first)
+//   ORANGE blinking  = waiting kitchen (shows mins since earliest preparing round)
+//   GREEN            = eating (shows running tab ₹ inclusive of taxes)
+// Tap any occupied table = open existing BookingDetailModal (no backend change).
+// 🛟 FALLBACK: if floor-plan crashes, KPI tiles + search bar remain functional
+// and captain can still open tables via the orphan-calls strip + waiter-call
+// banner. Walk-in CTA above is unchanged so seating still works.
+type FloorTableStatus =
+  | { state: "free" }
+  | { state: "red"; r: HodTableReservation; ts: number; queue?: number }
+  | { state: "orange"; r: HodTableReservation; since: number }
+  | { state: "green"; r: HodTableReservation; tab: number };
+
+function FloorPlanView({
+  reservations, customerSearch, pendingFilter, activeWaiterCallTableIds,
+  onSelectReservation, onSelectFreeTable,
+}: {
+  reservations: HodTableReservation[];
+  customerSearch: string;
+  // 🔴 2026-05-20 — when captain taps a KPI tile (Calling/Pending/Bill Due),
+  // we narrow the visual map to matching tables AND auto-jump to the floor
+  // that has at least one match, so a ping on the rooftop can't hide while
+  // captain stares at dining.
+  pendingFilter: "" | "pending" | "bill" | "calling";
+  activeWaiterCallTableIds: Set<string>;
+  onSelectReservation: (docId: string) => void;
+  onSelectFreeTable: (tableId: string, floorKey: FloorKey, floorLabel: string) => void;
+}) {
+  const [activeFloor, setActiveFloor] = useState<FloorKey>("dining");
+  // Tick every 30s so ORANGE timers refresh on screen without re-querying Firestore.
+  const [, setTick] = useState(0);
+  useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 30000); return () => clearInterval(id); }, []);
+
+  const q = customerSearch.trim().toLowerCase();
+
+  // 🔴 2026-05-20 — Reservations are matched by tableId ONLY (case-insensitive).
+  // Strict floor match was previously failing for legacy/aggregator rows whose
+  // `floor` field is missing or stale — those tables falsely showed as FREE.
+  // tableId is globally unique across all 3 floors (no collisions in
+  // TABLE_OPTIONS), so a tableId-only match is safe AND fail-open.
+  // 🛟 FALLBACK: reservations whose tableId is unknown to HOD_TABLES (e.g. POS
+  // has FD13/SMK3 but customer-site SVG never added those nodes, or a Proxy-N
+  // walk-in, or a typo) get surfaced in the off-map overflow strip below.
+  const reservationByTableId = useMemo(() => {
+    const m = new Map<string, HodTableReservation>();
+    reservations.forEach(r => {
+      if ((r as any).status === "cancelled") return;
+      const id = (r.tableId || "").toUpperCase();
+      if (id) m.set(id, r);
+    });
+    return m;
+  }, [reservations]);
+
+  // Compute red-state score (min of all known event timestamps) for a reservation.
+  const redEventTs = (r: HodTableReservation): number => {
+    const cands: number[] = [];
+    const callAtRaw = r.customerCallRequest && (r.customerCallRequest as any).at;
+    if (callAtRaw) { const t = new Date(callAtRaw).getTime(); if (t) cands.push(t); }
+    const billAtRaw = (r as any).billRequestedAt;
+    if (billAtRaw) { const t = new Date(billAtRaw).getTime(); if (t) cands.push(t); }
+    if (!cands.length) {
+      const t = new Date((r as any).bookedAt || 0).getTime();
+      if (t) cands.push(t);
+    }
+    return cands.length ? Math.min(...cands) : Date.now();
+  };
+
+  // Per-floor occupancy + per-floor matches for the active filter.
+  const floorStats = useMemo(() => {
+    const out: Record<FloorKey, { occ: number; matches: number }> = {
+      dance: { occ: 0, matches: 0 }, dining: { occ: 0, matches: 0 }, rooftop: { occ: 0, matches: 0 },
+    };
+    (Object.keys(HOD_TABLES) as FloorKey[]).forEach(fk => {
+      HOD_TABLES[fk].tables.forEach(t => {
+        const r = reservationByTableId.get(t.id.toUpperCase());
+        if (!r) return;
+        out[fk].occ += 1;
+        const isCalling = !!r.customerCallRequest || activeWaiterCallTableIds.has(t.id.toLowerCase());
+        const isBill = r.paymentStatus === "bill_requested";
+        const isPending = (r.tabRounds || []).some(rd => rd.status === "preparing");
+        const matchesQ = q && [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase().includes(q);
+        if (pendingFilter === "calling" && isCalling) out[fk].matches += 1;
+        else if (pendingFilter === "bill" && isBill) out[fk].matches += 1;
+        else if (pendingFilter === "pending" && isPending) out[fk].matches += 1;
+        else if (!pendingFilter && matchesQ) out[fk].matches += 1;
+      });
+    });
+    return out;
+  }, [reservationByTableId, activeWaiterCallTableIds, pendingFilter, q]);
+
+  // Auto-jump to floor with the first match when filter/search changes OR
+  // when a NEW realtime match arrives on another floor while a filter is on
+  // (e.g., new customerCallRequest on rooftop while captain stares at dining).
+  // Deps include floorStats so incoming pings re-trigger the jump check.
+  useEffect(() => {
+    if (!pendingFilter && !q) return;
+    if (floorStats[activeFloor].matches > 0) return;
+    const target = (["dance","dining","rooftop"] as FloorKey[]).find(k => floorStats[k].matches > 0);
+    if (target && target !== activeFloor) setActiveFloor(target);
+  }, [pendingFilter, q, floorStats, activeFloor]);
+
+  const floorData = HOD_TABLES[activeFloor];
+
+  const statuses = useMemo(() => {
+    const m = new Map<string, FloorTableStatus>();
+    floorData.tables.forEach((t) => {
+      const r = reservationByTableId.get(t.id.toUpperCase());
+      if (!r) { m.set(t.id, { state: "free" }); return; }
+      // Waiter-call header taps mirror to customerCallRequest but can fail
+      // silently (no linkedTableRef / prod rules) — so we also flip the table
+      // to RED if there's an active unmatched waiterCall keyed to this table.
+      const calling = !!r.customerCallRequest || activeWaiterCallTableIds.has(t.id.toLowerCase());
+      const billDue = r.paymentStatus === "bill_requested";
+      if (calling || billDue) {
+        m.set(t.id, { state: "red", r, ts: redEventTs(r) });
+        return;
+      }
+      // 🆕 2026-05-20 (Khushi spec correction) — RED vs ORANGE means:
+      //   RED    = round PLACED but KOT NOT YET PRINTED (status="preparing")
+      //            → captain action needed: HIT PRINT KOT
+      //   ORANGE = KOT printed, kitchen cooking (status="activated")
+      //            → waiting timer ticks from activatedAt
+      //   GREEN  = all rounds served (or no rounds)
+      // Previously preparing = orange, activated never surfaced as orange so a
+      // table whose KOT was already fired showed GREEN (FD17 bug Khushi caught).
+      const preparing = (r.tabRounds || []).filter(rd => rd.status === "preparing");
+      if (preparing.length) {
+        const earliest = preparing.reduce((min, rd) => {
+          const t = new Date((rd as any).placedAt || 0).getTime();
+          return t && t < min ? t : min;
+        }, Date.now());
+        m.set(t.id, { state: "red", r, ts: earliest });
+        return;
+      }
+      const activated = (r.tabRounds || []).filter(rd => rd.status === "activated");
+      if (activated.length) {
+        const earliest = activated.reduce((min, rd) => {
+          const t = new Date((rd as any).activatedAt || (rd as any).placedAt || 0).getTime();
+          return t && t < min ? t : min;
+        }, Date.now());
+        m.set(t.id, { state: "orange", r, since: earliest });
+        return;
+      }
+      // Reservation exists but no preparing/billed → seated & eating. Tab total
+      // is inclusive of taxes via computeHodBreakdown (same math the customer
+      // wallet shows, so captain ₹ == customer ₹).
+      const allItems = (r.tabRounds || []).flatMap(rd => rd.items || []);
+      const tab = allItems.length ? computeHodBreakdown(allItems).grandTotal : 0;
+      m.set(t.id, { state: "green", r, tab });
+    });
+    // Assign queue # to RED tables (oldest event first = #1).
+    const reds: Array<[string, FloorTableStatus]> = [];
+    m.forEach((s, id) => { if (s.state === "red") reds.push([id, s]); });
+    reds.sort((a, b) => (a[1] as any).ts - (b[1] as any).ts);
+    reds.forEach(([id, s], i) => m.set(id, { ...(s as any), queue: i + 1 }));
+    return m;
+  }, [floorData.tables, reservationByTableId, activeWaiterCallTableIds]);
+
+  // Filter-match set — tables matching the active KPI filter OR the search
+  // query. When non-empty, non-matching tables get dimmed so the captain's eye
+  // jumps straight to the action. Matched tables also get a dashed gold ring.
+  const filterMatches = useMemo(() => {
+    const s = new Set<string>();
+    floorData.tables.forEach((t) => {
+      const st = statuses.get(t.id);
+      if (!st || st.state === "free") return;
+      const r = (st as any).r as HodTableReservation;
+      if (pendingFilter === "calling" && st.state === "red" &&
+          (!!r.customerCallRequest || activeWaiterCallTableIds.has(t.id.toLowerCase()))) {
+        s.add(t.id); return;
+      }
+      if (pendingFilter === "bill" && r.paymentStatus === "bill_requested") { s.add(t.id); return; }
+      if (pendingFilter === "pending" && st.state === "orange") { s.add(t.id); return; }
+      if (!pendingFilter && q) {
+        const hay = [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase();
+        if (hay.includes(q)) s.add(t.id);
+      }
+    });
+    return s;
+  }, [q, pendingFilter, statuses, floorData.tables, activeWaiterCallTableIds]);
+  const hasActiveFilter = !!pendingFilter || !!q;
+
+  // 🛟 Off-map reservations: any non-cancelled reservation whose tableId is NOT
+  // a node on any floor of HOD_TABLES. Sources: POS-only tables (FD13/SMK3),
+  // Proxy-N walk-ins, typos, legacy aggregator imports. Surface as a strip
+  // below the map so captain can still open them — never silently hidden.
+  const allMapTableIds = useMemo(() => {
+    const s = new Set<string>();
+    (Object.keys(HOD_TABLES) as FloorKey[]).forEach(fk =>
+      HOD_TABLES[fk].tables.forEach(t => s.add(t.id.toUpperCase())));
+    return s;
+  }, []);
+  const offMapReservations = useMemo(() => {
+    return reservations.filter(r => {
+      if ((r as any).status === "cancelled") return false;
+      const id = (r.tableId || "").toUpperCase();
+      if (!id) return false;
+      return !allMapTableIds.has(id);
+    });
+  }, [reservations, allMapTableIds]);
+
+  const colorFor = (state: FloorTableStatus["state"]) => {
+    if (state === "free")   return { stroke: "#FFFFFF", fill: "rgba(255,255,255,.05)", text: "#FFFFFF" };
+    if (state === "red")    return { stroke: "#EF4444", fill: "rgba(239,68,68,.22)",   text: "#FCA5A5" };
+    if (state === "orange") return { stroke: "#F59E0B", fill: "rgba(245,158,11,.22)",  text: "#FDE68A" };
+    return                       { stroke: "#22C55E", fill: "rgba(34,197,94,.14)",   text: "#86EFAC" };
+  };
+  const fmtMins = (since: number) => {
+    const m = Math.max(0, Math.floor((Date.now() - since) / 60000));
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h${m % 60 ? (m % 60) + "m" : ""}`;
+  };
+
+  const renderTable = (t: FloorTable) => {
+    const s = statuses.get(t.id) || { state: "free" as const };
+    const c = colorFor(s.state);
+    const blink = s.state === "red" || s.state === "orange";
+    const matched = filterMatches.has(t.id);
+    // Dim when a filter is on AND this table isn't a match — but never dim a
+    // RED state (a customer-calling table must stay loud even outside filter).
+    const dimmed = hasActiveFilter && !matched && s.state !== "red";
+    let cx = 0, cy = 0;
+    let shape: ReactElement;
+    const shapeProps = {
+      fill: c.fill, stroke: c.stroke, strokeWidth: 2.2,
+      style: { cursor: "pointer", filter: blink ? `drop-shadow(0 0 6px ${c.stroke})` : undefined },
+    };
+    if (t.sh === "circle") {
+      cx = t.cx!; cy = t.cy!;
+      shape = <circle cx={cx} cy={cy} r={t.r} {...shapeProps} />;
+    } else if (t.sh === "rect") {
+      cx = (t.x || 0) + (t.w || 0) / 2;
+      cy = (t.y || 0) + (t.h || 0) / 2;
+      shape = <rect x={t.x} y={t.y} width={t.w} height={t.h} rx={6} {...shapeProps} />;
+    } else {
+      cx = t.cx!; cy = t.cy!;
+      const r = t.r!;
+      const points = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
+      shape = <polygon points={points} {...shapeProps} />;
+    }
+    let badge = "";
+    if (s.state === "free") badge = "+";
+    else if (s.state === "red" && (s as any).queue) badge = `#${(s as any).queue}`;
+    else if (s.state === "orange") badge = fmtMins((s as any).since);
+    else if (s.state === "green" && (s as any).tab > 0) badge = `₹${(s as any).tab}`;
+
+    const onClick = () => {
+      if (s.state === "free") onSelectFreeTable(t.id, activeFloor, floorData.label);
+      else onSelectReservation(((s as any).r as HodTableReservation)._docId);
+    };
+
+    return (
+      <g key={t.id} onClick={onClick} className={blink ? "hod-flash" : undefined} style={{ cursor: "pointer", opacity: dimmed ? 0.28 : 1, transition: "opacity .2s" }}>
+        {matched && t.sh === "circle" && <circle cx={cx} cy={cy} r={(t.r || 0) + 4} fill="none" stroke="#E5A82A" strokeWidth={1.5} strokeDasharray="3 3" />}
+        {matched && t.sh === "rect" && <rect x={(t.x || 0) - 4} y={(t.y || 0) - 4} width={(t.w || 0) + 8} height={(t.h || 0) + 8} rx={8} fill="none" stroke="#E5A82A" strokeWidth={1.5} strokeDasharray="3 3" />}
+        {shape}
+        <text x={cx} y={cy - 2} textAnchor="middle" fontSize="11" fontWeight={900}
+          fill={c.text} fontFamily="'Manrope','Space Grotesk',sans-serif" style={{ pointerEvents: "none" }}>
+          {t.id}
+        </text>
+        <text x={cx} y={cy + 12} textAnchor="middle" fontSize="10" fontWeight={800}
+          fill={c.text} fontFamily="'Manrope','Space Grotesk',sans-serif" opacity={0.95} style={{ pointerEvents: "none" }}>
+          {badge || `${t.seats}p`}
+        </text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ padding: "0 12px 120px" }}>
+      <style>{`@keyframes hodFlash { 0%,100%{opacity:1} 50%{opacity:.55} } .hod-flash { animation: hodFlash 1.2s ease-in-out infinite; }`}</style>
+
+      {/* Floor tabs — Ground/Dining/Rooftop */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, padding: "10px 0" }}>
+        {(["dance","dining","rooftop"] as FloorKey[]).map(k => {
+          const active = k === activeFloor;
+          const label = k === "dance" ? "GROUND" : k === "dining" ? "DINING" : "ROOFTOP";
+          // Show occupancy counter per tab. Uses the same tableId-only matching
+          // as the map itself (via floorStats) so legacy/aggregator rows with
+          // stale or missing `floor` aren't undercounted vs the visible state.
+          const occ = floorStats[k].occ;
+          return (
+            <button key={k} onClick={() => setActiveFloor(k)}
+              style={{
+                padding: "10px 8px", borderRadius: 10,
+                background: active ? "#E5A82A" : "rgba(255,255,255,.04)",
+                color: active ? "#0A0A0A" : "#F2EBD3",
+                border: `1.5px solid ${active ? "#E5A82A" : "rgba(255,255,255,.12)"}`,
+                fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer",
+              }}>{label} <span style={{ opacity: 0.7, fontWeight: 700 }}>{occ}/{HOD_TABLES[k].tables.length}</span></button>
+          );
+        })}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 10, fontWeight: 800, color: "rgba(242,235,211,.65)", padding: "0 2px 8px", letterSpacing: 0.4 }}>
+        <span><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(255,255,255,.05)", border: "1.5px solid #FFFFFF", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />FREE</span>
+        <span style={{ color: "#FCA5A5" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(239,68,68,.22)", border: "1.5px solid #EF4444", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />BILL / CALLING</span>
+        <span style={{ color: "#FDE68A" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(245,158,11,.22)", border: "1.5px solid #F59E0B", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />KOT PENDING</span>
+        <span style={{ color: "#86EFAC" }}><span style={{ display: "inline-block", width: 10, height: 10, background: "rgba(34,197,94,.14)", border: "1.5px solid #22C55E", borderRadius: 2, verticalAlign: "middle", marginRight: 4 }} />EATING</span>
+      </div>
+
+      {/* SVG floor plan */}
+      <div style={{ background: "rgba(12,8,22,.55)", borderRadius: 14, border: "1px solid rgba(229,168,42,.18)", padding: 8 }}>
+        <svg viewBox={floorData.vb} style={{ width: "100%", height: "auto", display: "block" }}
+          xmlns="http://www.w3.org/2000/svg">
+          {/* Background (stairs, walls, BAR labels) copied verbatim from the
+              customer site so the captain sees the same room layout the guest
+              sees when booking. Static SVG — no event handlers. */}
+          <g dangerouslySetInnerHTML={{ __html: floorData.bg }} />
+          {floorData.tables.map(renderTable)}
+        </svg>
+      </div>
+
+      {/* 🛟 Off-map reservations strip — tables that exist in POS but have no
+          node on the SVG (FD13/SMK3, Proxy-N walk-ins, typos, legacy imports).
+          Without this, taking a phone call for "Karthik on FD13" would leave
+          captain wondering where the table went. */}
+      {offMapReservations.length > 0 && (
+        <div style={{ marginTop: 10, background: "rgba(229,168,42,.06)", border: "1px dashed rgba(229,168,42,.35)", borderRadius: 10, padding: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 900, color: "#E5A82A", letterSpacing: 0.6, marginBottom: 6 }}>
+            🪑 {offMapReservations.length} TABLE{offMapReservations.length === 1 ? "" : "S"} NOT ON MAP — TAP TO OPEN
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {offMapReservations.map(r => {
+              const callOrBill = !!r.customerCallRequest || r.paymentStatus === "bill_requested";
+              const pending = (r.tabRounds || []).some(rd => rd.status === "preparing");
+              const ringColor = callOrBill ? "#EF4444" : pending ? "#F59E0B" : "#22C55E";
+              return (
+                <button key={r._docId} onClick={() => onSelectReservation(r._docId)}
+                  className={callOrBill || pending ? "hod-flash" : undefined}
+                  style={{
+                    background: "rgba(0,0,0,.4)", border: `1.5px solid ${ringColor}`,
+                    borderRadius: 8, padding: "6px 10px", color: "#F2EBD3", fontSize: 12, fontWeight: 800, cursor: "pointer",
+                  }}>
+                  {r.tableId} · {r.customerName || "Guest"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function CaptainDashboard({ captainName }: { captainName: string }) {
   const [date, setDate] = useState(() => new Date().toISOString().split("T")[0]);
-  const [floor, setFloor] = useState("");
+  // 🆕 2026-05-20 (Khushi) — floor filter retired; the new FloorPlanView has
+  // 3 floor tabs of its own. Kept as "" so existing filter logic below is a no-op.
+  const floor = "";
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [showWalkIn, setShowWalkIn] = useState(false);
+  // 🆕 2026-05-20 (Khushi) — when captain taps a FREE table on the floor plan,
+  // we open the walk-in modal with the tableId pre-selected. State drives the
+  // `prefillTable` prop on <WalkInModal/>.
+  const [walkInPrefill, setWalkInPrefill] = useState<string | undefined>(undefined);
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
   const [allReservations, setAllReservations] = useState<HodTableReservation[]>([]);
   const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" });
@@ -3649,6 +4093,25 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const billCountRef = useRef(0);
   const callingCountRef = useRef(0);
   const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 🔔 2026-05-20 (Khushi bug) — Calling tile must also count active waiterCalls
+  // (header "Call Waiter" button), not just tableReservations.customerCallRequest.
+  // The mirror to customerCallRequest can fail silently (prod rules / no
+  // linkedTableRef), but the waiterCalls write always succeeds and drives the
+  // red banner. Subscribing here gives the tile a second source of truth that
+  // matches what the captain SEES (banner on → count ≥ 1; ACK → count drops).
+  const [activeWaiterCallsList, setActiveWaiterCallsList] = useState<Array<{ id: string; tableId: string | null; floorLabel: string | null; customerName: string; coverRef: string }>>([]);
+  useEffect(() => {
+    const unsub = subscribeActiveWaiterCalls((calls) => {
+      // Only pending = unacknowledged. Acknowledged tails (≤90s) still appear
+      // in the banner but should NOT keep the tile lit — captain has handled it.
+      const pending = calls.filter((c) => c.status === "pending").map((c) => ({
+        id: c.id, tableId: c.tableId ?? null, floorLabel: c.floorLabel ?? null, customerName: c.customerName, coverRef: c.coverRef,
+      }));
+      setActiveWaiterCallsList(pending);
+    });
+    return () => unsub();
+  }, []);
+  const activeWaiterCalls = activeWaiterCallsList.length;
 
   // 2026-05-16 one-shot diagnostic — on mount, dump ALL tableReservations
   // grouped by `date` so we can see if customer-site bookings are landing
@@ -3714,13 +4177,33 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
   const pending = reservations.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
   const billDue = reservations.filter((r) => r.paymentStatus === "bill_requested").length;
-  const calling = reservations.filter((r) => !!r.customerCallRequest).length;
+  // 🔔 Combine both signals so the tile matches the banner. customerCallRequest
+  // = "AT MY TABLE" pings (linked tables only). activeWaiterCalls = header
+  // Call Waiter button (every cover). Sum is an UPPER BOUND — a single header
+  // tap can write BOTH (mirror + waiterCalls.add), so one real-world call may
+  // show as 2 on the tile. Acceptable: still tells captain "walk over now".
+  // Clearing: banner ACK drops the waiterCalls contribution; ✓ ON IT on the
+  // table card drops customerCallRequest. Tile hits 0 only when BOTH are clear.
+  const calling = reservations.filter((r) => !!r.customerCallRequest).length + activeWaiterCalls;
 
+  // 🔔 2026-05-20 (Khushi) — Calling filter must match what's drawn the tile.
+  // The tile counts customerCallRequest tables + pending waiterCalls. So the
+  // filtered list must also include reservations whose tableId matches an
+  // active waiterCall (case-insensitive, since hodclub.in may write "fd10"
+  // while POS stores "FD10"). Unmatched waiterCalls (e.g. bar walk-in with no
+  // table, or a typo) get surfaced in a separate "orphan calls" strip above
+  // the list — handled below in render via `orphanWaiterCalls`.
+  const waiterCallTableIds = useMemo(
+    () => new Set(activeWaiterCallsList.map((c) => (c.tableId || "").toLowerCase()).filter(Boolean)),
+    [activeWaiterCallsList]
+  );
   const displayedReservations = useMemo(() => {
     let list = reservations;
     if (pendingFilter === "pending") list = list.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
     else if (pendingFilter === "bill") list = list.filter(r => r.paymentStatus === "bill_requested");
-    else if (pendingFilter === "calling") list = list.filter(r => !!r.customerCallRequest);
+    else if (pendingFilter === "calling") {
+      list = list.filter(r => !!r.customerCallRequest || waiterCallTableIds.has((r.tableId || "").toLowerCase()));
+    }
     // 🔴 2026-05-20 (Khushi) — always sort customer-calling tables to the TOP
     // of the list regardless of filter, so a ping is impossible to miss even
     // if dozens of tables are open. Stable sort preserves prior order otherwise.
@@ -3757,16 +4240,9 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       </div>
 
-      <div style={{ padding: "10px 16px", display: "flex", gap: 8, background: "rgba(255,255,255,.02)", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
+      <div style={{ padding: "10px 16px", background: "rgba(255,255,255,.02)", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
-          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }} />
-        <select value={floor} onChange={(e) => setFloor(e.target.value)}
-          style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }}>
-          <option value="">All Floors</option>
-          <option value="dance">Dance Floor</option>
-          <option value="dining">Dining</option>
-          <option value="rooftop">Rooftop</option>
-        </select>
+          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, padding: "10px 16px" }}>
@@ -3797,6 +4273,42 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       )}
 
+      {/* 🔔 2026-05-20 (Khushi) — surface waiterCalls that don't map to any
+          open reservation today (bar walk-in / closed table / typo / different
+          date). Without this, the Calling tile would show "1" but the list
+          would say "No matching tables". The strip mirrors the top banner so
+          captain can ACK from here too. Only shown when Calling filter is on. */}
+      {pendingFilter === "calling" && (() => {
+        const reservedIds = new Set(reservations.map((r) => (r.tableId || "").toLowerCase()));
+        const orphans = activeWaiterCallsList.filter((c) => {
+          const tid = (c.tableId || "").toLowerCase();
+          return !tid || !reservedIds.has(tid);
+        });
+        if (orphans.length === 0) return null;
+        return (
+          <div style={{ padding: "0 16px", marginBottom: 8 }}>
+            {orphans.map((c) => (
+              <div key={c.id}
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                  background: "rgba(184,50,39,.12)", border: "1.5px solid rgba(239,68,68,.5)", borderRadius: 10,
+                  padding: "10px 12px", marginBottom: 6 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", letterSpacing: 0.4 }}>
+                    🛎 CALL · {c.customerName || "Guest"}
+                  </div>
+                  <div style={{ fontSize: 11, color: "rgba(242,235,211,.75)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {c.tableId ? `Table ${c.tableId}` : "No table linked"}
+                    {c.floorLabel ? ` · ${c.floorLabel}` : ""}
+                    {c.coverRef ? ` · ${c.coverRef}` : ""}
+                    {" — not in today's open tables. Walk over or use top banner ACK."}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       {/* 2026-05-13 — Khushi spec: customer search bar.
           Searches name, phone, table id, and booking ref together. */}
       <div style={{ padding: "10px 16px 0", position: "relative" }}>
@@ -3816,31 +4328,32 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       </div>
 
       <div style={{ padding: "10px 16px 0" }}>
-        <button onClick={() => setShowWalkIn(true)}
+        <button onClick={() => { setWalkInPrefill(undefined); setShowWalkIn(true); }}
           style={{ width: "100%", padding: 12, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.15),rgba(229,168,42,.08))", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 16, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
           🚶 + Seat Walk-In Guest
         </button>
       </div>
 
-      <div style={{ padding: "10px 16px 120px" }}>
-        {displayedReservations.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 60, color: "rgba(242,235,211,.72)" }}>{customerSearch ? `No matches for "${customerSearch}".` : pendingFilter ? "No matching tables." : "No reservations today."}</div>
-        ) : (
-          displayedReservations.map((r) => (
-            <BookingRow key={r._docId} r={r}
-              captainName={captainName}
-              existingTables={allTableIds}
-              allReservations={allReservations}
-              onClick={() => setSelectedDocId(r._docId)} />
-          ))
-        )}
-      </div>
+      {/* 🆕 2026-05-20 (Khushi) — FLOOR-PLAN dashboard replaces the list. Same
+          SVG layout the customer sees on hodclub.in/?book=table. KPI tiles,
+          search bar, and Seat Walk-In CTA above remain unchanged. Tap a free
+          table = walk-in modal pre-filled. Tap an occupied table = existing
+          BookingDetailModal opens (no backend change). */}
+      <FloorPlanView
+        reservations={reservations}
+        customerSearch={pendingFilter ? "" : customerSearch /* KPI filters override search highlighting */}
+        pendingFilter={pendingFilter}
+        activeWaiterCallTableIds={waiterCallTableIds}
+        onSelectReservation={(docId) => setSelectedDocId(docId)}
+        onSelectFreeTable={(tableId) => { setWalkInPrefill(tableId); setShowWalkIn(true); }}
+      />
 
       {showWalkIn && (
         <WalkInModal captainName={captainName}
           existingTables={allTableIds}
           allReservations={allReservations}
-          onClose={() => setShowWalkIn(false)} />
+          prefillTable={walkInPrefill}
+          onClose={() => { setShowWalkIn(false); setWalkInPrefill(undefined); }} />
       )}
 
       {selectedDocId && (() => {

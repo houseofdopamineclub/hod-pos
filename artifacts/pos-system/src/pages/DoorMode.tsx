@@ -39,7 +39,7 @@ import {
   type EdcVendor, type EdcTransactionDoc,
 } from "@/lib/edc-charge";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable } from "@/lib/firestore-hod";
+import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable, subscribeToDoorPricingSettings, subscribeToAllCovers } from "@/lib/firestore-hod";
 import WaitlistView from "@/components/WaitlistView";
 import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
 import { useToast } from "@/hooks/use-toast";
@@ -1434,6 +1434,16 @@ function isGroupBooking(b: HodBooking) {
   if (tt && tt.includes("group")) return true;
   return false;
 }
+// 🔴 2026-05-20 (Khushi) — CORPORATE bookings live in `tableReservations`
+// (created via createCorporateTableBooking which writes source="corporate" +
+// isCorporateBooking:true). This helper recognises them so the new CORPORATE
+// dashboard tab can pull them out of the tables stream — and the TABLES tab
+// can exclude them so they don't double-count.
+function isCorporateTableRes(r: HodTableReservation) {
+  if ((r as any).isCorporateBooking === true) return true;
+  const s = String((r as any).source || "").toLowerCase();
+  return s === "corporate";
+}
 function isOnlyEntryBooking(b: HodBooking) {
   // Source of truth: the customer wallet (separate `hodclub.in` repo) writes
   // `entryType: "entryonly"` (no underscore, lowercase) on the booking doc
@@ -1501,7 +1511,10 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
   todayBookings = todayBookings.filter((b) => !isGuestlistBooking(b));
   // Then narrow to this tab's segment.
   if (kind === "tickets") {
-    todayBookings = todayBookings.filter((b) => !isGroupBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b));
+    // 🔴 2026-05-20 (Khushi) — GROUP dashboard tab removed. All group bookings
+    // now flow into TICKETS (they're just regular party-size bookings — no need
+    // for a dedicated tab). Per-head GROUP, bookMode:group, etc. all land here.
+    todayBookings = todayBookings.filter((b) => !isOnlyEntryBooking(b) && !isTableBooking(b));
   } else if (kind === "group") {
     todayBookings = todayBookings.filter((b) => isGroupBooking(b));
   } else if (kind === "onlyentry") {
@@ -1915,7 +1928,7 @@ const AGG_FILTERS: Array<{ key: string; label: string }> = [
   { key: "zomato",    label: "ZOMATO" },
 ];
 
-function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusConsumed }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; focusDocId?: string | null; onFocusConsumed?: () => void }) {
+function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusConsumed, sourceFilter }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; focusDocId?: string | null; onFocusConsumed?: () => void; sourceFilter?: "corporate" | "non-corporate" }) {
   const { toast } = useToast();
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [aggFilter, setAggFilter] = useState<string>("all");
@@ -2005,7 +2018,14 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
     );
   }, [reservations, today, calToday]);
 
-  const activeAll = reservations.filter((r) => (r as any).status !== "cancelled");
+  const activeAllPreFilter = reservations.filter((r) => (r as any).status !== "cancelled");
+  // 🔴 2026-05-20 (Khushi) — corporate split. Corporate bookings now have their
+  // own dashboard tab; TABLES tab excludes them so they don't double-count.
+  const activeAll = sourceFilter === "corporate"
+    ? activeAllPreFilter.filter(isCorporateTableRes)
+    : sourceFilter === "non-corporate"
+      ? activeAllPreFilter.filter((r) => !isCorporateTableRes(r))
+      : activeAllPreFilter;
   // Tables are physical assets, not per-event — door staff need to see EVERY
   // reservation arriving tonight regardless of which event chip is selected.
   // The dual-date subscription above already constrains to tonight's window,
@@ -2799,50 +2819,42 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
     } finally { setBusy(false); }
   };
 
-  // 🔴 2026-05-20 (Khushi) — high-visibility theme: gold outlines + gold text
-  // on every field so all 3 tabs (Tables / Aggregator / Corporate) are clearly
-  // legible in low light at the door. Applied via shared styles so all inputs
-  // and labels update together.
-  // 🔴 2026-05-20 (Khushi) — keep gold OUTLINES for visibility, but text is
-  // WHITE (not yellow) and a touch larger so it reads cleanly at the door.
+  // 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — softer, less-shouty input chrome.
+  // Was: bright gold 1.5px borders on every field (felt like a tax form). Now:
+  // subtle warm border + warmer fill so the gold accent is RESERVED for the
+  // active tab + CTA. Same legibility (white 16px), but premium not loud.
   const inputStyle: React.CSSProperties = {
-    width: "100%", padding: 13, borderRadius: 8,
-    background: "rgba(200,166,69,0.06)", border: "1.5px solid #C8A645",
-    color: "#FFFFFF", fontSize: 16, fontWeight: 700, marginTop: 4, boxSizing: "border-box",
-    outline: "none",
+    width: "100%", padding: "13px 14px", borderRadius: 10,
+    background: "rgba(255,255,255,0.04)", border: "1px solid rgba(200,166,69,0.32)",
+    color: "#FFFFFF", fontSize: 15.5, fontWeight: 600, marginTop: 6, boxSizing: "border-box",
+    outline: "none", transition: "border-color .15s ease",
   };
-  // 🔴 2026-05-20 (Khushi) — field labels (GUEST NAME, PHONE, PAX, EMAIL,
-  // ARRIVAL TIME, BOOKING DATE, ASSIGN TABLE) bumped to gold + bigger so
-  // they read as bold headings instead of muted whispers.
+  // 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — labels are now muted ivory caps
+  // (was bright gold). They read as quiet section headers, not screaming chips.
   const labelStyle: React.CSSProperties = {
-    fontSize: 13, fontWeight: 900, letterSpacing: "1.2px", textTransform: "uppercase",
-    color: "#F2C744", marginBottom: 6, textShadow: "0 1px 0 rgba(0,0,0,.4)",
+    fontSize: 11, fontWeight: 800, letterSpacing: "1.4px", textTransform: "uppercase",
+    color: "rgba(255,255,255,0.62)",
   };
-  // 🔴 2026-05-20 (Khushi) — classic "file-folder" tab look. Each tab has
-  // rounded TOP corners only; the active tab bleeds into the heading bar
-  // below (no bottom border) for a real tabbed-folder feel.
+  // 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — flat segmented pill (was a
+  // double-bordered file-folder tab look that doubled up the yellow chrome).
+  // Active tab gets a soft gold fill + black text; inactive is transparent
+  // with a faint warm tint. One border line under the whole strip.
   const tabBtn = (active: boolean): React.CSSProperties => ({
-    flex: 1, padding: "12px 4px",
-    borderTopLeftRadius: 10, borderTopRightRadius: 10,
-    borderBottomLeftRadius: 0, borderBottomRightRadius: 0,
-    background: active ? "#C8A645" : "rgba(200,166,69,0.06)",
-    borderTop: "2px solid #C8A645",
-    borderLeft: "2px solid #C8A645",
-    borderRight: "2px solid #C8A645",
-    borderBottom: active ? "2px solid #C8A645" : "2px solid #C8A645",
-    marginBottom: active ? -2 : 0,
-    color: active ? "#0A0A0A" : "#FFFFFF",
-    fontSize: 13, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.6px",
+    flex: 1, padding: "11px 6px",
+    borderRadius: 999,
+    background: active ? "linear-gradient(180deg, #E6C361 0%, #C8A645 100%)" : "transparent",
+    border: "none",
+    color: active ? "#0A0A0A" : "rgba(255,255,255,0.72)",
+    fontSize: 12.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.6px",
     cursor: "pointer",
-    boxShadow: active ? "0 -2px 8px rgba(200,166,69,0.35)" : "none",
-    position: "relative",
-    zIndex: active ? 2 : 1,
+    boxShadow: active ? "0 2px 12px rgba(200,166,69,0.32)" : "none",
+    transition: "all .18s ease",
   });
 
   const subtitle =
-    tab === "tables"     ? "In-house / walk-in / phone reservation" :
+    tab === "tables"     ? "In-house · walk-in · phone reservation" :
     tab === "aggregator" ? "Zomato · Swiggy Dineout · Swiggy Scenes · EazyDiner" :
-                           "Corporate / group booking (company event)";
+                           "Company event · pre-booked party · corporate billing";
 
   const nameLabel = tab === "corporate" ? "Contact Name" : "Guest Name";
   const ctaLabel  =
@@ -2852,41 +2864,36 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0A0A0A", border: "2px solid #C8A645", borderRadius: 14, padding: 18, maxWidth: 460, width: "100%", marginTop: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h2 style={{ fontFamily: "'Playfair Display',serif", color: "#F2C744", fontSize: 22, fontWeight: 900, margin: 0 }}>🍽 NEW TABLE BOOKING</h2>
-          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "#fff", fontSize: 22, cursor: "pointer" }}>×</button>
+      {/* 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — single hairline gold border,
+          deeper black fill, subtle inner glow. Less "yellow box" — more
+          "blacked-out lounge menu". */}
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: "linear-gradient(180deg, #0E0E10 0%, #0A0A0A 100%)",
+        border: "1px solid rgba(200,166,69,0.45)",
+        borderRadius: 16, padding: 20, maxWidth: 460, width: "100%", marginTop: 16,
+        boxShadow: "0 20px 60px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.03)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h2 style={{ fontFamily: "'Playfair Display',serif", color: "#F2C744", fontSize: 22, fontWeight: 900, margin: 0, letterSpacing: 0.3 }}>New Table Booking</h2>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "rgba(255,255,255,0.7)", fontSize: 26, cursor: "pointer", lineHeight: 1, padding: "0 4px" }}>×</button>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", letterSpacing: 1.2, textTransform: "uppercase", fontWeight: 700, marginBottom: 16 }}>
+          Reservations · House of Dopamine
         </div>
 
-        {/* 🔴 2026-05-20 (Khushi) — file-folder tab look. The 3 tabs sit on
-            top of a gold heading bar; active tab connects into the bar so it
-            visually reads as one continuous "open folder". */}
-        <div style={{ display: "flex", gap: 4, alignItems: "flex-end" }}>
-          <button onClick={() => switchTab("tables")}     style={tabBtn(tab === "tables")}>🍽 Tables</button>
-          <button onClick={() => switchTab("aggregator")} style={tabBtn(tab === "aggregator")}>📲 Aggregator</button>
-          <button onClick={() => switchTab("corporate")}  style={tabBtn(tab === "corporate")}>🏢 Corporate</button>
-        </div>
-
-        {/* Folder "open page" — heading bar with the active tab name */}
+        {/* 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — segmented pill control on a
+            single dark track. No double border, no heading-band duplication. */}
         <div style={{
-          border: "2px solid #C8A645", borderTop: "2px solid #C8A645",
-          borderBottomLeftRadius: 12, borderBottomRightRadius: 12,
-          borderTopLeftRadius: 0, borderTopRightRadius: 12,
-          background: "linear-gradient(180deg, rgba(200,166,69,0.18) 0%, rgba(200,166,69,0.04) 100%)",
-          padding: "12px 14px", marginBottom: 12, position: "relative", zIndex: 1,
+          display: "flex", gap: 4, padding: 4, marginBottom: 10,
+          background: "rgba(255,255,255,0.04)", borderRadius: 999,
+          border: "1px solid rgba(200,166,69,0.18)",
         }}>
-          <div style={{
-            fontFamily: "'Playfair Display', serif",
-            fontSize: 20, fontWeight: 900, color: "#F2C744",
-            letterSpacing: "0.5px", lineHeight: 1.1,
-          }}>
-            {tab === "tables"     && "🍽 IN-HOUSE / WALK-IN"}
-            {tab === "aggregator" && "📲 AGGREGATOR BOOKING"}
-            {tab === "corporate"  && "🏢 CORPORATE / GROUP"}
-          </div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", marginTop: 4, fontWeight: 600 }}>
-            {subtitle}
-          </div>
+          <button onClick={() => switchTab("tables")}     style={tabBtn(tab === "tables")}>Tables</button>
+          <button onClick={() => switchTab("aggregator")} style={tabBtn(tab === "aggregator")}>Aggregator</button>
+          <button onClick={() => switchTab("corporate")}  style={tabBtn(tab === "corporate")}>Corporate</button>
+        </div>
+        <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.55)", marginBottom: 18, textAlign: "center", fontWeight: 600, letterSpacing: 0.3 }}>
+          {subtitle}
         </div>
 
         {/* 🔴 2026-05-20 (Khushi) — big tappable calendar field + quick-pick
@@ -2930,10 +2937,10 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
             try { el.focus(); el.click(); } catch {}
           };
           return (
-            <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
+            <div style={{ marginBottom: 12, border: "1px solid rgba(200,166,69,0.22)", borderRadius: 12, padding: 12, background: "rgba(255,255,255,0.02)" }}>
               <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>📅 Booking Date</span>
-                <span style={{ color: "#F2C744", fontSize: 11, letterSpacing: 0 }}>{fmtPretty(bookingDate)}</span>
+                <span>Booking Date</span>
+                <span style={{ color: "#F2C744", fontSize: 11.5, letterSpacing: 0.3, fontWeight: 700, textTransform: "none" }}>{fmtPretty(bookingDate)}</span>
               </div>
               {/* Quick-pick chips + PICK DATE (opens calendar) */}
               <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
@@ -3017,11 +3024,12 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               <input value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="Acme Corp, Bengaluru Bachelor Party, etc." style={inputStyle} />
             </div>
 
-            {/* 🔴 2026-05-20 (Khushi) — ADVANCE captured at booking time */}
-            <div style={{ marginBottom: 10, border: "1.5px solid #C8A645", borderRadius: 10, padding: 10, background: "rgba(200,166,69,0.04)" }}>
-              <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between" }}>
-                <span>💰 Advance Paid (optional)</span>
-                <span style={{ color: advanceAmount > 0 ? "#22C55E" : "rgba(255,255,255,0.4)", letterSpacing: 0 }}>
+            {/* 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — softened chrome to match
+                the main modal frame; gold reserved for accents not enclosures. */}
+            <div style={{ marginBottom: 12, border: "1px solid rgba(200,166,69,0.22)", borderRadius: 12, padding: 12, background: "rgba(255,255,255,0.02)" }}>
+              <div style={{ ...labelStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>Advance Paid (optional)</span>
+                <span style={{ color: advanceAmount > 0 ? "#34D399" : "rgba(255,255,255,0.35)", letterSpacing: 0, fontWeight: 800, textTransform: "none", fontSize: 12 }}>
                   ₹{advanceAmount.toLocaleString("en-IN")}
                 </span>
               </div>
@@ -3498,6 +3506,29 @@ function UnifiedWalkInModal({
   // the single source of truth across customer site + door tablet.
   const [groupMode, setGroupMode] = useState<"entry" | "table4" | "vvip">("entry");
 
+  // 🆕 2026-05-20 (Khushi) — CUSTOM BARGAIN PRICE.
+  // Gated by admin toggle (appSettings/doorPricing). When OFF (default),
+  // prices lock to event values and `entryPriceStr` input is read-only.
+  // When ON, door staff can override the unit price per walk-in to handle
+  // Koramangala bargain customers (cover / entry / group / table4 / vvip).
+  // 🛟 FALLBACK: blank custom price = use default; subscribe error = OFF.
+  const ENTRY_ONLY_BASELINE = 500; // canonical entry-only default; bargain only above/below this is audited.
+  const [priceOverrideEnabled, setPriceOverrideEnabled] = useState(false);
+  const [customPriceStr, setCustomPriceStr] = useState("");
+  useEffect(() => subscribeToDoorPricingSettings((s) => setPriceOverrideEnabled(!!s.priceOverrideEnabled)), []);
+  // Reset custom price + entry-only field whenever booking type / tier /
+  // group mode changes so a negotiated price doesn't leak between flows.
+  useEffect(() => {
+    setCustomPriceStr("");
+    setEntryPriceStr(String(ENTRY_ONLY_BASELINE));
+  }, [kind, tier, groupMode]);
+  // 🔒 When admin toggle flips OFF mid-modal, snap entry-only price back
+  // to the canonical baseline so a stale bargain price can't slip through.
+  useEffect(() => {
+    if (!priceOverrideEnabled) setEntryPriceStr(String(ENTRY_ONLY_BASELINE));
+  }, [priceOverrideEnabled]);
+  const customPrice = parseInt(customPriceStr || "0", 10) || 0;
+
   // 2026-05-16 (Khushi v2): payment method picker — 4 ways the door girl
   // can collect (cash / upi / card / split). ONLINE was removed at her
   // request — door walk-ins are always in-person; if customer wants to
@@ -3559,10 +3590,20 @@ function UnifiedWalkInModal({
   const groupSeatsFor = (m: "entry" | "table4" | "vvip") =>
     m === "vvip" ? 6 : m === "table4" ? 4 : partySize;
 
-  const unit =
+  // Default unit price for the current selection (event-driven).
+  const defaultUnit =
     kind === "cover" ? tierPrices[tier].price :
     kind === "onlyentry" ? entryPrice :
     kind === "group" ? groupUnitFor(groupMode) : 0;
+  // 🆕 2026-05-20: when admin toggle ON + door girl typed a custom price,
+  // override the unit. Entry-Only uses its dedicated `entryPriceStr` field
+  // (which is the bargain field for that flow), so its override is detected
+  // as "price differs from ENTRY_ONLY_BASELINE while toggle is ON".
+  // Custom price never applies to guestlist (free).
+  const usingCustomCoverOrGroup = priceOverrideEnabled && customPrice > 0 && (kind === "cover" || kind === "group");
+  const usingCustomEntry = priceOverrideEnabled && kind === "onlyentry" && entryPrice !== ENTRY_ONLY_BASELINE;
+  const usingCustom = usingCustomCoverOrGroup || usingCustomEntry;
+  const unit = usingCustomCoverOrGroup ? customPrice : defaultUnit;
   const qty =
     kind === "group" ? (groupMode === "entry" ? partySize : 1) :
     tickets;
@@ -3643,7 +3684,14 @@ function UnifiedWalkInModal({
           tableType: kind === "group"
             ? (groupMode === "vvip" ? "VVIP" : groupMode === "table4" ? "TABLE4" : "")
             : undefined,
-          notes: "",
+          // 🆕 2026-05-20 (Khushi) — bargain-price audit trail in notes.
+          // When door girl uses custom price, stamp original + override so
+          // manager can spot non-standard amounts in Reports + Sheets.
+          notes: usingCustomCoverOrGroup
+            ? `PRICE OVERRIDE: ₹${customPrice}/unit (default ₹${defaultUnit}) by ${agentName}`
+            : usingCustomEntry
+              ? `PRICE OVERRIDE: ₹${entryPrice}/unit (default ₹${ENTRY_ONLY_BASELINE}) by ${agentName}`
+              : "",
           staffName: agentName,
           paymentMethod: total === 0 ? "comp" : payMethod,
           paymentRef,
@@ -4020,17 +4068,55 @@ function UnifiedWalkInModal({
           </div>
         )}
 
-        {/* Entry-Only price + Group fields */}
+        {/* Entry-Only price — editable only when admin toggle is ON.
+            🆕 2026-05-20 (Khushi): gated behind appSettings/doorPricing
+            so manager controls if door girls can bargain. When OFF the
+            field shows the locked default and door girl cannot edit. */}
         {kind === "onlyentry" && (
           <div style={{ marginBottom: 16 }}>
-            <div style={lbl}>PRICE PER ENTRY (₹)</div>
+            <div style={lbl}>
+              PRICE PER ENTRY (₹)
+              {priceOverrideEnabled
+                ? <span style={{ color: "#00C864", marginLeft: 8, fontWeight: 800 }}>✏️ BARGAIN OK</span>
+                : <span style={{ color: "rgba(255,255,255,.4)", marginLeft: 8, fontWeight: 700 }}>🔒 LOCKED BY MANAGER</span>}
+            </div>
             <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryPriceStr}
+              readOnly={!priceOverrideEnabled}
               onChange={(e) => {
-                // Strip non-digits and leading zeros (so "0500" → "500").
+                if (!priceOverrideEnabled) return;
                 const cleaned = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, "");
                 setEntryPriceStr(cleaned);
               }}
-              style={inp} />
+              style={{ ...inp, opacity: priceOverrideEnabled ? 1 : 0.65, cursor: priceOverrideEnabled ? "text" : "not-allowed" }} />
+          </div>
+        )}
+
+        {/* 🆕 2026-05-20 (Khushi) — CUSTOM BARGAIN PRICE for cover / group.
+            Only shown when admin has enabled price override. Leave blank
+            to use the default event price. Applies to:
+              • COVER (Stag/Couple/Ladies)
+              • GROUP per-head
+              • TABLE FOR 4
+              • VVIP TABLE FOR 6
+            Audit trail: when used, booking notes carry "PRICE OVERRIDE: ..."
+            so Khushi can spot non-standard amounts in Reports. */}
+        {priceOverrideEnabled && (kind === "cover" || kind === "group") && (
+          <div style={{
+            marginBottom: 16, padding: 12, borderRadius: 10,
+            background: "rgba(0,200,100,.06)", border: "1px dashed rgba(0,200,100,.45)",
+          }}>
+            <div style={{ ...lbl, color: "#00C864", marginBottom: 6 }}>
+              ✏️ CUSTOM PRICE (BARGAIN) — leave blank for default ₹{defaultUnit.toLocaleString("en-IN")}
+            </div>
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={customPriceStr}
+              onChange={(e) => setCustomPriceStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder={`Default ₹${defaultUnit.toLocaleString("en-IN")}`}
+              style={{ ...inp, borderColor: usingCustom ? "#00C864" : undefined }} />
+            {usingCustom && (
+              <div style={{ marginTop: 6, fontSize: 11, color: "#00C864", fontWeight: 700, letterSpacing: .3 }}>
+                ✓ Using custom price ₹{customPrice.toLocaleString("en-IN")} (default ₹{defaultUnit.toLocaleString("en-IN")}) — logged for manager review
+              </div>
+            )}
           </div>
         )}
         {kind === "group" && (
@@ -4183,7 +4269,7 @@ function UnifiedWalkInModal({
             <div>
               <div style={{ fontSize: 12, color: "rgba(255,255,255,.85)", fontWeight: 700 }}>Total Amount</div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginTop: 2 }}>
-                {kind === "group" ? "Min spend / deposit" : `${qty} × ₹${unit.toLocaleString("en-IN")}`}
+                {kind === "group" ? `Min spend / deposit${usingCustom ? " · ✏️ CUSTOM" : ""}` : `${qty} × ₹${unit.toLocaleString("en-IN")}${usingCustom ? " · ✏️ CUSTOM" : ""}`}
               </div>
             </div>
             <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744" }}>
@@ -4486,7 +4572,14 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
 }
 
 function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: () => void }) {
-  const [tab, setTab] = useState<"tickets" | "guestlist" | "tables" | "group" | "onlyentry" | "waitlist">("tickets");
+  const [tab, setTab] = useState<"all" | "tickets" | "guestlist" | "tables" | "corporate" | "onlyentry" | "waitlist">("all");
+  // 🔴 2026-05-20 (Khushi) — LIVE REPORTS modal toggle. Header button opens this.
+  const [liveReportsOpen, setLiveReportsOpen] = useState(false);
+  // 🔴 2026-05-20 (Khushi) — covers feed for live reports KPIs (cover charges
+  // collected + amount redeemed). Subscribed at parent so the modal opens
+  // instantly with live data (no spinner).
+  const [allCovers, setAllCovers] = useState<HodCover[]>([]);
+  useEffect(() => subscribeToAllCovers(setAllCovers), []);
   const [qrModal, setQrModal] = useState<{ bookingRef: string; walletUrl: string; customerName: string; reason: string } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -4617,20 +4710,28 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
       if (!r._docId || tableSeen.has(r._docId)) return;
       tableSeen.add(r._docId); allTables.push(r);
     }));
+    // 🔴 2026-05-20 (Khushi) — GROUP merged into TICKETS; new CORPORATE tab
+    // pulled out of tableReservations. Tables count now excludes corporate so
+    // a reservation is only counted once across the dashboard.
+    const activeTables = allTables.filter((r) => (r as any).status !== "cancelled");
+    const tickets   = today.filter((b) => !isOnlyEntryBooking(b) && !isTableBooking(b) && inEvent(b)).length;
+    const guestlist = todayGuests.length + guestlistFromBookings.length;
+    const tables    = activeTables.filter((r) => !isCorporateTableRes(r)).length;
+    const corporate = activeTables.filter(isCorporateTableRes).length;
+    const onlyentry = today.filter((b) => isOnlyEntryBooking(b) && inEvent(b)).length;
     return {
-      tickets:   today.filter((b) => !isGroupBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b) && inEvent(b)).length,
-      guestlist: todayGuests.length + guestlistFromBookings.length,
-      tables:    allTables.filter((r) => (r as any).status !== "cancelled").length,
-      group:     today.filter((b) => isGroupBooking(b) && inEvent(b)).length,
-      onlyentry: today.filter((b) => isOnlyEntryBooking(b) && inEvent(b)).length,
+      tickets, guestlist, tables, corporate, onlyentry,
+      // 🔴 2026-05-20 (Khushi) — ALL tab count = sum of every category.
+      all: tickets + guestlist + tables + corporate + onlyentry,
     };
   })();
 
   const tabs = [
+    { key: "all" as const,       label: "ALL",            count: tabCounts.all },
     { key: "tickets" as const,   label: "TICKETS",        count: tabCounts.tickets },
     { key: "guestlist" as const, label: "GUEST LIST",     count: tabCounts.guestlist },
     { key: "tables" as const,    label: "TABLES",         count: tabCounts.tables },
-    { key: "group" as const,     label: "GROUP",          count: tabCounts.group },
+    { key: "corporate" as const, label: "CORPORATE",      count: tabCounts.corporate },
     { key: "onlyentry" as const, label: "ENTRY PASS",     count: tabCounts.onlyentry },
     { key: "waitlist" as const,  label: "WAITLIST",       count: 0 },
   ];
@@ -4649,6 +4750,14 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
           <span style={{ fontFamily: "'Inter',system-ui,sans-serif", fontSize: 12, color: "rgba(255,255,255,0.7)", fontWeight: 800 }}>{agentName}</span>
+          {/* 🔴 2026-05-20 (Khushi) — LIVE REPORTS button, sits LEFT of LOGOUT.
+              Opens a full-screen modal with real-time KPI tiles + CSV export. */}
+          <button onClick={() => setLiveReportsOpen(true)}
+            style={{ padding: "8px 12px", borderRadius: 10, background: "transparent", border: "1.5px solid rgba(200,166,69,.7)", color: "#C8A645", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .4, display: "flex", alignItems: "center", gap: 4 }}
+            title="Live Reports — real-time KPIs for tonight">
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22C55E", boxShadow: "0 0 6px #22C55E", display: "inline-block" }} />
+            LIVE REPORTS
+          </button>
           <button onClick={onLogout}
             style={{ padding: "8px 12px", borderRadius: 10, background: "transparent", border: "1.5px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 11, fontWeight: 800, cursor: "pointer", letterSpacing: .3 }}>
             LOGOUT
@@ -4741,8 +4850,10 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           const hits: Hit[] = [];
           for (const b of todayBookings) {
             if (!matches(b.name, b.phone, b.ref)) continue;
-            const tabKey: typeof tab = isGroupBooking(b) ? "group" : isOnlyEntryBooking(b) ? "onlyentry" : "tickets";
-            const tabLabel = tabKey === "group" ? "GROUP" : tabKey === "onlyentry" ? "ENTRY PASS" : "TICKETS";
+            // 🔴 2026-05-20 (Khushi) — GROUP tab removed; group bookings route
+            // to TICKETS alongside the rest.
+            const tabKey: typeof tab = isOnlyEntryBooking(b) ? "onlyentry" : "tickets";
+            const tabLabel = tabKey === "onlyentry" ? "ENTRY PASS" : "TICKETS";
             hits.push({
               key: `b-${b.id}`, tab: tabKey, label: tabLabel,
               name: b.name || "(no name)", phone: b.phone || "",
@@ -4810,12 +4921,15 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
               tableSeen.add(r._docId);
               if ((r as any).status === "cancelled") continue;
               if (!matches((r as any).customerName, (r as any).phone, (r as any).bookingRef)) continue;
+              // 🔴 2026-05-20 (Khushi) — corporate reservations route to the
+              // CORPORATE tab, regular tables route to TABLES.
+              const isCorp = isCorporateTableRes(r);
               hits.push({
-                key: `t-${r._docId}`, tab: "tables", label: "TABLE",
+                key: `t-${r._docId}`, tab: isCorp ? "corporate" : "tables", label: isCorp ? "CORPORATE" : "TABLE",
                 name: (r as any).customerName || "(no name)", phone: (r as any).phone || "",
                 subtitle: `${(r as any).tableId || ""} · ${(r as any).floorLabel || (r as any).floor || ""} · ${(r as any).arrivalTime || ""}`.replace(/ +/g, " ").trim(),
-                ref: (r as any).bookingRef || r._docId, tone: "#F59E0B",
-                onClick: () => { setTab("tables"); setTablesFocusDocId(r._docId!); },
+                ref: (r as any).bookingRef || r._docId, tone: isCorp ? "#A78BFA" : "#F59E0B",
+                onClick: () => { setTab(isCorp ? "corporate" : "tables"); setTablesFocusDocId(r._docId!); },
               });
             }
           }
@@ -4954,10 +5068,19 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           })}
         </div>
 
+        {tab === "all" && <AllBookingsTab
+          allBookings={allBookings}
+          allGuests={allGuests}
+          tableResByDate={tableResByDate}
+          query={searchInput}
+          eventId={selectedEventId}
+          onBookingClick={(b) => setScanDetail(b)}
+          onTableClick={(r, isCorp) => { setTab(isCorp ? "corporate" : "tables"); setTablesFocusDocId(r._docId!); }}
+        />}
         {tab === "tickets"   && <TicketsTab        agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} />}
-        {tab === "group"     && <GroupBookingsTab  agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="non-corporate" />}
+        {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
       </div>
@@ -4996,6 +5119,16 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         }}
       />}
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
+      {liveReportsOpen && <LiveReportsModal
+        agentName={agentName}
+        allBookings={allBookings}
+        allGuests={allGuests}
+        tableResByDate={tableResByDate}
+        allCovers={allCovers}
+        selectedEventId={selectedEventId}
+        eventChips={eventChips}
+        onClose={() => setLiveReportsOpen(false)}
+      />}
       {qrModal && (
         <WalletQrModal
           bookingRef={qrModal.bookingRef} walletUrl={qrModal.walletUrl}
@@ -5003,6 +5136,645 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           onClose={() => setQrModal(null)}
         />
       )}
+    </div>
+  );
+}
+
+// 🔴 ═════════════════════════════════════════════════════════════════════════
+// 🔴 2026-05-20 (Khushi) — ALL TAB + LIVE REPORTS DASHBOARD
+// 🔴 ═════════════════════════════════════════════════════════════════════════
+// ALL tab = one unified scrolling list across tickets / guestlist / tables /
+// corporate / entry-pass — same data sources as the per-category tabs so
+// numbers always reconcile. Search + event filter respected. Tap a row to
+// jump to its native tab (or open the booking detail modal).
+//
+// LIVE REPORTS = full-screen modal with KPI tiles + CSV export. Uses the
+// same parent-level subscriptions (allBookings, allGuests, tableResByDate,
+// allCovers) so data is live and matches the dashboard counters.
+//
+// 🛟 FALLBACK: both views are pure read-only React — if they crash the door
+// girl can hard-refresh and keep working. No Firestore writes happen here.
+// 🔴 ═════════════════════════════════════════════════════════════════════════
+
+type AllBookingsTabProps = {
+  allBookings: HodBooking[];
+  allGuests: HodGuestlistEntry[];
+  tableResByDate: Record<string, HodTableReservation[]>;
+  query: string;
+  eventId: string;
+  onBookingClick: (b: HodBooking) => void;
+  onTableClick: (r: HodTableReservation, isCorporate: boolean) => void;
+};
+
+function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId, onBookingClick, onTableClick }: AllBookingsTabProps) {
+  const todayDates = TODAY_DATE_SET();
+  const ql = (query || "").trim().toLowerCase();
+  const qd = (query || "").replace(/\D/g, "");
+  const matchText = (s?: string) => !ql || (!!s && String(s).toLowerCase().includes(ql));
+  const matchPhone = (p?: string) => {
+    if (!qd || qd.length < 4) return false;
+    const pd = String(p || "").replace(/\D/g, "");
+    return !!pd && pd.includes(qd);
+  };
+  const matches = (name?: string, phone?: string, ref?: string) =>
+    !ql ? true : (matchText(name) || matchPhone(phone) || matchText(ref));
+  const inEvent = (b: HodBooking) => eventId === "all" || !b.eventId || b.eventId === eventId;
+
+  type Row =
+    | { kind: "ticket" | "entry" | "group"; key: string; booking: HodBooking; label: string; tone: string; sortAt: string }
+    | { kind: "guestlist"; key: string; booking: HodBooking; label: string; tone: string; sortAt: string }
+    | { kind: "table" | "corporate"; key: string; res: HodTableReservation; label: string; tone: string; sortAt: string };
+
+  const rows: Row[] = [];
+
+  // TICKETS / ENTRY PASS / GROUP (non-guestlist bookings)
+  for (const b of allBookings) {
+    const d = (b.date || "").slice(0, 10);
+    if (!todayDates.has(d)) continue;
+    if (isGuestlistBooking(b)) continue;
+    if (!inEvent(b)) continue;
+    if (!matches(b.name, b.phone, b.ref)) continue;
+    const isEntry = isOnlyEntryBooking(b);
+    rows.push({
+      kind: isEntry ? "entry" : "ticket",
+      key: `b-${b.id}`,
+      booking: b,
+      label: isEntry ? "ENTRY PASS" : "TICKET",
+      tone: isEntry ? "#F59E0B" : "#60A5FA",
+      sortAt: (b as any).bookedAt || b.date || "",
+    });
+  }
+
+  // GUESTLIST (collection) — architect-flagged: must apply event filter for
+  // parity with GuestlistTab, and accept bookedAt fallback below for parity
+  // with the typed-booking merge.
+  const todayGuests = allGuests.filter((g) => {
+    const d = ((g as any).date || "").slice(0, 10);
+    if (d) { if (!todayDates.has(d)) return false; }
+    else {
+      const ja = ((g as any).joinedAt || "").slice(0, 10);
+      const et = ((g as any).entryTime || "").slice(0, 10);
+      if (!todayDates.has(ja) && !todayDates.has(et)) return false;
+    }
+    if (eventId !== "all" && (g as any).eventId && (g as any).eventId !== eventId) return false;
+    return true;
+  });
+  const glIds = new Set(todayGuests.map((g) => g.id));
+  for (const g of todayGuests) {
+    if (!matches(g.name, g.phone, (g as any).ref)) continue;
+    const adapted: HodBooking = {
+      id: g.id, ref: (g as any).ref || g.id, name: g.name, phone: g.phone,
+      eventId: g.eventId, eventTitle: g.eventTitle, type: g.type,
+      total: 0, checkedIn: !!g.checkedIn,
+      _isGuestList: true, _glDocId: (g as any)._bookingDocId || g.id,
+      date: ((g as any).joinedAt || (g as any).entryTime || "").slice(0, 10),
+    } as any;
+    rows.push({
+      kind: "guestlist",
+      key: `g-${g.id}`,
+      booking: adapted,
+      label: "GUEST LIST",
+      tone: "#34D399",
+      sortAt: (g as any).joinedAt || (g as any).entryTime || "",
+    });
+  }
+  // GUESTLIST (typed bookings — parity with GuestlistTab)
+  // Architect-flagged: GuestlistTab accepts EITHER b.date OR b.bookedAt; we
+  // were only accepting b.date and dropping legacy rows. Also apply event filter.
+  for (const b of allBookings) {
+    if (!isGuestlistBooking(b)) continue;
+    const d = (b.date || "").slice(0, 10);
+    const ba = ((b as any).bookedAt || "").slice(0, 10);
+    if (!todayDates.has(d) && !todayDates.has(ba)) continue;
+    if (glIds.has(b.id)) continue;
+    if (!inEvent(b)) continue;
+    if (!matches(b.name, b.phone, b.ref)) continue;
+    rows.push({
+      kind: "guestlist",
+      key: `gb-${b.id}`,
+      booking: b,
+      label: "GUEST LIST",
+      tone: "#34D399",
+      sortAt: (b as any).bookedAt || b.date || "",
+    });
+  }
+
+  // TABLES + CORPORATE (dedupe by _docId across the dual-date subscription)
+  const tableSeen = new Set<string>();
+  for (const list of Object.values(tableResByDate)) {
+    for (const r of list) {
+      if (!r._docId || tableSeen.has(r._docId)) continue;
+      tableSeen.add(r._docId);
+      if ((r as any).status === "cancelled") continue;
+      if (!matches((r as any).customerName, (r as any).phone, (r as any).bookingRef)) continue;
+      const isCorp = isCorporateTableRes(r);
+      rows.push({
+        kind: isCorp ? "corporate" : "table",
+        key: `t-${r._docId}`,
+        res: r,
+        label: isCorp ? "CORPORATE" : "TABLE",
+        tone: isCorp ? "#A78BFA" : "#F59E0B",
+        sortAt: (r as any).arrivalTime || (r as any).bookedAt || "",
+      });
+    }
+  }
+
+  // Sort newest first by creation time-ish (sortAt). Empty sorts last.
+  rows.sort((a, b) => {
+    if (!a.sortAt) return 1;
+    if (!b.sortAt) return -1;
+    return b.sortAt.localeCompare(a.sortAt);
+  });
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.08)", borderRadius: 12, padding: 24, textAlign: "center", color: "rgba(255,255,255,.5)", fontSize: 13 }}>
+        No bookings tonight{ql ? ` match "${query}"` : ""} yet.
+      </div>
+    );
+  }
+
+  // Khushi 2026-05-20: removed the category chip strip inside ALL — the tab
+  // counters in the dashboard header already show the same split, having them
+  // twice was redundant.
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {rows.map((row) => {
+        if (row.kind === "table" || row.kind === "corporate") {
+          const r = row.res;
+          const isCorp = row.kind === "corporate";
+          const pax = (r as any).partySize || 0;
+          const arr = (r as any).arrivalTime || "";
+          const subtitle = `${(r as any).tableId || "?"} · ${(r as any).floorLabel || (r as any).floor || ""} · ${arr || "no time"}${pax ? ` · ${pax}p` : ""}`;
+          return (
+            <button key={row.key} onClick={() => onTableClick(r, isCorp)}
+              style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
+                background: `${row.tone}10`, border: `1px solid ${row.tone}40`,
+                color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {(r as any).customerName || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {(r as any).phone || "no phone"}</span>
+                </div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {subtitle}
+                </div>
+              </div>
+              <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
+                background: `${row.tone}20`, color: row.tone, border: `1px solid ${row.tone}60` }}>
+                {row.label}
+              </span>
+            </button>
+          );
+        }
+        if (row.kind !== "ticket" && row.kind !== "entry" && row.kind !== "group" && row.kind !== "guestlist") return null;
+        const b = row.booking;
+        const subtitle = `${b.eventTitle || ""}${b.ref ? " · " + b.ref : ""}`.replace(/^ · /, "").trim() || (b.ref || "");
+        return (
+          <button key={row.key} onClick={() => onBookingClick(b)}
+            style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
+              background: `${row.tone}10`, border: `1px solid ${row.tone}40`,
+              color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {b.name || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {b.phone || "no phone"}</span>
+                {b.checkedIn && <span style={{ marginLeft: 6, fontSize: 10, color: "#34D399", fontWeight: 800 }}>✓ IN</span>}
+              </div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {subtitle}
+              </div>
+            </div>
+            <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
+              background: `${row.tone}20`, color: row.tone, border: `1px solid ${row.tone}60` }}>
+              {row.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// LIVE REPORTS MODAL
+// ─────────────────────────────────────────────────────────────────────────
+// KPI tiles for Khushi's nightly summary. Operational window per Khushi
+// 2026-05-20: 12 NOON IST → 03:00 IST next day. Default = TONIGHT. Date
+// picker lets her scroll back to past operational nights.
+//
+// Aggregator buckets (Khushi 2026-05-20): show EVERY discount % that
+// occurred, not just 50/30. e.g. "30% × 2 tables", "50% × 15", "60% × 2".
+// Lunch / Dinner split: arrival < 17:00 IST = lunch, ≥ 17:00 = dinner.
+// Checked-out KPI: skipped (no schema field yet).
+
+type LiveReportsModalProps = {
+  agentName: string;
+  allBookings: HodBooking[];
+  allGuests: HodGuestlistEntry[];
+  tableResByDate: Record<string, HodTableReservation[]>;
+  allCovers: HodCover[];
+  selectedEventId: string;
+  eventChips: Array<{ id: string; title: string; date: string }>;
+  onClose: () => void;
+};
+
+function LiveReportsModal({ agentName, allBookings, allGuests, tableResByDate, allCovers, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
+  // Operational night = the YYYY-MM-DD that represents the night. Today's
+  // op night by default; date picker can rewind.
+  const [nightDate, setNightDate] = useState<string>(getOperationalNightStr());
+  // Subscribe to the picked night's table reservations if it's not already
+  // in the parent's tableResByDate map.
+  const [pickedTables, setPickedTables] = useState<HodTableReservation[] | null>(null);
+  useEffect(() => {
+    if (tableResByDate[nightDate]) { setPickedTables(null); return; }
+    const u = subscribeToHodReservations(nightDate, (rows) => setPickedTables(rows));
+    return () => u();
+  }, [nightDate, tableResByDate]);
+
+  // Operational window in ms: noon IST on nightDate → 03:00 IST next day.
+  // IST = UTC+5:30, so 12:00 IST = 06:30 UTC same day; 03:00 IST next day
+  // = 21:30 UTC same day (NOT the next UTC date).
+  const [y, m, d] = nightDate.split("-").map(Number);
+  const winStartMs = Date.UTC(y, m - 1, d, 6, 30, 0);          // noon IST
+  const winEndMs   = Date.UTC(y, m - 1, d, 21, 30, 0);         // 03:00 IST next day = 21:30 UTC same day
+  const inWindowIso = (iso?: string) => {
+    if (!iso) return false;
+    const t = Date.parse(iso);
+    if (isNaN(t)) return false;
+    return t >= winStartMs && t < winEndMs;
+  };
+
+  const dateLabel = new Date(y, m - 1, d).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  const eventLabel = (() => {
+    if (selectedEventId === "all") return "All Events";
+    const ev = eventChips.find((e) => e.id === selectedEventId);
+    return ev ? (ev.title || "Event") : "Event";
+  })();
+
+  const [searchQ, setSearchQ] = useState("");
+  const ql = searchQ.trim().toLowerCase();
+  const passSearch = (...fields: (string | undefined)[]) => {
+    if (!ql) return true;
+    return fields.some((f) => !!f && String(f).toLowerCase().includes(ql));
+  };
+
+  // Tables for picked night — Khushi 2026-05-20: previous logic double-counted
+  // (showed 93 when door tab showed 47, admin showed 50) because BOTH
+  // `tableResByDate[nightDate]` AND `pickedTables` were briefly non-null during
+  // the parent-subscription race window. New approach mirrors the dashboard
+  // counter at line 4709 EXACTLY:
+  //   1. Walk every parent-subscribed date key (dedupe by _docId across all)
+  //   2. Also walk `pickedTables` (only ever set for past-night picker)
+  //   3. STRICT filter `r.date === nightDate` so only rows that actually belong
+  //      to the picked operational night are counted — kills any stale rows
+  //      that linger from a previous night's subscription.
+  //   4. Drop status:"cancelled" and apply search filter.
+  // Result: matches door TABLES tab + admin Reports for the same night.
+  const tablesForNight: HodTableReservation[] = (() => {
+    const seen = new Set<string>();
+    const out: HodTableReservation[] = [];
+    const consider = (list: HodTableReservation[] | undefined) => {
+      if (!list) return;
+      for (const r of list) {
+        const id = r._docId || (r as any).bookingRef || "";
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        if ((r as any).status === "cancelled") continue;
+        if ((r.date || "").slice(0, 10) !== nightDate) continue;
+        if (!passSearch((r as any).customerName, (r as any).phone, (r as any).bookingRef, (r as any).companyName)) continue;
+        out.push(r);
+      }
+    };
+    Object.values(tableResByDate).forEach(consider);
+    consider(pickedTables ?? undefined);
+    return out;
+  })();
+
+  // Bookings filtered to picked night
+  const bookingsForNight = allBookings.filter((b) => {
+    const d = (b.date || "").slice(0, 10);
+    if (d !== nightDate) return false;
+    if (selectedEventId !== "all" && b.eventId && b.eventId !== selectedEventId) return false;
+    return passSearch(b.name, b.phone, b.ref, b.eventTitle);
+  });
+
+  // Guestlist filtered to picked night
+  const guestsForNight = allGuests.filter((g) => {
+    const d = ((g as any).date || "").slice(0, 10);
+    if (d) { if (d !== nightDate) return false; }
+    else {
+      const ja = ((g as any).joinedAt || "").slice(0, 10);
+      const et = ((g as any).entryTime || "").slice(0, 10);
+      if (ja !== nightDate && et !== nightDate) return false;
+    }
+    if (selectedEventId !== "all" && g.eventId && g.eventId !== selectedEventId) return false;
+    return passSearch(g.name, g.phone, (g as any).ref);
+  });
+
+  // Split categories
+  const ticketBookings = bookingsForNight.filter((b) => !isGuestlistBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b));
+  const entryBookings  = bookingsForNight.filter((b) => !isGuestlistBooking(b) && isOnlyEntryBooking(b));
+  const guestlistFromBookingsRaw = bookingsForNight.filter((b) => isGuestlistBooking(b));
+  // Architect-flagged: same guest may exist in BOTH the guestlist collection
+  // and a guestlist-typed booking. Dedupe by stable key (ref → id → phone+name)
+  // so Total Pax and Guestlist tiles don't double-count.
+  const guestlistKey = (x: { ref?: string; id?: string; phone?: string; name?: string }) =>
+    (x.ref || "").toLowerCase()
+      || (x.id || "").toLowerCase()
+      || `${(x.phone || "").replace(/\D/g, "")}|${(x.name || "").toLowerCase().trim()}`;
+  const guestlistSeen = new Set(guestsForNight.map(guestlistKey));
+  const guestlistFromBookings = guestlistFromBookingsRaw.filter((b) => {
+    const k = guestlistKey({ ref: b.ref, id: b.id, phone: b.phone, name: b.name });
+    if (!k || guestlistSeen.has(k)) return false;
+    guestlistSeen.add(k);
+    return true;
+  });
+  const corporateTables = tablesForNight.filter(isCorporateTableRes);
+  const regularTables   = tablesForNight.filter((r) => !isCorporateTableRes(r));
+
+  // PAX TOTALS — booking.guests for tickets/entry, partySize for tables,
+  // 1 per guestlist entry.
+  const ticketPax    = ticketBookings.reduce((s, b) => s + (Number(b.guests) || 1), 0);
+  const entryPax     = entryBookings.reduce((s, b) => s + (Number(b.guests) || 1), 0);
+  const tablePax     = regularTables.reduce((s, r) => s + (Number((r as any).partySize) || 0), 0);
+  const corpPax      = corporateTables.reduce((s, r) => s + (Number((r as any).partySize) || 0), 0);
+  const guestlistPax = guestsForNight.length + guestlistFromBookings.length;
+  const totalPax     = ticketPax + entryPax + tablePax + corpPax + guestlistPax;
+
+  // COVERS — collected + redeemed across the operational window.
+  // A cover belongs to this night if its `date` field matches OR if
+  // `activatedAt` falls in the noon-to-3am window (handles legacy docs
+  // missing `date`).
+  const coversForNight = allCovers.filter((c) => {
+    if ((c as any).date === nightDate) return true;
+    const at = (c as any).activatedAt || (c as any).createdAt;
+    return inWindowIso(at);
+  });
+  const totalCoversCollected = coversForNight.reduce((s, c) => s + (Number(c.coverActivated) || 0), 0);
+  const totalAmountRedeemed  = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number(c.coverBalance) || 0)), 0);
+
+  // LUNCH / DINNER split for ALL tables (regular + corporate). Cutoff = 17:00.
+  const allTablesForNight = [...regularTables, ...corporateTables];
+  const isLunch = (arr?: string) => {
+    if (!arr) return false;
+    const m = arr.match(/^(\d{1,2}):/);
+    if (!m) return false;
+    return Number(m[1]) < 17;
+  };
+  const lunchTables  = allTablesForNight.filter((r) => isLunch((r as any).arrivalTime)).length;
+  const dinnerTables = allTablesForNight.filter((r) => !isLunch((r as any).arrivalTime)).length;
+
+  // AGGREGATOR breakdown — for each source bucket, list every discount %
+  // that appears and the count of tables + sum of pax at that discount.
+  const aggSources: Array<"zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse"> = ["zomato", "swiggy", "eazydiner", "whatsapp_bot", "inhouse"];
+  const aggLabels: Record<string, string> = { zomato: "ZOMATO", swiggy: "SWIGGY", eazydiner: "EAZYDINER", whatsapp_bot: "DINEOUT", inhouse: "IN-HOUSE" };
+  const canonical = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse" => {
+    const v = (raw || "inhouse").toLowerCase();
+    if (v.includes("zomato")) return "zomato";
+    if (v.includes("swiggy")) return "swiggy";
+    if (v.includes("eazy") || v.includes("easy")) return "eazydiner";
+    if (v.includes("dineout") || v.includes("whatsapp")) return "whatsapp_bot";
+    return "inhouse";
+  };
+  const aggBuckets: Record<string, { total: number; pax: number; byDiscount: Map<number, { tables: number; pax: number }> }> = {};
+  for (const k of aggSources) aggBuckets[k] = { total: 0, pax: 0, byDiscount: new Map() };
+  for (const r of allTablesForNight) {
+    const rawSrc = (r as any).aggregator || (r as any).source || "inhouse";
+    const src = canonical(rawSrc);
+    const pax = Number((r as any).partySize) || 0;
+    // 🐛 Khushi-flagged: was reading `discountPercent` which never exists on
+    // table reservations → every card showed 0%. Real field is
+    // `aggregatorDiscount`, with `getAggregatorDiscount(name)` as the
+    // canonical default fallback (mirrors line 2334 logic). Also accept the
+    // few legacy fallback names just in case.
+    const discRaw = (r as any).aggregatorDiscount
+      ?? (r as any).discountPercent
+      ?? (r as any).discount
+      ?? (src === "inhouse" ? 0 : getAggregatorDiscount(String(rawSrc).toLowerCase()));
+    const disc = Math.round(Number(discRaw) || 0);
+    aggBuckets[src].total += 1;
+    aggBuckets[src].pax += pax;
+    const cur = aggBuckets[src].byDiscount.get(disc) || { tables: 0, pax: 0 };
+    cur.tables += 1; cur.pax += pax;
+    aggBuckets[src].byDiscount.set(disc, cur);
+  }
+
+  // ENTRY KPIs
+  const totalPaidEntry = ticketBookings.reduce((s, b) => s + (Number(b.total) || 0), 0)
+                      + entryBookings.reduce((s, b) => s + (Number(b.total) || 0), 0);
+  const totalEntryOnly = entryBookings.length;
+  // CHECK-INS across all sources
+  const totalCheckedIn =
+      ticketBookings.filter((b) => b.checkedIn).length
+    + entryBookings.filter((b) => b.checkedIn).length
+    + guestsForNight.filter((g) => g.checkedIn).length
+    + guestlistFromBookings.filter((b) => b.checkedIn).length
+    + allTablesForNight.filter((r) => !!(r as any).actualArrivalTime).length;
+
+  // CSV EXPORT — flatten every tile + every aggregator discount row.
+  const downloadCsv = () => {
+    const lines: string[] = [];
+    const push = (label: string, value: string | number) => lines.push(`"${label.replace(/"/g, '""')}",${typeof value === "number" ? value : `"${String(value).replace(/"/g, '""')}"`}`);
+    lines.push("Metric,Value");
+    push("Date", nightDate);
+    push("Event", eventLabel);
+    push("Generated", new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }));
+    push("Generated By", agentName);
+    push("", "");
+    push("TOTAL PAX", totalPax);
+    push("  Pax (Tickets)", ticketPax);
+    push("  Pax (Entry-only)", entryPax);
+    push("  Pax (Tables)", tablePax);
+    push("  Pax (Corporate)", corpPax);
+    push("  Pax (Guestlist)", guestlistPax);
+    push("", "");
+    push("TOTAL COVER CHARGES COLLECTED (Rs)", totalCoversCollected);
+    push("TOTAL AMOUNT REDEEMED (Rs)", totalAmountRedeemed);
+    push("", "");
+    push("TOTAL TABLES BOOKED", allTablesForNight.length);
+    push("  Lunch (< 5pm)", lunchTables);
+    push("  Dinner (>= 5pm)", dinnerTables);
+    push("", "");
+    for (const k of aggSources) {
+      const bk = aggBuckets[k];
+      push(`${aggLabels[k]} — tables`, bk.total);
+      push(`${aggLabels[k]} — pax`, bk.pax);
+      const sorted = Array.from(bk.byDiscount.entries()).sort((a, b) => b[0] - a[0]);
+      for (const [disc, v] of sorted) {
+        push(`  ${aggLabels[k]} ${disc}% — tables`, v.tables);
+        push(`  ${aggLabels[k]} ${disc}% — pax`, v.pax);
+      }
+    }
+    push("", "");
+    push("CORPORATE BOOKINGS", corporateTables.length);
+    push("GUESTLIST / FREE ENTRY", guestlistPax);
+    push("TOTAL PAID ENTRY (Rs)", totalPaidEntry);
+    push("TOTAL ENTRY-ONLY BOOKINGS", totalEntryOnly);
+    push("TOTAL CHECKED IN", totalCheckedIn);
+
+    // UTF-8 BOM for Excel friendliness
+    const csv = "\uFEFF" + lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `HOD-LiveReport-${nightDate}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // Palette: ONLY yellow (gold), black, white, red. Numbers/headings use
+  // Space Grotesk (non-cursive, monospaced-feel digits via tnum). Khushi
+  // explicitly rejected Playfair italics for numeric KPIs.
+  const NUM_FONT = "'Space Grotesk','Inter','SF Pro Display',system-ui,sans-serif";
+  const NUM_STYLE: React.CSSProperties = { fontFamily: NUM_FONT, fontVariantNumeric: "tabular-nums", fontFeatureSettings: "'tnum'" };
+  const Tile = ({ label, value, tone = "#C8A645", sub, children }: { label: string; value: string | number; tone?: string; sub?: string; children?: any }) => (
+    <div style={{ background: tone === "#EF4444" ? "rgba(239,68,68,.06)" : "rgba(200,166,69,.06)", border: `1px solid ${tone}55`, borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 6, minHeight: 92 }}>
+      <div style={{ fontSize: 12, fontWeight: 900, color: tone, letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>{label}</div>
+      <div style={{ ...NUM_STYLE, fontSize: 32, fontWeight: 800, color: "#fff", lineHeight: 1, letterSpacing: -.5 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 700, fontFamily: NUM_FONT }}>{sub}</div>}
+      {children}
+    </div>
+  );
+  // Small "chip" used inside the TOTAL PAX tile so the split is readable
+  // rather than a single dot-separated string.
+  const PaxChip = ({ label, n }: { label: string; n: number }) => (
+    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 4, padding: "3px 7px", borderRadius: 999, background: "rgba(255,255,255,.06)", border: "1px solid rgba(200,166,69,.35)" }}>
+      <span style={{ fontSize: 9, fontWeight: 900, color: "#C8A645", letterSpacing: .6 }}>{label}</span>
+      <span style={{ ...NUM_STYLE, fontSize: 12, fontWeight: 800, color: "#fff" }}>{n}</span>
+    </span>
+  );
+
+  const fmtRs = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
+
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, overflow: "auto", padding: "12px 0", WebkitOverflowScrolling: "touch" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 980, margin: "0 auto", background: "#0A0A0A", border: "1px solid rgba(200,166,69,.4)", borderRadius: 14, padding: 16, color: "#fff" }}>
+        {/* HEADER */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontFamily: NUM_FONT, fontSize: 28, fontWeight: 900, color: "#C8A645", letterSpacing: 1.5, display: "flex", alignItems: "center", gap: 10, textTransform: "uppercase" }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#EF4444", boxShadow: "0 0 10px #EF4444", display: "inline-block" }} />
+              LIVE REPORTS
+            </div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginTop: 4, fontFamily: NUM_FONT, fontWeight: 700 }}>
+              <b style={{ color: "#fff" }}>{eventLabel}</b> · {dateLabel} <span style={{ opacity: .6 }}>· 12:00pm → 3:00am IST</span>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0, flexWrap: "wrap" }}>
+            <input type="date" value={nightDate} onChange={(e) => setNightDate(e.target.value)}
+              style={{ background: "#0A0A0A", border: "1px solid rgba(200,166,69,.4)", color: "#fff", padding: "6px 8px", borderRadius: 8, fontSize: 12, fontWeight: 700 }}
+              title="Pick operational night" />
+            <button onClick={downloadCsv}
+              style={{ padding: "7px 12px", borderRadius: 8, background: "#C8A645", border: "none", color: "#0A0A0A", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}
+              title="Download CSV of all tiles">
+              ⬇ EXPORT CSV
+            </button>
+            <button onClick={onClose}
+              style={{ padding: "7px 12px", borderRadius: 8, background: "transparent", border: "1px solid rgba(255,255,255,.2)", color: "rgba(255,255,255,.7)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+              ✕ CLOSE
+            </button>
+          </div>
+        </div>
+
+        {/* SEARCH */}
+        <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
+          placeholder="Search bookings (name, phone, ref) — narrows all tiles below"
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "#0A0A0A", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 14 }} />
+
+        {/* TOP TILES */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
+          <Tile label="TOTAL PAX" value={totalPax} tone="#C8A645">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+              {/* Khushi 2026-05-20: relabelled as "… PAX" so the chips inside
+                  the TOTAL PAX tile aren't misread as booking counts. Booking
+                  counts live in the dashboard tab headers + the TOTAL TABLES
+                  BOOKED tile below. */}
+              <PaxChip label="TICKET PAX" n={ticketPax} />
+              <PaxChip label="TABLE PAX" n={tablePax} />
+              <PaxChip label="CORP PAX" n={corpPax} />
+              <PaxChip label="ENTRY PAX" n={entryPax} />
+              <PaxChip label="GUEST PAX" n={guestlistPax} />
+            </div>
+          </Tile>
+          <Tile label="COVER CHARGES COLLECTED" value={fmtRs(totalCoversCollected)} tone="#C8A645"
+            sub={`${coversForNight.length} cover${coversForNight.length === 1 ? "" : "s"} activated`} />
+          <Tile label="TOTAL AMOUNT REDEEMED" value={fmtRs(totalAmountRedeemed)} tone="#EF4444"
+            sub={`Wallet spend across all covers`} />
+          <Tile label="TOTAL TABLES BOOKED" value={allTablesForNight.length} tone="#C8A645">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+              <PaxChip label="LUNCH" n={lunchTables} />
+              <PaxChip label="DINNER" n={dinnerTables} />
+            </div>
+          </Tile>
+        </div>
+
+        {/* AGGREGATOR BUCKETS */}
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#C8A645", letterSpacing: 2, marginBottom: 10, fontFamily: NUM_FONT, textTransform: "uppercase" }}>📍 BOOKINGS BY SOURCE</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12, marginBottom: 16 }}>
+          {aggSources.map((k) => {
+            const bk = aggBuckets[k];
+            const sortedDiscs = Array.from(bk.byDiscount.entries()).sort((a, b) => b[0] - a[0]);
+            // Palette restricted to yellow/red/white. Zomato = red accent
+            // (its brand colour), everyone else = gold.
+            const tone = k === "zomato" ? "#EF4444" : "#C8A645";
+            const bgRGBA = k === "zomato" ? "rgba(239,68,68,.06)" : "rgba(200,166,69,.06)";
+            return (
+              <div key={k} style={{ background: bgRGBA, border: `1px solid ${tone}55`, borderRadius: 14, padding: 14 }}>
+                {/* HEADER: brand + totals */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${tone}22` }}>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: tone, letterSpacing: 1.2, fontFamily: NUM_FONT, textTransform: "uppercase" }}>
+                    {aggLabels[k]}
+                  </div>
+                  <div style={{ display: "flex", gap: 14 }}>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#fff", lineHeight: 1 }}>{bk.total}</div>
+                      <div style={{ fontSize: 9, fontWeight: 900, color: "rgba(255,255,255,.55)", letterSpacing: .8, marginTop: 2, fontFamily: NUM_FONT }}>TABLES</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#fff", lineHeight: 1 }}>{bk.pax}</div>
+                      <div style={{ fontSize: 9, fontWeight: 900, color: "rgba(255,255,255,.55)", letterSpacing: .8, marginTop: 2, fontFamily: NUM_FONT }}>PAX</div>
+                    </div>
+                  </div>
+                </div>
+                {/* DISCOUNT BREAKDOWN ROWS */}
+                {sortedDiscs.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.4)", fontWeight: 700, textAlign: "center", padding: "12px 0", fontFamily: NUM_FONT }}>NO BOOKINGS YET</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                    {sortedDiscs.map(([disc, v]) => (
+                      <div key={disc} style={{ display: "grid", gridTemplateColumns: "60px 1fr auto", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8, background: "rgba(255,255,255,.04)" }}>
+                        <span style={{ ...NUM_STYLE, color: tone, fontWeight: 900, fontSize: 15 }}>{disc}%</span>
+                        <span style={{ fontSize: 11, color: "rgba(255,255,255,.55)", fontWeight: 700, fontFamily: NUM_FONT, letterSpacing: .5 }}>OFF</span>
+                        <span style={{ ...NUM_STYLE, fontSize: 12, color: "#fff", fontWeight: 700 }}>
+                          <b style={{ ...NUM_STYLE, color: "#fff", fontSize: 14, fontWeight: 800 }}>{v.tables}</b>
+                          <span style={{ color: "rgba(255,255,255,.5)", fontWeight: 700, margin: "0 4px" }}>·</span>
+                          <b style={{ ...NUM_STYLE, color: "#fff", fontSize: 14, fontWeight: 800 }}>{v.pax}</b>
+                          <span style={{ color: "rgba(255,255,255,.5)", fontSize: 10, fontWeight: 700, marginLeft: 4 }}>PAX</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* BOTTOM TILES */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+          <Tile label="CORPORATE BOOKINGS" value={corporateTables.length} tone="#C8A645" sub={`${corpPax} pax`} />
+          <Tile label="GUESTLIST / FREE ENTRY" value={guestlistPax} tone="#C8A645" sub="comp entries" />
+          <Tile label="TOTAL PAID ENTRY" value={fmtRs(totalPaidEntry)} tone="#C8A645" sub={`${ticketBookings.length + entryBookings.length} bookings`} />
+          <Tile label="TOTAL ENTRY-ONLY" value={totalEntryOnly} tone="#C8A645" sub="entry-pass bookings" />
+          <Tile label="TOTAL CHECKED IN" value={totalCheckedIn} tone="#EF4444" sub="across all sources" />
+        </div>
+
+        <div style={{ marginTop: 14, fontSize: 10, color: "rgba(255,255,255,.4)", textAlign: "center", lineHeight: 1.5 }}>
+          🛟 Window: 12:00 pm → 3:00 am IST on {nightDate}. Lunch &lt; 5pm · Dinner ≥ 5pm. All numbers update live as bookings arrive.
+        </div>
+      </div>
     </div>
   );
 }
