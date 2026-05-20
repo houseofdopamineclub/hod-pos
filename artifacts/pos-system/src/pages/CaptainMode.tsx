@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactElement } from "react";
 import { Link } from "wouter";
 import {
-  sha256, subscribeToHodReservations, subscribeActiveWaiterCalls, diagnoseTableReservationDates, markGuestArrived, markRoundServed, markRoundActivated,
+  sha256, subscribeToHodReservations, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
@@ -4186,14 +4186,15 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   }, []);
   const activeWaiterCalls = activeWaiterCallsList.length;
 
-  // 2026-05-16 one-shot diagnostic — on mount, dump ALL tableReservations
-  // grouped by `date` so we can see if customer-site bookings are landing
-  // under a date string different from what POS is querying for.
-  useEffect(() => {
-    diagnoseTableReservationDates()
-      .then((r) => console.log("[captain][diag] tableReservations BY DATE", r.totals, "RECENT 20:", r.recent, "POS QUERIES:", date))
-      .catch((e) => console.warn("[captain][diag] failed", e));
-  }, [date]);
+  // 🆕 2026-05-21 (Khushi cost-burn fix) — REMOVED the May-16 diagnostic call
+  // that fetched the ENTIRE `tableReservations` collection on every dashboard
+  // mount + every date change. With 1,000+ docs × 3-4 tablets × dozens of
+  // navigations per night this was burning ~4M Firestore reads/day and was the
+  // root cause of the ₹1,886 May bill. The real listener below is already
+  // date-filtered via `subscribeToHodReservations(date, ...)` so we lose
+  // nothing by deleting the diag. The helper function `diagnoseTableReservationDates`
+  // is kept in firestore-hod.ts as a manual debug tool (call it from devtools
+  // if a date-mismatch bug reappears).
 
   useEffect(() => {
     const unsub = subscribeToHodReservations(date, (all) => {
