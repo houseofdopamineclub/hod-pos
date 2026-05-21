@@ -415,38 +415,10 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
               📲 Send WhatsApp Wallet Link
             </button>
-            {/* 🔴 2026-05-13 (Khushi) — Void Cover (door equivalent of
-                Captain Mode's Void Bill). Manager-PIN gated. Zeros the
-                remaining cover balance with an audit-logged edit. The
-                cash refund itself is handled out-of-band by the manager
-                (per HOD policy — same as Captain Mode void bills). The
-                amount-already-used remains attributed to the cover so
-                Reports / EOD reconciliation stays accurate. */}
-            <button onClick={async () => {
-              const used = existing.coverUsed || 0;
-              const remaining = (existing.coverActivated || 0) - used;
-              if (remaining <= 0) { alert("Nothing to void — cover has no remaining balance."); return; }
-              const pin = window.prompt(`🚫 VOID COVER\n\nThis will zero the remaining wallet balance of ₹${remaining.toLocaleString("en-IN")} for ${booking.name || "guest"}.\n\nThe ₹${used.toLocaleString("en-IN")} already used stays attributed.\nCash refund (if any) must be handled by the manager separately.\n\nEnter MANAGER PIN to confirm:`)?.trim();
-              if (!pin) return;
-              const h = await sha256(pin);
-              if (h !== DOOR_MANAGER_HASH) { alert("❌ Wrong Manager PIN."); return; }
-              const reason = window.prompt("Reason for void (e.g. customer left without entering, double-charge, manager call):")?.trim();
-              if (!reason) { alert("Void cancelled — reason required."); return; }
-              setBusy(true); setErr("");
-              try {
-                await editCoverAmount(existing.id, used, `${agentName} VOID: ${reason}`);
-                const cv = await getCoverForBooking(booking.ref || booking.id);
-                setExisting(cv);
-                alert(`✅ Cover voided. Remaining ₹${remaining.toLocaleString("en-IN")} cleared.\nManager: please process the cash refund (if any).`);
-              } catch (e: unknown) {
-                setErr(e instanceof Error ? e.message : "Void failed.");
-              }
-              setBusy(false);
-            }} disabled={busy}
-              title="Use ONLY when cover was charged in error / customer left (Manager PIN required)"
-              style={{ width: "100%", padding: 11, borderRadius: 10, background: "#A02820", border: "1px solid #A02820", color: "#fff", fontSize: 12, fontWeight: 800, cursor: busy ? "wait" : "pointer", marginBottom: 8, letterSpacing: .4, textTransform: "uppercase" }}>
-              🚫 Void Cover
-            </button>
+            {/* 🔴 2026-05-21 (Khushi) — Void Cover button REMOVED per request.
+                Mistakes during check-in are now reverted via the existing
+                ✏️ Edit Cover Amount button just above (set back to ₹0 or
+                whatever was originally collected). */}
           </>
         ) : (
           <>
@@ -843,10 +815,225 @@ function EDCPaymentDialog({
   );
 }
 
-function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; agentName: string; onDone: () => void }) {
+// 🔴 2026-05-21 (Khushi) — CheckInPaymentModal
+// Opens for EVERY check-in (tickets, guestlist, entry-only, group, table).
+// Door girl picks amount + payment method, then wallet activates with that
+// amount. Entry-only: wallet is HARD-LOCKED to ₹0 (entry fee is not redeemable
+// on F&B), but the amount + method are still recorded for audit.
+function CheckInPaymentModal({
+  booking, isEntryOnly, source, sourceKey, agentName, onClose, onConfirmed,
+}: {
+  booking: HodBooking;
+  isEntryOnly: boolean;
+  source: "booking" | "guestlist" | "table";
+  sourceKey: string;
+  agentName: string;
+  onClose: () => void;
+  onConfirmed: (result: { checkedInAt: string; wasNew: boolean }) => void;
+}) {
+  const isCash = !!(booking.paymentId && booking.paymentId.startsWith("cash_"));
+  const paidOnline = isCash ? 0 : (booking.total || 0);
+  const defaultAmt = isEntryOnly
+    ? String(booking.total || 0)            // record entry-fee collected; wallet stays ₹0
+    : String(booking.total || paidOnline || 0);
+  const defaultMethod: "cash" | "upi" | "card" | "paid_online" | "split" =
+    paidOnline > 0 ? "paid_online" : (booking._isGuestList ? "cash" : "cash");
+
+  const [amount, setAmount] = useState(defaultAmt);
+  const [method, setMethod] = useState<"cash" | "upi" | "card" | "paid_online" | "split">(defaultMethod);
+  const [splitCash, setSplitCash] = useState("");
+  const [splitUpi, setSplitUpi] = useState("");
+  const [splitCard, setSplitCard] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const amt = parseInt(amount || "0", 10) || 0;
+  const walletAmt = isEntryOnly ? 0 : amt;   // ⚡ HARD LOCK for entry-only
+
+  const handleConfirm = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      // Validation
+      if (method === "split" && !isEntryOnly && walletAmt > 0) {
+        const c = parseInt(splitCash || "0", 10) || 0;
+        const u = parseInt(splitUpi || "0", 10) || 0;
+        const cd = parseInt(splitCard || "0", 10) || 0;
+        const total = c + u + cd + paidOnline;
+        if (total !== walletAmt) {
+          throw new Error(`Split total ₹${total} must equal wallet ₹${walletAmt}`);
+        }
+      }
+
+      // STEP 1 — check in (always runs first; this is the critical move).
+      // ⚠️ Pass "table" through as-is — it's the ONLY source that updates
+      // tableReservations.actualArrivalTime. Coercing to "booking" would
+      // mark the wrong doc and the Tables tab "Arrived" counter would never
+      // move. (architect flagged 2026-05-21)
+      const { checkedInAt, wasNew } = await checkInGuest(sourceKey, source, agentName);
+
+      // STEP 2 — wallet (fail-open: errors here do NOT block the check-in)
+      try {
+        if (walletAmt > 0 && !isEntryOnly) {
+          // Real wallet activation
+          const split = method === "split" ? {
+            cash: parseInt(splitCash || "0", 10) || 0,
+            upi: parseInt(splitUpi || "0", 10) || 0,
+            card: parseInt(splitCard || "0", 10) || 0,
+            paid_online: paidOnline,
+          } : undefined;
+          await activateCoverForBooking({
+            booking,
+            amount: walletAmt,
+            paymentMethod: method,
+            paymentSplit: split,
+            staffName: agentName,
+          });
+        } else {
+          // ₹0 wallet stub (entry-only OR door girl typed 0)
+          const mintSource: "booking" | "guestlist" =
+            source === "guestlist" ? "guestlist" : "booking";
+          await ensureZeroBalanceCoverForGuest({
+            bookingRef: booking.ref || booking.id,
+            sourceDocId: booking.id || booking.ref,
+            name: booking.name || "Guest",
+            phone: booking.phone || "",
+            source: mintSource,
+            eventId: (booking as any).eventId || "",
+            eventTitle: booking.eventTitle || "",
+            staffName: agentName,
+          });
+        }
+      } catch (walletErr: any) {
+        // Wallet failed but check-in succeeded — log + let user retry via ACTIVATE COVER
+        console.warn("[CheckInPaymentModal] wallet write failed (non-fatal)", walletErr);
+      }
+
+      onConfirmed({ checkedInAt, wasNew });
+    } catch (e: any) {
+      setErr(e?.message || "Check-in failed");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, backdropFilter: "blur(4px)" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 440, background: "#0F0F12", border: "1.5px solid rgba(200,166,69,0.4)", borderRadius: 18, padding: 22, maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#C8A645", marginBottom: 4 }}>
+          ✅ CHECK IN
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", marginBottom: 2 }}>{booking.name || "Guest"}</div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 14 }}>
+          {booking.ref}{booking.phone ? ` · ${booking.phone}` : ""}
+        </div>
+
+        {isEntryOnly && (
+          <div style={{ background: "rgba(245,158,11,.1)", border: "1px solid rgba(245,158,11,.4)", borderRadius: 10, padding: 10, marginBottom: 14, fontSize: 12, color: "#F59E0B", fontWeight: 700, lineHeight: 1.4 }}>
+            ⚠️ ENTRY-ONLY TICKET — WALLET WILL BE ₹0<br/>
+            <span style={{ fontWeight: 500, fontSize: 11 }}>
+              Type the entry fee below for audit (e.g. ₹599) and pick payment method.
+              Wallet is NOT redeemable on F&B.
+            </span>
+          </div>
+        )}
+
+        {paidOnline > 0 && !isEntryOnly && (
+          <div style={{ background: "rgba(0,200,100,.08)", border: "1px solid rgba(0,200,100,.3)", borderRadius: 10, padding: 10, marginBottom: 12, fontSize: 12, color: "#00C864", fontWeight: 700 }}>
+            ✅ ₹{paidOnline.toLocaleString("en-IN")} ALREADY PAID ONLINE
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 6 }}>
+          {isEntryOnly ? "ENTRY FEE COLLECTED (₹)" : "WALLET AMOUNT (₹)"}
+        </div>
+        <input type="number" inputMode="numeric" value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="0"
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1.5px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 20, fontWeight: 800, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
+
+        {isEntryOnly && amt > 0 && (
+          <div style={{ fontSize: 11, color: "#F59E0B", marginBottom: 10, marginTop: -8, fontStyle: "italic" }}>
+            ↳ Wallet activates at ₹0 · entry fee ₹{amt} logged for audit only.
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 8 }}>PAYMENT METHOD</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+          {([
+            { id: "cash" as const, label: "💵 Cash", color: "#00C864" },
+            { id: "upi" as const, label: "📱 UPI", color: "#00C4FF" },
+            { id: "card" as const, label: "💳 Card", color: "#A855F7" },
+            { id: "paid_online" as const, label: "✅ Paid Online", color: "#F59E0B" },
+          ]).map((pm) => {
+            const sel = method === pm.id;
+            return (
+              <button key={pm.id} type="button" onClick={() => setMethod(pm.id)}
+                style={{ padding: 10, borderRadius: 8, border: `${sel ? 2.5 : 1.5}px solid ${pm.color}55`, background: `${pm.color}${sel ? "26" : "0d"}`, color: pm.color, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                {pm.label}
+              </button>
+            );
+          })}
+        </div>
+        <button type="button" onClick={() => setMethod("split")}
+          style={{ width: "100%", padding: 10, borderRadius: 8, border: `${method === "split" ? 2.5 : 1.5}px solid #EC489955`, background: `#EC4899${method === "split" ? "26" : "0d"}`, color: "#EC4899", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>
+          ➗ Split Payment
+        </button>
+
+        {method === "split" && (() => {
+          const c = parseInt(splitCash || "0", 10) || 0;
+          const u = parseInt(splitUpi || "0", 10) || 0;
+          const cd = parseInt(splitCard || "0", 10) || 0;
+          const total = c + u + cd + paidOnline;
+          const target = isEntryOnly ? amt : walletAmt;
+          const remain = target - total;
+          return (
+            <div style={{ background: "rgba(236,72,153,.06)", border: "1px solid rgba(236,72,153,.25)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: 10, color: "#EC4899", marginBottom: 8, fontWeight: 800 }}>SPLIT (must total ₹{target})</div>
+              {paidOnline > 0 && (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 10px", borderRadius: 7, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.25)", fontSize: 12, color: "#F59E0B", marginBottom: 6 }}>
+                  <span>✅ Paid online (locked)</span><span style={{ fontWeight: 800 }}>₹{paidOnline}</span>
+                </div>
+              )}
+              {([
+                { lbl: "💵 Cash", color: "#00C864", val: splitCash, set: setSplitCash },
+                { lbl: "📱 UPI", color: "#00C4FF", val: splitUpi, set: setSplitUpi },
+                { lbl: "💳 Card", color: "#A855F7", val: splitCard, set: setSplitCard },
+              ]).map((row) => (
+                <div key={row.lbl} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, color: row.color, fontWeight: 700, minWidth: 70 }}>{row.lbl}</span>
+                  <input type="number" inputMode="numeric" value={row.val} onChange={(e) => row.set(e.target.value)} placeholder="0"
+                    style={{ padding: "8px 10px", borderRadius: 7, background: "rgba(255,255,255,.05)", border: `1px solid ${row.color}55`, color: "#fff", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" }} />
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 10px", borderRadius: 8, background: remain === 0 ? "rgba(0,200,100,.1)" : "rgba(239,68,68,.08)", border: `1px solid ${remain === 0 ? "rgba(0,200,100,.4)" : "rgba(239,68,68,.3)"}`, fontSize: 12, fontWeight: 800, color: remain === 0 ? "#00C864" : "#EF4444", marginTop: 4 }}>
+                <span>{remain === 0 ? "✓ Balanced" : remain > 0 ? "Remaining" : "Over by"}</span>
+                <span>₹{Math.abs(remain).toLocaleString("en-IN")}</span>
+              </div>
+            </div>
+          );
+        })()}
+
+        {err && <div style={{ color: "#EF4444", fontSize: 12, marginBottom: 10, textAlign: "center", fontWeight: 700 }}>⚠️ {err}</div>}
+
+        <button onClick={handleConfirm} disabled={busy}
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#00C864,#00A050)", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: busy ? "wait" : "pointer", marginBottom: 8, letterSpacing: .5 }}>
+          {busy ? "Checking in…" : `✅ CONFIRM CHECK-IN${walletAmt > 0 ? ` · ₹${walletAmt} WALLET` : isEntryOnly ? " · ₹0 WALLET" : ""}`}
+        </button>
+        <button onClick={onClose} disabled={busy}
+          style={{ width: "100%", padding: 10, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.55)", fontSize: 12, cursor: "pointer" }}>
+          ✗ Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LookupResult({ booking, agentName, onDone: _onDone }: { booking: HodBooking; agentName: string; onDone: () => void }) {
   const [done, setDone] = useState(booking.checkedIn || false);
   const [err, setErr] = useState("");
+  const [showCheckInModal, setShowCheckInModal] = useState(false);
   const { toast } = useToast();
   // Cross-collection search may surface an aggregator booking that has not
   // yet been assigned a table (auto-assign still pending or flagged for
@@ -863,86 +1050,51 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
   const paidOnline = isGuestList ? 0 : (isCash ? 0 : (booking.total || 0));
   const payAtVenue = isCash ? (booking.total || 0) : 0;
 
-  const handleCheckIn = async () => {
-    setBusy(true); setErr("");
-    try {
-      // 🛡 BUGFIX 2026-05-08: TABLE FOR 4 / VVIP TABLE FOR 6 bookings dual-write
-      // to both `bookings` and `tableReservations`. lookupBooking finds them in
-      // `bookings` first (so _isTable=false) — but we need the check-in to land
-      // on the tableReservations doc so the Tables tab "Arrived" counter moves
-      // and the row flips to actualArrivalTime. Detect via tableType / bookMode.
-      const isModalTable = !!(booking as any).tableType || (booking as any).bookMode === "group";
-      const source = (booking._isTable || isModalTable) ? "table" : booking._isGuestList ? "guestlist" : "booking";
-      // For table source, key MUST be the booking ref (matches tableReservations.bookingRef).
-      // For booking source, prefer docId (fast path); checkInGuest falls back to ref query.
-      const key = source === "booking" ? (booking.id || booking.ref) : (booking.ref || booking.id);
-      const { checkedInAt, wasNew } = await checkInGuest(key, source, agentName);
-      // 🔴 BUGFIX 2026-05-16 (Khushi) — auto-mint ₹0 cover wallet so the
-      // customer site's hodclub.in/?wallet=XXX URL flips from "Guest List
-      // Confirmed" QR page to the wallet+menu view immediately.
-      //
-      // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — auto-mint ONLY for guests
-      // whose wallet is ALWAYS ₹0 at the door:
-      //   • guestlist  → ₹0 (free entry, top up at bar later)
-      //   • entry-only → ₹0 (entry fee, not redeemable)
-      // COVER bookings must NOT auto-mint — they need an explicit cover
-      // amount (e.g. ₹1000) entered via "💰 Activate Cover" button. A
-      // zero-stub here would (a) make the wallet show ₹0 on the customer
-      // phone, and (b) collide with the later activation write. TABLE
-      // bookings continue to be skipped — captain seating handles them.
-      const isEntryOnly = isOnlyEntryBooking(booking);
-      const shouldMintZero =
-        source === "guestlist" ||
-        (source === "booking" && isEntryOnly);
-      if (shouldMintZero) {
-        const walletRef = booking.ref || booking.id;
-        ensureZeroBalanceCoverForGuest({
-          bookingRef: walletRef,
-          sourceDocId: booking.id || walletRef,
-          name: booking.name || "Guest",
-          phone: booking.phone || "",
-          source: source as "booking" | "guestlist",
-          eventId: (booking as any).eventId || "",
-          eventTitle: booking.eventTitle || "",
-          staffName: agentName,
-        }).catch(() => {});
-      }
-      setDone(true);
-      // Only offer undo if THIS call was the actual check-in mutation. If the guest
-      // was already checked in (e.g., another agent did it earlier), show an
-      // informational toast — undoing it from a stale screen would clobber their work.
-      if (wasNew) {
-        toast({
-          title: `✅ Checked in: ${booking.name || "Guest"}`,
-          description: "Tap Undo within 30 seconds if this was a mistake.",
-          duration: 30000,
-          action: (
-            <ToastAction altText="Undo check-in" onClick={async () => {
-              try {
-                const r = await checkInGuest(key, source, agentName, true, checkedInAt);
-                if (r.undone) {
-                  setDone(false);
-                  toast({ title: "↩️ Check-in reversed", duration: 4000 });
-                } else {
-                  toast({ title: "Cannot undo", description: "Record was modified — ask a manager.", variant: "destructive", duration: 6000 });
-                }
-              } catch (e: any) {
-                toast({ title: "Undo failed", description: e?.message || "Try the admin dashboard", variant: "destructive" });
-              }
-            }}>Undo</ToastAction>
-          ),
-        });
-      } else {
-        toast({
-          title: `Already checked in: ${booking.name || "Guest"}`,
-          description: "No new action taken.",
-          duration: 4000,
-        });
-      }
-    } catch (e: any) {
-      setErr(e?.message || "Check-in failed — see admin dashboard");
+  // 🔴 2026-05-21 (Khushi) — Check-in now opens CheckInPaymentModal instead
+  // of running silently. Door girl picks amount + payment method, then
+  // wallet activates with that amount (₹0 for entry-only).
+  const isModalTable = !!(booking as any).tableType || (booking as any).bookMode === "group";
+  const ciSource: "booking" | "guestlist" | "table" =
+    (booking._isTable || isModalTable) ? "table" : booking._isGuestList ? "guestlist" : "booking";
+  const ciKey = ciSource === "booking" ? (booking.id || booking.ref) : (booking.ref || booking.id);
+  const isEntryOnly = isOnlyEntryBooking(booking);
+
+  const openCheckInModal = () => {
+    if (done) {
+      toast({ title: `Already checked in: ${booking.name || "Guest"}`, description: "No action taken.", duration: 3000 });
+      return;
     }
-    setBusy(false);
+    setErr("");
+    setShowCheckInModal(true);
+  };
+
+  const handleModalConfirmed = ({ checkedInAt, wasNew }: { checkedInAt: string; wasNew: boolean }) => {
+    setShowCheckInModal(false);
+    setDone(true);
+    if (wasNew) {
+      toast({
+        title: `✅ Checked in: ${booking.name || "Guest"}`,
+        description: "Tap Undo within 30 seconds if this was a mistake.",
+        duration: 30000,
+        action: (
+          <ToastAction altText="Undo check-in" onClick={async () => {
+            try {
+              const r = await checkInGuest(ciKey, ciSource, agentName, true, checkedInAt);
+              if (r.undone) {
+                setDone(false);
+                toast({ title: "↩️ Check-in reversed", duration: 4000 });
+              } else {
+                toast({ title: "Cannot undo", description: "Record was modified — ask a manager.", variant: "destructive", duration: 6000 });
+              }
+            } catch (e: any) {
+              toast({ title: "Undo failed", description: e?.message || "Try the admin dashboard", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ),
+      });
+    } else {
+      toast({ title: `Already checked in: ${booking.name || "Guest"}`, description: "No new action taken.", duration: 4000 });
+    }
   };
 
   return (
@@ -959,18 +1111,48 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-        {booking.type && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Type: <span style={{ color: "#C8A645", fontWeight: 700 }}>{booking.type}</span></div>}
-        {booking.tier && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Tier: <span style={{ color: "#C8A645", fontWeight: 700 }}>{booking.tier}</span></div>}
-        {booking.guests && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Guests: <span style={{ color: "#fff", fontWeight: 700 }}>{booking.guests}</span></div>}
-        {booking.eventTitle && <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)" }}>Event: <span style={{ color: "#fff", fontWeight: 700 }}>{booking.eventTitle}</span></div>}
-        {isGuestList ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", gridColumn: "1 / -1" }}>Entry: <span style={{ color: "#60A5FA", fontWeight: 700 }}>📋 Free guest list</span></div>
-        ) : payAtVenue > 0 ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", gridColumn: "1 / -1" }}>Status: <span style={{ color: "#FBBF24", fontWeight: 700 }}>💵 Pay at venue ₹{payAtVenue}</span></div>
-        ) : paidOnline > 0 ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", gridColumn: "1 / -1" }}>Paid online: <span style={{ color: "#00C864", fontWeight: 700 }}>✅ ₹{paidOnline}</span></div>
-        ) : null}
+      {/* 🔴 2026-05-21 (Khushi) — Category + breakdown card. Door girl can see
+          at a glance: WHAT KIND of booking (ticket/guestlist/entry-only/group/
+          table) and HOW MANY (3 stags, 1 couple, 5 ladies, table for 4, etc).
+          Replaces the old loose Type/Tier/Guests grid which only worked for
+          legacy bookings that filled those fields. */}
+      <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+        {(() => {
+          const desc = describeBooking(booking);
+          return (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}55`, color: desc.categoryColor, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 999, letterSpacing: .5 }}>
+                  {desc.category}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>{desc.breakdown}</span>
+              </div>
+              {booking.eventTitle && (
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>
+                  🎵 <span style={{ color: "#fff", fontWeight: 700 }}>{booking.eventTitle}</span>
+                </div>
+              )}
+              {booking.tier && (
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)" }}>
+                  Tier: <span style={{ color: "#C8A645", fontWeight: 700 }}>{booking.tier}</span>
+                </div>
+              )}
+              {isGuestList ? (
+                <div style={{ fontSize: 12, color: "#60A5FA", fontWeight: 700, marginTop: 6 }}>
+                  📋 Free entry — no payment due
+                </div>
+              ) : payAtVenue > 0 ? (
+                <div style={{ fontSize: 12, color: "#FBBF24", fontWeight: 700, marginTop: 6 }}>
+                  💵 Pay at venue · ₹{payAtVenue}
+                </div>
+              ) : paidOnline > 0 ? (
+                <div style={{ fontSize: 12, color: "#00C864", fontWeight: 700, marginTop: 6 }}>
+                  ✅ Paid online · ₹{paidOnline}
+                </div>
+              ) : null}
+            </>
+          );
+        })()}
       </div>
 
       {err && (
@@ -986,10 +1168,22 @@ function LookupResult({ booking, agentName, onDone }: { booking: HodBooking; age
       )}
 
       {!done && !pendingAssignment && (
-        <button onClick={handleCheckIn} disabled={busy}
+        <button onClick={openCheckInModal}
           style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
-          {busy ? "Checking in..." : "✅ Check In Guest"}
+          ✅ Check In Guest
         </button>
+      )}
+
+      {showCheckInModal && (
+        <CheckInPaymentModal
+          booking={booking}
+          isEntryOnly={isEntryOnly}
+          source={ciSource}
+          sourceKey={ciKey}
+          agentName={agentName}
+          onClose={() => setShowCheckInModal(false)}
+          onConfirmed={handleModalConfirmed}
+        />
       )}
     </div>
   );
@@ -1300,12 +1494,79 @@ function PaidBadge({ booking }: { booking: HodBooking }) {
   // walk-ins (cash_*), guestlist comps, aggregator bookings, zero-total
   // entries — falls into "Pay at venue" so door staff knows to confirm
   // the cover/entry charge at the door.
+  // 🔴 2026-05-21 (Khushi) — GUESTLIST never shows a paid badge. Guest list
+  // is comp/free; "Paid online" was misleading on free entries.
+  if (booking._isGuestList) return null;
   const pid = booking.paymentId || "";
   const paidOnline = pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
   if (paidOnline) {
     return <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.45)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>✓ Paid online</span>;
   }
   return <span style={{ background: "rgba(200,166,69,0.18)", border: "1px solid rgba(200,166,69,0.55)", color: "#C8A645", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>₹ Pay at venue</span>;
+}
+
+// 🔴 2026-05-21 (Khushi) — Derive ticket category + breakdown for the
+// LookupResult info card. Reads the same Firestore fields the customer
+// site writes (entryType, tableType, bookMode, qty, guests, partySize).
+function describeBooking(b: HodBooking): { category: string; categoryColor: string; breakdown: string } {
+  const any = b as any;
+  const entryType = String(any.entryType || "").toLowerCase();
+  const tableType = String(any.tableType || "").toLowerCase();
+  const bookMode = String(any.bookMode || "").toLowerCase();
+  const qty = Number(any.qty || 0);
+  const guests = Number(b.guests || 0);
+  const partySize = Number(any.partySize || 0);
+
+  // GUESTLIST (free entry tab on customer site)
+  if (b._isGuestList || entryType.startsWith("guestlist_")) {
+    const isLadies = entryType === "guestlist_female" || (b.type || "").toLowerCase().includes("ladies") || (b.type || "").toLowerCase().includes("female");
+    return {
+      category: "📋 GUESTLIST",
+      categoryColor: "#60A5FA",
+      breakdown: isLadies ? `${qty || guests || 1} × Ladies` : `${qty || guests || 1} × Couple`,
+    };
+  }
+
+  // ENTRY ONLY (door entry pass, non-redeemable)
+  if (entryType === "entryonly" || entryType === "only_entry" || entryType === "entry_only") {
+    return { category: "🎟 ENTRY ONLY", categoryColor: "#F59E0B", breakdown: `${qty || 1} × Entry pass` };
+  }
+
+  // TABLE / VIP / GROUP TABLE — show actual guest count (no hardcoded
+  // capacity, so Khushi-edited oversize tables aren't mislabelled).
+  if (b._isTable || tableType) {
+    const n = guests || partySize || qty || 1;
+    if (tableType === "vip" || tableType === "vvip") {
+      return { category: "👑 VVIP TABLE", categoryColor: "#EC4899", breakdown: `${n} guest(s)` };
+    }
+    if (tableType === "table4") {
+      return { category: "🍽 TABLE FOR 4", categoryColor: "#EC4899", breakdown: `${n} guest(s)` };
+    }
+    return { category: "🍽 TABLE BOOKING", categoryColor: "#EC4899", breakdown: `${n} guest(s)${tableType ? ` · ${tableType.toUpperCase()}` : ""}` };
+  }
+
+  // GROUP BOOKING (per-head group flow)
+  if (bookMode === "group" || entryType === "group" || entryType === "group_booking") {
+    return { category: "👥 GROUP BOOKING", categoryColor: "#A855F7", breakdown: `${guests || qty || 1} person(s)` };
+  }
+
+  // TICKETS — stag / couple / female via cover tab
+  if (entryType === "stag" || (b.type || "").toLowerCase() === "stag") {
+    return { category: "🎫 TICKET", categoryColor: "#C8A645", breakdown: `${qty || 1} × Stag` };
+  }
+  if (entryType === "couple" || (b.type || "").toLowerCase().includes("couple")) {
+    return { category: "🎫 TICKET", categoryColor: "#C8A645", breakdown: `${qty || 1} × Couple` };
+  }
+  if (entryType === "female" || (b.type || "").toLowerCase().includes("ladies") || (b.type || "").toLowerCase().includes("female")) {
+    return { category: "🎫 TICKET", categoryColor: "#C8A645", breakdown: `${qty || 1} × Ladies` };
+  }
+
+  // Fallback — show whatever we have
+  return {
+    category: "🎫 TICKET",
+    categoryColor: "#C8A645",
+    breakdown: `${qty || guests || 1} guest(s)${b.type ? ` · ${b.type}` : ""}`,
+  };
 }
 
 function BookingRow({ booking, onOpen }: { booking: HodBooking; onOpen: (b: HodBooking) => void }) {
@@ -1604,54 +1865,55 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
     return unsub;
   }, []);
 
+  // 🔴 2026-05-21 (Khushi) — modal state for row check-in
+  const [checkInTarget, setCheckInTarget] = useState<HodGuestlistEntry | null>(null);
+
   const handleToggle = async (g: HodGuestlistEntry) => {
-    setBusyId(g.id);
     const wasCheckedIn = g.checkedIn;
-    // Adapted bookings live in `bookings`, not `guestlist` — route check-in there.
     const _source: "booking" | "guestlist" = (g as any)._source === "booking" ? "booking" : "guestlist";
+
+    // CHECK-IN path → open modal (amount + payment method)
+    if (!wasCheckedIn) {
+      if (busyId === g.id) return;
+      setCheckInTarget(g);
+      return;
+    }
+
+    // UN-CHECK path → direct call (no modal — just reverse the check-in)
+    setBusyId(g.id);
     try {
-      const { checkedInAt, wasNew } = await checkInGuest(g.id, _source, agentName, wasCheckedIn);
-      // 🔴 BUGFIX 2026-05-16 (Khushi) — mirror the LookupResult fix: any
-      // guest-list check-in must also mint the ₹0 cover so the customer
-      // site's wallet URL flips to wallet+menu view (was stuck on QR page).
-      // Only on a fresh check-in (not un-check / not idempotent re-check).
-      if (!wasCheckedIn && wasNew) {
-        ensureZeroBalanceCoverForGuest({
-          bookingRef: g.id,
-          sourceDocId: (g as any)._bookingDocId || g.id,
-          name: g.name || "Guest",
-          phone: g.phone || "",
-          source: _source,
-          eventId: g.eventId || "",
-          eventTitle: g.eventTitle || "",
-          staffName: agentName,
-        }).catch(() => {});
-      }
-      // Only show undo for a fresh check-in mutation (not idempotent no-ops, not un-checks).
-      // Prevents stale-UI undo from clobbering a re-check-in by another agent.
-      if (!wasCheckedIn && wasNew) {
-        toast({
-          title: `✅ Checked in: ${g.name || "Guest"}`,
-          description: "Tap Undo within 30 seconds if this was a mistake.",
-          duration: 30000,
-          action: (
-            <ToastAction altText="Undo check-in" onClick={async () => {
-              try {
-                const r = await checkInGuest(g.id, _source, agentName, true, checkedInAt);
-                if (r.undone) {
-                  toast({ title: "↩️ Check-in reversed", duration: 4000 });
-                } else {
-                  toast({ title: "Cannot undo", description: "Record was modified — ask a manager.", variant: "destructive", duration: 6000 });
-                }
-              } catch (e: any) {
-                toast({ title: "Undo failed", description: e?.message || "Try again", variant: "destructive" });
-              }
-            }}>Undo</ToastAction>
-          ),
-        });
-      }
+      await checkInGuest(g.id, _source, agentName, wasCheckedIn);
+      toast({ title: `↩️ Un-checked: ${g.name || "Guest"}`, duration: 3000 });
     } catch {}
     setBusyId("");
+  };
+
+  const handleCheckInModalConfirmed = (g: HodGuestlistEntry, checkedInAt: string, wasNew: boolean) => {
+    setCheckInTarget(null);
+    const _source: "booking" | "guestlist" = (g as any)._source === "booking" ? "booking" : "guestlist";
+    if (wasNew) {
+      toast({
+        title: `✅ Checked in: ${g.name || "Guest"}`,
+        description: "Tap Undo within 30 seconds if this was a mistake.",
+        duration: 30000,
+        action: (
+          <ToastAction altText="Undo check-in" onClick={async () => {
+            try {
+              const r = await checkInGuest(g.id, _source, agentName, true, checkedInAt);
+              if (r.undone) {
+                toast({ title: "↩️ Check-in reversed", duration: 4000 });
+              } else {
+                toast({ title: "Cannot undo", description: "Record was modified — ask a manager.", variant: "destructive", duration: 6000 });
+              }
+            } catch (e: any) {
+              toast({ title: "Undo failed", description: e?.message || "Try again", variant: "destructive" });
+            }
+          }}>Undo</ToastAction>
+        ),
+      });
+    } else {
+      toast({ title: `Already checked in: ${g.name || "Guest"}`, duration: 3000 });
+    }
   };
 
   const today = TODAY_STR();
@@ -1742,6 +2004,17 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
 
   return (
     <div>
+      {checkInTarget && (
+        <CheckInPaymentModal
+          booking={adapt(checkInTarget)}
+          isEntryOnly={false}
+          source={((checkInTarget as any)._source === "booking" ? "booking" : "guestlist") as "booking" | "guestlist"}
+          sourceKey={checkInTarget.id}
+          agentName={agentName}
+          onClose={() => setCheckInTarget(null)}
+          onConfirmed={({ checkedInAt, wasNew }) => handleCheckInModalConfirmed(checkInTarget, checkedInAt, wasNew)}
+        />
+      )}
       {detail && detailGuest && (
         <div onClick={() => setDetail(null)}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
