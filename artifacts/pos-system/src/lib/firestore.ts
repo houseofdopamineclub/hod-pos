@@ -786,6 +786,8 @@ export async function seedDefaultStaff(): Promise<void> {
     { name: "Captain 3", pin: "3003", role: "captain", active: true },
     { name: "Steward 1", pin: "4001", role: "steward", active: true },
     { name: "Bartender 1", pin: "5001", role: "bartender", active: true },
+    { name: "Chef 1", pin: "7001", role: "chef", active: true },
+    { name: "Chef 2", pin: "7002", role: "chef", active: true },
   ];
 
   for (const s of defaultStaff) {

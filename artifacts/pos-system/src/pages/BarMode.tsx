@@ -6,6 +6,9 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, updatePreparingRoundItems,
+  // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
+  // listen for ready-bumps so bartender can run-the-pass when food is up.
+  writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
   type HodCover, type HodOrderItem, type TabletFloor, type HodGuestSearchHit, type HodTransaction,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
@@ -266,6 +269,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
     const unsub = subscribeToCover(cover.id, (fresh) => { if (fresh) setCv(fresh); });
     return unsub;
   }, [cover.id]);
+
+  // 🍳 2026-05-21 — KDS ready-flash for THIS cover. Chef bumps food → green
+  // banner inside the wallet so bartender knows to run the pass. Filter from
+  // the global ready stream by coverDocId. Fail-open: if listener errors, no
+  // banner shows — bartender falls back to walking to the kitchen.
+  const [readyKDSAll, setReadyKDSAll] = useState<HodKDSItem[]>([]);
+  useEffect(() => {
+    const unsub = subscribeToReadyKDSItems(setReadyKDSAll);
+    return () => unsub();
+  }, []);
+  const readyKDSForThisCover = readyKDSAll.filter((it) => it.coverDocId === cover.id);
 
   const bal = cv.coverBalance || 0;
   const isExpired = cv.expiresAt ? new Date(cv.expiresAt).getTime() < Date.now() : false;
@@ -705,6 +719,24 @@ function WalletOverlay({ cover, staffName, onClose }: {
         items: allItems, roundTotal: total,
       }).catch(() => {});
 
+      // 🍳 KDS — mirror food items to kitchen screen for bar walk-in orders.
+      // Best-effort; paper KOT already handled by printKOT above. Drinks
+      // are silently filtered inside writeKDSItemsFromKOT.
+      if ((allItems || []).some((it) => it.t === "food")) {
+        writeKDSItemsFromKOT({
+          coverDocId: cover.id,
+          reservationId: "",
+          tableId: cv.tableId || cv.ref || "BAR",
+          tableLabel: cv.tableId ? cv.tableId : "BAR",
+          floorLabel: cv.floorLabel || "BAR",
+          customerName: cv.name || "",
+          bookingRef: cv.ref || "",
+          staff: staffName,
+          roundNum: (cv.transactions || []).filter((t) => t.type === "activate").length + 1,
+          items: allItems,
+        } as any).catch((e) => console.warn("[KDS] bar write failed", e));
+      }
+
       // 2026-05-14 — COMBINED "PRINT KOT + BILL" path. Used by ground-floor
       // cash-and-carry where bartender wants both prints in one tap. Bills
       // ALL activated rounds (the just-activated one + any prior ones) so
@@ -962,6 +994,42 @@ function WalletOverlay({ cover, staffName, onClose }: {
             🟡 PENDING ✅ TICK — ₹{persistentPendingTotal.toLocaleString("en-IN")} ({persistentPendingTicks.length} online recharge{persistentPendingTicks.length > 1 ? "s" : ""})
           </div>
           <div style={{ fontSize: 10, color: "rgba(255,200,0,.7)", fontStyle: "italic" }}>verify EOD</div>
+        </div>
+      )}
+
+      {/* 🍳 2026-05-21 — KDS FOOD-READY banner for bar wallet flow. Chef
+          bumped this cover's food → bartender sees pulsing green strip with
+          dish list and a ✓ PICKED UP button. Same UX as captain side. */}
+      {readyKDSForThisCover.length > 0 && (
+        <div
+          style={{
+            background: "linear-gradient(90deg,#14532d,#16a34a,#14532d)",
+            color: "#fff", padding: "10px 16px", borderBottom: "1px solid rgba(0,0,0,.3)",
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+            animation: "hodKdsReady 1.4s ease-in-out infinite",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 2 }}>
+              🍽 FOOD READY — RUN THE PASS
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.95, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {readyKDSForThisCover.map((it) => `${it.qty}× ${it.itemName}`).join(" · ")}
+            </div>
+          </div>
+          <button
+            onClick={async (e) => {
+              e.stopPropagation();
+              for (const it of readyKDSForThisCover) {
+                if (it.id) { try { await markKDSPickedUp(it.id, staffName); } catch {} }
+              }
+            }}
+            style={{
+              background: "#fff", color: "#16a34a", border: "none", padding: "8px 14px",
+              borderRadius: 8, fontSize: 13, fontWeight: 900, letterSpacing: 0.5,
+              cursor: "pointer", flexShrink: 0, textTransform: "uppercase",
+            }}
+          >✓ PICKED UP</button>
         </div>
       )}
 

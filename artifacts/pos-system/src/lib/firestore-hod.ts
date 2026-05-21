@@ -4404,3 +4404,221 @@ export async function updateDoorPricingSettings(
     throw e;
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🍳 KDS — KITCHEN DISPLAY SYSTEM (2026-05-21, Khushi-requested)
+// Adds a real-time kitchen screen showing grouped pending food items with a
+// BUMP button. When chef bumps, captain/bar tablets get an instant green
+// "FOOD READY" banner so they walk once and serve hot.
+// Paper KOTs are UNCHANGED — KDS rows are written ALONGSIDE printKOT, never
+// replacing it. If KDS write or screen fails, kitchen falls back to paper
+// (today's flow). Fail-open per Khushi philosophy.
+// Drinks bypass KDS entirely (bar makes them at the bar — same as today).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const KDS_COL = "posKDSItems";
+
+export type HodKDSStatus = "pending" | "ready" | "picked_up" | "voided";
+
+export interface HodKDSItem {
+  id?: string;
+  itemName: string;
+  /** Lowercase + trimmed for grouping. E.g. "paneer tikka". */
+  itemKey: string;
+  qty: number;
+  /** Always "food" today (drinks excluded). Future: per-station routing. */
+  itemType: string;
+  /** Pretty table label for chef display: "T3", "FD2", "BAR". */
+  tableLabel: string;
+  /** Floor name for chef context. */
+  floorLabel: string;
+  /** Customer first name for chef context (helps re-fire requests). */
+  customerName: string;
+  /** Captain/Bartender who fired this. */
+  staff: string;
+  /** TableReservations doc id — captain tablet listens by this for green flash. */
+  reservationId: string;
+  /** Covers doc id (bar walk-in flow) — bar tablet listens by this. */
+  coverDocId: string;
+  /** Back-link to the posKOTs doc so reports can join. */
+  kotId: string;
+  /** Round number on that table — chef uses to spot re-fires. */
+  roundNum: number;
+  /** Status lifecycle. */
+  status: HodKDSStatus;
+  firedAt?: any;
+  readyAt?: any;
+  readyBy?: string;
+  pickedUpAt?: any;
+  pickedUpBy?: string;
+  /** Operational-night stamp for end-of-night reports + auto-cleanup. */
+  opNight?: string;
+}
+
+function normalizeItemKey(name: string): string {
+  return (name || "").toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+/** Writes one KDS row PER food line on a KOT. Called AFTER printKOT succeeds
+ *  from Captain Mode + Bar Mode. Drinks are silently skipped (bar handles
+ *  those). Idempotent via stable doc id (resId/coverId + roundNum + itemIdx)
+ *  so a re-fire never duplicates KDS rows. Best-effort try/catch — if KDS
+ *  write fails, paper KOT already printed and kitchen works the old way. */
+export async function writeKDSItemsFromKOT(input: {
+  reservationId?: string;
+  coverDocId?: string;
+  kotId?: string;
+  tableId: string;
+  tableLabel?: string;
+  floorLabel?: string;
+  customerName?: string;
+  staff: string;
+  roundNum: number;
+  items: HodOrderItem[];
+}): Promise<number> {
+  try {
+    const foodOnly = (input.items || []).filter((i) => (i.t || "").toLowerCase() === "food");
+    if (foodOnly.length === 0) return 0;
+    const opNight = getOperationalNightStr();
+    const idBase = input.reservationId || input.coverDocId || `${input.tableId}_${Date.now()}`;
+    let written = 0;
+    for (let idx = 0; idx < foodOnly.length; idx++) {
+      const it = foodOnly[idx];
+      const stableId = `${idBase}_r${input.roundNum}_i${idx}_${normalizeItemKey(it.n).slice(0, 24).replace(/[^a-z0-9]/g, "")}`;
+      try {
+        await setDoc(doc(db, KDS_COL, stableId), {
+          itemName: it.n,
+          itemKey: normalizeItemKey(it.n),
+          qty: it.qty || 1,
+          itemType: "food",
+          tableLabel: input.tableLabel || input.tableId || "—",
+          floorLabel: input.floorLabel || "",
+          customerName: input.customerName || "",
+          staff: input.staff,
+          reservationId: input.reservationId || "",
+          coverDocId: input.coverDocId || "",
+          kotId: input.kotId || "",
+          roundNum: input.roundNum,
+          status: "pending" as HodKDSStatus,
+          firedAt: serverTimestamp(),
+          opNight,
+        });
+        written++;
+      } catch (e) {
+        console.warn("[KDS] write skipped (will fall back to paper)", e);
+      }
+    }
+    return written;
+  } catch (e) {
+    console.warn("[KDS] writeKDSItemsFromKOT failed", e);
+    return 0;
+  }
+}
+
+/** Kitchen tablet subscribes to all non-bumped items for today.
+ *  🛟 NOTE: single-field `where` only — NO orderBy on firedAt. The composite
+ *  index (status + firedAt) is NOT deployed and would silently break the
+ *  whole subscription (kitchen would forever show "ALL CLEAR" even when KOTs
+ *  fire). Sorting is done client-side in KitchenMode.tsx instead. */
+export function subscribeToActiveKDSItems(
+  cb: (items: HodKDSItem[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, KDS_COL),
+    where("status", "==", "pending"),
+    limit(200)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: HodKDSItem[] = [];
+      snap.forEach((d) => items.push({ id: d.id, ...(d.data() as any) }));
+      // Client-side sort: oldest fired first (matches the dropped orderBy asc).
+      items.sort((a, b) => {
+        const ta = a.firedAt?.toMillis ? a.firedAt.toMillis() : 0;
+        const tb = b.firedAt?.toMillis ? b.firedAt.toMillis() : 0;
+        return ta - tb;
+      });
+      cb(items);
+    },
+    (err) => {
+      console.warn("[KDS] active subscribe failed", err);
+      cb([]);
+    }
+  );
+}
+
+/** Captain/Bar tablets subscribe to all READY items so green-flash banners
+ *  can render on the matching table card or bar cover row.
+ *  🛟 Same composite-index avoidance as subscribeToActiveKDSItems above. */
+export function subscribeToReadyKDSItems(
+  cb: (items: HodKDSItem[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, KDS_COL),
+    where("status", "==", "ready"),
+    limit(100)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: HodKDSItem[] = [];
+      snap.forEach((d) => items.push({ id: d.id, ...(d.data() as any) }));
+      // Client-side sort: newest ready first (matches the dropped orderBy desc).
+      items.sort((a, b) => {
+        const ta = a.readyAt?.toMillis ? a.readyAt.toMillis() : 0;
+        const tb = b.readyAt?.toMillis ? b.readyAt.toMillis() : 0;
+        return tb - ta;
+      });
+      cb(items);
+    },
+    (err) => {
+      console.warn("[KDS] ready subscribe failed", err);
+      cb([]);
+    }
+  );
+}
+
+/** Chef taps BUMP on one item. */
+export async function bumpKDSItem(id: string, chef: string): Promise<void> {
+  await updateDoc(doc(db, KDS_COL, id), {
+    status: "ready" as HodKDSStatus,
+    readyAt: serverTimestamp(),
+    readyBy: chef,
+  });
+}
+
+/** Chef taps BUMP ALL on a grouped card → bump every item with that itemKey. */
+export async function bumpKDSGroup(ids: string[], chef: string): Promise<{ ok: number; fail: number }> {
+  let ok = 0, fail = 0;
+  for (const id of ids) {
+    try { await bumpKDSItem(id, chef); ok++; } catch { fail++; }
+  }
+  return { ok, fail };
+}
+
+/** Captain/Bar taps ✓ PICKED UP — clears the green banner. */
+export async function markKDSPickedUp(id: string, by: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, KDS_COL, id), {
+      status: "picked_up" as HodKDSStatus,
+      pickedUpAt: serverTimestamp(),
+      pickedUpBy: by,
+    });
+  } catch (e) {
+    console.warn("[KDS] pickup failed", e);
+  }
+}
+
+/** Recall a bumped item (chef hit BUMP by mistake — 60-sec undo). */
+export async function recallKDSItem(id: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, KDS_COL, id), {
+      status: "pending" as HodKDSStatus,
+      readyAt: null,
+      readyBy: null,
+    });
+  } catch (e) {
+    console.warn("[KDS] recall failed", e);
+  }
+}

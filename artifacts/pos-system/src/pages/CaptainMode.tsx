@@ -20,6 +20,9 @@ import {
   subscribeToCoverById,
   // 2026-05-20 — Customer-calls-captain: clear ping after captain acknowledges
   clearCustomerCallRequest,
+  // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
+  // listen for ready-bumps to green-flash the table card, and let captain acknowledge.
+  writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
   // 2026-05-18 — Live menu category filtering (admin Menu CRM controls visibility + discount)
   subscribeToLiveMenuCategories, filterMenuByLiveCategories, type MenuCategory,
 } from "@/lib/firestore-hod";
@@ -2203,6 +2206,28 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
   }>(null);
   const [busy, setBusy] = useState("");
   const [qrFallback, setQrFallback] = useState<{ url: string; reason: string } | null>(null);
+  // 🍳 2026-05-21 — KDS ready items for THIS table. Chef bumps in Kitchen Mode
+  // → these populate within 1s → green banner below pulses with chime so
+  // captain serves hot. Filter from the global ready stream (single Firestore
+  // listener for the whole captain dashboard via dedup at SDK level).
+  const [readyKDSAll, setReadyKDSAll] = useState<HodKDSItem[]>([]);
+  useEffect(() => {
+    const unsub = subscribeToReadyKDSItems(setReadyKDSAll);
+    return () => unsub();
+  }, []);
+  const readyKDSForThisTable = useMemo(
+    () => readyKDSAll.filter((it) => it.reservationId === r._docId),
+    [readyKDSAll, r._docId]
+  );
+  // Soft chime when ready count transitions 0 → N (uses captain's existing
+  // playAlert helper so we get the same audio behavior as waiter calls).
+  const prevReadyCountRef = useRef(0);
+  useEffect(() => {
+    if (readyKDSForThisTable.length > prevReadyCountRef.current && prevReadyCountRef.current === 0) {
+      try { playAlert(false); } catch {}
+    }
+    prevReadyCountRef.current = readyKDSForThisTable.length;
+  }, [readyKDSForThisTable.length, playAlert]);
   // 🆕 2026-05-20 (Khushi spec) — captain always needs a way to share the
   // wallet/menu link in case Meta WhatsApp delivery fails. This opens a
   // local QR popup with the hodclub.in/?wallet=<ref> URL the customer can
@@ -2369,6 +2394,22 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
         } else {
           alert(`🖨 KOT sent to: ${dests.join(" + ")}\n\nTable floor: ${floorName}\n(Derived from table ${r.tableId})`);
         }
+        // 🍳 KDS — mirror food items to kitchen screen. Best-effort; paper KOT
+        // already fired so chef has a fallback if this write fails.
+        if (hasFood) {
+          writeKDSItemsFromKOT({
+            reservationId: r._docId,
+            coverDocId: (r as any).linkedCoverDocId || "",
+            tableId: r.tableId,
+            tableLabel: r.tableId,
+            floorLabel: floorName,
+            customerName: r.customerName || "",
+            bookingRef: r.bookingRef,
+            staff: captainName,
+            roundNum: round.roundNum,
+            items: round.items,
+          } as any).catch((e) => console.warn("[KDS] captain serve write failed", e));
+        }
       }
     } catch {}
     setBusy("");
@@ -2411,6 +2452,22 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             tabletFloor: tableFloor,
           });
           if (ok) okCount++; else failCount++;
+          // 🍳 KDS — mirror food to kitchen screen (best-effort; paper KOT
+          // already handled by printKOT above).
+          if ((round.items || []).some((it) => it.t === "food")) {
+            writeKDSItemsFromKOT({
+              reservationId: r._docId,
+              coverDocId: (r as any).linkedCoverDocId || "",
+              tableId: r.tableId,
+              tableLabel: r.tableId,
+              floorLabel: floorName,
+              customerName: r.customerName || "",
+              bookingRef: r.bookingRef,
+              staff: captainName,
+              roundNum: round.roundNum,
+              items: round.items,
+            } as any).catch((e) => console.warn("[KDS] captain serveAll write failed", e));
+          }
         } catch { failCount++; }
       }
       // Rooftop has no bar → drinks made at FF bar (runners carry up)
@@ -2821,6 +2878,43 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             </div>
           );
         })()}
+        {/* 🍳 2026-05-21 — KDS FOOD-READY banner. Chef bumped this table's
+            food from Kitchen Mode → captain sees a green pulsing banner with
+            the dish list and a ✓ PICKED UP button. Tap clears the row (status
+            → picked_up). 🛟 If clear write fails, banner stays — next bump
+            elsewhere doesn't break this one. Audio chime via playAlert. */}
+        {readyKDSForThisTable.length > 0 && (
+          <div
+            style={{
+              background: "linear-gradient(90deg,#14532d,#16a34a,#14532d)",
+              color: "#fff", padding: "10px 14px", borderBottom: "1px solid rgba(0,0,0,.3)",
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+              animation: "hodKdsReady 1.4s ease-in-out infinite",
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 2 }}>
+                🍽 FOOD READY — GO SERVE
+              </div>
+              <div style={{ fontSize: 13, opacity: 0.95, lineHeight: 1.4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {readyKDSForThisTable.map((it) => `${it.qty}× ${it.itemName}`).join(" · ")}
+              </div>
+            </div>
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                for (const it of readyKDSForThisTable) {
+                  if (it.id) { try { await markKDSPickedUp(it.id, captainName); } catch {} }
+                }
+              }}
+              style={{
+                background: "#fff", color: "#16a34a", border: "none", padding: "8px 14px",
+                borderRadius: 8, fontSize: 14, fontWeight: 900, letterSpacing: 0.5,
+                cursor: "pointer", flexShrink: 0, textTransform: "uppercase",
+              }}
+            >✓ PICKED UP</button>
+          </div>
+        )}
         {/* 🔴 2026-05-20 (Khushi Bug 1 fix) — LAST CALL RECAP strip.
             Shows the MOST RECENT dismissed customer call for 30 min after
             captain tapped ✓ ON IT, so the captain doesn't lose the item
@@ -3735,6 +3829,7 @@ type FloorTableStatus =
 
 function FloorPlanView({
   reservations, customerSearch, pendingFilter, activeWaiterCallTableIds,
+  readyKDSResIds,
   onSelectReservation, onSelectFreeTable,
 }: {
   reservations: HodTableReservation[];
@@ -3743,8 +3838,13 @@ function FloorPlanView({
   // we narrow the visual map to matching tables AND auto-jump to the floor
   // that has at least one match, so a ping on the rooftop can't hide while
   // captain stares at dining.
-  pendingFilter: "" | "pending" | "bill" | "calling";
+  pendingFilter: "" | "pending" | "bill" | "calling" | "ready";
   activeWaiterCallTableIds: Set<string>;
+  // 🍳 2026-05-21 (Khushi) — set of reservation _docIds with at least one
+  // KDS item in status="ready" (chef bumped, captain hasn't picked up yet).
+  // Used to pulse those table tiles GREEN on the floor map so captain spots
+  // ready food from across the room without opening the card.
+  readyKDSResIds: Set<string>;
   onSelectReservation: (docId: string) => void;
   onSelectFreeTable: (tableId: string, floorKey: FloorKey, floorLabel: string) => void;
 }) {
@@ -3804,6 +3904,7 @@ function FloorPlanView({
         if (pendingFilter === "calling" && isCalling) out[fk].matches += 1;
         else if (pendingFilter === "bill" && isBill) out[fk].matches += 1;
         else if (pendingFilter === "pending" && isPending) out[fk].matches += 1;
+        else if (pendingFilter === "ready" && readyKDSResIds.has(r._docId)) out[fk].matches += 1;
         else if (!pendingFilter && matchesQ) out[fk].matches += 1;
       });
     });
@@ -3893,6 +3994,7 @@ function FloorPlanView({
       }
       if (pendingFilter === "bill" && r.paymentStatus === "bill_requested") { s.add(t.id); return; }
       if (pendingFilter === "pending" && st.state === "orange") { s.add(t.id); return; }
+      if (pendingFilter === "ready" && readyKDSResIds.has(r._docId)) { s.add(t.id); return; }
       if (!pendingFilter && q) {
         const hay = [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase();
         if (hay.includes(q)) s.add(t.id);
@@ -4016,11 +4118,38 @@ function FloorPlanView({
       }
     }
 
+    // 🍳 2026-05-21 (Khushi) — pulse animations for tile-level alerts.
+    // GREEN pulse trumps amber: a table with ready food needs immediate
+    // service even if some other dish is still cooking.
+    const resForTile = (s as any).r as HodTableReservation | undefined;
+    const tileReady = !!(resForTile && readyKDSResIds.has(resForTile._docId));
+    const tileClasses: string[] = [];
+    if (blink) tileClasses.push("hod-flash");
+    if (tileReady) tileClasses.push("hod-tile-ready");
+    else if (s.state === "orange") tileClasses.push("hod-tile-orange");
     return (
-      <g key={t.id} onClick={onClick} className={blink ? "hod-flash" : undefined} style={{ cursor: "pointer", opacity: dimmed ? 0.28 : 1, transition: "opacity .2s" }}>
+      <g key={t.id} onClick={onClick} className={tileClasses.join(" ") || undefined} style={{ cursor: "pointer", opacity: dimmed ? 0.28 : 1, transition: "opacity .2s" }}>
         {matched && t.sh === "circle" && <circle cx={cx} cy={cy} r={(t.r || 0) + 4} fill="none" stroke="#E5A82A" strokeWidth={1.5} strokeDasharray="3 3" />}
         {matched && t.sh === "rect" && <rect x={(t.x || 0) - 4} y={(t.y || 0) - 4} width={(t.w || 0) + 8} height={(t.h || 0) + 8} rx={8} fill="none" stroke="#E5A82A" strokeWidth={1.5} strokeDasharray="3 3" />}
         {shape}
+        {/* 🍳 2026-05-21 (Khushi) — marching-dash green ring around the tile
+            when food is READY at the pass. Swaps the previous green dot for
+            a more eye-catching rotating dashed outline. Disappears the moment
+            captain taps ✓ PICKED UP (or ✓ MARK SERVED inside the card) because
+            tileReady recomputes from the live posKDSItems subscription. */}
+        {tileReady && t.sh === "circle" && (
+          <circle cx={cx} cy={cy} r={(t.r || 0) + 5} className="hod-tile-ready-ring" />
+        )}
+        {tileReady && t.sh === "rect" && (
+          <rect x={(t.x || 0) - 5} y={(t.y || 0) - 5} width={(t.w || 0) + 10} height={(t.h || 0) + 10} rx={8} className="hod-tile-ready-ring" />
+        )}
+        {tileReady && t.sh !== "circle" && t.sh !== "rect" && (
+          /* Diamond / polygon — ring rendered as a slightly larger polygon. */
+          <polygon
+            points={`${cx},${cy - ((t.r || 0) + 5)} ${cx + ((t.r || 0) + 5)},${cy} ${cx},${cy + ((t.r || 0) + 5)} ${cx - ((t.r || 0) + 5)},${cy}`}
+            className="hod-tile-ready-ring"
+          />
+        )}
         <text x={cx} y={cy - 2} textAnchor="middle" fontSize="11" fontWeight={900}
           fill={c.text} fontFamily="'Manrope','Space Grotesk',sans-serif" style={{ pointerEvents: "none" }}>
           {t.id}
@@ -4153,7 +4282,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
   const [allReservations, setAllReservations] = useState<HodTableReservation[]>([]);
   const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" });
-  const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill" | "calling">("");
+  const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill" | "calling" | "ready">("");
   const [customerSearch, setCustomerSearch] = useState("");
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   // 🔴 2026-05-20 (Khushi) — track customerCallRequest in prev snapshot so we
@@ -4185,6 +4314,39 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     return () => unsub();
   }, []);
   const activeWaiterCalls = activeWaiterCallsList.length;
+
+  // 🍳 2026-05-21 (Khushi) — Dashboard-level KDS-ready subscription. Single
+  // Firestore listener powers: (a) pulsing green TILES on the floor map, and
+  // (b) the global "🍽 FOOD READY" strip below the KPIs. TableCard keeps its
+  // own per-reservation subscription for the in-card banner — small dupe, but
+  // both work in isolation if either fails (fail-open).
+  const [readyKDSAllDash, setReadyKDSAllDash] = useState<HodKDSItem[]>([]);
+  useEffect(() => {
+    const unsub = subscribeToReadyKDSItems(setReadyKDSAllDash);
+    return () => unsub();
+  }, []);
+  const readyKDSResIds = useMemo(
+    () => new Set(readyKDSAllDash.map((it) => it.reservationId).filter(Boolean)),
+    [readyKDSAllDash]
+  );
+  // Group ready items by reservationId so the strip renders one row per table
+  // with stacked item names. coverDocId-only items (bar walk-in) get bucketed
+  // under their coverDocId so the bar's runner can see them too.
+  const readyGroups = useMemo(() => {
+    const m = new Map<string, { key: string; tableLabel: string; floorLabel: string; customerName: string; items: HodKDSItem[]; resId: string }>();
+    readyKDSAllDash.forEach((it) => {
+      const key = it.reservationId || `cover:${it.coverDocId}`;
+      const g = m.get(key);
+      if (g) { g.items.push(it); }
+      else m.set(key, {
+        key, tableLabel: it.tableLabel || it.reservationId || "—",
+        floorLabel: it.floorLabel || "",
+        customerName: it.customerName || "",
+        items: [it], resId: it.reservationId || "",
+      });
+    });
+    return Array.from(m.values());
+  }, [readyKDSAllDash]);
 
   // 🆕 2026-05-21 (Khushi cost-burn fix) — REMOVED the May-16 diagnostic call
   // that fetched the ENTIRE `tableReservations` collection on every dashboard
@@ -4278,6 +4440,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     else if (pendingFilter === "calling") {
       list = list.filter(r => !!r.customerCallRequest || waiterCallTableIds.has((r.tableId || "").toLowerCase()));
     }
+    else if (pendingFilter === "ready") list = list.filter(r => readyKDSResIds.has(r._docId));
     // 🔴 2026-05-20 (Khushi) — always sort customer-calling tables to the TOP
     // of the list regardless of filter, so a ping is impossible to miss even
     // if dozens of tables are open. Stable sort preserves prior order otherwise.
@@ -4295,7 +4458,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       });
     }
     return list;
-  }, [reservations, pendingFilter, customerSearch]);
+  }, [reservations, pendingFilter, customerSearch, waiterCallTableIds, readyKDSResIds]);
 
   return (
     <div className="captain-v2" style={{ minHeight: "100vh", background: "#050507", color: "#F2EBD3", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
@@ -4319,30 +4482,48 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: "8px 12px", color: "#F2EBD3", fontSize: 14, outline: "none" }} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, padding: "10px 16px" }}>
+      {/* 🍳 2026-05-21 (Khushi) — KPI tiles bumped from 4 → 5 to add FOOD READY
+          tab next to BILL DUE. Tap it to filter the floor map + list down to
+          tables with bumped-but-not-picked-up food. Tile auto-pulses green
+          (custom class — distinct from calling's red pulse-red). */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6, padding: "10px 16px" }}>
         {[
-          { label: "Tables", value: reservations.length, color: "#E5A82A", filter: "" as const, pulse: false },
-          { label: "Calling", value: calling, color: calling > 0 ? "#EF4444" : "rgba(242,235,211,.72)", filter: "calling" as const, pulse: calling > 0 },
-          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#E5A82A", filter: "pending" as const, pulse: false },
-          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#E5A82A" : "rgba(242,235,211,.72)", filter: "bill" as const, pulse: false },
-        ].map((s) => (
-          <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
-            className={s.pulse ? "pulse-red" : ""}
-            style={{ background: pendingFilter === s.filter && s.filter ? "rgba(239,68,68,.12)" : s.pulse ? "rgba(239,68,68,.08)" : "rgba(255,255,255,.04)",
-              border: `1.5px solid ${pendingFilter === s.filter && s.filter ? s.color + "80" : s.pulse ? "rgba(239,68,68,.5)" : "rgba(255,255,255,.08)"}`,
-              borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s" }}>
-            <div style={{ fontSize: 23, fontWeight: 900, color: s.color }}>{s.value}</div>
-            <div style={{ fontSize: 12, color: s.pulse ? "#EF4444" : "rgba(242,235,211,.72)", marginTop: 2, fontWeight: s.pulse ? 800 : 400, letterSpacing: s.pulse ? .5 : 0 }}>
-              {s.pulse && "🔔 "}{s.label}
+          { label: "Tables", value: reservations.length, color: "#E5A82A", filter: "" as const, pulse: false, kind: "default" as const },
+          { label: "Calling", value: calling, color: calling > 0 ? "#EF4444" : "rgba(242,235,211,.72)", filter: "calling" as const, pulse: calling > 0, kind: "red" as const },
+          { label: "Pending", value: pending, color: pending > 0 ? "#EF4444" : "#E5A82A", filter: "pending" as const, pulse: false, kind: "default" as const },
+          { label: "Bill Due", value: billDue, color: billDue > 0 ? "#E5A82A" : "rgba(242,235,211,.72)", filter: "bill" as const, pulse: false, kind: "default" as const },
+          { label: "Food Ready", value: readyGroups.length, color: readyGroups.length > 0 ? "#22C55E" : "rgba(242,235,211,.72)", filter: "ready" as const, pulse: readyGroups.length > 0, kind: "green" as const },
+        ].map((s) => {
+          const isGreenPulse = s.kind === "green" && s.pulse;
+          const isRedPulse = s.kind === "red" && s.pulse;
+          const isActive = pendingFilter === s.filter && !!s.filter;
+          const bg = isActive
+            ? (isGreenPulse ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.12)")
+            : isRedPulse ? "rgba(239,68,68,.08)"
+            : isGreenPulse ? "rgba(34,197,94,.08)"
+            : "rgba(255,255,255,.04)";
+          const border = isActive
+            ? (isGreenPulse ? "rgba(34,197,94,.6)" : s.color + "80")
+            : isRedPulse ? "rgba(239,68,68,.5)"
+            : isGreenPulse ? "rgba(34,197,94,.5)"
+            : "rgba(255,255,255,.08)";
+          return (
+            <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
+              className={isRedPulse ? "pulse-red" : isGreenPulse ? "hod-tile-ready" : ""}
+              style={{ background: bg, border: `1.5px solid ${border}`, borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s" }}>
+              <div style={{ fontSize: 20, fontWeight: 900, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 10, color: isRedPulse ? "#EF4444" : isGreenPulse ? "#86EFAC" : "rgba(242,235,211,.72)", marginTop: 2, fontWeight: (isRedPulse || isGreenPulse) ? 800 : 400, letterSpacing: (isRedPulse || isGreenPulse) ? .5 : 0 }}>
+                {isRedPulse && "🔔 "}{isGreenPulse && "🍽 "}{s.label}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       {pendingFilter && (
         <div style={{ padding: "0 16px", marginBottom: 4 }}>
           <button onClick={() => setPendingFilter("")}
             style={{ fontSize: 13, color: "#E5A82A", background: "rgba(229,168,42,.08)", border: "1px solid rgba(229,168,42,.2)", borderRadius: 8, padding: "4px 12px", cursor: "pointer" }}>
-            Showing {pendingFilter === "pending" ? "Pending" : pendingFilter === "calling" ? "🔔 Customer Calling" : "Bill Due"} only — tap to clear ✕
+            Showing {pendingFilter === "pending" ? "Pending" : pendingFilter === "calling" ? "🔔 Customer Calling" : pendingFilter === "ready" ? "🍽 Food Ready" : "Bill Due"} only — tap to clear ✕
           </button>
         </div>
       )}
@@ -4401,6 +4582,59 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         )}
       </div>
 
+      {/* 🍳 2026-05-21 (Khushi) — FOOD READY strip now ONLY renders when the
+          Food Ready tab is active. Previously it auto-showed any time food
+          was ready, which Khushi felt cluttered the dashboard. The 5th KPI
+          tile (green pulse) is the always-visible cue; tap it → strip opens.
+          🛟 FALLBACK: in-card green banner + pulsing green ring on the tile
+          still fire independently, so captain can't miss ready food even if
+          they never tap the Food Ready tab. */}
+      {pendingFilter === "ready" && readyGroups.length > 0 && (
+        <div style={{ padding: "10px 16px 0" }}>
+          <div className="hod-tile-ready"
+            style={{
+              borderRadius: 12, border: "1.5px solid #22C55E",
+              background: "linear-gradient(135deg,rgba(34,197,94,.18),rgba(34,197,94,.06))",
+              padding: "10px 12px",
+            }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div style={{ fontSize: 13, fontWeight: 900, color: "#86EFAC", letterSpacing: 0.6 }}>
+                🍽 FOOD READY · {readyGroups.length} TABLE{readyGroups.length > 1 ? "S" : ""}
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(134,239,172,.7)", fontWeight: 800, letterSpacing: 0.4 }}>
+                TAP A ROW → ✓ PICKED UP
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {readyGroups.map((g) => {
+                const isOpenableTable = !!g.resId && reservations.some((r) => r._docId === g.resId);
+                return (
+                  <div key={g.key}
+                    onClick={() => { if (isOpenableTable) setSelectedDocId(g.resId); }}
+                    style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
+                      background: "rgba(0,0,0,.35)", border: "1px solid rgba(34,197,94,.35)",
+                      borderRadius: 8, padding: "8px 10px", cursor: isOpenableTable ? "pointer" : "default",
+                    }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 900, color: "#FFFFFF", letterSpacing: 0.3 }}>
+                        {g.tableLabel}{g.floorLabel ? ` · ${g.floorLabel}` : ""}{g.customerName ? ` · ${g.customerName}` : ""}
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(242,235,211,.8)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {g.items.map((it) => `${it.itemName} ×${it.qty}`).join(" · ")}
+                      </div>
+                    </div>
+                    {isOpenableTable && (
+                      <div style={{ fontSize: 11, fontWeight: 900, color: "#22C55E", letterSpacing: 0.5, whiteSpace: "nowrap" }}>OPEN →</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ padding: "10px 16px 0" }}>
         <button onClick={() => { setWalkInPrefill(undefined); setShowWalkIn(true); }}
           style={{ width: "100%", padding: 12, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.15),rgba(229,168,42,.08))", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 16, fontWeight: 800, cursor: "pointer", letterSpacing: 0.5 }}>
@@ -4418,6 +4652,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         customerSearch={pendingFilter ? "" : customerSearch /* KPI filters override search highlighting */}
         pendingFilter={pendingFilter}
         activeWaiterCallTableIds={waiterCallTableIds}
+        readyKDSResIds={readyKDSResIds}
         onSelectReservation={(docId) => setSelectedDocId(docId)}
         onSelectFreeTable={(tableId) => { setWalkInPrefill(tableId); setShowWalkIn(true); }}
       />

@@ -27,6 +27,7 @@ export const FEATURES = {
   // Phase 2 — captain / bar / KOT / billing
   captainMode: PHASE >= 2,
   barMode: PHASE >= 2,
+  kitchenMode: PHASE >= 2,
   floorView: PHASE >= 2,
   tablePos: PHASE >= 2,
   billing: PHASE >= 2,

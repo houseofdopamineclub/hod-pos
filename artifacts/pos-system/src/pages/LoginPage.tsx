@@ -156,6 +156,7 @@ export default function LoginPage() {
           FEATURES.captainMode && { href: "/captain", label: "Captain Mode", icon: "🪩" },
           FEATURES.barMode && { href: "/bar", label: "Bar Mode", icon: "🍸" },
           FEATURES.doorMode && { href: "/door", label: "Door Mode", icon: "🚪" },
+          FEATURES.kitchenMode && { href: "/kitchen", label: "Kitchen Mode", icon: "🍳" },
         ].filter(Boolean).map((m: any) => (
           <a
             key={m.href}
