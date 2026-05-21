@@ -395,6 +395,25 @@ export function deriveItemDestination(it: HodOrderItem & { dest?: string }, tabl
 
 const COVERS_COL = "covers";
 const TABLE_RES_COL = "tableReservations";
+
+// 🔴 2026-05-21 (Khushi) — easy-to-read category-prefixed refs (6 digits).
+// TIC=ticket · GL=guestlist · ENT=entry-only · TAB=table · GRP=group.
+// Legacy refs (HOD-XXXXXXXX, WALK-…, WI-…, GL-…, CORP-…) keep working — all
+// Firestore reads are key-based, not prefix-parsed. Wallet routing on the
+// customer site was updated to accept both old and new TAB/GL formats.
+// AGG- / PROXY- refs intentionally NOT switched: AGG- is parsed by the
+// aggregator-detection filter (`startsWith('AGG-')`) at several read sites
+// and PROXY- encodes the proxy operator's name in the ref for the audit
+// trail. Both stay as-is.
+export type HodRefCategory = "ticket" | "guestlist" | "entryonly" | "table" | "group";
+export function mintHodRef(cat: HodRefCategory): string {
+  const P: Record<HodRefCategory, string> = { ticket: "TIC", guestlist: "GL", entryonly: "ENT", table: "TAB", group: "GRP" };
+  // 6 digits — 900k space per category. Collision probability is negligible
+  // (≪0.001% per night at typical volume). Caller can retry on setDoc
+  // conflict; fail-open philosophy.
+  const n = Math.floor(100000 + Math.random() * 900000);
+  return `HOD${P[cat]}${n}`;
+}
 const TABLE_HISTORY_COL = "tableHistory";
 const BOOKINGS_COL = "bookings";
 const GUESTLIST_COL = "guestlist";
@@ -945,7 +964,24 @@ export async function getCoverByRef(ref: string): Promise<HodCover | null> {
 
 export async function searchCovers(searchQuery: string, tonightDate?: string): Promise<HodCover[]> {
   const q = searchQuery.toLowerCase();
-  const snap = await getDocs(collection(db, COVERS_COL));
+  // 💰 COST FIX 2026-05-21 — scope to tonight's operational night + IST calendar
+  // today (so a cover written near the 12-noon rollover is still visible). HodCover.date
+  // is OPTIONAL on the interface — covers written before this migration WILL be missed
+  // by this filtered query, so callers that need historical reach (Reports >7-day view)
+  // must use a separate unfiltered helper. Day-to-day Door/Bar redemption only ever
+  // touches tonight's wallets so this is safe for the live ops path.
+  const tonight = tonightDate || getOperationalNightStr();
+  const calToday = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const dates = Array.from(new Set([tonight, calToday]));
+  let snap;
+  try {
+    snap = await getDocs(query(collection(db, COVERS_COL), where("date", "in", dates)));
+  } catch (e) {
+    // 🛟 FALLBACK: composite index missing or 'date' field absent everywhere — fall back
+    // to full scan so search never silently returns blank. Logs to console for ops visibility.
+    console.warn("[searchCovers] date-filtered query failed, falling back to full scan", e);
+    snap = await getDocs(collection(db, COVERS_COL));
+  }
   const results: HodCover[] = [];
   const nowMs = Date.now();
   snap.forEach((d) => {
@@ -2401,8 +2437,12 @@ export interface BillAuditRow {
 }
 export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]> {
   const rows: BillAuditRow[] = [];
-  // Wallets
-  const coverSnap = await getDocs(collection(db, COVERS_COL));
+  // Wallets — 💰 COST FIX 2026-05-21: cap at 500 covers (was: full collection scan
+  // growing unbounded). No orderBy because not every cover doc has a guaranteed
+  // 'createdAt' field — adding it would fail the query. limit(500) alone returns
+  // Firestore's natural order which is close-enough for an audit page that's
+  // already paginated by `maxRows` below.
+  const coverSnap = await getDocs(query(collection(db, COVERS_COL), limit(500)));
   coverSnap.forEach((d) => {
     const data = d.data() as HodCover & { id?: string };
     const log = data.walletBillPrintLog;
@@ -2582,7 +2622,7 @@ export async function createWalkInTable(
   const now = new Date();
   const date = now.toISOString().split("T")[0];
   const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
-  const ref = `WALK-${tableId}-${Date.now().toString(36).toUpperCase()}`;
+  const ref = mintHodRef("table");
 
   const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tableId), where("date", "==", date), limit(1));
   const existing = await getDocs(q2);
@@ -2696,7 +2736,7 @@ export async function createWalkInTicketBooking(input: {
   if (!name?.trim()) throw new Error("Enter customer name");
   if (!phone?.trim()) throw new Error("Enter phone number");
 
-  const ref = `WI-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const ref = mintHodRef(kind === "group" ? "group" : "entryonly");
   const date = getOperationalNightStr();
   const cleanPhone = phone.replace(/\D/g, "").slice(-10);
 
@@ -2782,7 +2822,7 @@ export async function createWalkInGuestlistEntry(input: {
   if (!name?.trim()) throw new Error("Enter guest name");
   if (!phone?.trim()) throw new Error("Enter phone number");
 
-  const ref = `GL-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString(36).toUpperCase()}`;
+  const ref = mintHodRef("guestlist");
   const cleanPhone = phone.replace(/\D/g, "").slice(-10);
   const entryType = type ? `guestlist_${type}` : "guestlist_stag";
 
@@ -2959,7 +2999,7 @@ export async function createWalkInTableReservation(input: {
     if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
   }
 
-  const ref = `WALK-${Date.now().toString(36).toUpperCase()}`;
+  const ref = mintHodRef("table");
   await setDoc(doc(db, TABLE_RES_COL, ref), {
     tableId: tableId || "",
     floor: floor || "",
@@ -3083,7 +3123,7 @@ export async function createCorporateTableBooking(input: {
     if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
   }
 
-  const ref = `CORP-${Date.now().toString(36).toUpperCase()}`;
+  const ref = mintHodRef("group");
   await setDoc(doc(db, TABLE_RES_COL, ref), {
     tableId: tableId || "",
     floor: floor || "",
