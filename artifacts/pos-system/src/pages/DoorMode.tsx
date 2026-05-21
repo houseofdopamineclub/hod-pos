@@ -1379,6 +1379,177 @@ function bookingEntryLabel(b: HodBooking): string {
   if (type) return type.toUpperCase();
   return guests > 1 ? `${guests} GUESTS` : "STAG";
 }
+
+// 🔴 2026-05-21 (Khushi) — category-aware WhatsApp templates. Routes by
+// booking type (ticket / group / entry-only / guestlist) AND payment status
+// (paid online vs pay-at-venue). Single source of truth so the Meta template
+// fallback `fallbackText` and any future template params stay in sync.
+type HodWaCategory = "ticket" | "group" | "entryonly" | "guestlist";
+function detectWaCategory(b: HodBooking): HodWaCategory {
+  const et = ((b as any).entryType || "").toLowerCase();
+  if (b._isGuestList || et.startsWith("guestlist_")) return "guestlist";
+  if (et === "entryonly") return "entryonly";
+  if (et === "group" || ((b as any).bookMode || "") === "group") return "group";
+  const tier = ((b.tier || "") + " " + (b.type || "")).toLowerCase();
+  if (tier.indexOf("group") >= 0) return "group";
+  return "ticket";
+}
+function detectWaPaid(b: HodBooking): { paid: boolean; amount: number } {
+  const pid = (b.paymentId || "").trim();
+  const amount = Math.max(0, Math.round(Number(b.total) || 0));
+  const paid = !!pid && pid.startsWith("pay_");
+  return { paid, amount };
+}
+function fmtINR(n: number): string {
+  // 1499 → "1,499" — Indian numbering, no decimals for whole rupees.
+  return n.toLocaleString("en-IN");
+}
+function paymentLine(b: HodBooking): string {
+  const { paid, amount } = detectWaPaid(b);
+  if (amount <= 0) return "";
+  if (paid) return `✅ PAID ONLINE: ₹${fmtINR(amount)}`;
+  return `💵 PAY AT VENUE: ₹${fmtINR(amount)}`;
+}
+function entryLineForTicket(b: HodBooking): string {
+  // "COUPLE × 1" / "STAG × 2" — qty makes the line useful at the door.
+  const label = bookingEntryLabel(b);
+  const qty = Math.max(1, Number((b as any).qty) || Number(b.guests) || 1);
+  return `${label} × ${qty}`;
+}
+function entryLineForGroup(b: HodBooking): string {
+  const size = Number((b as any).partySize) || Number(b.guests) || 0;
+  return size > 0 ? `GROUP OF ${size}` : "GROUP";
+}
+// 🔴 2026-05-21 (Khushi) — picks the right approved Meta template per
+// (category × paid status). Returns null when no suitable template exists
+// (e.g. amount ≤ 0 for non-guestlist) so the caller falls back to free-form
+// text — avoids sending nonsense like "PAY AT VENUE: ₹0".
+//
+// Approved templates (created via API 2026-05-21, PENDING Meta review):
+//   guestlist_ready          [name, eventTitle, dateNice, tierLabel, link]
+//   ticket_confirmed_paid    [name, eventTitle, dateNice, entryLabel, amount, link]
+//   ticket_confirmed_unpaid  [name, eventTitle, dateNice, entryLabel, amount, link]
+//   group_confirmed_paid     [name, eventTitle, dateNice, partySize, amount, link]
+//   group_confirmed_unpaid   [name, eventTitle, dateNice, partySize, amount, link]
+//   entry_only_paid          [name, eventTitle, dateNice, qty, amount, link]
+//   entry_only_unpaid        [name, eventTitle, dateNice, qty, amount, link]
+function pickBookingTemplate(
+  b: HodBooking,
+  link: string,
+): { name: string; params: string[] } | null {
+  const cat = detectWaCategory(b);
+  const { paid, amount } = detectWaPaid(b);
+  const name = b.name || "Guest";
+  const eventTitle = b.eventTitle || "Tonight at H.O.D";
+  const dateNice = formatBookingDateNice(b.date);
+
+  if (cat === "guestlist") {
+    const type = ((b.type || "") as string).toLowerCase();
+    const tierLabel = type === "couple" ? "COUPLE" : type === "ladies" || type === "female" ? "LADIES" : "STAG";
+    return { name: "guestlist_ready", params: [name, eventTitle, dateNice, tierLabel, link] };
+  }
+  // Paid/unpaid templates all require an amount param ({{5}}). If amount is
+  // 0 (free comp, malformed booking), skip the template so we don't render
+  // "₹0" in the customer's message — caller will fall back to free-form text.
+  if (amount <= 0) return null;
+  const amountStr = fmtINR(amount);
+
+  if (cat === "entryonly") {
+    const qty = String(Math.max(1, Number((b as any).qty) || 1));
+    return {
+      name: paid ? "entry_only_paid" : "entry_only_unpaid",
+      params: [name, eventTitle, dateNice, qty, amountStr, link],
+    };
+  }
+  if (cat === "group") {
+    const size = String(Number((b as any).partySize) || Number(b.guests) || 1);
+    return {
+      name: paid ? "group_confirmed_paid" : "group_confirmed_unpaid",
+      params: [name, eventTitle, dateNice, size, amountStr, link],
+    };
+  }
+  // ticket (default)
+  const entryLabel = entryLineForTicket(b);
+  return {
+    name: paid ? "ticket_confirmed_paid" : "ticket_confirmed_unpaid",
+    params: [name, eventTitle, dateNice, entryLabel, amountStr, link],
+  };
+}
+
+// One central builder so the Meta template-missing fallback never drifts
+// from the desired copy. Returns the full message body.
+function buildBookingWhatsAppText(b: HodBooking, walletUrl: string): string {
+  const cat = detectWaCategory(b);
+  const customerName = b.name || "Guest";
+  const eventTitle = b.eventTitle || "Tonight at H.O.D";
+  const dateNice = formatBookingDateNice(b.date);
+  const footer = `\n📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+  const meta =
+    `🎉 Event: ${eventTitle}\n` +
+    `📅 Date: ${dateNice}\n`;
+
+  if (cat === "guestlist") {
+    // Guestlist is always free — no payment line. Cover-after-9 rule per
+    // Khushi 2026-05-21 spec.
+    const type = ((b.type || "") as string).toLowerCase();
+    const tierLabel = type === "couple" ? "COUPLE" : type === "ladies" || type === "female" ? "LADIES" : "STAG";
+    return (
+      `Hi ${customerName}, you're on the HOD Guest List! ✨\n\n` +
+      meta +
+      `🚪 Entry: GUEST LIST · ${tierLabel}\n` +
+      `🎁 FREE ENTRY TILL 9:00 PM\n\n` +
+      `After 9 PM, cover charges apply for couples and ladies (redeemable on food & drinks).\n\n` +
+      `Show your QR at the door for guest list entry.\n\n` +
+      `View pass: ${walletUrl}\n\n` +
+      `See you tonight!\n` +
+      footer
+    );
+  }
+
+  if (cat === "entryonly") {
+    const pay = paymentLine(b);
+    return (
+      `Hi ${customerName}, your HOD entry pass is booked! 🎟️\n\n` +
+      meta +
+      `🚪 Entry: ENTRY ONLY × ${Math.max(1, Number((b as any).qty) || 1)}\n` +
+      (pay ? pay + "\n" : "") +
+      `\n⚠️ IMPORTANT: This is an ENTRY-ONLY pass.\n` +
+      `The amount paid is NOT redeemable on food or drinks. F&B is charged separately at the venue.\n\n` +
+      `Show your QR at the door to enter.\n\n` +
+      `View ticket: ${walletUrl}\n\n` +
+      `See you tonight!\n` +
+      footer
+    );
+  }
+
+  if (cat === "group") {
+    const pay = paymentLine(b);
+    return (
+      `Hi ${customerName}, your HOD group booking is confirmed! 🎟️\n\n` +
+      meta +
+      `🚪 Entry: ${entryLineForGroup(b)}\n` +
+      (pay ? pay + "\n" : "") +
+      `\nShow your QR at the door — your wallet activates when you arrive at HOD.\n\n` +
+      `View ticket: ${walletUrl}\n\n` +
+      `See you tonight!\n` +
+      footer
+    );
+  }
+
+  // Default: ticket (stag / couple / ladies / regular event ticket)
+  const pay = paymentLine(b);
+  return (
+    `Hi ${customerName}, your HOD ticket is booked! 🎟️\n\n` +
+    meta +
+    `🚪 Entry: ${entryLineForTicket(b)}\n` +
+    (pay ? pay + "\n" : "") +
+    `\nShow your QR at the door — your wallet activates when you arrive at HOD.\n\n` +
+    `View ticket: ${walletUrl}\n\n` +
+    `See you tonight!\n` +
+    footer
+  );
+}
+
 async function sendBookingWhatsApp(
   b: HodBooking,
   onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void,
@@ -1387,18 +1558,12 @@ async function sendBookingWhatsApp(
   const ref = b.ref || b.id;
   const link = `https://hodclub.in/?wallet=${encodeURIComponent(ref)}`;
   const customerName = b.name || "Guest";
-  const eventTitle = b.eventTitle || "Tonight at H.O.D";
-  const dateNice = formatBookingDateNice(b.date);
-  const entryLabel = bookingEntryLabel(b);
-  const fallbackText =
-    `Hi ${customerName}, your HOD cover is booked! 🎟️\n\n` +
-    `🎉 Event: ${eventTitle}\n` +
-    `📅 Date: ${dateNice}\n` +
-    `🚪 Entry: ${entryLabel}\n\n` +
-    `Show your QR at the door — your wallet activates when you arrive at HOD.\n\n` +
-    `View ticket: ${link}\n\n` +
-    `See you tonight!\n\n` +
-    `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+  // 🔴 2026-05-21 (Khushi) — category + paid-status aware template routing.
+  // pickBookingTemplate picks one of the 7 approved templates (or returns
+  // null → text-only fallback for ₹0 bookings). fallbackText is what Meta
+  // delivers if the template is rejected / unapproved / outside 24h window.
+  const tpl = pickBookingTemplate(b, link);
+  const fallbackText = buildBookingWhatsAppText(b, link);
   if (phone.length !== 10) {
     if (ref) await logNotificationOutcome(ref, { status: "no_phone" });
     onShowQr({ bookingRef: ref, walletUrl: link, customerName,
@@ -1407,7 +1572,7 @@ async function sendBookingWhatsApp(
   }
   const result = await sendWhatsAppViaMeta({
     phone,
-    template: { name: "cover_confirmed", params: [customerName, eventTitle, dateNice, entryLabel, link] },
+    template: tpl ? { name: tpl.name, params: tpl.params } : undefined,
     fallbackText,
   });
   if (result.ok) {
@@ -1418,7 +1583,7 @@ async function sendBookingWhatsApp(
   } else {
     const isTemplateMissing = result.code === 132001 || result.code === 132000 || result.code === 132012 || result.code === 132015;
     const reason = isTemplateMissing
-      ? `Template "cover_confirmed" not approved by Meta yet, and the guest is outside the 24h reply window.`
+      ? `Template "${tpl?.name || "(text-only)"}" not approved by Meta yet, and the guest is outside the 24h reply window.`
       : `Meta WhatsApp: ${result.error || "send failed"}${result.code ? ` (code ${result.code})` : ""}`;
     if (ref) await logNotificationOutcome(ref, { status: "qr_shown", reason, code: result.code });
     // 2026-05-10 (Khushi) — ALWAYS show a popup so door staff knows the
@@ -1444,24 +1609,34 @@ async function sendGuestlistWhatsApp(
   const customerName = g.name || "Guest";
   const eventTitle = g.eventTitle || "Tonight at H.O.D";
   const dateNice = formatBookingDateNice((g as any).date);
-  const fallbackText =
-    `Hi ${customerName}, you're on the HOD guest list! 🎟️\n\n` +
-    `🎉 Event: ${eventTitle}\n` +
-    `📅 Date: ${dateNice}\n` +
-    `🚪 Entry: FREE (Guest List)\n\n` +
-    `Show your QR at the door — entry is complimentary.\n\n` +
-    `View pass: ${link}\n\n` +
-    `See you tonight!\n\n` +
-    `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+  // 🔴 2026-05-21 (Khushi) — use the central builder so guestlist copy stays
+  // in sync with the FREE-till-9-PM rule. Synthesize a minimal HodBooking
+  // shape with _isGuestList:true so detectWaCategory routes correctly.
+  const synthetic: HodBooking = {
+    id: g.id,
+    ref: glRef,
+    name: customerName,
+    phone: g.phone || "",
+    eventId: g.eventId,
+    eventTitle: eventTitle,
+    type: g.type as any,
+    total: 0,
+    date: (g as any).date || dateNice,
+    _isGuestList: true,
+  } as any;
+  const fallbackText = buildBookingWhatsAppText(synthetic, link);
   if (phone.length !== 10) {
     await logNotificationOutcome(g.id, { status: "no_phone" });
     onShowQr({ bookingRef: g.id, walletUrl: link, customerName,
       reason: "No valid phone on file. Show this QR to the guest instead." });
     return;
   }
+  // 🔴 2026-05-21 (Khushi) — guestlist_ready template now takes 5 params
+  // [name, eventTitle, dateNice, tierLabel, link]. Picker handles tier mapping.
+  const tpl = pickBookingTemplate(synthetic, link);
   const result = await sendWhatsAppViaMeta({
     phone,
-    template: { name: "guestlist_ready", params: [customerName, eventTitle, link] },
+    template: tpl ? { name: tpl.name, params: tpl.params } : undefined,
     fallbackText,
   });
   if (result.ok) {
@@ -1472,7 +1647,7 @@ async function sendGuestlistWhatsApp(
   } else {
     const isTemplateMissing = result.code === 132001 || result.code === 132000 || result.code === 132012 || result.code === 132015;
     const reason = isTemplateMissing
-      ? `Template "guestlist_ready" not approved by Meta yet, and the guest is outside the 24h reply window.`
+      ? `Template "${tpl?.name || "guestlist_ready"}" not approved by Meta yet, and the guest is outside the 24h reply window.`
       : `Meta WhatsApp: ${result.error || "send failed"}${result.code ? ` (code ${result.code})` : ""}`;
     await logNotificationOutcome(g.id, { status: "qr_shown", reason, code: result.code });
     // 2026-05-10 (Khushi) — failure popup so door staff doesn't think it sent.
@@ -1494,9 +1669,13 @@ function PaidBadge({ booking }: { booking: HodBooking }) {
   // walk-ins (cash_*), guestlist comps, aggregator bookings, zero-total
   // entries — falls into "Pay at venue" so door staff knows to confirm
   // the cover/entry charge at the door.
-  // 🔴 2026-05-21 (Khushi) — GUESTLIST never shows a paid badge. Guest list
-  // is comp/free; "Paid online" was misleading on free entries.
-  if (booking._isGuestList) return null;
+  // 🔴 2026-05-21 (Khushi) — GUESTLIST shows a dedicated "FREE ENTRY" badge.
+  // Guest list is always comp/free; the old "Paid online" was misleading
+  // (Razorpay never processed a payment) and hiding the badge entirely lost
+  // visual signal that this entry costs nothing.
+  if (booking._isGuestList) {
+    return <span style={{ background: "rgba(96,165,250,.15)", border: "1px solid rgba(96,165,250,.45)", color: "#60A5FA", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>🎁 FREE ENTRY</span>;
+  }
   const pid = booking.paymentId || "";
   const paidOnline = pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
   if (paidOnline) {
@@ -2026,11 +2205,42 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
                   {detailGuest.name || "Guest"}
                 </div>
                 <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4 }}>
-                  {detailGuest.phone || "no phone"} · 📋 Guest list{detailGuest.type ? ` · ${detailGuest.type}` : ""}
+                  {detailGuest.phone || "no phone"}{(detailGuest as any).ref ? ` · ${(detailGuest as any).ref}` : ""}
                 </div>
               </div>
               <PaidBadge booking={adapt(detailGuest)} />
             </div>
+
+            {/* 🔴 2026-05-21 (Khushi) — Guestlist modal now shows the SAME
+                category + breakdown + event card as the tickets/table flow,
+                so door staff has full context (who · what type · how many ·
+                which event) before deciding to check in / free-entry / cover. */}
+            {(() => {
+              const desc = describeBooking(adapt(detailGuest));
+              return (
+                <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                    <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}55`, color: desc.categoryColor, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 999, letterSpacing: .5 }}>
+                      {desc.category}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>{desc.breakdown}</span>
+                  </div>
+                  {detailGuest.eventTitle && (
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>
+                      🎵 <span style={{ color: "#fff", fontWeight: 700 }}>{detailGuest.eventTitle}</span>
+                    </div>
+                  )}
+                  {(detailGuest as any).joinedAt && (
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)" }}>
+                      Added: <span style={{ color: "rgba(255,255,255,.75)", fontWeight: 700 }}>{String((detailGuest as any).joinedAt).slice(0, 16).replace("T", " ")}</span>
+                    </div>
+                  )}
+                  <div style={{ fontSize: 12, color: "#60A5FA", fontWeight: 700, marginTop: 6 }}>
+                    📋 Free entry — no payment due
+                  </div>
+                </div>
+              );
+            })()}
 
             {detailGuest.checkedIn ? (
               <div style={{ background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.35)", color: "#00C864", padding: 14, borderRadius: 12, fontSize: 13, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>
@@ -2489,7 +2699,23 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
     const customerName = r.customerName || "Guest";
     const tableLabel = r.tableId || "your table";
     const floorLabel = r.floorLabel || "";
-    const fallbackText = `🪩 *Your Table at HOD*\n\nHi *${customerName}*!\n\n📍 *${tableLabel} · ${floorLabel}* | 🕐 ${r.arrivalTime || ""}\n\n🍷 Browse menu & view your tab:\n${link}\n\nSee you tonight! 🌟`;
+    // 🔴 2026-05-21 (Khushi) — tables now use the new `table_confirmed`
+    // template (PENDING Meta approval). 7 params, no payment line because
+    // tables don't take pre-payment at the door.
+    // Params: [name, dateNice, arrivalTime, tableLabel, floorLabel, partySize, link]
+    const dateNice = formatBookingDateNice(r.date);
+    const arrivalTime = (r.arrivalTime || "").trim() || "FROM NOW";
+    const partySizeStr = String(Math.max(1, Number(r.partySize) || 1));
+    const fallbackText =
+      `Hi ${customerName}, your HOD table is booked! 🍽️\n\n` +
+      `📅 Date: ${dateNice}\n` +
+      `🕘 Arrival: ${arrivalTime}\n` +
+      `🪑 Table: ${tableLabel} · ${floorLabel}\n` +
+      `👥 Guests: ${partySizeStr}\n\n` +
+      `Show your QR at the door — we'll have your table ready.\n\n` +
+      `View reservation: ${link}\n\n` +
+      `See you tonight!\n` +
+      `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
     if (phone.length !== 10) {
       if (ref) await logNotificationOutcome(ref, { status: "no_phone" });
       onShowQr({ bookingRef: ref, walletUrl: link, customerName,
@@ -2498,7 +2724,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
     }
     const result = await sendWhatsAppViaMeta({
       phone,
-      template: { name: "table_ready", params: [customerName, tableLabel, floorLabel, link] },
+      template: { name: "table_confirmed", params: [customerName, dateNice, arrivalTime, tableLabel, floorLabel, partySizeStr, link] },
       fallbackText,
     });
     if (result.ok) {
@@ -2509,7 +2735,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
     } else {
       const isTemplateMissing = result.code === 132001 || result.code === 132000 || result.code === 132012 || result.code === 132015;
       const reason = isTemplateMissing
-        ? `Template "table_ready" not approved by Meta yet, and the guest is outside the 24h reply window.`
+        ? `Template "table_confirmed" not approved by Meta yet, and the guest is outside the 24h reply window.`
         : `Meta WhatsApp: ${result.error || "send failed"}${result.code ? ` (code ${result.code})` : ""}`;
       if (ref) await logNotificationOutcome(ref, { status: "qr_shown", reason, code: result.code });
       onShowQr({ bookingRef: ref, walletUrl: link, customerName, reason });
@@ -3687,41 +3913,38 @@ function _autoFireBookingWhatsApp(opts: {
   ref: string; name: string; cleanPhone: string;
   kind: WalkInKind; eventTitle: string;
   tier: string; partySize: number; tableType: string;
+  total: number;
 }) {
-  const { ref, name, cleanPhone, kind, eventTitle, tier, partySize, tableType } = opts;
-  const tplName =
-    kind === "guestlist" ? "guestlist_confirmed" :
-    kind === "cover"     ? "cover_confirmed" :
-    "booking_confirmed";
-  const dateNice = formatBookingDateNice(TODAY_STR());
-  const entryLabel =
-    kind === "cover"     ? tier.toUpperCase() :
-    kind === "group"     ? `${partySize} GUESTS · ${tableType.toUpperCase()}` :
-    kind === "onlyentry" ? "ENTRY ONLY" :
-    tier.toUpperCase();
+  const { ref, name, cleanPhone, kind, eventTitle, tier, partySize, total } = opts;
   const link = `https://hodclub.in/?wallet=${encodeURIComponent(ref)}`;
-  const fallbackText =
-    `Hi ${name}, your HOD booking is confirmed! 🎉\n\n` +
-    `🎉 Event: ${eventTitle || "Tonight at H.O.D"}\n` +
-    `📅 ${dateNice}\n` +
-    `🚪 ${entryLabel}\n\n` +
-    `View ticket: ${link}\n\n` +
-    `📍 House of Dopamine, Koramangala`;
-  // 🔴 BUGFIX 2026-05-16 (Khushi) — walk-in guestlist WhatsApp was using
-  // cover_confirmed-style params [name, eventTitle, date, entryLabel, link],
-  // which the Meta-approved `guestlist_confirmed` template REJECTS because
-  // its body expects [name, type(STAG/COUPLE/LADIES), date, "FREE before 9PM",
-  // link] (matches the customer-site send at hodclub-patched line 3151).
-  // Param mismatch → Meta silently drops → customer never receives. Align.
-  const templateParams = kind === "guestlist"
-    ? [name, tier.toUpperCase() || "STAG", dateNice, "FREE before 9 PM", link]
-    : [name, eventTitle || "Tonight at H.O.D", dateNice, entryLabel, link];
+  // 🔴 2026-05-21 (Khushi) — route through the new category-aware template
+  // picker. Walk-ins are always pay-at-venue (cash collected at door) so
+  // paymentId stays empty → detectWaPaid returns paid:false → unpaid variants.
+  const synthetic: HodBooking = {
+    id: ref,
+    ref,
+    name,
+    phone: cleanPhone,
+    eventId: "",
+    eventTitle: eventTitle || "Tonight at H.O.D",
+    tier: kind === "cover" || kind === "guestlist" ? tier : "",
+    type: kind === "guestlist" ? (tier || "stag") : (tier as any),
+    total: Math.max(0, Math.round(Number(total) || 0)),
+    guests: partySize,
+    date: TODAY_STR(),
+    paymentId: "",
+    _isGuestList: kind === "guestlist",
+    ...(kind === "group"     ? { entryType: "group",     partySize, bookMode: "group" } : {}),
+    ...(kind === "onlyentry" ? { entryType: "entryonly", qty: 1 } : {}),
+  } as any;
+  const tpl = pickBookingTemplate(synthetic, link);
+  const fallbackText = buildBookingWhatsAppText(synthetic, link);
   sendWhatsAppViaMeta({
     phone: cleanPhone,
-    template: { name: tplName, params: templateParams },
+    template: tpl ? { name: tpl.name, params: tpl.params } : undefined,
     fallbackText,
   }).then((res) => {
-    console.log("[door][auto-wa]", tplName, res.ok ? `✓ via ${res.via}` : `✗ ${res.error}`);
+    console.log("[door][auto-wa]", tpl?.name || "(text-only)", res.ok ? `✓ via ${res.via}` : `✗ ${res.error}`);
     if (ref && res.ok) logNotificationOutcome(ref, res.via === "template"
       ? { status: "sent_template", recipient: cleanPhone }
       : { status: "sent_text", recipient: cleanPhone });
@@ -4005,6 +4228,7 @@ function UnifiedWalkInModal({
         tableType: kind === "group"
           ? (groupMode === "vvip" ? "VVIP TABLE FOR 6" : groupMode === "table4" ? "TABLE FOR 4" : "GROUP")
           : "",
+        total,
       });
     } catch (e: any) {
       setErr(e?.message || "Could not save booking");
@@ -4072,24 +4296,32 @@ function UnifiedWalkInModal({
           eventId, eventTitle, staffName: agentName,
         });
       } catch (e) { console.warn("[door][sendMenu] cover ensure failed (continuing)", e); }
-      const tplName =
-        kind === "guestlist" ? "guestlist_confirmed" :
-        kind === "cover"     ? "cover_confirmed" :
-        "booking_confirmed";
-      const dateNice = formatBookingDateNice(TODAY_STR());
-      const entryLabel =
-        kind === "cover"     ? tier.toUpperCase() :
-        kind === "group"     ? (
-          groupMode === "vvip"   ? "VVIP TABLE FOR 6" :
-          groupMode === "table4" ? "TABLE FOR 4" :
-          `${partySize} GUESTS · GROUP`
-        ) :
-        kind === "onlyentry" ? "ENTRY ONLY" :
-        tier.toUpperCase();
+      // 🔴 2026-05-21 (Khushi) — route through pickBookingTemplate so the
+      // RESEND uses the SAME approved template the auto-fire used. Walk-in
+      // bookings (paymentId="") → unpaid variants per detectWaPaid.
+      const synthetic: HodBooking = {
+        id: done.ref,
+        ref: done.ref,
+        name: name || "Guest",
+        phone: done.phone,
+        eventId: eventId || "",
+        eventTitle: eventTitle || "Tonight at H.O.D",
+        tier: kind === "cover" || kind === "guestlist" ? tier : "",
+        type: kind === "guestlist" ? (tier || "stag") : (tier as any),
+        total: Math.max(0, Math.round(Number(done.total) || 0)),
+        guests: partySize,
+        date: TODAY_STR(),
+        paymentId: "",
+        _isGuestList: kind === "guestlist",
+        ...(kind === "group"     ? { entryType: "group", partySize: groupSeatsFor(groupMode), bookMode: "group" } : {}),
+        ...(kind === "onlyentry" ? { entryType: "entryonly", qty: 1 } : {}),
+      } as any;
+      const tpl = pickBookingTemplate(synthetic, walletUrl);
+      const fallbackText = buildBookingWhatsAppText(synthetic, walletUrl);
       const r = await sendWhatsAppViaMeta({
         phone: done.phone,
-        template: { name: tplName, params: [name || "Guest", eventTitle || "Tonight at H.O.D", dateNice, entryLabel, walletUrl] },
-        fallbackText: `Hi ${name}, your HOD wallet is ready! 🎉\nView ticket: ${walletUrl}`,
+        template: tpl ? { name: tpl.name, params: tpl.params } : undefined,
+        fallbackText,
       });
       if (r.ok) setActionMsg(`✅ Wallet link re-sent on WhatsApp (${r.via})`);
       else { setActionMsg("⚠ WhatsApp failed — showing QR fallback"); setShowQrModal({ url: walletUrl, title: "📷 SCAN WALLET" }); }
