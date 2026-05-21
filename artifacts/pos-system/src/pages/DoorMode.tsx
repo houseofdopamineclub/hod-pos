@@ -1426,7 +1426,7 @@ function entryLineForGroup(b: HodBooking): string {
 // text — avoids sending nonsense like "PAY AT VENUE: ₹0".
 //
 // Approved templates (created via API 2026-05-21, PENDING Meta review):
-//   guestlist_ready          [name, eventTitle, dateNice, tierLabel, link]
+//   guestlist_entry_confirmed          [name, eventTitle, dateNice, tierLabel, link]
 //   ticket_confirmed_paid    [name, eventTitle, dateNice, entryLabel, amount, link]
 //   ticket_confirmed_unpaid  [name, eventTitle, dateNice, entryLabel, amount, link]
 //   group_confirmed_paid     [name, eventTitle, dateNice, partySize, amount, link]
@@ -1446,7 +1446,7 @@ function pickBookingTemplate(
   if (cat === "guestlist") {
     const type = ((b.type || "") as string).toLowerCase();
     const tierLabel = type === "couple" ? "COUPLE" : type === "ladies" || type === "female" ? "LADIES" : "STAG";
-    return { name: "guestlist_ready", params: [name, eventTitle, dateNice, tierLabel, link] };
+    return { name: "guestlist_entry_confirmed", params: [name, eventTitle, dateNice, tierLabel, link] };
   }
   // Paid/unpaid templates all require an amount param ({{5}}). If amount is
   // 0 (free comp, malformed booking), skip the template so we don't render
@@ -1631,7 +1631,7 @@ async function sendGuestlistWhatsApp(
       reason: "No valid phone on file. Show this QR to the guest instead." });
     return;
   }
-  // 🔴 2026-05-21 (Khushi) — guestlist_ready template now takes 5 params
+  // 🔴 2026-05-21 (Khushi) — guestlist_entry_confirmed template now takes 5 params
   // [name, eventTitle, dateNice, tierLabel, link]. Picker handles tier mapping.
   const tpl = pickBookingTemplate(synthetic, link);
   const result = await sendWhatsAppViaMeta({
@@ -1647,7 +1647,7 @@ async function sendGuestlistWhatsApp(
   } else {
     const isTemplateMissing = result.code === 132001 || result.code === 132000 || result.code === 132012 || result.code === 132015;
     const reason = isTemplateMissing
-      ? `Template "${tpl?.name || "guestlist_ready"}" not approved by Meta yet, and the guest is outside the 24h reply window.`
+      ? `Template "${tpl?.name || "guestlist_entry_confirmed"}" not approved by Meta yet, and the guest is outside the 24h reply window.`
       : `Meta WhatsApp: ${result.error || "send failed"}${result.code ? ` (code ${result.code})` : ""}`;
     await logNotificationOutcome(g.id, { status: "qr_shown", reason, code: result.code });
     // 2026-05-10 (Khushi) — failure popup so door staff doesn't think it sent.
