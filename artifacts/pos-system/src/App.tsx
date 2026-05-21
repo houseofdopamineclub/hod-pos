@@ -16,6 +16,7 @@ import AggregatorPage from "@/pages/AggregatorPage";
 import CaptainMode from "@/pages/CaptainMode";
 import BarMode from "@/pages/BarMode";
 import DoorMode from "@/pages/DoorMode";
+import KitchenMode from "@/pages/KitchenMode";
 import NotFound from "@/pages/not-found";
 import { FEATURES, IS_PHASE_1_ONLY } from "@/lib/feature-flags";
 import { useEffect } from "react";
@@ -64,6 +65,7 @@ function AppRoutes() {
       {FEATURES.captainMode && <Route path="/captain" component={CaptainMode} />}
       {FEATURES.barMode && <Route path="/bar" component={BarMode} />}
       {FEATURES.doorMode && <Route path="/door" component={DoorMode} />}
+      {FEATURES.kitchenMode && <Route path="/kitchen" component={KitchenMode} />}
       <Route><AuthGate /></Route>
     </Switch>
   );

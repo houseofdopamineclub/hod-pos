@@ -261,6 +261,54 @@
   50%      { box-shadow: 0 0 28px 8px rgba(239,68,68,.85); }
 }
 
+/* 2026-05-21 — KDS urgent-card pulse (kitchen screen, items aged 10+ min).
+   Subtle red breathe so chef notices without being distracting. */
+@keyframes hodKdsUrgent {
+  0%, 100% { box-shadow: 0 0 10px 2px rgba(239,68,68,.35); }
+  50%      { box-shadow: 0 0 22px 6px rgba(239,68,68,.7); }
+}
+
+/* 2026-05-21 — KDS food-ready green flash on captain table card. Stays
+   pulsing until captain taps ✓ PICKED UP. */
+@keyframes hodKdsReady {
+  0%, 100% { box-shadow: 0 0 14px 3px rgba(34,197,94,.55); }
+  50%      { box-shadow: 0 0 30px 9px rgba(34,197,94,.9); }
+}
+
+/* 2026-05-21 (Khushi) — SVG-compatible green pulse for floor-map TILES when
+   the table has at least one KDS-ready item. box-shadow doesn't work on SVG
+   shapes; we animate the drop-shadow filter instead. */
+@keyframes hodKdsReadyTile {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(34,197,94,.55)); }
+  50%      { filter: drop-shadow(0 0 14px rgba(34,197,94,1)); }
+}
+.hod-tile-ready { animation: hodKdsReadyTile 1.1s ease-in-out infinite; }
+
+/* 2026-05-21 (Khushi) — amber pulse for ORANGE waiting tables on the floor
+   map so a long-cooking ticket nags the captain to chase the kitchen. */
+@keyframes hodTileOrange {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(245,158,11,.55)); }
+  50%      { filter: drop-shadow(0 0 14px rgba(245,158,11,.95)); }
+}
+.hod-tile-orange { animation: hodTileOrange 1.4s ease-in-out infinite; }
+
+/* 2026-05-21 (Khushi) — marching-dash green ring around tiles whose food is
+   READY at the pass. Animates stroke-dashoffset so the dashes appear to
+   rotate around the perimeter — works on any SVG shape (circle/rect/polygon)
+   without CSS `transform: rotate` quirks. Clears the moment captain taps
+   ✓ PICKED UP because the wrapping tile re-renders with tileReady=false. */
+@keyframes hodReadyMarch {
+  to { stroke-dashoffset: -60; }
+}
+.hod-tile-ready-ring {
+  stroke: #22C55E;
+  stroke-width: 2;
+  fill: none;
+  stroke-dasharray: 5 4;
+  animation: hodReadyMarch 1.2s linear infinite;
+  pointer-events: none;
+}
+
 /* 2026-05-20 — Captain Mode v2 visual overhaul (Khushi spec):
    darker/more vivid colors, off-white not stark white, richer gold,
    Manrope as the primary readable font (Playfair stays for display),
