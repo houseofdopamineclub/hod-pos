@@ -1663,7 +1663,7 @@ async function sendGuestlistWhatsApp(
 // 5 tabs of dense lists without a wall of buttons per row.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PaidBadge({ booking }: { booking: HodBooking }) {
+function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover | null }) {
   // Per Khushi spec: only two states. Anything paid through the customer
   // site's online checkout (Razorpay) is "Paid online"; everything else —
   // walk-ins (cash_*), guestlist comps, aggregator bookings, zero-total
@@ -1673,15 +1673,59 @@ function PaidBadge({ booking }: { booking: HodBooking }) {
   // Guest list is always comp/free; the old "Paid online" was misleading
   // (Razorpay never processed a payment) and hiding the badge entirely lost
   // visual signal that this entry costs nothing.
-  if (booking._isGuestList) {
-    return <span style={{ background: "rgba(96,165,250,.15)", border: "1px solid rgba(96,165,250,.45)", color: "#60A5FA", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>🎁 FREE ENTRY</span>;
-  }
+  // 🔴 2026-05-21 (Khushi v2) — once a guest is CHECKED IN, the badge must
+  // reflect what was actually collected at the door:
+  //   • cover activated (>0)            → "PAID ₹<amt>" (gold)
+  //   • entry-only ticket sold at door  → "ENTRY ONLY · PAID ₹<amt>" (gold)
+  //   • ₹0 wallet activated / ticket-only walk-through → "FREE ENTRY" (blue)
+  //   • pre-paid online                 → "✓ PAID ONLINE ₹<amt>" (green)
+  // Fallback (no cover doc, not checked in) → "Pay at venue".
+  const checkedIn = !!booking.checkedIn;
   const pid = booking.paymentId || "";
-  const paidOnline = pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
-  if (paidOnline) {
-    return <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.45)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>✓ Paid online</span>;
+  const paidOnline = !!pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
+  const total = Number((booking as any).total || 0);
+  const coverAmt = Number(cover?.coverActivated || 0);
+  const isEntryOnly = isOnlyEntryBooking(booking);
+
+  // Shared pill styles.
+  const goldPill: React.CSSProperties = { background: "rgba(200,166,69,0.22)", border: "1px solid rgba(200,166,69,0.7)", color: "#C8A645", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 };
+  const greenPill: React.CSSProperties = { background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.45)", color: "#00C864", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 };
+  const bluePill: React.CSSProperties = { background: "rgba(96,165,250,.15)", border: "1px solid rgba(96,165,250,.45)", color: "#60A5FA", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 };
+  const dimGoldPill: React.CSSProperties = { background: "rgba(200,166,69,0.18)", border: "1px solid rgba(200,166,69,0.55)", color: "#C8A645", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 };
+
+  // ── CHECKED-IN states (evaluated FIRST so post-arrival actions win over
+  //    pre-arrival shortcuts like guestlist/paidOnline). ──────────────────
+  if (checkedIn) {
+    // Cover wallet activated at the door (works for guestlist + tickets alike).
+    if (coverAmt > 0) {
+      return <span style={goldPill}>✓ PAID ₹{coverAmt.toLocaleString("en-IN")}</span>;
+    }
+    // Entry-only pass — cover not collected, entry was (walk-in or prepaid).
+    if (isEntryOnly && total > 0) {
+      return <span style={goldPill}>ENTRY ONLY · PAID ₹{total.toLocaleString("en-IN")}</span>;
+    }
+    // Pre-paid via Razorpay (non-entry-only ticket) — keep the green "PAID
+    // ONLINE" pill so door staff can see money already changed hands.
+    if (paidOnline) {
+      const amt = total > 0 ? ` ₹${total.toLocaleString("en-IN")}` : "";
+      return <span style={greenPill}>✓ PAID ONLINE{amt}</span>;
+    }
+    // ₹0 wallet / guestlist / ticket-only walk-through — nothing collected.
+    return <span style={bluePill}>🎁 FREE ENTRY</span>;
   }
-  return <span style={{ background: "rgba(200,166,69,0.18)", border: "1px solid rgba(200,166,69,0.55)", color: "#C8A645", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 }}>₹ Pay at venue</span>;
+
+  // ── PRE-CHECK-IN states ───────────────────────────────────────────────
+  // Guestlist comp — always free until check-in upgrades it via cover.
+  if (booking._isGuestList) {
+    return <span style={bluePill}>🎁 FREE ENTRY</span>;
+  }
+  // Pre-paid via Razorpay.
+  if (paidOnline) {
+    const amt = total > 0 ? ` ₹${total.toLocaleString("en-IN")}` : "";
+    return <span style={greenPill}>✓ PAID ONLINE{amt}</span>;
+  }
+  // Default — not checked in yet, no online payment recorded.
+  return <span style={dimGoldPill}>₹ Pay at venue</span>;
 }
 
 // 🔴 2026-05-21 (Khushi) — Derive ticket category + breakdown for the
@@ -1748,7 +1792,7 @@ function describeBooking(b: HodBooking): { category: string; categoryColor: stri
   };
 }
 
-function BookingRow({ booking, onOpen }: { booking: HodBooking; onOpen: (b: HodBooking) => void }) {
+function BookingRow({ booking, cover, onOpen }: { booking: HodBooking; cover?: HodCover | null; onOpen: (b: HodBooking) => void }) {
   const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
   return (
     <div onClick={() => onOpen(booking)}
@@ -1767,7 +1811,7 @@ function BookingRow({ booking, onOpen }: { booking: HodBooking; onOpen: (b: HodB
           {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
         </div>
       </div>
-      <PaidBadge booking={booking} />
+      <PaidBadge booking={booking} cover={cover} />
       {phoneClean && (
         <a href={`tel:${phoneClean}`} onClick={(e) => e.stopPropagation()} title="Call guest"
           style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", background: "#B83227", border: "none", color: "#fff", fontSize: 16, textDecoration: "none" }}>
@@ -1789,6 +1833,22 @@ function BookingDetailModal({
   onSendWhatsApp?: (b: HodBooking) => void;
 }) {
   const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
+  // 🔴 2026-05-21 (Khushi) — Live cover lookup so the modal's PaidBadge
+  // matches the row badge (was showing "FREE ENTRY" while row showed
+  // "✓ PAID ₹999"). Subscribe to the tonight-wide covers feed and pick
+  // the matching one by ref/bookingId. Fail-open: if subscription dies,
+  // badge falls back to its legacy logic (paymentId / guestlist).
+  const [modalCover, setModalCover] = useState<HodCover | null>(null);
+  useEffect(() => {
+    const unsub = subscribeToAllCovers((all) => {
+      // Match EITHER booking identifier (ref or doc id) against EITHER cover
+      // identifier (ref or bookingId) — covers all 4 cross-mapping cases.
+      const keys = new Set([booking.ref, booking.id].filter(Boolean) as string[]);
+      const c = all.find((x) => (x.ref && keys.has(x.ref)) || (x.bookingId && keys.has(x.bookingId))) || null;
+      setModalCover(c);
+    });
+    return unsub;
+  }, [booking.ref, booking.id]);
   return (
     <div onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
@@ -1803,7 +1863,7 @@ function BookingDetailModal({
               {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
             </div>
           </div>
-          <PaidBadge booking={booking} />
+          <PaidBadge booking={booking} cover={modalCover} />
         </div>
 
         <LookupResult booking={booking} agentName={agentName} onDone={onClose} />
@@ -1811,14 +1871,14 @@ function BookingDetailModal({
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
           {!booking._isGuestList && (
             <button onClick={() => { onCover(booking); onClose(); }}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "#B83227", border: "none", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              style={{ padding: "12px 10px", borderRadius: 10, background: "#C8A645", border: "none", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
               💰 Activate Cover
             </button>
           )}
           {onSendWhatsApp && (
             <button onClick={() => onSendWhatsApp(booking)}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-              📲 WhatsApp Link
+              style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+              📲 Send Wallet Link to WhatsApp
             </button>
           )}
           <button onClick={() => onShowQr({
@@ -1827,12 +1887,12 @@ function BookingDetailModal({
             customerName: booking.name || "Guest",
             reason: "Show this QR — guest scans to open their wallet & menu instantly.",
           })}
-            style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(200,166,69,0.12)", border: "1px solid rgba(200,166,69,0.4)", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-            📱 Show QR
+            style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+            📱 Show Wallet QR
           </button>
           {phoneClean && (
             <a href={`tel:${phoneClean}`}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
+              style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
               📞 Call
             </a>
           )}
@@ -1929,6 +1989,7 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
   onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void;
 }) {
   const [bookings, setBookings] = useState<HodBooking[]>([]);
+  const [covers, setCovers] = useState<HodCover[]>([]);
   const [detail, setDetail] = useState<HodBooking | null>(null);
   const [viewMode, setViewMode] = useState<"all" | "pending" | "checked">("pending");
 
@@ -1944,6 +2005,15 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
     const unsub = subscribeToBookings((all) => setBookings(all));
     return unsub;
   }, []);
+  // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch from
+  // "Pay at venue" → "PAID ₹<amt>" / "FREE ENTRY" / "ENTRY ONLY · PAID ₹<amt>"
+  // live, the moment door staff activates a wallet or marks check-in.
+  useEffect(() => subscribeToAllCovers(setCovers), []);
+  const coverByRef = new Map<string, HodCover>();
+  for (const c of covers) {
+    if (c.ref) coverByRef.set(c.ref, c);
+    if (c.bookingId) coverByRef.set(c.bookingId, c);
+  }
 
   const todayDates = TODAY_DATE_SET();
   let todayBookings = bookings.filter((b) => todayDates.has((b.date || "").slice(0, 10)));
@@ -1970,6 +2040,17 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
       ? todayBookings.filter((b) => !b.checkedIn)
       : todayBookings;
   const filtered = visibleBookings.filter((b) => matchQuery(query, b.name, b.phone, b.ref));
+  // 🔴 2026-05-21 (Khushi) — checked-in rows drop to BOTTOM so new arrivals
+  // always sit at the top of every tab (TICKETS / GROUP / ENTRY PASS).
+  filtered.sort((a, b) => {
+    const ad = !!a.checkedIn, bd = !!b.checkedIn;
+    if (ad !== bd) return ad ? 1 : -1;
+    const at = String((a as any).bookedAt || a.date || "");
+    const bt = String((b as any).bookedAt || b.date || "");
+    if (!at) return 1;
+    if (!bt) return -1;
+    return bt.localeCompare(at);
+  });
 
   return (
     <div>
@@ -2009,7 +2090,7 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
       </div>
 
       {filtered.map((b) => (
-        <BookingRow key={b.id} booking={b} onOpen={setDetail} />
+        <BookingRow key={b.id} booking={b} cover={coverByRef.get(b.ref) || coverByRef.get(b.id) || null} onOpen={setDetail} />
       ))}
       {filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,0.35)", fontSize: 13, fontWeight: 500 }}>
@@ -2026,6 +2107,7 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
 function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentName: string; query: string; eventId: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
   const [guests, setGuests] = useState<HodGuestlistEntry[]>([]);
   const [bookings, setBookings] = useState<HodBooking[]>([]);
+  const [covers, setCovers] = useState<HodCover[]>([]);
   const [busyId, setBusyId] = useState("");
   const [viewMode, setViewMode] = useState<"all" | "pending" | "checked">("pending");
   const [detail, setDetail] = useState<HodBooking | null>(null);
@@ -2035,6 +2117,9 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
     const unsub = subscribeToGuestlist((all) => setGuests(all));
     return unsub;
   }, []);
+  // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch guestlist
+  // rows from FREE ENTRY → PAID ₹<amt> the moment a wallet is activated.
+  useEffect(() => subscribeToAllCovers(setCovers), []);
   // ── BUGFIX 2026-05-08: also subscribe to bookings so guestlist-typed entries
   // that landed in `bookings` (Firestore rules / cache / pre-fix HTML) still
   // show up under "📋 Guest List". Mapped to HodGuestlistEntry shape, deduped
@@ -2140,6 +2225,17 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
       ? todayGuests.filter((g) => !g.checkedIn)
       : todayGuests;
   const filtered = visibleGuests.filter((g) => matchQuery(query, g.name, g.phone));
+  // 🔴 2026-05-21 (Khushi) — checked-in guests drop to BOTTOM so new arrivals
+  // appear at the top. Within each group: newest joinedAt/entryTime first.
+  filtered.sort((a, b) => {
+    const ad = !!a.checkedIn, bd = !!b.checkedIn;
+    if (ad !== bd) return ad ? 1 : -1;
+    const at = String(a.joinedAt || a.entryTime || "");
+    const bt = String(b.joinedAt || b.entryTime || "");
+    if (!at) return 1;
+    if (!bt) return -1;
+    return bt.localeCompare(at);
+  });
   // Find the underlying guestlist entry for the open detail modal so we can
   // wire the per-row free-entry / cover / WA flows through the modal.
   const detailGuest = detail ? todayGuests.find((g) => g.id === detail.id) || null : null;
@@ -2248,19 +2344,19 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
               </div>
             ) : (
               <button onClick={() => handleToggle(detailGuest)} disabled={busyId === detailGuest.id}
-                style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+                style={{ width: "100%", padding: 14, borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
                 {busyId === detailGuest.id ? "Checking…" : "✅ Check In Guest"}
               </button>
             )}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <button onClick={() => { onCover(adapt(detailGuest)); setDetail(null); }}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "#B83227", border: "none", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                style={{ padding: "12px 10px", borderRadius: 10, background: "#C8A645", border: "none", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
                 💰 Activate Cover
               </button>
               <button onClick={() => sendGuestlistWhatsApp(detailGuest, onShowQr)}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                📲 WhatsApp Link
+                style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                📲 Send Wallet Link to WhatsApp
               </button>
               <button onClick={() => onShowQr({
                 bookingRef: detailGuest.id,
@@ -2268,18 +2364,18 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
                 customerName: detailGuest.name || "Guest",
                 reason: "Show this QR — guest scans to open their guest-list pass instantly.",
               })}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(200,166,69,0.12)", border: "1px solid rgba(200,166,69,0.4)", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                📱 Show QR
+                style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                📱 Show Wallet QR
               </button>
               {!detailGuest.checkedIn && (
                 <button onClick={() => handleFreeEntry(detailGuest)} disabled={busyId === detailGuest.id}
-                  style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(96,165,250,.12)", border: "1px solid rgba(96,165,250,.45)", color: "#60A5FA", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
+                  style={{ padding: "12px 10px", borderRadius: 10, background: "#fff", border: "1px solid #C8A645", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
                   {busyId === detailGuest.id ? "…" : "🎁 Free Entry"}
                 </button>
               )}
               {detailGuest.phone && (
                 <a href={`tel:${(detailGuest.phone || "").replace(/[^\d+]/g, "")}`}
-                  style={{ padding: "12px 10px", borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
+                  style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
                   📞 Call
                 </a>
               )}
@@ -2317,9 +2413,19 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
         </div>
       </div>
 
-      {filtered.map((g) => (
-        <BookingRow key={g.id} booking={adapt(g)} onOpen={(b) => setDetail(b)} />
-      ))}
+      {(() => {
+        // Build cover lookup map once per render (parity with BookingsListTab).
+        const coverByRef = new Map<string, HodCover>();
+        for (const c of covers) {
+          if (c.ref) coverByRef.set(c.ref, c);
+          if (c.bookingId) coverByRef.set(c.bookingId, c);
+        }
+        return filtered.map((g) => {
+          const adapted = adapt(g);
+          const cov = coverByRef.get(adapted.ref) || coverByRef.get(g.id) || null;
+          return <BookingRow key={g.id} booking={adapted} cover={cov} onOpen={(b) => setDetail(b)} />;
+        });
+      })()}
       {filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 36, color: "rgba(255,255,255,0.35)", fontSize: 13, fontWeight: 500 }}>
           {query ? `No matches for "${query}" in today's guest list`
@@ -2550,6 +2656,18 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
     arrivalFilter === "pending" ? byAgg.filter((r) => !r.actualArrivalTime) :
     byAgg;
   const filtered = byArrival.filter((r) => matchQuery(query, r.customerName, r.phone, r.tableId, r.bookingRef));
+  // 🔴 2026-05-21 (Khushi) — arrived tables drop to BOTTOM so new arrivals
+  // sit at the top. Within each group: earliest arrivalTime (slot) first so
+  // the captain sees the next expected guest at the top.
+  filtered.sort((a, b) => {
+    const ad = !!a.actualArrivalTime, bd = !!b.actualArrivalTime;
+    if (ad !== bd) return ad ? 1 : -1;
+    const at = String(a.arrivalTime || "");
+    const bt = String(b.arrivalTime || "");
+    if (!at) return 1;
+    if (!bt) return -1;
+    return at.localeCompare(bt);
+  });
 
   const arrivedCount = active.filter((r) => r.actualArrivalTime).length;
   const pendingCount = active.length - arrivedCount;
@@ -5784,8 +5902,16 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
     }
   }
 
-  // Sort newest first by creation time-ish (sortAt). Empty sorts last.
+  // 🔴 2026-05-21 (Khushi) — checked-in rows drop to the BOTTOM so new
+  // arrivals always appear at the top. Tables/corporate don't have a
+  // checkedIn field on the row → treat as not-checked-in. Within each
+  // group, keep newest-first by sortAt (empty sorts last within group).
+  const isDone = (r: Row) => (r.kind === "ticket" || r.kind === "entry" || r.kind === "group" || r.kind === "guestlist")
+    ? !!(r.booking as any).checkedIn
+    : false;
   rows.sort((a, b) => {
+    const ad = isDone(a), bd = isDone(b);
+    if (ad !== bd) return ad ? 1 : -1;
     if (!a.sortAt) return 1;
     if (!b.sortAt) return -1;
     return b.sortAt.localeCompare(a.sortAt);
