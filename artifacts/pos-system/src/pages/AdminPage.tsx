@@ -20,15 +20,13 @@ import { FEATURES } from "@/lib/feature-flags";
 import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
-  subscribeToDoorPricingSettings, updateDoorPricingSettings, type DoorPricingSettings,
 } from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
 import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
-import MenuCRM from "./MenuCRM";
-import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
+import AttendanceAdmin from "./AttendanceAdmin";
 
 // Manager PIN gate for menu changes (OOS toggle, discount set/clear).
 // Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
@@ -44,9 +42,7 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings" | "door-pricing">("monitor");
-  const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
-  const [doorPricingSaving, setDoorPricingSaving] = useState(false);
+  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "staff" | "attendance" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [happyHour, setHappyHour] = useState<HappyHourConfig | null>(null);
   const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
@@ -65,7 +61,6 @@ export default function AdminPage() {
       subscribeToAggregatorSettings(setAggSettings),
       subscribeToMenuOverrides(setMenuOverridesState),
       subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
-      subscribeToDoorPricingSettings(setDoorPricing),
     ];
     return () => unsubs.forEach(u => u());
   }, []);
@@ -170,8 +165,8 @@ export default function AdminPage() {
       `${discountPercent || discountAmount ? "SET" : "CLEAR"} DISCOUNT on ${itemName}` +
       (discountPercent ? ` (${discountPercent}% OFF)` : discountAmount ? ` (₹${discountAmount} OFF)` : "")
     ))) return;
-    // 🔴 BUGFIX 2026-05-10 — same merge:true clear bug as bulk discount.
-    // Write explicit 0/"" instead of undefined so the field actually clears.
+    // 🔴 BUGFIX 2026-05-10 — Firestore setDoc({merge:true}) keeps existing
+    // fields when you pass undefined. Write explicit 0/"" to clear.
     await setMenuOverride(itemName, {
       outOfStock: current?.outOfStock || false,
       discountPercent: discountPercent ?? 0,
@@ -305,10 +300,10 @@ export default function AdminPage() {
       </header>
 
       <div className="flex gap-1 px-4 py-2" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
-        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "menu-crm", "bot-knowledge", "staff", "happy-hour", "aggregator", "door-pricing", "tablet", "settings"] as const).map((t) => (
+        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "staff", "attendance", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu-crm" ? "📋 Menu CRM" : t === "bot-knowledge" ? "🧠 Bot Knowledge" : t === "menu" ? "OOS / Discount" : t === "door-pricing" ? "💰 Door Pricing" : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu" ? "OOS / Discount" : t === "attendance" ? "📊 Attendance" : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -348,9 +343,7 @@ export default function AdminPage() {
 
         {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
 
-        {tab === "menu-crm" && <MenuCRM />}
-
-        {tab === "bot-knowledge" && <KnowledgeBaseAdmin />}
+        {tab === "attendance" && <AttendanceAdmin />}
 
         {tab === "menu" && (
           <div>
@@ -601,101 +594,6 @@ export default function AdminPage() {
                   : edcDefaultVendor
                     ? `✅ Venue default: ${edcDefaultVendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus"}.`
                     : `No venue default set yet — Door Mode falls back to the build-time default (${(import.meta.env.VITE_EDC_VENDOR as string) === "pinelabs" ? "Pine Labs" : "Razorpay POS"}).`}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 🆕 2026-05-20 (Khushi) — DOOR PRICING TOGGLE
-            Manager controls whether door girls can override walk-in prices
-            (cover / entry-only / group / table4 / vvip-6). When OFF, prices
-            lock to event values — safest default. When ON, door staff can
-            bargain with Koramangala customers; every override is logged in
-            the booking's `notes` field for review in Reports + Sheets. */}
-        {tab === "door-pricing" && (
-          <div className="space-y-4 max-w-xl">
-            <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>💰 Door Bargain Pricing</h3>
-              <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
-                When <b>ON</b>, door staff can edit the price for each walk-in (covers, entry-only, group per-head, table for 4, VVIP table for 6) — useful for Koramangala customers who bargain. Every overridden price is stamped in the booking's notes as <code>PRICE OVERRIDE: ₹X (default ₹Y) by &lt;staff&gt;</code> for your review.
-                <br /><br />
-                When <b>OFF</b>, prices lock to the event's published values — door staff cannot change them.
-              </p>
-
-              <div className="flex items-center justify-between p-4 rounded-lg" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
-                <div>
-                  <div className="text-sm font-semibold" style={{ color: "hsl(36 29% 93%)" }}>
-                    Allow door staff to override prices
-                  </div>
-                  <div className="text-xs mt-1" style={{ color: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
-                    {doorPricing.priceOverrideEnabled
-                      ? "✅ ON — door girls can bargain prices on every walk-in"
-                      : "🔒 OFF — prices locked to event values (safest default)"}
-                  </div>
-                </div>
-                <button
-                  onClick={async () => {
-                    if (doorPricingSaving) return;
-                    const next = !doorPricing.priceOverrideEnabled;
-                    // Manager PIN gate — same as menu changes — so a stray
-                    // tablet tap can't open the bargain window.
-                    const ok = await requireManagerPinAdmin(
-                      next
-                        ? "Allow door staff to override walk-in prices?"
-                        : "Lock door walk-in prices back to event values?"
-                    );
-                    if (!ok) return;
-                    setDoorPricingSaving(true);
-                    try {
-                      await updateDoorPricingSettings(
-                        { priceOverrideEnabled: next },
-                        currentStaff?.name || "admin"
-                      );
-                      // 🛟 Optimistic UI update — the helper writes to localStorage
-                      // synchronously and tries Firestore best-effort. If Firestore
-                      // succeeds, onSnapshot will reconcile; if rules silently
-                      // reject (auth null), local state still reflects the click
-                      // so the toggle actually MOVES on this tablet.
-                      setDoorPricing({ priceOverrideEnabled: next });
-                      await logAudit({
-                        action: "DOOR_PRICING_OVERRIDE_TOGGLE",
-                        staffId: currentStaff?.id || "admin",
-                        staffName: currentStaff?.name || "admin",
-                        staffRole: (currentStaff?.role || "admin") as StaffRole,
-                        details: { enabled: next },
-                      }).catch(() => {});
-                    } catch (e: any) {
-                      alert(`❌ Could not update setting: ${e?.message || e}`);
-                    } finally {
-                      setDoorPricingSaving(false);
-                    }
-                  }}
-                  disabled={doorPricingSaving}
-                  className="relative inline-flex items-center"
-                  style={{
-                    width: 64, height: 34, borderRadius: 999,
-                    background: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(240 8% 20%)",
-                    border: "1px solid hsl(240 8% 25%)",
-                    cursor: doorPricingSaving ? "wait" : "pointer",
-                    opacity: doorPricingSaving ? 0.6 : 1,
-                    transition: "background .2s",
-                  }}
-                  aria-label="Toggle door pricing override"
-                >
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: doorPricing.priceOverrideEnabled ? 32 : 4,
-                      top: 3, width: 26, height: 26, borderRadius: "50%",
-                      background: "#fff", transition: "left .2s",
-                      boxShadow: "0 2px 6px rgba(0,0,0,.35)",
-                    }}
-                  />
-                </button>
-              </div>
-
-              <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
-                <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If this setting can't load, the door modal defaults to <b>OFF</b> (locked prices) so revenue is never accidentally discounted. Audit every override in <b>📋 Reports</b> — look for "PRICE OVERRIDE" in the booking notes column.
               </div>
             </div>
           </div>
