@@ -6,7 +6,7 @@ import { useStaff } from "@/lib/staff-context";
 // CANONICAL list — it matches BarMode and customer wallet (hodclub.in).
 // Admin must manage the same list everyone else sells from. Override
 // docs are now keyed by slug(name), so cross-list ID mismatch is moot.
-import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
+import { HOD_MENU_ITEMS, HOD_CATEGORYimport AttendanceAdmin from "./AttendanceAdmin";_LABELS } from "@/lib/hod-menu";
 import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride, StaffRole } from "@/lib/types";
 import {
   subscribeToHappyHour, updateHappyHour,
@@ -27,6 +27,7 @@ import Reports from "./Reports";
 import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
 import AttendanceAdmin from "./AttendanceAdmin";
+import StaffManagement from "./StaffManagement";
 
 // Manager PIN gate for menu changes (OOS toggle, discount set/clear).
 // Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
@@ -439,44 +440,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        {tab === "staff" && (
-          <div>
-            <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Add Staff</h3>
-              <div className="flex gap-2 flex-wrap">
-                <input placeholder="Name" value={newStaff.name} onChange={(e) => setNewStaff(s => ({...s, name: e.target.value}))}
-                  className="px-3 py-2 rounded text-sm flex-1 min-w-[150px]" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                <input placeholder="4-digit PIN" value={newStaff.pin} onChange={(e) => setNewStaff(s => ({...s, pin: e.target.value.slice(0,4)}))} maxLength={4}
-                  className="px-3 py-2 rounded text-sm w-28" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                <select value={newStaff.role} onChange={(e) => setNewStaff(s => ({...s, role: e.target.value as StaffRole}))}
-                  className="px-3 py-2 rounded text-sm" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}>
-                  {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <button onClick={handleAddStaff} className="px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Add</button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              {allStaff.map((s) => (
-                <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: "hsl(240 12% 5%)" }}>
-                  <div>
-                    <span className="text-sm">{s.name}</span>
-                    <span className="text-xs ml-2 px-2 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "#C9A84C" }}>{s.role}</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
-                      className="text-xs px-2 py-1 rounded" style={{ background: s.active ? "#22c55e33" : "#ef444433", color: s.active ? "#22c55e" : "#ef4444" }}>
-                      {s.active ? "Active" : "Inactive"}
-                    </button>
-                    {hasRole("admin") && s.role !== "admin" && (
-                      <button onClick={() => s.id && deleteStaffMember(s.id)}
-                        className="text-xs px-2 py-1 rounded" style={{ background: "#ef444433", color: "#ef4444" }}>Delete</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+     {tab === "staff" && <StaffManagement />}
 
         {tab === "happy-hour" && (
           <div className="max-w-md">
