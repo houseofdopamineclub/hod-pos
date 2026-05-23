@@ -2846,6 +2846,10 @@ export async function createWalkInGuestlistEntry(input: {
     type: type || "stag",
     entryType,
     joinedAt: new Date().toISOString(),
+    // 🔴 2026-05-23 (Khushi COST FIX r2) — operational-night stamp so the
+    // tonight-scoped Door view can find this entry even if a future query
+    // switches to date-equality instead of joinedAt range.
+    date: getOperationalNightStr(),
     createdAt: serverTimestamp(),
     isWalkIn: true,
     walkInBy: staffName,
@@ -3649,10 +3653,53 @@ export function subscribeToBookings(cb: (bookings: HodBooking[]) => void): Unsub
   }, () => cb([]));
 }
 
+// 🔴 2026-05-23 (Khushi COST FIX round 2) — Date-scoped bookings feed. The
+// unfiltered `subscribeToBookings` pulls the entire bookings collection
+// (every booking ever made on hodclub.in) on EVERY subscriber — this is the
+// #1 remaining read-burner. Pass tonight's operational-night date(s).
+// Firestore `in` supports up to 10 values; we de-dupe + clamp defensively.
+// Fail-open: empty array → returns [] (door staff sees no rows but no crash).
+export function subscribeToBookingsForNights(
+  nights: string[],
+  cb: (bookings: HodBooking[]) => void,
+): Unsubscribe {
+  const unique = Array.from(new Set((nights || []).filter(Boolean))).slice(0, 10);
+  if (unique.length === 0) { cb([]); return () => {}; }
+  return onSnapshot(
+    query(collection(db, BOOKINGS_COL), where("date", "in", unique)),
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking))),
+    () => cb([]),
+  );
+}
+
 export function subscribeToGuestlist(cb: (guests: HodGuestlistEntry[]) => void): Unsubscribe {
   return onSnapshot(collection(db, GUESTLIST_COL), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry)));
   }, () => cb([]));
+}
+
+// 🔴 2026-05-23 (Khushi COST FIX round 2) — Date-scoped guestlist feed.
+// Guestlist entries (POS + customer-site) all carry `joinedAt` as an ISO
+// string. We use a string-range query on that field — this only requires
+// Firestore's built-in single-field index (no composite index needed).
+// Pass a [from, to) window of YYYY-MM-DD strings, e.g. [calYesterday,
+// calTomorrow) to safely cover the operational night which straddles UTC
+// midnight. Fail-open: returns [] on error.
+export function subscribeToGuestlistInRange(
+  fromDateInclusive: string,
+  toDateExclusive: string,
+  cb: (guests: HodGuestlistEntry[]) => void,
+): Unsubscribe {
+  if (!fromDateInclusive || !toDateExclusive) { cb([]); return () => {}; }
+  return onSnapshot(
+    query(
+      collection(db, GUESTLIST_COL),
+      where("joinedAt", ">=", fromDateInclusive),
+      where("joinedAt", "<", toDateExclusive),
+    ),
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry))),
+    () => cb([]),
+  );
 }
 
 // 🔴 2026-05-20 (Khushi LIVE REPORTS) — subscribe to ALL covers so the Door
