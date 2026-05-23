@@ -2102,21 +2102,21 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
           style={{ background: viewMode === "all" ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "all" ? "#C8A645" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayBookings.length}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayBookings.length}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>{COPY.all.toUpperCase()} {viewMode === "all" ? "•" : ""}</div>
         </div>
         <div onClick={() => setViewMode("pending")}
           style={{ background: viewMode === "pending" ? "rgba(245,158,11,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "pending" ? "#F59E0B" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pending}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pending}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>YET TO CHECK IN {viewMode === "pending" ? "•" : ""}</div>
         </div>
         <div onClick={() => setViewMode("checked")}
           style={{ background: viewMode === "checked" ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "checked" ? "#00C864" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checked}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checked}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {viewMode === "checked" ? "•" : ""}</div>
         </div>
       </div>
@@ -2432,21 +2432,21 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
           style={{ background: viewMode === "all" ? "rgba(200,166,69,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "all" ? "#C8A645" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayGuests.length}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#F2C744", lineHeight: 1 }}>{todayGuests.length}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>TONIGHT'S LIST {viewMode === "all" ? "•" : ""}</div>
         </div>
         <div onClick={() => setViewMode("pending")}
           style={{ background: viewMode === "pending" ? "rgba(245,158,11,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "pending" ? "#F59E0B" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pendingGuests}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#F59E0B", lineHeight: 1 }}>{pendingGuests}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>YET TO CHECK IN {viewMode === "pending" ? "•" : ""}</div>
         </div>
         <div onClick={() => setViewMode("checked")}
           style={{ background: viewMode === "checked" ? "rgba(0,200,100,0.12)" : "rgba(255,255,255,.04)",
             border: `2px solid ${viewMode === "checked" ? "#00C864" : "transparent"}`,
             borderRadius: 10, padding: 12, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checkedIn}</div>
+          <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: "#00C864", lineHeight: 1 }}>{checkedIn}</div>
           <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "1px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)", marginTop: 6 }}>CHECKED IN {viewMode === "checked" ? "•" : ""}</div>
         </div>
       </div>
@@ -2922,7 +2922,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
                 border: `2px solid ${on ? t.color : "transparent"}`,
                 borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer",
               }}>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: t.color }}>{t.val}</div>
+              <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: t.color }}>{t.val}</div>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>{t.label} {on ? "•" : ""}</div>
             </div>
           );
@@ -4911,7 +4911,7 @@ function UnifiedWalkInModal({
                 width: 38, height: 38, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)",
                 background: "rgba(255,255,255,.04)", color: "#fff", fontSize: 18, cursor: "pointer",
               }}>−</button>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff" }}>{tickets}</div>
+              <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 22, fontWeight: 900, color: "#fff" }}>{tickets}</div>
               <button onClick={() => setTickets(Math.min(20, tickets + 1))} style={{
                 width: 38, height: 38, borderRadius: 8, border: "1px solid rgba(242,199,68,.4)",
                 background: "rgba(200,166,69,0.12)", color: "#C8A645", fontSize: 18, fontWeight: 900, cursor: "pointer",
@@ -4933,7 +4933,7 @@ function UnifiedWalkInModal({
                 {kind === "group" ? `Min spend / deposit${usingCustom ? " · ✏️ CUSTOM" : ""}` : `${qty} × ₹${unit.toLocaleString("en-IN")}${usingCustom ? " · ✏️ CUSTOM" : ""}`}
               </div>
             </div>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#F2C744" }}>
+            <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 22, fontWeight: 900, color: "#F2C744" }}>
               ₹{total.toLocaleString("en-IN")}
             </div>
           </div>
@@ -5733,7 +5733,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                   color: on ? "#0A0A0A" : "#FFFFFF",
                   display: "flex", flexDirection: "column", alignItems: "center", gap: 2, lineHeight: 1.1 }}>
                 <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.6px", textTransform: "uppercase" }}>{t.label}</span>
-                <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900,
+                <span style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 18, fontWeight: 900,
                   color: on ? "#0A0A0A" : "#F2C744" }}>{t.count}</span>
               </button>
             );
@@ -6257,8 +6257,22 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   }
 
   // ENTRY KPIs
-  const totalPaidEntry = ticketBookings.reduce((s, b) => s + (Number(b.total) || 0), 0)
-                      + entryBookings.reduce((s, b) => s + (Number(b.total) || 0), 0);
+  // 🐛 Khushi-flagged 23 May 2026: was summing b.total for EVERY ticket/entry
+  // booking, including "pay at venue" cash bookings where money hasn't been
+  // collected yet → false ₹4,496 with no one having paid. Fix: count a
+  // booking only if money has ACTUALLY moved —
+  //   (a) Online Razorpay paid → paymentId exists and does NOT start "cash_"
+  //   (b) Cash at door → checkedIn = true (door agent collected)
+  const isActuallyPaid = (b: any) => {
+    const pid = String(b?.paymentId || "");
+    const paidOnline = pid && !pid.startsWith("cash_");
+    const cashCollected = pid.startsWith("cash_") && !!b?.checkedIn;
+    return paidOnline || cashCollected;
+  };
+  const paidTicketBookings = ticketBookings.filter(isActuallyPaid);
+  const paidEntryBookings  = entryBookings.filter(isActuallyPaid);
+  const totalPaidEntry = paidTicketBookings.reduce((s, b) => s + (Number(b.total) || 0), 0)
+                      + paidEntryBookings.reduce((s, b) => s + (Number(b.total) || 0), 0);
   const totalEntryOnly = entryBookings.length;
   // CHECK-INS across all sources
   const totalCheckedIn =
@@ -6464,7 +6478,7 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
           <Tile label="CORPORATE BOOKINGS" value={corporateTables.length} tone="#C8A645" sub={`${corpPax} pax`} />
           <Tile label="GUESTLIST / FREE ENTRY" value={guestlistPax} tone="#C8A645" sub="comp entries" />
-          <Tile label="TOTAL PAID ENTRY" value={fmtRs(totalPaidEntry)} tone="#C8A645" sub={`${ticketBookings.length + entryBookings.length} bookings`} />
+          <Tile label="TOTAL PAID ENTRY" value={fmtRs(totalPaidEntry)} tone="#C8A645" sub={`${paidTicketBookings.length + paidEntryBookings.length} paid${(ticketBookings.length + entryBookings.length) > (paidTicketBookings.length + paidEntryBookings.length) ? ` · ${(ticketBookings.length + entryBookings.length) - (paidTicketBookings.length + paidEntryBookings.length)} unpaid` : ""}`} />
           <Tile label="TOTAL ENTRY-ONLY" value={totalEntryOnly} tone="#C8A645" sub="entry-pass bookings" />
           <Tile label="TOTAL CHECKED IN" value={totalCheckedIn} tone="#EF4444" sub="across all sources" />
         </div>

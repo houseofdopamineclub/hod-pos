@@ -219,12 +219,21 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
   if (r.billStale) flags.push("bill-stale");
   if (unpaidMinAfterBill >= 60) flags.push(`unpaid-${unpaidMinAfterBill}min`);
   else if (unpaidMinAfterBill >= 30) flags.push(`unpaid-${unpaidMinAfterBill}min`);
-  if (r.needsManualReview) flags.push("needs-review");
+  // Khushi 23 May 2026: Zomato emails legitimately don't carry pax/phone/time
+  // (full details come via SMS path). So `needsManualReview` on a Zomato row
+  // is EXPECTED, not an alert. Soften it: show a yellow "add-details" hint
+  // instead of a red "needs-review" siren, and don't push ambiguity to RED.
+  // For non-Zomato sources, an actual auto-assign failure still surfaces red.
+  const isZomatoNeedsDetails = r.needsManualReview && aggName === "zomato";
+  if (r.needsManualReview && !isZomatoNeedsDetails) flags.push("needs-review");
+  else if (isZomatoNeedsDetails) flags.push("add-details");
 
   let ambiguity: Ambiguity = "green";
-  if (billPrintCount > 1 || voidValueLost > 0 || hasDowngrade || unpaidMinAfterBill >= 60 || r.needsManualReview ||
+  if (billPrintCount > 1 || voidValueLost > 0 || hasDowngrade || unpaidMinAfterBill >= 60 ||
+      (r.needsManualReview && !isZomatoNeedsDetails) ||
       (aggregatorVariance !== null && aggregatorVariance <= -500)) ambiguity = "red";
   else if (overrides > 0 || sourceSwapLog.length > 0 || modifiedDiscount || r.billStale || unpaidMinAfterBill >= 30 ||
+      isZomatoNeedsDetails ||
       (aggregatorVariance !== null && Math.abs(aggregatorVariance) >= 200)) ambiguity = "orange";
 
   return {
