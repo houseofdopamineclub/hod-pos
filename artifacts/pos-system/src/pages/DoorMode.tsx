@@ -1692,10 +1692,26 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
   // Fallback (no cover doc, not checked in) → "Pay at venue".
   const checkedIn = !!booking.checkedIn;
   const pid = booking.paymentId || "";
-  const paidOnline = !!pid && !pid.startsWith("cash_") && !pid.startsWith("comp_");
+  // 🔴 2026-05-23 (Khushi) — exclude free_/free_entry_ prefixes from "paid
+  // online" too. Guestlist tickets booked via customer site get a synthetic
+  // `free_<rand>` paymentId so the booking flow has a non-empty paymentId,
+  // but Razorpay never processed money. Treating these as "paid online"
+  // was misleading door staff.
+  const paidOnline =
+    !!pid &&
+    !pid.startsWith("cash_") &&
+    !pid.startsWith("comp_") &&
+    !pid.startsWith("free_");
   const total = Number((booking as any).total || 0);
   const coverAmt = Number(cover?.coverActivated || 0);
   const isEntryOnly = isOnlyEntryBooking(booking);
+  // 🔴 2026-05-23 (Khushi) — `_isGuestList` is only set when adapting from
+  // the guestlist collection. When door staff SEARCHES by phone, the same
+  // person can come back from the bookings collection with `entryType =
+  // "guestlist_female" / "guestlist_couple"` but no `_isGuestList` flag.
+  // Use the same detection rule as describeBooking() so badges agree.
+  const entryType = String((booking as any).entryType || "").toLowerCase();
+  const isGuestListBooking = !!booking._isGuestList || entryType.startsWith("guestlist_");
 
   // Shared pill styles.
   const goldPill: React.CSSProperties = { background: "rgba(200,166,69,0.22)", border: "1px solid rgba(200,166,69,0.7)", color: "#C8A645", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap", letterSpacing: .3 };
@@ -1726,7 +1742,9 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
 
   // ── PRE-CHECK-IN states ───────────────────────────────────────────────
   // Guestlist comp — always free until check-in upgrades it via cover.
-  if (booking._isGuestList) {
+  // Use combined flag so phone-search lookups (which come from BOOKINGS_COL
+  // without the `_isGuestList` flag set) still render FREE ENTRY correctly.
+  if (isGuestListBooking) {
     return <span style={bluePill}>🎁 FREE ENTRY</span>;
   }
   // Pre-paid via Razorpay.
