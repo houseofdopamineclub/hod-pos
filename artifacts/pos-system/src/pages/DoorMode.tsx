@@ -39,7 +39,7 @@ import {
   type EdcVendor, type EdcTransactionDoc,
 } from "@/lib/edc-charge";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable, subscribeToDoorPricingSettings, subscribeToAllCovers } from "@/lib/firestore-hod";
+import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable, subscribeToDoorPricingSettings, subscribeToCoversForNight } from "@/lib/firestore-hod";
 import WaitlistView from "@/components/WaitlistView";
 import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
 import { useToast } from "@/hooks/use-toast";
@@ -1840,7 +1840,8 @@ function BookingDetailModal({
   // badge falls back to its legacy logic (paymentId / guestlist).
   const [modalCover, setModalCover] = useState<HodCover | null>(null);
   useEffect(() => {
-    const unsub = subscribeToAllCovers((all) => {
+    // 🔴 2026-05-22 — tonight-scoped feed (was reading WHOLE covers collection).
+    const unsub = subscribeToCoversForNight(getOperationalNightStr(), (all) => {
       // Match EITHER booking identifier (ref or doc id) against EITHER cover
       // identifier (ref or bookingId) — covers all 4 cross-mapping cases.
       const keys = new Set([booking.ref, booking.id].filter(Boolean) as string[]);
@@ -2008,7 +2009,8 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
   // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch from
   // "Pay at venue" → "PAID ₹<amt>" / "FREE ENTRY" / "ENTRY ONLY · PAID ₹<amt>"
   // live, the moment door staff activates a wallet or marks check-in.
-  useEffect(() => subscribeToAllCovers(setCovers), []);
+  // 🔴 2026-05-22 (Khushi COST FIX) — tonight-scoped covers (was full collection).
+  useEffect(() => subscribeToCoversForNight(getOperationalNightStr(), setCovers), []);
   const coverByRef = new Map<string, HodCover>();
   for (const c of covers) {
     if (c.ref) coverByRef.set(c.ref, c);
@@ -2119,7 +2121,8 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   }, []);
   // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch guestlist
   // rows from FREE ENTRY → PAID ₹<amt> the moment a wallet is activated.
-  useEffect(() => subscribeToAllCovers(setCovers), []);
+  // 🔴 2026-05-22 (Khushi COST FIX) — tonight-scoped covers (was full collection).
+  useEffect(() => subscribeToCoversForNight(getOperationalNightStr(), setCovers), []);
   // ── BUGFIX 2026-05-08: also subscribe to bookings so guestlist-typed entries
   // that landed in `bookings` (Firestore rules / cache / pre-fix HTML) still
   // show up under "📋 Guest List". Mapped to HodGuestlistEntry shape, deduped
@@ -5198,11 +5201,10 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   const [tab, setTab] = useState<"all" | "tickets" | "guestlist" | "tables" | "corporate" | "onlyentry" | "waitlist">("all");
   // 🔴 2026-05-20 (Khushi) — LIVE REPORTS modal toggle. Header button opens this.
   const [liveReportsOpen, setLiveReportsOpen] = useState(false);
-  // 🔴 2026-05-20 (Khushi) — covers feed for live reports KPIs (cover charges
-  // collected + amount redeemed). Subscribed at parent so the modal opens
-  // instantly with live data (no spinner).
-  const [allCovers, setAllCovers] = useState<HodCover[]>([]);
-  useEffect(() => subscribeToAllCovers(setAllCovers), []);
+  // 🔴 2026-05-22 (Khushi COST FIX) — Live Reports covers subscription MOVED
+  // INTO the modal itself (see LiveReportsModal). Parent no longer subscribes
+  // — modal opens rarely + needs night-picker support, so dashboard-wide
+  // subscription was both wasteful AND broken for past-night rewind.
   const [qrModal, setQrModal] = useState<{ bookingRef: string; walletUrl: string; customerName: string; reason: string } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -5747,7 +5749,6 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         allBookings={allBookings}
         allGuests={allGuests}
         tableResByDate={tableResByDate}
-        allCovers={allCovers}
         selectedEventId={selectedEventId}
         eventChips={eventChips}
         onClose={() => setLiveReportsOpen(false)}
@@ -6002,16 +6003,24 @@ type LiveReportsModalProps = {
   allBookings: HodBooking[];
   allGuests: HodGuestlistEntry[];
   tableResByDate: Record<string, HodTableReservation[]>;
-  allCovers: HodCover[];
   selectedEventId: string;
   eventChips: Array<{ id: string; title: string; date: string }>;
   onClose: () => void;
 };
 
-function LiveReportsModal({ agentName, allBookings, allGuests, tableResByDate, allCovers, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
+function LiveReportsModal({ agentName, allBookings, allGuests, tableResByDate, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
   // Operational night = the YYYY-MM-DD that represents the night. Today's
   // op night by default; date picker can rewind.
   const [nightDate, setNightDate] = useState<string>(getOperationalNightStr());
+  // 🔴 2026-05-22 (Khushi COST FIX) — Subscribe to covers for the SELECTED
+  // night. Was a parent-level full-collection subscription that broke when
+  // the date picker rewound (parent only had tonight's covers). Now follows
+  // nightDate dynamically — saves dashboard cost AND fixes historical view.
+  const [allCovers, setAllCovers] = useState<HodCover[]>([]);
+  useEffect(() => {
+    const u = subscribeToCoversForNight(nightDate, setAllCovers);
+    return () => u();
+  }, [nightDate]);
   // Subscribe to the picked night's table reservations if it's not already
   // in the parent's tableResByDate map.
   const [pickedTables, setPickedTables] = useState<HodTableReservation[] | null>(null);
