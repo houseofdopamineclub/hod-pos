@@ -36,8 +36,12 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
 .camera-wrap{position:relative;width:100%;aspect-ratio:3/4;background:#000;border-radius:16px;overflow:hidden;border:2px solid var(--border)}
 .camera-wrap video{width:100%;height:100%;object-fit:cover;display:block}
 .camera-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:20px;background:linear-gradient(transparent 60%,rgba(0,0,0,.7))}
-.capture-btn{width:64px;height:64px;border-radius:50%;border:4px solid #fff;background:var(--red);cursor:pointer}
-.preview-img{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:16px;border:2px solid var(--border)}
+.record-btn{width:72px;height:72px;border-radius:50%;border:4px solid #fff;background:var(--red);cursor:pointer;position:relative;transition:all .3s}
+.record-btn.recording{background:#fff;border-color:var(--red);animation:pulseRec 1s infinite}
+@keyframes pulseRec{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+.record-btn.recording::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:24px;height:24px;background:var(--red);border-radius:4px}
+.countdown{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:80px;font-weight:900;color:#fff;text-shadow:0 2px 20px rgba(0,0,0,.8);z-index:10;pointer-events:none}
+.preview-video{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:16px;border:2px solid var(--border);background:#000}
 .status-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;text-align:center}
 .geo-status{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:700;margin-top:8px}
 .geo-inside{background:rgba(67,160,71,.1);border:1px solid rgba(67,160,71,.3);color:var(--green)}
@@ -72,10 +76,10 @@ firebase.initializeApp(firebaseConfig);
 var db=firebase.firestore();
 var storage=firebase.storage();
 
-// HOD Location — DARSHAN INDUSTRIAL ESTATE
-var HOD_LAT=12.9381525,HOD_LNG=77.4015736,HOD_RADIUS=200;
+// HOD Location — TESTING LOCATION (Khushi's current position)
+var HOD_LAT=12.977128028869629,HOD_LNG=77.49148559570312,HOD_RADIUS=200;
 
-var state={screen:'phone',phone:'',pin:'',staff:null,selfieBlob:null,selfieDataUrl:null,location:null,distance:null,isInside:false,todayRecord:null};
+var state={screen:'phone',phone:'',pin:'',staff:null,videoBlob:null,videoUrl:null,location:null,distance:null,isInside:false,todayRecord:null};
 
 function showToast(msg,type){var t=document.getElementById('toast');t.textContent=msg;t.className='toast show'+(type==='err'?' toast-err':'');setTimeout(function(){t.classList.remove('show')},4000)}
 function getRoleBadge(r){var m={manager:'role-manager',captain:'role-captain',runner:'role-runner',steward:'role-steward'},l={manager:'Manager',captain:'Captain',runner:'Runner',steward:'Steward'};return'<span class="role-badge '+(m[r]||'')+'">'+(l[r]||r)+'</span>'}
@@ -85,15 +89,15 @@ function getDist(lat1,lon1,lat2,lon2){var R=6371000,dLat=(lat2-lat1)*Math.PI/180
 function checkGeo(lat,lng){var d=getDist(lat,lng,HOD_LAT,HOD_LNG);state.location={lat:lat,lng:lng};state.distance=d;state.isInside=d<=HOD_RADIUS;return{distance:d,inside:state.isInside}}
 
 var appEl=document.getElementById('app');
-function render(){switch(state.screen){case'phone':renderPhone();break;case'pin':renderPIN();break;case'selfie':renderSelfie();break;case'preview':renderPreview();break;case'dashboard':renderDashboard()}}
+function render(){switch(state.screen){case'phone':renderPhone();break;case'pin':renderPIN();break;case'record':renderRecord();break;case'preview':renderPreview();break;case'dashboard':renderDashboard()}}
 
 function renderPhone(){
 appEl.innerHTML='<div class="login-logo"><div class="icon">📍</div><h1>HOD Attendance</h1><p>Phone + PIN Login</p></div>'+
-'<div class="login-card"><h2>👋 Enter Phone Number</h2><p class="sub">Enter your registered phone number to clock in/out.</p>'+
+'<div class="login-card"><h2>👋 Enter Phone Number</h2><p class="sub">Enter your registered phone number to Login/Logout.</p>'+
 '<div style="display:flex;gap:8px"><span style="display:flex;align-items:center;padding:0 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;font-size:15px;font-weight:700;color:var(--text-dim)">🇮🇳 +91</span>'+
 '<input type="tel" id="phoneInp" class="inp" placeholder="9876543210" maxlength="10" style="flex:1" onkeypress="if(event.key===\'Enter\')findStaff()"></div>'+
 '<button class="btn btn-gold" id="btn" onclick="findStaff()">Continue</button></div>'+
-'<div style="text-align:center;margin-top:16px;padding:0 20px"><p style="font-size:11px;color:var(--text-dim);line-height:1.6">🔒 Phone number verified against staff records.<br>📍 Location checked to ensure you\'re at HOD.<br>📸 Selfie captured for attendance record.</p></div>';
+'<div style="text-align:center;margin-top:16px;padding:0 20px"><p style="font-size:11px;color:var(--text-dim);line-height:1.6">🔒 Phone number verified against staff records.<br>📍 Location checked to ensure you\'re at HOD.<br>🎥 3-sec video captured for attendance record.</p></div>';
 setTimeout(function(){document.getElementById('phoneInp')?.focus()},100)}
 
 function renderPIN(){
@@ -104,33 +108,33 @@ appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen
 '<button class="btn btn-gold" id="btn" onclick="verifyPIN()">✓ Login</button></div></div>';
 setTimeout(function(){document.getElementById('pinInp')?.focus()},100)}
 
-function renderSelfie(){
-var type=state.todayRecord?'Clock Out':'Clock In';
+function renderRecord(){
+var type=state.todayRecord?'Logout':'Login';
 appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'dashboard\';render()">←</button><span class="hdr-title">'+type+'</span></div><div class="screen">'+
 '<div class="status-card" style="padding:12px"><div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px"><span style="font-size:16px;font-weight:800">'+state.staff.name+'</span>'+getRoleBadge(state.staff.role)+'</div><div id="geoStatus" class="geo-status geo-pending">📍 Checking location...</div></div>'+
-'<div class="camera-wrap"><video id="camVideo" autoplay playsinline muted></video><div class="camera-overlay"><div style="font-size:11px;color:#fff;margin-bottom:8px">Position your face in the frame</div><button class="capture-btn" onclick="captureSelfie()"></button></div></div>'+
-'<p style="font-size:11px;color:var(--text-dim);text-align:center">Tap red button to capture selfie for attendance record.</p></div>';
+'<div class="camera-wrap"><video id="camVideo" autoplay playsinline muted></video><div class="countdown" id="countdown" style="display:none"></div><div class="camera-overlay"><div style="font-size:11px;color:#fff;margin-bottom:8px;text-align:center">Tap red button to start 3-second recording</div><button class="record-btn" id="recBtn" onclick="startRecording()"></button></div></div>'+
+'<p style="font-size:11px;color:var(--text-dim);text-align:center">A 3-second video will be recorded for attendance verification.</p></div>';
 startCamera();checkLocation()}
 
 function renderPreview(){
-var type=state.todayRecord?'Clock Out':'Clock In';
-appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'selfie\';render()">←</button><span class="hdr-title">Confirm '+type+'</span></div><div class="screen">'+
-'<div class="status-card"><div style="font-size:40px;margin-bottom:8px">📸</div><div class="status-title">'+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'</div>'+
-'<img class="preview-img" src="'+state.selfieDataUrl+'">'+
+var type=state.todayRecord?'Logout':'Login';
+appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'record\';render()">←</button><span class="hdr-title">Confirm '+type+'</span></div><div class="screen">'+
+'<div class="status-card"><div style="font-size:40px;margin-bottom:8px">🎥</div><div class="status-title">'+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'</div>'+
+'<video class="preview-video" id="prevVideo" src="'+state.videoUrl+'" controls autoplay muted playsinline></video>'+
 '<div class="clock-info"><div class="info-item"><div class="label">Location</div><div class="value" style="font-size:13px">'+(state.isInside?'✅ Inside HOD':'❌ '+state.distance+'m away')+'</div></div>'+
 '<div class="info-item"><div class="label">Distance</div><div class="value" style="font-size:13px">'+state.distance+'m</div></div>'+
 '<div class="info-item"><div class="label">Time</div><div class="value" style="font-size:13px">'+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})+'</div></div>'+
 '<div class="info-item"><div class="label">Type</div><div class="value" style="font-size:13px">'+type+'</div></div></div>'+
 '<button class="btn btn-gold" id="confirmBtn" onclick="confirmAttendance()">✓ Confirm '+type+'</button>'+
-'<button class="btn btn-outline" onclick="retakeSelfie()">🔄 Retake Selfie</button></div>'}
+'<button class="btn btn-outline" onclick="retakeVideo()">🔄 Re-record Video</button></div>'}
 
 function renderDashboard(){
 var in_=state.todayRecord&&state.todayRecord.clockIn&&!state.todayRecord.clockOut;
 appEl.innerHTML='<div class="hdr"><span class="hdr-title">My Attendance</span></div><div class="screen">'+
 '<div class="status-card"><div style="font-size:20px;font-weight:900">'+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'<div style="font-size:13px;color:var(--text-dim);margin-top:4px">+91 '+state.staff.phone+'</div></div>'+
-'<div class="status-card" style="border-color:'+(in_?'var(--green)':'var(--border)')+'"><div style="font-size:40px;margin-bottom:8px">'+(in_?'🟢':'⚪')+'</div><div class="status-title" style="color:'+(in_?'var(--green)':'var(--text-dim)')+'">'+(in_?'Currently Clocked In':'Not Clocked In')+'</div><div class="status-sub">'+(in_?'Started at '+fmtTime(state.todayRecord.clockIn):'Tap below to clock in')+'</div></div>'+
-(in_?'<div class="clock-info"><div class="info-item"><div class="label">Clock In</div><div class="value">'+fmtTime(state.todayRecord.clockIn)+'</div></div><div class="info-item"><div class="label">Duration</div><div class="value" id="dur">--</div></div></div>':'')+
-'<button class="btn '+(in_?'btn-red':'btn-green')+'" onclick="'+(in_?'startClockOut':'goToSelfie')+'()">'+(in_?'🔴 Clock Out':'🟢 Clock In Now')+'</button>'+
+'<div class="status-card" style="border-color:'+(in_?'var(--green)':'var(--border)')+'"><div style="font-size:40px;margin-bottom:8px">'+(in_?'🟢':'⚪')+'</div><div class="status-title" style="color:'+(in_?'var(--green)':'var(--text-dim)')+'">'+(in_?'Currently Logged In':'Not Logged In')+'</div><div class="status-sub">'+(in_?'Started at '+fmtTime(state.todayRecord.clockIn):'Tap below to Login')+'</div></div>'+
+(in_?'<div class="clock-info"><div class="info-item"><div class="label">Login Time</div><div class="value">'+fmtTime(state.todayRecord.clockIn)+'</div></div><div class="info-item"><div class="label">Duration</div><div class="value" id="dur">--</div></div></div>':'')+
+'<button class="btn '+(in_?'btn-red':'btn-green')+'" onclick="'+(in_?'goToRecord':'goToRecord')+'()">'+(in_?'🔴 Logout':'🟢 Login Now')+'</button>'+
 '<h3 style="font-size:13px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-top:20px">📋 Recent History</h3><div id="historyList"><div class="spinner"></div></div></div>';
 loadHistory();if(in_)updateDur()}
 
@@ -138,19 +142,25 @@ function findStaff(){var p=document.getElementById('phoneInp').value.replace(/\D
 
 function verifyPIN(){var p=document.getElementById('pinInp').value;if(p.length!==4){showToast('Enter 4-digit PIN','err');return}var btn=document.getElementById('btn');btn.disabled=true;btn.textContent='Verifying...';if(state.staff.pin!==p){btn.disabled=false;btn.textContent='✓ Login';showToast('Wrong PIN. Try again.','err');document.getElementById('pinInp').value='';setTimeout(function(){document.getElementById('pinInp')?.focus()},100);return}showToast('✅ Welcome, '+state.staff.name);state.screen='dashboard';render()}
 
-function goToSelfie(){state.screen='selfie';render()}
-function startClockOut(){state.screen='selfie';render()}
+function goToRecord(){state.screen='record';render()}
 
-var camStream=null;
-function startCamera(){navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(function(s){camStream=s;var v=document.getElementById('camVideo');v.srcObject=s;v.play()}).catch(function(){showToast('Camera access denied. Enable it in settings.','err')})}
+var camStream=null,mediaRecorder=null,recordedChunks=[];
+function startCamera(){navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:true}).then(function(s){camStream=s;var v=document.getElementById('camVideo');v.srcObject=s;v.play()}).catch(function(){showToast('Camera access denied. Enable it in settings.','err')})}
 function stopCamera(){if(camStream){camStream.getTracks().forEach(function(t){t.stop()});camStream=null}}
+
+function startRecording(){var btn=document.getElementById('recBtn');var cd=document.getElementById('countdown');if(!camStream){showToast('Camera not ready','err');return}
+recordedChunks=[];mediaRecorder=new MediaRecorder(camStream,{mimeType:'video/webm;codecs=vp9,opus'});
+mediaRecorder.ondataavailable=function(e){if(e.data.size>0)recordedChunks.push(e.data)};
+mediaRecorder.onstop=function(){var blob=new Blob(recordedChunks,{type:'video/webm'});state.videoBlob=blob;state.videoUrl=URL.createObjectURL(blob);stopCamera();state.screen='preview';render()};
+btn.classList.add('recording');btn.disabled=true;cd.style.display='block';
+var count=3;cd.textContent=count;
+var iv=setInterval(function(){count--;if(count>0){cd.textContent=count}else if(count===0){cd.textContent='🎥';mediaRecorder.start()}else{clearInterval(iv);cd.style.display='none';mediaRecorder.stop();btn.classList.remove('recording')}},1000)}
 
 function checkLocation(){var g=document.getElementById('geoStatus');if(!g)return;if(!navigator.geolocation){g.className='geo-status geo-outside';g.textContent='❌ GPS not supported';return}g.textContent='📍 Getting location...';navigator.geolocation.getCurrentPosition(function(p){var r=checkGeo(p.coords.latitude,p.coords.longitude);if(r.inside){g.className='geo-status geo-inside';g.textContent='✅ Inside HOD ('+r.distance+'m)'}else{g.className='geo-status geo-outside';g.textContent='❌ '+r.distance+'m away. Must be within '+HOD_RADIUS+'m.';showToast('You are '+r.distance+'m away. Come closer.','err')}},function(){g.className='geo-status geo-outside';g.textContent='❌ Location denied. Enable GPS.';showToast('Enable location permission','err')},{enableHighAccuracy:true,timeout:10000,maximumAge:0})}
 
-function captureSelfie(){var v=document.getElementById('camVideo');if(!v||!v.videoWidth){showToast('Camera not ready','err');return}var c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);c.toBlob(function(b){state.selfieBlob=b;state.selfieDataUrl=c.toDataURL('image/jpeg',0.85);stopCamera();state.screen='preview';render()},'image/jpeg',0.85)}
-function retakeSelfie(){state.selfieBlob=null;state.selfieDataUrl=null;state.screen='selfie';render()}
+function retakeVideo(){state.videoBlob=null;state.videoUrl=null;state.screen='record';render()}
 
-function confirmAttendance(){if(!state.isInside){showToast('❌ Must be within '+HOD_RADIUS+'m of HOD to clock in/out','err');return}if(!state.selfieBlob){showToast('Selfie required','err');return}var btn=document.getElementById('confirmBtn');btn.disabled=true;btn.textContent='Saving...';var now=new Date(),ts=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0'),docId=state.staff.id+'_'+ts,isOut=state.todayRecord&&state.todayRecord.clockIn;var selfieRef=storage.ref('attendance/'+docId+'_'+Date.now()+'.jpg');selfieRef.put(state.selfieBlob).then(function(s){return s.ref.getDownloadURL()}).then(function(url){if(isOut){return db.collection('attendance').doc(docId).update({clockOut:firebase.firestore.FieldValue.serverTimestamp(),clockOutLocation:state.location,clockOutDistance:state.distance,clockOutPhoto:url,updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}else{return db.collection('attendance').doc(docId).set({staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,phone:state.staff.phone,date:ts,clockIn:firebase.firestore.FieldValue.serverTimestamp(),clockInLocation:state.location,clockInDistance:state.distance,clockInPhoto:url,clockOut:null,clockOutLocation:null,clockOutPhoto:null,createdAt:firebase.firestore.FieldValue.serverTimestamp(),updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}}).then(function(){showToast(isOut?'✅ Clocked Out!':'✅ Clocked In!');return db.collection('attendance').doc(docId).get()}).then(function(d){state.todayRecord=d.data();state.selfieBlob=null;state.selfieDataUrl=null;state.screen='dashboard';render()}).catch(function(e){btn.disabled=false;btn.textContent='✓ Confirm '+(isOut?'Clock Out':'Clock In');showToast('Error: '+e.message,'err')})}
+function confirmAttendance(){if(!state.isInside){showToast('❌ Must be within '+HOD_RADIUS+'m of HOD to Login/Logout','err');return}if(!state.videoBlob){showToast('Video recording required','err');return}var btn=document.getElementById('confirmBtn');btn.disabled=true;btn.textContent='Saving...';var now=new Date(),ts=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0'),docId=state.staff.id+'_'+ts,isOut=state.todayRecord&&state.todayRecord.clockIn;var vidRef=storage.ref('attendance/'+docId+'_'+Date.now()+'.webm');vidRef.put(state.videoBlob).then(function(s){return s.ref.getDownloadURL()}).then(function(url){if(isOut){return db.collection('attendance').doc(docId).update({clockOut:firebase.firestore.FieldValue.serverTimestamp(),clockOutLocation:state.location,clockOutDistance:state.distance,clockOutVideo:url,updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}else{return db.collection('attendance').doc(docId).set({staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,phone:state.staff.phone,date:ts,clockIn:firebase.firestore.FieldValue.serverTimestamp(),clockInLocation:state.location,clockInDistance:state.distance,clockInVideo:url,clockOut:null,clockOutLocation:null,clockOutVideo:null,createdAt:firebase.firestore.FieldValue.serverTimestamp(),updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}}).then(function(){showToast(isOut?'✅ Logged Out!':'✅ Logged In!');return db.collection('attendance').doc(docId).get()}).then(function(d){state.todayRecord=d.data();state.videoBlob=null;state.videoUrl=null;state.screen='dashboard';render()}).catch(function(e){btn.disabled=false;btn.textContent='✓ Confirm '+(isOut?'Logout':'Login');showToast('Error: '+e.message,'err')})}
 
 function loadHistory(){if(!state.staff)return;db.collection('attendance').where('staffId','==',state.staff.id).get().then(function(s){var h='';if(s.empty){h='<div style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">No records yet</div>'}else{var a=[];s.forEach(function(d){a.push(d.data())});a.sort(function(x,y){return(y.createdAt?.seconds||0)-(x.createdAt?.seconds||0)});a.slice(0,10).forEach(function(d){var c=d.clockIn&&d.clockOut,i=c?'✅':d.clockIn?'🟢':'⚪',t=c?'Completed':d.clockIn?'In Progress':'Unknown',sub=d.clockIn?'In: '+fmtTime(d.clockIn):'';if(d.clockOut)sub+=' · Out: '+fmtTime(d.clockOut);h+='<div class="history-item"><span style="font-size:20px">'+i+'</span><div class="h-info"><div class="h-title">'+t+'</div><div class="h-sub">'+fmtDate(d.createdAt)+' · '+sub+'</div></div></div>'})}document.getElementById('historyList').innerHTML=h}).catch(function(){document.getElementById('historyList').innerHTML='<div style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">Could not load</div>'})}
 
@@ -158,8 +168,8 @@ function updateDur(){if(!state.todayRecord||!state.todayRecord.clockIn)return;va
 setInterval(updateDur,60000);
 
 render();
-console.log('✅ HOD Attendance PIN-based loaded');
-console.log('📍 Location: Darshan Industrial Estate, Basavanapalya (radius: '+HOD_RADIUS+'m)');
+console.log('✅ HOD Attendance v2 loaded — Login/Logout + 3-sec video');
+console.log('📍 Location: TESTING ('+HOD_LAT+','+HOD_LNG+') radius:'+HOD_RADIUS+'m');
 </script>
 </body>
 </html>
