@@ -6,13 +6,12 @@ import { useStaff } from "@/lib/staff-context";
 // CANONICAL list — it matches BarMode and customer wallet (hodclub.in).
 // Admin must manage the same list everyone else sells from. Override
 // docs are now keyed by slug(name), so cross-list ID mismatch is moot.
-import { HOD_MENU_ITEMS, HOD_CATEGORYimport AttendanceAdmin from "./AttendanceAdmin";_LABELS } from "@/lib/hod-menu";
-import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride, StaffRole } from "@/lib/types";
+import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
+import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride } from "@/lib/types";
 import {
   subscribeToHappyHour, updateHappyHour,
   subscribeToAggregatorSettings, updateAggregatorSettings,
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
-  addStaffMember, updateStaffMember, deleteStaffMember,
   logAudit,
   subscribeToEdcDefaultVendor, setEdcDefaultVendor, type EdcDefaultVendor,
 } from "@/lib/firestore";
@@ -41,7 +40,7 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 }
 
 export default function AdminPage() {
-  const { currentStaff, allStaff, hasRole, logout } = useStaff();
+  const { currentStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
   const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "staff" | "attendance" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
@@ -49,7 +48,6 @@ export default function AdminPage() {
   const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
   const [menuSearch, setMenuSearch] = useState("");
-  const [newStaff, setNewStaff] = useState({ name: "", pin: "", role: "steward" as StaffRole });
   const [editingHH, setEditingHH] = useState(false);
   const [hhForm, setHhForm] = useState({ enabled: false, days: [0,1,2,3,4,5,6], startTime: "12:00", endTime: "20:00", discountPercent: 10 });
   const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
@@ -166,8 +164,8 @@ export default function AdminPage() {
       `${discountPercent || discountAmount ? "SET" : "CLEAR"} DISCOUNT on ${itemName}` +
       (discountPercent ? ` (${discountPercent}% OFF)` : discountAmount ? ` (₹${discountAmount} OFF)` : "")
     ))) return;
-    // 🔴 BUGFIX 2026-05-10 — Firestore setDoc({merge:true}) keeps existing
-    // fields when you pass undefined. Write explicit 0/"" to clear.
+    // 🔴 BUGFIX 2026-05-10 — same merge:true clear bug as bulk discount.
+    // Write explicit 0/"" instead of undefined so the field actually clears.
     await setMenuOverride(itemName, {
       outOfStock: current?.outOfStock || false,
       discountPercent: discountPercent ?? 0,
@@ -269,12 +267,6 @@ export default function AdminPage() {
     );
   };
 
-  const handleAddStaff = async () => {
-    if (!newStaff.name || !newStaff.pin || newStaff.pin.length !== 4) return;
-    await addStaffMember({ ...newStaff, active: true });
-    setNewStaff({ name: "", pin: "", role: "steward" });
-  };
-
   const handleSaveHappyHour = async () => {
     await updateHappyHour({
       ...hhForm,
@@ -285,7 +277,6 @@ export default function AdminPage() {
   };
 
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const roleOptions: StaffRole[] = ["admin", "manager", "cashier", "captain", "steward", "bartender", "hostess", "chef"];
 
   return (
     <div className="min-h-screen" style={{ background: "#030305", color: "hsl(36 29% 93%)" }}>
@@ -304,7 +295,7 @@ export default function AdminPage() {
         {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "staff", "attendance", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu" ? "OOS / Discount" : t === "attendance" ? "📊 Attendance" : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu" ? "OOS / Discount" : t === "attendance" ? "📍 Attendance" : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -343,8 +334,6 @@ export default function AdminPage() {
         )}
 
         {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
-
-        {tab === "attendance" && <AttendanceAdmin />}
 
         {tab === "menu" && (
           <div>
@@ -440,7 +429,9 @@ export default function AdminPage() {
           </div>
         )}
 
-     {tab === "staff" && <StaffManagement />}
+        {tab === "staff" && <StaffManagement />}
+
+        {tab === "attendance" && <AttendanceAdmin />}
 
         {tab === "happy-hour" && (
           <div className="max-w-md">
