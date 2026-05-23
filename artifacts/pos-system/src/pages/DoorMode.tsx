@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Link } from "wouter";
 import {
   sha256, lookupBooking, subscribeToBookings, subscribeToGuestlist,
+  subscribeToBookingsForNights, subscribeToGuestlistInRange,
   subscribeToHodReservations, checkInGuest, reassignTable, cancelTableReservation,
   updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
@@ -1196,6 +1197,15 @@ const TODAY_STR = () => getOperationalNightStr();
 const CALENDAR_TODAY_STR = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 const TODAY_DATE_SET = () => new Set([TODAY_STR(), CALENDAR_TODAY_STR()]);
+// 🔴 2026-05-23 (Khushi COST FIX r2) — Add N days to a YYYY-MM-DD string.
+// Used to build [from, to) windows for guestlist range queries that cover
+// the operational night spanning calendar midnight.
+const addDaysStr = (yyyyMmDd: string, days: number): string => {
+  const [y, m, d] = yyyyMmDd.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+};
 
 function matchQuery(q: string, ...fields: Array<string | undefined | null>): boolean {
   if (!q) return true;
@@ -2002,8 +2012,10 @@ function BookingsListTab({ kind, agentName, query, eventId, onCover, onShowQr }:
     : { all: "Today's Bookings", empty: "No bookings for today" };
 
 
+  // 🔴 2026-05-23 (Khushi COST FIX r2) — tonight-scoped bookings (was full collection).
+  // Same filter rules as parent tabCounts: today + calendar today.
   useEffect(() => {
-    const unsub = subscribeToBookings((all) => setBookings(all));
+    const unsub = subscribeToBookingsForNights([TODAY_STR(), CALENDAR_TODAY_STR()], setBookings);
     return unsub;
   }, []);
   // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch from
@@ -2115,8 +2127,12 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   const [detail, setDetail] = useState<HodBooking | null>(null);
   const { toast } = useToast();
 
+  // 🔴 2026-05-23 (Khushi COST FIX r2) — tonight-scoped guestlist via joinedAt
+  // range query (was full collection). Window = [calToday-1, calToday+2) so
+  // the operational night straddling calendar midnight is fully covered.
   useEffect(() => {
-    const unsub = subscribeToGuestlist((all) => setGuests(all));
+    const c = CALENDAR_TODAY_STR();
+    const unsub = subscribeToGuestlistInRange(addDaysStr(c, -1), addDaysStr(c, 2), setGuests);
     return unsub;
   }, []);
   // 🔴 2026-05-21 (Khushi) — covers feed so PaidBadge can switch guestlist
@@ -2127,8 +2143,9 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
   // that landed in `bookings` (Firestore rules / cache / pre-fix HTML) still
   // show up under "📋 Guest List". Mapped to HodGuestlistEntry shape, deduped
   // by id with the canonical guestlist collection.
+  // 🔴 2026-05-23 (Khushi COST FIX r2) — tonight-scoped (was full collection).
   useEffect(() => {
-    const unsub = subscribeToBookings((all) => setBookings(all));
+    const unsub = subscribeToBookingsForNights([TODAY_STR(), CALENDAR_TODAY_STR()], setBookings);
     return unsub;
   }, []);
 
@@ -5299,8 +5316,20 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   // Per-date map so removals (cancellations / date edits) evict stale rows
   // instead of sticking around forever in the accumulator.
   const [tableResByDate, setTableResByDate] = useState<Record<string, HodTableReservation[]>>({});
-  useEffect(() => subscribeToBookings(setAllBookings), []);
-  useEffect(() => subscribeToGuestlist(setAllGuests), []);
+  // 🔴 2026-05-23 (Khushi COST FIX r2) — DoorDashboard tabCounts only needs
+  // TONIGHT'S bookings + guestlist (see line ~5314, 5318 filters). The
+  // unfiltered subscriptions were burning ~entire-collection reads every
+  // single time any door PC loaded, all night long. Now scoped to today.
+  useEffect(() => {
+    const t = TODAY_STR(); const c = CALENDAR_TODAY_STR();
+    const u = subscribeToBookingsForNights([t, c], setAllBookings);
+    return () => u();
+  }, []);
+  useEffect(() => {
+    const c = CALENDAR_TODAY_STR();
+    const u = subscribeToGuestlistInRange(addDaysStr(c, -1), addDaysStr(c, 2), setAllGuests);
+    return () => u();
+  }, []);
   useEffect(() => {
     const t = TODAY_STR(); const c = CALENDAR_TODAY_STR();
     const u1 = subscribeToHodReservations(t, (rows) => setTableResByDate((m) => ({ ...m, [t]: rows })));
@@ -5746,8 +5775,6 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
       {liveReportsOpen && <LiveReportsModal
         agentName={agentName}
-        allBookings={allBookings}
-        allGuests={allGuests}
         tableResByDate={tableResByDate}
         selectedEventId={selectedEventId}
         eventChips={eventChips}
@@ -6000,15 +6027,13 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
 
 type LiveReportsModalProps = {
   agentName: string;
-  allBookings: HodBooking[];
-  allGuests: HodGuestlistEntry[];
   tableResByDate: Record<string, HodTableReservation[]>;
   selectedEventId: string;
   eventChips: Array<{ id: string; title: string; date: string }>;
   onClose: () => void;
 };
 
-function LiveReportsModal({ agentName, allBookings, allGuests, tableResByDate, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
+function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
   // Operational night = the YYYY-MM-DD that represents the night. Today's
   // op night by default; date picker can rewind.
   const [nightDate, setNightDate] = useState<string>(getOperationalNightStr());
@@ -6019,6 +6044,21 @@ function LiveReportsModal({ agentName, allBookings, allGuests, tableResByDate, s
   const [allCovers, setAllCovers] = useState<HodCover[]>([]);
   useEffect(() => {
     const u = subscribeToCoversForNight(nightDate, setAllCovers);
+    return () => u();
+  }, [nightDate]);
+  // 🔴 2026-05-23 (Khushi COST FIX r2) — Same treatment for bookings + guestlist.
+  // Parent now only subscribes to TONIGHT (for tab counters); modal needs to
+  // follow the date picker independently. Both refresh when nightDate changes.
+  const [allBookings, setAllBookings] = useState<HodBooking[]>([]);
+  useEffect(() => {
+    const u = subscribeToBookingsForNights([nightDate], setAllBookings);
+    return () => u();
+  }, [nightDate]);
+  const [allGuests, setAllGuests] = useState<HodGuestlistEntry[]>([]);
+  useEffect(() => {
+    // Operational night straddles calendar midnight — fetch a 2-day window
+    // to safely catch entries joined either side of it; JS filter narrows.
+    const u = subscribeToGuestlistInRange(addDaysStr(nightDate, 0), addDaysStr(nightDate, 2), setAllGuests);
     return () => u();
   }, [nightDate]);
   // Subscribe to the picked night's table reservations if it's not already

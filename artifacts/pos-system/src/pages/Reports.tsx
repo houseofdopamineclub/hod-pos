@@ -27,6 +27,7 @@ import { collection, onSnapshot, query, where, Timestamp } from "firebase/firest
 import { db } from "@/lib/firebase";
 import {
   subscribeToHodReservations, subscribeToBookings, subscribeToGuestlist,
+  subscribeToBookingsForNights, subscribeToGuestlistInRange, subscribeToCoversForNight,
   AGGREGATOR_OPTIONS, getAggregatorDiscount,
   type HodTableReservation, type HodBooking, type HodGuestlistEntry, type HodCover,
 } from "@/lib/firestore-hod";
@@ -421,6 +422,18 @@ export default function Reports() {
   const todayNight = getOperationalNightStr();
   const [selectedDate, setSelectedDate] = useState<string>(todayNight);
   const today = selectedDate;
+  // 🔴 2026-05-23 (Khushi COST FIX r3) — merge helper: replaces the prior
+  // night-slice of covers (so removed/edited docs drop) without clobbering
+  // covers from the *other* night that share the local state array.
+  const mergeCoversByNight = (
+    prev: Array<HodCover & { id: string }>,
+    night: string,
+    rows: HodCover[],
+  ): Array<HodCover & { id: string }> => {
+    const keep = prev.filter((c) => (c as any).date !== night);
+    const next = rows.map((r) => ({ ...(r as any), id: (r as any).id })) as Array<HodCover & { id: string }>;
+    return [...keep, ...next];
+  };
   const last7Dates = useMemo(() => {
     const out: string[] = [];
     for (let i = 0; i < 7; i++) {
@@ -487,17 +500,27 @@ export default function Reports() {
     const u4 = subHist(next,  (r) => { bHist = r; merge(); });
     return () => { u1(); u2(); u3(); u4(); };
   }, [today]);
-  // 2) Bookings (real-time, all)
-  useEffect(() => subscribeToBookings(setBookings), []);
-  // 3) Guestlist (real-time, all)
-  useEffect(() => subscribeToGuestlist(setGuestlist), []);
-  // 4) Covers (real-time — query the whole collection; small enough for a club night)
+  // 🔴 2026-05-23 (Khushi COST FIX r3) — Bookings / Guestlist / Covers were
+  // pulling the ENTIRE collection on every Reports page open. With 10K+ rows
+  // of history that's the single biggest read-burner outside DoorMode. All
+  // three are now scoped to the selected `today` night + next day (covers
+  // events that straddle midnight). Re-subscribes when the date picker moves.
+  // 🛟 FALLBACK: if a row's `date` field is missing it's silently excluded
+  // here; the picker can rewind one night at a time to find historical data.
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, "covers"), (snap) => {
-      setCovers(snap.docs.map(d => ({ ...(d.data() as HodCover), id: d.id })));
-    }, (e) => console.warn("[Reports] covers subscribe failed", e));
-    return unsub;
-  }, []);
+    const nextDay = (() => {
+      const [y, m, d] = today.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split("T")[0];
+    })();
+    const u1 = subscribeToBookingsForNights([today, nextDay], setBookings);
+    const u2 = subscribeToGuestlistInRange(today, (() => {
+      const [y, m, d] = today.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d + 2)).toISOString().split("T")[0];
+    })(), setGuestlist);
+    const u3a = subscribeToCoversForNight(today,   (rows) => setCovers((prev) => mergeCoversByNight(prev, today, rows)));
+    const u3b = subscribeToCoversForNight(nextDay, (rows) => setCovers((prev) => mergeCoversByNight(prev, nextDay, rows)));
+    return () => { u1(); u2(); u3a(); u3b(); };
+  }, [today]);
   // 4b) posKOTs for the selected night (Feature #2 — KOT-vs-Bill Tally).
   //     Window = 12pm (noon) selectedDate → 12pm next day (operational night,
   //     matches getOperationalNightStr cutoff per Khushi 11 May 2026).
