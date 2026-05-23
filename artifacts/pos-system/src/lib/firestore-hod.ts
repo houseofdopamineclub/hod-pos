@@ -1800,7 +1800,7 @@ export async function markTablePaid(
   // merge:true write would create a stub without isTableBooking, kicking the
   // customer's wallet view back into cover-mode. Force the flag since this
   // function is only called for TABLE bills.
-  if (bookingRef) await setDoc(doc(db, COVERS_COL, bookingRef), { ...upd, isTableBooking: true }, { merge: true }).catch(() => {});
+  if (bookingRef) await setDoc(doc(db, COVERS_COL, bookingRef), { ...upd, isTableBooking: true, date: getOperationalNightStr() }, { merge: true }).catch(() => {});
 }
 
 /** V1 — Record a void event when items are removed from an already-activated
@@ -2640,6 +2640,9 @@ export async function createWalkInTable(
     ...(email.trim() ? { email: email.trim() } : {}),
     arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, ref, isWalkIn: true,
+    // 🔴 2026-05-22 (Khushi COST FIX) — date is REQUIRED so tonight-scoped
+    // covers feed (subscribeToCoversForNight) catches this walk-in.
+    date: getOperationalNightStr(),
   }, { merge: true });
 
   const d = doc(db, TABLE_RES_COL, ref);
@@ -2674,10 +2677,17 @@ export type NotificationOutcome =
 export async function logNotificationOutcome(bookingRef: string, outcome: NotificationOutcome) {
   if (!bookingRef) return;
   try {
-    await setDoc(doc(db, COVERS_COL, bookingRef), {
+    // 🔴 2026-05-22 (Khushi COST FIX) — read-then-write to avoid clobbering
+    // a real `date` on a pre-existing covers doc. Only inject tonight's
+    // night-string if the doc is brand new OR truly missing `date`.
+    const ref = doc(db, COVERS_COL, bookingRef);
+    const snap = await getDoc(ref).catch(() => null);
+    const needsDate = !snap?.exists() || !(snap.data() as any)?.date;
+    await setDoc(ref, {
       notificationStatus: outcome.status,
       notificationDetails: outcome,
       notificationAt: serverTimestamp(),
+      ...(needsDate ? { date: getOperationalNightStr() } : {}),
       ...(outcome.status === "qr_shown" ? { qrShownAt: serverTimestamp() } : {}),
     }, { merge: true });
   } catch (e) {
@@ -3255,6 +3265,8 @@ export async function createProxyTable(
     ...(email.trim() ? { email: email.trim() } : {}),
     arrivalTime: arrTime, actualArrivalTime: arrTime,
     bookingRef: ref, ref, isWalkIn: true, isProxy: true,
+    // 🔴 2026-05-22 (Khushi COST FIX) — date REQUIRED for tonight-scoped feed.
+    date: getOperationalNightStr(),
   }, { merge: true });
   const d = doc(db, TABLE_RES_COL, ref);
   await setDoc(d, {
@@ -3652,6 +3664,25 @@ export function subscribeToAllCovers(cb: (covers: HodCover[]) => void): Unsubscr
   return onSnapshot(collection(db, COVERS_COL), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodCover)));
   }, () => cb([]));
+}
+
+// 🔴 2026-05-22 (Khushi COST FIX) — Date-filtered covers feed. The unfiltered
+// `subscribeToAllCovers` was the #1 read-burner in the app (each open Door
+// Mode tab subscribed to the WHOLE covers collection — months of history —
+// every refresh). This variant scopes to a single operational night via the
+// `date` field that every cover doc carries (see activateCoverForBooking,
+// ensureZeroBalanceCoverForGuest, ensureCoverForAggregatorArrival).
+// Pass `getOperationalNightStr()` for tonight. Fail-open: on error returns [].
+export function subscribeToCoversForNight(
+  night: string,
+  cb: (covers: HodCover[]) => void,
+): Unsubscribe {
+  if (!night) { cb([]); return () => {}; }
+  return onSnapshot(
+    query(collection(db, COVERS_COL), where("date", "==", night)),
+    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodCover))),
+    () => cb([]),
+  );
 }
 
 // Check in a guest. Returns { checkedInAt, wasNew, undone }.
