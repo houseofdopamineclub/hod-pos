@@ -1,175 +1,841 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<title>HOD Attendance</title>
-<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-storage-compat.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>HOD Staff Attendance</title>
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-storage-compat.js"></script>
+<!-- face-api.js (actively maintained fork) -->
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-:root{--bg:#0A0A0A;--card:#111;--surface:#1A1A1A;--gold:#C8A645;--red:#E53935;--green:#43A047;--blue:#1E88E5;--text:#F5F5F5;--text-dim:#888;--border:#2A2A2A}
-html,body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;height:100vh;overflow:hidden}
-.app{max-width:480px;margin:0 auto;height:100vh;display:flex;flex-direction:column}
-.hdr{height:56px;background:var(--card);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:center;padding:0 16px;position:relative}
-.hdr-title{font-size:16px;font-weight:800;color:var(--gold)}
-.hdr-back{position:absolute;left:12px;background:none;border:none;color:var(--text-dim);font-size:20px;cursor:pointer}
-.screen{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
-.screen::-webkit-scrollbar{display:none}
-.login-logo{text-align:center;padding:30px 0 20px}
-.login-logo .icon{font-size:48px}
-.login-logo h1{font-size:22px;font-weight:900;color:var(--gold);margin:8px 0 4px}
-.login-logo p{font-size:12px;color:var(--text-dim)}
-.login-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:14px}
-.login-card h2{font-size:15px;font-weight:700}
-.login-card p.sub{font-size:12px;color:var(--text-dim);line-height:1.5}
-.inp{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px 14px;color:var(--text);font-size:15px;outline:none;font-family:inherit}
-.inp:focus{border-color:var(--gold)}
-.inp::placeholder{color:#555}
-.btn{width:100%;padding:14px;border-radius:10px;font-size:15px;font-weight:800;border:none;cursor:pointer;font-family:inherit}
-.btn:disabled{opacity:.4;cursor:not-allowed}
-.btn-gold{background:linear-gradient(135deg,var(--gold),#A08830);color:#000}
-.btn-green{background:var(--green);color:#fff}
-.btn-red{background:var(--red);color:#fff}
-.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text-dim)}
-.camera-wrap{position:relative;width:100%;aspect-ratio:3/4;background:#000;border-radius:16px;overflow:hidden;border:2px solid var(--border)}
-.camera-wrap video{width:100%;height:100%;object-fit:cover;display:block}
-.camera-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:20px;background:linear-gradient(transparent 60%,rgba(0,0,0,.7))}
-.record-btn{width:72px;height:72px;border-radius:50%;border:4px solid #fff;background:var(--red);cursor:pointer;position:relative;transition:all .3s}
-.record-btn.recording{background:#fff;border-color:var(--red);animation:pulseRec 1s infinite}
-@keyframes pulseRec{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
-.record-btn.recording::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:24px;height:24px;background:var(--red);border-radius:4px}
-.countdown{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:80px;font-weight:900;color:#fff;text-shadow:0 2px 20px rgba(0,0,0,.8);z-index:10;pointer-events:none}
-.preview-video{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:16px;border:2px solid var(--border);background:#000}
-.status-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;text-align:center}
-.geo-status{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:700;margin-top:8px}
-.geo-inside{background:rgba(67,160,71,.1);border:1px solid rgba(67,160,71,.3);color:var(--green)}
-.geo-outside{background:rgba(229,57,53,.1);border:1px solid rgba(229,57,53,.3);color:var(--red)}
-.geo-pending{background:rgba(30,136,229,.1);border:1px solid rgba(30,136,229,.3);color:var(--blue)}
-.clock-info{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.info-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center}
-.info-item .label{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
-.info-item .value{font-size:14px;font-weight:800;color:var(--gold)}
-.history-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;align-items:center;gap:12px;margin-bottom:8px}
-.history-item .h-info{flex:1}
-.history-item .h-title{font-size:13px;font-weight:700}
-.history-item .h-sub{font-size:11px;color:var(--text-dim)}
-.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto}
-@keyframes spin{to{transform:rotate(360deg)}}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--card);border:1px solid var(--border);color:var(--text);padding:12px 20px;border-radius:12px;font-size:13px;font-weight:700;z-index:9999;transition:transform .3s;max-width:90%;text-align:center}
-.toast.show{transform:translateX(-50%) translateY(0)}
-.toast-err{border-color:var(--red);background:rgba(229,57,53,.1);color:var(--red)}
-.role-badge{display:inline-block;padding:4px 10px;border-radius:6px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-left:6px}
-.role-manager{background:rgba(156,39,176,.2);color:#CE93D8}
-.role-captain{background:rgba(30,136,229,.2);color:#64B5F6}
-.role-runner{background:rgba(255,152,0,.2);color:#FFB74D}
-.role-steward{background:rgba(76,175,80,.2);color:#81C784}
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  :root{
+    --gold:#C9A84C;--gold2:#F2C744;--bg:#0A0A0A;--card:#111111;
+    --border:#1A1A1A;--text:#E8E0D4;--muted:#8A7E6B;
+    --green:#22c55e;--red:#ef4444;--orange:#f59e0b;
+  }
+  body{
+    background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    min-height:100dvh;display:flex;flex-direction:column;
+  }
+  .wrap{flex:1;display:flex;flex-direction:column;max-width:480px;width:100%;margin:0 auto;padding:12px 14px 100px}
+  h1{font-size:20px;font-weight:700;text-align:center;color:var(--gold);margin:6px 0 10px;letter-spacing:.5px}
+  h2{font-size:15px;font-weight:600;color:var(--gold);margin-bottom:10px}
+
+  input,select{
+    width:100%;padding:13px 14px;border-radius:12px;border:1px solid #2A2A2A;
+    background:#141414;color:var(--text);font-size:16px;outline:none;margin-bottom:10px;
+    -webkit-appearance:none;
+  }
+  input:focus,select:focus{border-color:var(--gold)}
+
+  .btn{
+    width:100%;padding:14px;border-radius:14px;border:none;font-size:16px;font-weight:700;
+    cursor:pointer;transition:.15s;text-align:center;letter-spacing:.3px;
+  }
+  .btn-gold{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000}
+  .btn-gold:active{transform:scale(.98);opacity:.9}
+  .btn-red{background:linear-gradient(135deg,#dc2626,var(--red));color:#fff}
+  .btn-red:active{transform:scale(.98);opacity:.9}
+  .btn-dark{background:#1A1A1A;color:var(--text);border:1px solid #2A2A2A}
+  .btn-sm{padding:10px 16px;font-size:13px;border-radius:10px;width:auto;display:inline-flex;align-items:center;gap:6px}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+
+  /* Camera/video */
+  .cam-box{position:relative;border-radius:14px;overflow:hidden;background:#000;margin-bottom:10px;aspect-ratio:3/4;max-height:32vh}
+  .cam-box video,.cam-box canvas,.cam-box img{width:100%;height:100%;object-fit:cover;display:block}
+  .cam-box canvas.overlay{position:absolute;top:0;left:0}
+
+  .cam-row{display:flex;gap:8px;margin-bottom:10px}
+  .cam-row .btn{flex:1;font-size:14px;padding:12px}
+
+  /* Info grid */
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:12px;
+    padding:10px 8px;text-align:center;
+  }
+  .card .label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:3px}
+  .card .val{font-size:16px;font-weight:700;color:var(--gold)}
+  .card .val.green{color:var(--green)}.card .val.red{color:var(--red)}.card .val.orange{color:var(--orange)}
+
+  /* Toast */
+  .toast{
+    position:fixed;top:0;left:0;right:0;padding:14px 18px;text-align:center;font-size:14px;
+    font-weight:600;z-index:1000;transform:translateY(-100%);transition:.3s;
+  }
+  .toast.show{transform:translateY(0)}
+  .toast.ok{background:rgba(34,197,94,.92);color:#fff}
+  .toast.err{background:rgba(239,68,68,.92);color:#fff}
+  .toast.warn{background:rgba(245,158,11,.92);color:#fff}
+
+  .spin{display:inline-block;width:18px;height:18px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* Dashboard */
+  .dash-avatar{
+    width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--gold2));
+    display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#000;margin:0 auto 10px;
+  }
+  .timer{font-size:42px;font-weight:800;color:var(--gold);text-align:center;font-variant-numeric:tabular-nums;letter-spacing:2px}
+  .dash-status{text-align:center;font-size:13px;color:var(--green);margin:4px 0 14px;font-weight:600}
+  .auto-logout-banner{
+    background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);border-radius:12px;
+    padding:10px 14px;text-align:center;font-size:12px;color:var(--red);margin-bottom:12px;display:none;
+  }
+  .auto-logout-banner.show{display:block}
+
+  /* Face overlay guides */
+  .face-guide{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  .face-guide .oval{
+    width:55%;height:45%;border:2px dashed rgba(201,168,76,.6);border-radius:50%;
+    animation:pulse 2s infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+  .face-status{
+    position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+    background:rgba(0,0,0,.75);padding:8px 18px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;
+  }
+
+  /* Bottom bar */
+  .bottom-bar{
+    position:fixed;bottom:0;left:0;right:0;padding:10px 14px 14px;
+    background:linear-gradient(to top,rgba(10,10,10,.98),rgba(10,10,10,.9));
+    border-top:1px solid var(--border);z-index:100;
+  }
+  .bottom-bar .wrap-btns{max-width:480px;margin:0 auto;display:flex;gap:10px}
+  .bottom-bar .btn{margin-bottom:0}
+
+  .muted{color:var(--muted);font-size:12px}
+  .hide{display:none!important}
+
+  /* Model loading */
+  .model-load{text-align:center;padding:30px 20px}
+  .model-load .spin{width:28px;height:28px;margin-bottom:12px}
+  .progress-bar{height:4px;background:#1A1A1A;border-radius:2px;overflow:hidden;margin:12px 0}
+  .progress-bar .fill{height:100%;background:var(--gold);transition:width .3s;border-radius:2px}
+
+  /* Blink instruction overlay */
+  .blink-overlay{
+    position:absolute;top:20px;left:50%;transform:translateX(-50%);
+    background:rgba(0,0,0,.8);padding:8px 18px;border-radius:20px;
+    font-size:14px;font-weight:700;color:var(--gold);z-index:10;
+  }
 </style>
 </head>
 <body>
-<div class="app" id="app"></div>
-<div class="toast" id="toast"></div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<div class="wrap">
+
+  <!-- ═══════════════ LOGIN FLOW ═══════════════ -->
+  <div id="loginFlow">
+
+    <!-- SCREEN: Phone -->
+    <div id="scrPhone">
+      <div style="text-align:center;margin:16px 0 12px">
+        <div style="font-size:40px;margin-bottom:4px">🏛️</div>
+        <h1>House of Dopamine</h1>
+        <p class="muted">Staff Attendance</p>
+      </div>
+      <h2 style="margin-top:10px">📱 Enter Phone Number</h2>
+      <input type="tel" id="phoneInp" placeholder="9876543210" maxlength="10" inputmode="numeric">
+      <button class="btn btn-gold" onclick="lookupPhone()" id="lookupBtn">Continue</button>
+    </div>
+
+    <!-- SCREEN: PIN -->
+    <div id="scrPIN" class="hide">
+      <div style="text-align:center;margin:8px 0">
+        <button class="btn btn-sm btn-dark" onclick="backToPhone()">← Back</button>
+      </div>
+      <h2>🔐 Enter 4-Digit PIN</h2>
+      <p class="muted" style="text-align:center;margin:-4px 0 10px">Welcome, <strong style="color:var(--gold)" id="pinStaffName">—</strong></p>
+      <input type="password" id="pinInp" placeholder="****" maxlength="4" inputmode="numeric" style="font-size:22px;letter-spacing:12px;text-align:center">
+      <button class="btn btn-gold" onclick="verifyPIN()">Verify PIN</button>
+    </div>
+
+    <!-- SCREEN: Face Enrollment (first time) -->
+    <div id="scrEnroll" class="hide">
+      <h2>📸 Face Enrollment</h2>
+      <p class="muted" style="margin-bottom:8px">First time login. Center your face in the oval and tap Capture.</p>
+      <div class="cam-box" id="enrollBox">
+        <video id="enrollVideo" autoplay playsinline muted></video>
+        <canvas id="enrollCanvas" class="overlay"></canvas>
+        <div class="face-guide"><div class="oval"></div></div>
+        <div class="face-status" id="enrollStatus" style="color:var(--muted)">Loading camera...</div>
+      </div>
+      <div class="cam-row">
+        <button class="btn btn-gold" id="enrollBtn" onclick="captureEnrollment()" disabled>📸 Capture Face</button>
+        <button class="btn btn-dark" onclick="switchCamEnroll()">🔄 Flip</button>
+      </div>
+    </div>
+
+    <!-- SCREEN: Face Verify (login/logout) -->
+    <div id="scrFace" class="hide">
+      <h2 id="faceTitle">👤 Face Verification</h2>
+      <p class="muted" style="margin-bottom:8px" id="faceSubtitle">Center your face in the oval. Blink when prompted.</p>
+      <div class="cam-box" id="faceBox">
+        <video id="faceVideo" autoplay playsinline muted></video>
+        <canvas id="faceCanvas" class="overlay"></canvas>
+        <div class="face-guide"><div class="oval"></div></div>
+        <div class="blink-overlay hide" id="blinkOverlay">👁️ Please BLINK</div>
+        <div class="face-status" id="faceStatus" style="color:var(--muted)">Loading models...</div>
+      </div>
+    </div>
+
+    <!-- SCREEN: Preview / Confirm -->
+    <div id="scrPreview" class="hide">
+      <h2>👀 Review</h2>
+      <div class="grid-2">
+        <div class="card"><div class="label">Location</div><div class="val green" id="pLoc">Checking...</div></div>
+        <div class="card"><div class="label">Distance</div><div class="val" id="pDist">—</div></div>
+        <div class="card"><div class="label">Time</div><div class="val" id="pTime">—</div></div>
+        <div class="card"><div class="label">Type</div><div class="val" id="pType">Login</div></div>
+      </div>
+      <div class="card" style="margin-top:8px">
+        <div class="label">Face Match</div>
+        <div class="val green" id="pFace">✅ Matched</div>
+      </div>
+    </div>
+
+    <!-- SCREEN: Model Loading -->
+    <div id="scrLoading" class="hide">
+      <div class="model-load">
+        <div style="font-size:36px;margin-bottom:8px">🧠</div>
+        <div style="font-size:16px;font-weight:700;color:var(--gold);margin-bottom:4px">Loading AI Models</div>
+        <div class="muted" style="margin-bottom:16px">One-time setup. ~3MB download.</div>
+        <div class="progress-bar"><div class="fill" id="modelProgress" style="width:0%"></div></div>
+        <div class="muted" id="modelLabel">Initializing...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════ LOGGED-IN DASHBOARD ═══════════════ -->
+  <div id="dashScreen" class="hide" style="flex:1;display:flex;flex-direction:column;justify-content:center;min-height:55vh">
+    <div style="text-align:center">
+      <div class="dash-avatar" id="dashAvatar">H</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text)" id="dashName">—</div>
+      <div style="font-size:13px;color:var(--muted);margin:2px 0 16px" id="dashRole">—</div>
+
+      <div class="timer" id="dashTimer">00:00:00</div>
+      <div class="dash-status" id="dashStatus">● Currently Logged In</div>
+
+      <!-- Auto-logout warning banner -->
+      <div class="auto-logout-banner" id="autoLogoutBanner">
+        ⚠️ You are far from HOD. Auto-logout in <span id="autoLogoutCount">—</span>
+      </div>
+
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;margin:16px 0;text-align:left">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">Login Details</div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin:4px 0"><span style="color:var(--muted)">Logged in at</span><span style="color:var(--gold);font-weight:600" id="dashLoginTime">—</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin:4px 0"><span style="color:var(--muted)">Duration</span><span style="color:var(--text);font-weight:600" id="dashDuration">—</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin:4px 0"><span style="color:var(--muted)">Location</span><span style="color:var(--green);font-weight:600" id="dashLocation">Inside HOD</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin:4px 0"><span style="color:var(--muted)">GPS Check</span><span style="color:var(--green);font-weight:600" id="dashGpsStatus">Active</span></div>
+      </div>
+
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5">
+        All activities in Captain Mode, Bar Mode &amp; Door Mode are being tracked under your name.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════ BOTTOM BAR ═══════════════ -->
+<div class="bottom-bar" id="bottomBar" style="display:none">
+  <div class="wrap-btns">
+    <button class="btn btn-gold" id="confirmBtn" onclick="confirmAction()">✓ Confirm Login</button>
+    <button class="btn btn-red" id="logoutBtn" onclick="startLogoutFlow()" style="display:none">🔴 Logout</button>
+  </div>
+</div>
+
 <script>
-var firebaseConfig={apiKey:"AIzaSyB6YfM1DyVq0NTEWXpMdbCYuWwr9cWwbt0",authDomain:"hod-tickets.firebaseapp.com",projectId:"hod-tickets",storageBucket:"hod-tickets.firebasestorage.app",messagingSenderId:"86190418978",appId:"1:86190418978:web:8b1eafc784c4986fd3ee7b"};
-firebase.initializeApp(firebaseConfig);
-var db=firebase.firestore();
-var storage=firebase.storage();
+// ═══════════════════════════════════════════════════════════════════════════
+// HOD ATTENDANCE v4 — Face Recognition + Auto-Logout + Persistent Session
+// ═══════════════════════════════════════════════════════════════════════════
 
-// HOD Location — TESTING LOCATION (Khushi's current position)
-var HOD_LAT=12.977128028869629,HOD_LNG=77.49148559570312,HOD_RADIUS=200;
+// ── CONFIG ──
+var HOD_LAT=12.977128028869629,HOD_LNG=77.49148559570312;
+var LOGIN_RADIUS=200;var AUTO_LOGOUT_RADIUS=100;
+var GEO_CHECK_MS=60000;var MAX_OUTSIDE_STRIKES=3;
+var FACE_MATCH_THRESHOLD=0.55;var BLINK_EAR_THRESHOLD=0.22;
 
-var state={screen:'phone',phone:'',pin:'',staff:null,videoBlob:null,videoUrl:null,location:null,distance:null,isInside:false,todayRecord:null};
+// ── FIREBASE ──
+firebase.initializeApp({
+  apiKey:"AIzaSyB6YfM1DyVq0NTEWXpMdbCYuWwr9cWwbt0",
+  authDomain:"hod-tickets.firebaseapp.com",
+  projectId:"hod-tickets",
+  storageBucket:"hod-tickets.firebasestorage.app",
+  messagingSenderId:"86190418978",
+  appId:"1:86190418978:web:8b1eafc784c4986fd3ee7b"
+});
+var db=firebase.firestore(),storage=firebase.storage();
 
-function showToast(msg,type){var t=document.getElementById('toast');t.textContent=msg;t.className='toast show'+(type==='err'?' toast-err':'');setTimeout(function(){t.classList.remove('show')},4000)}
-function getRoleBadge(r){var m={manager:'role-manager',captain:'role-captain',runner:'role-runner',steward:'role-steward'},l={manager:'Manager',captain:'Captain',runner:'Runner',steward:'Steward'};return'<span class="role-badge '+(m[r]||'')+'">'+(l[r]||r)+'</span>'}
-function fmtTime(ts){if(!ts)return'--:--';var d=ts.toDate?ts.toDate():new Date(ts);return d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}
-function fmtDate(ts){if(!ts)return'--';var d=ts.toDate?ts.toDate():new Date(ts);return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})}
-function getDist(lat1,lon1,lat2,lon2){var R=6371000,dLat=(lat2-lat1)*Math.PI/180,dLon=(lon2-lon1)*Math.PI/180,a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2);return Math.round(R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)))}
-function checkGeo(lat,lng){var d=getDist(lat,lng,HOD_LAT,HOD_LNG);state.location={lat:lat,lng:lng};state.distance=d;state.isInside=d<=HOD_RADIUS;return{distance:d,inside:state.isInside}}
+// ── STATE ──
+var state={
+  screen:'',phone:'',pin:'',staff:null,
+  faceDescriptor:null,hasDescriptor:false,
+  location:null,distance:null,isInside:false,
+  recordId:null,todayRecord:null,
+  camFacing:'user',camStream:null,
+  isLogout:false,blinkDetected:false,
+};
+var SESSION_KEY='hod_attendance_session';
+var timerInterval=null,geoInterval=null;
+var outsideStrikes=0;
+var modelsLoaded=false;
 
-var appEl=document.getElementById('app');
-function render(){switch(state.screen){case'phone':renderPhone();break;case'pin':renderPIN();break;case'record':renderRecord();break;case'preview':renderPreview();break;case'dashboard':renderDashboard()}}
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded',async function(){
+  var sess=loadSession();
+  if(sess&&sess.clockIn&&!sess.clockOut){
+    showDashboard(sess);
+  }else{
+    clearSession();
+    showScreen('phone');
+  }
+  // Load face-api models in background
+  loadModels();
+  document.getElementById('phoneInp').addEventListener('keypress',function(e){if(e.key==='Enter')lookupPhone()});
+  document.getElementById('pinInp').addEventListener('keypress',function(e){if(e.key==='Enter')verifyPIN()});
+});
 
-function renderPhone(){
-appEl.innerHTML='<div class="login-logo"><div class="icon">📍</div><h1>HOD Attendance</h1><p>Phone + PIN Login</p></div>'+
-'<div class="login-card"><h2>👋 Enter Phone Number</h2><p class="sub">Enter your registered phone number to Login/Logout.</p>'+
-'<div style="display:flex;gap:8px"><span style="display:flex;align-items:center;padding:0 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;font-size:15px;font-weight:700;color:var(--text-dim)">🇮🇳 +91</span>'+
-'<input type="tel" id="phoneInp" class="inp" placeholder="9876543210" maxlength="10" style="flex:1" onkeypress="if(event.key===\'Enter\')findStaff()"></div>'+
-'<button class="btn btn-gold" id="btn" onclick="findStaff()">Continue</button></div>'+
-'<div style="text-align:center;margin-top:16px;padding:0 20px"><p style="font-size:11px;color:var(--text-dim);line-height:1.6">🔒 Phone number verified against staff records.<br>📍 Location checked to ensure you\'re at HOD.<br>🎥 3-sec video captured for attendance record.</p></div>';
-setTimeout(function(){document.getElementById('phoneInp')?.focus()},100)}
+// ═══════════════════════════════════════════════════════════════════════════
+// FACE-API.JS MODEL LOADING
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadModels(){
+  if(modelsLoaded)return;
+  var MODEL_URL='https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+  try{
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+    modelsLoaded=true;
+    console.log('[FaceAPI] Models loaded');
+  }catch(e){
+    console.error('[FaceAPI] Model load failed:',e);
+    showToast('AI model load failed. Refresh.','err');
+  }
+}
 
-function renderPIN(){
-appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'phone\';render()">←</button><span class="hdr-title">Enter PIN</span></div><div class="screen">'+
-'<div class="status-card"><div style="font-size:40px;margin-bottom:8px">🔐</div><div class="status-title">Welcome, '+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'<div class="status-sub" style="margin-top:8px">+91 '+state.phone+'</div></div>'+
-'<div class="login-card"><h2>Enter 4-Digit PIN</h2><p class="sub">Your PIN was set by your manager when you were registered.</p>'+
-'<input type="password" id="pinInp" class="inp" placeholder="••••" maxlength="4" style="text-align:center;letter-spacing:8px;font-size:20px" onkeypress="if(event.key===\'Enter\')verifyPIN()">'+
-'<button class="btn btn-gold" id="btn" onclick="verifyPIN()">✓ Login</button></div></div>';
-setTimeout(function(){document.getElementById('pinInp')?.focus()},100)}
+function ensureModelsLoaded(){
+  return new Promise(function(resolve){
+    if(modelsLoaded){resolve();return}
+    showScreen('loading');
+    var attempts=0;
+    var iv=setInterval(function(){
+      attempts++;
+      document.getElementById('modelProgress').style.width=Math.min(attempts*20,90)+'%';
+      if(modelsLoaded){clearInterval(iv);resolve()}
+      if(attempts>30){clearInterval(iv);showToast('Model load timeout. Refresh.','err')}
+    },500);
+  });
+}
 
-function renderRecord(){
-var type=state.todayRecord?'Logout':'Login';
-appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'dashboard\';render()">←</button><span class="hdr-title">'+type+'</span></div><div class="screen">'+
-'<div class="status-card" style="padding:12px"><div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px"><span style="font-size:16px;font-weight:800">'+state.staff.name+'</span>'+getRoleBadge(state.staff.role)+'</div><div id="geoStatus" class="geo-status geo-pending">📍 Checking location...</div></div>'+
-'<div class="camera-wrap"><video id="camVideo" autoplay playsinline muted></video><div class="countdown" id="countdown" style="display:none"></div><div class="camera-overlay"><div style="font-size:11px;color:#fff;margin-bottom:8px;text-align:center">Tap red button to start 3-second recording</div><button class="record-btn" id="recBtn" onclick="startRecording()"></button></div></div>'+
-'<p style="font-size:11px;color:var(--text-dim);text-align:center">A 3-second video will be recorded for attendance verification.</p></div>';
-startCamera();checkLocation()}
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+function loadSession(){try{var s=localStorage.getItem(SESSION_KEY);if(s)return JSON.parse(s)}catch(e){}return null}
+function saveSession(s){try{localStorage.setItem(SESSION_KEY,JSON.stringify(s))}catch(e){}}
+function clearSession(){try{localStorage.removeItem(SESSION_KEY)}catch(e){}}
 
-function renderPreview(){
-var type=state.todayRecord?'Logout':'Login';
-appEl.innerHTML='<div class="hdr"><button class="hdr-back" onclick="state.screen=\'record\';render()">←</button><span class="hdr-title">Confirm '+type+'</span></div><div class="screen">'+
-'<div class="status-card"><div style="font-size:40px;margin-bottom:8px">🎥</div><div class="status-title">'+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'</div>'+
-'<video class="preview-video" id="prevVideo" src="'+state.videoUrl+'" controls autoplay muted playsinline></video>'+
-'<div class="clock-info"><div class="info-item"><div class="label">Location</div><div class="value" style="font-size:13px">'+(state.isInside?'✅ Inside HOD':'❌ '+state.distance+'m away')+'</div></div>'+
-'<div class="info-item"><div class="label">Distance</div><div class="value" style="font-size:13px">'+state.distance+'m</div></div>'+
-'<div class="info-item"><div class="label">Time</div><div class="value" style="font-size:13px">'+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})+'</div></div>'+
-'<div class="info-item"><div class="label">Type</div><div class="value" style="font-size:13px">'+type+'</div></div></div>'+
-'<button class="btn btn-gold" id="confirmBtn" onclick="confirmAttendance()">✓ Confirm '+type+'</button>'+
-'<button class="btn btn-outline" onclick="retakeVideo()">🔄 Re-record Video</button></div>'}
+// ═══════════════════════════════════════════════════════════════════════════
+// SCREEN MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+function showScreen(name){
+  state.screen=name;
+  ['scrPhone','scrPIN','scrEnroll','scrFace','scrPreview','scrLoading','dashScreen','loginFlow'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)el.classList.add('hide');
+  });
+  var scr=document.getElementById('scr'+name.charAt(0).toUpperCase()+name.slice(1));
+  if(scr)scr.classList.remove('hide');
+  // Show/hide bottom bar
+  var bar=document.getElementById('bottomBar');
+  var confirmBtn=document.getElementById('confirmBtn');
+  var logoutBtn=document.getElementById('logoutBtn');
+  if(name==='preview'){
+    bar.style.display='block';confirmBtn.style.display='block';
+    logoutBtn.style.display='none';confirmBtn.textContent=state.isLogout?'✓ Confirm Logout':'✓ Confirm Login';
+    confirmBtn.disabled=false;confirmBtn.innerHTML=state.isLogout?'✓ Confirm Logout':'✓ Confirm Login';
+  }else if(name==='dashboard'){
+    document.getElementById('dashScreen').classList.remove('hide');
+    document.getElementById('dashScreen').style.display='flex';
+    bar.style.display='block';confirmBtn.style.display='none';
+    logoutBtn.style.display='block';
+    document.getElementById('loginFlow').classList.remove('hide');
+  }else{
+    bar.style.display='none';confirmBtn.style.display='none';logoutBtn.style.display='none';
+    if(name!=='loading'){document.getElementById('loginFlow').classList.remove('hide')}
+  }
+}
 
-function renderDashboard(){
-var in_=state.todayRecord&&state.todayRecord.clockIn&&!state.todayRecord.clockOut;
-appEl.innerHTML='<div class="hdr"><span class="hdr-title">My Attendance</span></div><div class="screen">'+
-'<div class="status-card"><div style="font-size:20px;font-weight:900">'+state.staff.name+'</div>'+getRoleBadge(state.staff.role)+'<div style="font-size:13px;color:var(--text-dim);margin-top:4px">+91 '+state.staff.phone+'</div></div>'+
-'<div class="status-card" style="border-color:'+(in_?'var(--green)':'var(--border)')+'"><div style="font-size:40px;margin-bottom:8px">'+(in_?'🟢':'⚪')+'</div><div class="status-title" style="color:'+(in_?'var(--green)':'var(--text-dim)')+'">'+(in_?'Currently Logged In':'Not Logged In')+'</div><div class="status-sub">'+(in_?'Started at '+fmtTime(state.todayRecord.clockIn):'Tap below to Login')+'</div></div>'+
-(in_?'<div class="clock-info"><div class="info-item"><div class="label">Login Time</div><div class="value">'+fmtTime(state.todayRecord.clockIn)+'</div></div><div class="info-item"><div class="label">Duration</div><div class="value" id="dur">--</div></div></div>':'')+
-'<button class="btn '+(in_?'btn-red':'btn-green')+'" onclick="'+(in_?'goToRecord':'goToRecord')+'()">'+(in_?'🔴 Logout':'🟢 Login Now')+'</button>'+
-'<h3 style="font-size:13px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-top:20px">📋 Recent History</h3><div id="historyList"><div class="spinner"></div></div></div>';
-loadHistory();if(in_)updateDur()}
+// ═══════════════════════════════════════════════════════════════════════════
+// PHONE LOOKUP
+// ═══════════════════════════════════════════════════════════════════════════
+function lookupPhone(){
+  var p=document.getElementById('phoneInp').value.replace(/\D/g,'');
+  if(p.length<10){showToast('Enter 10-digit phone number','err');return}
+  state.phone=p;
+  var btn=document.getElementById('lookupBtn');btn.disabled=true;btn.textContent='Looking up...';
+  db.collection('staff').where('phone','==',p).where('active','==',true).get()
+    .then(function(snap){
+      btn.disabled=false;btn.textContent='Continue';
+      if(snap.empty){showToast('No active staff found with this number','err');return}
+      var doc=snap.docs[0];
+      state.staff={id:doc.id,...doc.data()};
+      state.hasDescriptor=!!(state.staff.faceDescriptor&&state.staff.faceDescriptor.length===128);
+      document.getElementById('pinStaffName').textContent=state.staff.name;
+      document.getElementById('pinInp').value='';
+      showScreen('PIN');
+    })
+    .catch(function(e){btn.disabled=false;btn.textContent='Continue';showToast('Error: '+e.message,'err')});
+}
+function backToPhone(){showScreen('phone');}
 
-function findStaff(){var p=document.getElementById('phoneInp').value.replace(/\D/g,'');if(p.length!==10){showToast('Enter valid 10-digit phone number','err');return}var btn=document.getElementById('btn');btn.disabled=true;btn.textContent='Checking...';state.phone=p;db.collection('staff').where('phone','==',p).where('active','==',true).get().then(function(s){if(s.empty){btn.disabled=false;btn.textContent='Continue';showToast('Phone not registered. Contact manager.','err');return}var d=s.docs[0];state.staff={id:d.id,...d.data()};var t=new Date(),ts=t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');return db.collection('attendance').doc(state.staff.id+'_'+ts).get().then(function(r){state.todayRecord=r.exists?r.data():null;state.screen='pin';render()})}).catch(function(e){btn.disabled=false;btn.textContent='Continue';showToast('Error: '+e.message,'err')})}
+// ═══════════════════════════════════════════════════════════════════════════
+// PIN VERIFY
+// ═══════════════════════════════════════════════════════════════════════════
+function verifyPIN(){
+  var p=document.getElementById('pinInp').value;
+  if(p.length!==4){showToast('Enter 4-digit PIN','err');return}
+  if(state.staff.pin!==p){showToast('Wrong PIN. Try again.','err');return}
+  showToast('Welcome, '+state.staff.name);
+  state.isLogout=false;
+  checkTodayRecord(function(){
+    if(state.todayRecord&&state.todayRecord.clockIn&&!state.todayRecord.clockOut){
+      var sess={staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,
+        phone:state.staff.phone,pin:state.staff.pin,clockIn:state.todayRecord.clockIn.toMillis?state.todayRecord.clockIn.toMillis():Date.now(),
+        recordId:state.todayRecord.id,hodLat:HOD_LAT,hodLng:HOD_LNG};
+      saveSession(sess);showDashboard(sess);
+    }else{
+      ensureModelsLoaded().then(function(){
+        if(!state.hasDescriptor){
+          startEnrollment();
+        }else{
+          startFaceVerify();
+        }
+      });
+    }
+  });
+}
 
-function verifyPIN(){var p=document.getElementById('pinInp').value;if(p.length!==4){showToast('Enter 4-digit PIN','err');return}var btn=document.getElementById('btn');btn.disabled=true;btn.textContent='Verifying...';if(state.staff.pin!==p){btn.disabled=false;btn.textContent='✓ Login';showToast('Wrong PIN. Try again.','err');document.getElementById('pinInp').value='';setTimeout(function(){document.getElementById('pinInp')?.focus()},100);return}showToast('✅ Welcome, '+state.staff.name);state.screen='dashboard';render()}
+function checkTodayRecord(cb){
+  if(!state.staff||!state.staff.id){cb();return}
+  var today=new Date().toISOString().split('T')[0];
+  db.collection('attendance').where('staffId','==',state.staff.id).where('date','==',today).get()
+    .then(function(snap){
+      if(!snap.empty){var d=snap.docs[0];state.todayRecord={id:d.id,...d.data()};state.recordId=d.id}
+      cb();
+    }).catch(function(){cb()});
+}
 
-function goToRecord(){state.screen='record';render()}
+// ═══════════════════════════════════════════════════════════════════════════
+// FACE ENROLLMENT (first time)
+// ═══════════════════════════════════════════════════════════════════════════
+function startEnrollment(){
+  showScreen('enroll');
+  startCamera('enrollVideo',function(){
+    document.getElementById('enrollStatus').textContent='Center your face in the oval';
+    document.getElementById('enrollStatus').style.color='var(--gold)';
+    document.getElementById('enrollBtn').disabled=false;
+  });
+}
 
-var camStream=null,mediaRecorder=null,recordedChunks=[];
-function startCamera(){navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:true}).then(function(s){camStream=s;var v=document.getElementById('camVideo');v.srcObject=s;v.play()}).catch(function(){showToast('Camera access denied. Enable it in settings.','err')})}
-function stopCamera(){if(camStream){camStream.getTracks().forEach(function(t){t.stop()});camStream=null}}
+function switchCamEnroll(){
+  state.camFacing=state.camFacing==='user'?'environment':'user';
+  if(state.camStream){state.camStream.getTracks().forEach(function(t){t.stop()})}
+  startEnrollment();
+}
 
-function startRecording(){var btn=document.getElementById('recBtn');var cd=document.getElementById('countdown');if(!camStream){showToast('Camera not ready','err');return}
-recordedChunks=[];mediaRecorder=new MediaRecorder(camStream,{mimeType:'video/webm;codecs=vp9,opus'});
-mediaRecorder.ondataavailable=function(e){if(e.data.size>0)recordedChunks.push(e.data)};
-mediaRecorder.onstop=function(){var blob=new Blob(recordedChunks,{type:'video/webm'});state.videoBlob=blob;state.videoUrl=URL.createObjectURL(blob);stopCamera();state.screen='preview';render()};
-btn.classList.add('recording');btn.disabled=true;cd.style.display='block';
-var count=3;cd.textContent=count;
-var iv=setInterval(function(){count--;if(count>0){cd.textContent=count}else if(count===0){cd.textContent='🎥';mediaRecorder.start()}else{clearInterval(iv);cd.style.display='none';mediaRecorder.stop();btn.classList.remove('recording')}},1000)}
+async function captureEnrollment(){
+  var video=document.getElementById('enrollVideo');
+  var statusEl=document.getElementById('enrollStatus');
+  statusEl.textContent='Analyzing face...';statusEl.style.color='var(--gold)';
+  document.getElementById('enrollBtn').disabled=true;
 
-function checkLocation(){var g=document.getElementById('geoStatus');if(!g)return;if(!navigator.geolocation){g.className='geo-status geo-outside';g.textContent='❌ GPS not supported';return}g.textContent='📍 Getting location...';navigator.geolocation.getCurrentPosition(function(p){var r=checkGeo(p.coords.latitude,p.coords.longitude);if(r.inside){g.className='geo-status geo-inside';g.textContent='✅ Inside HOD ('+r.distance+'m)'}else{g.className='geo-status geo-outside';g.textContent='❌ '+r.distance+'m away. Must be within '+HOD_RADIUS+'m.';showToast('You are '+r.distance+'m away. Come closer.','err')}},function(){g.className='geo-status geo-outside';g.textContent='❌ Location denied. Enable GPS.';showToast('Enable location permission','err')},{enableHighAccuracy:true,timeout:10000,maximumAge:0})}
+  try{
+    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:416,scoreThreshold:0.5}))
+      .withFaceLandmarks().withFaceDescriptor();
+    if(!detection){
+      statusEl.textContent='No face detected. Adjust lighting & position.';statusEl.style.color='var(--red)';
+      document.getElementById('enrollBtn').disabled=false;return;
+    }
+    // Save descriptor to Firestore
+    var descriptorArray=Array.from(detection.descriptor);
+    await db.collection('staff').doc(state.staff.id).update({faceDescriptor:descriptorArray,updatedAt:firebase.firestore.FieldValue.serverTimestamp()});
+    state.hasDescriptor=true;
+    stopCamera();
+    showToast('Face enrolled successfully!');
+    startFaceVerify();
+  }catch(e){
+    statusEl.textContent='Error: '+e.message;statusEl.style.color='var(--red)';
+    document.getElementById('enrollBtn').disabled=false;
+  }
+}
 
-function retakeVideo(){state.videoBlob=null;state.videoUrl=null;state.screen='record';render()}
+// ═══════════════════════════════════════════════════════════════════════════
+// FACE VERIFICATION + BLINK LIVENESS
+// ═══════════════════════════════════════════════════════════════════════════
+function startFaceVerify(){
+  showScreen('face');
+  document.getElementById('faceTitle').textContent=state.isLogout?'👤 Face Verify (Logout)':'👤 Face Verification';
+  document.getElementById('faceSubtitle').textContent='Center your face. Blink when "Please BLINK" appears.';
+  document.getElementById('faceStatus').textContent='Initializing camera...';
+  document.getElementById('faceStatus').style.color='var(--muted)';
+  document.getElementById('blinkOverlay').classList.add('hide');
+  state.blinkDetected=false;
 
-function confirmAttendance(){if(!state.isInside){showToast('❌ Must be within '+HOD_RADIUS+'m of HOD to Login/Logout','err');return}if(!state.videoBlob){showToast('Video recording required','err');return}var btn=document.getElementById('confirmBtn');btn.disabled=true;btn.textContent='Saving...';var now=new Date(),ts=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0'),docId=state.staff.id+'_'+ts,isOut=state.todayRecord&&state.todayRecord.clockIn;var vidRef=storage.ref('attendance/'+docId+'_'+Date.now()+'.webm');vidRef.put(state.videoBlob).then(function(s){return s.ref.getDownloadURL()}).then(function(url){if(isOut){return db.collection('attendance').doc(docId).update({clockOut:firebase.firestore.FieldValue.serverTimestamp(),clockOutLocation:state.location,clockOutDistance:state.distance,clockOutVideo:url,updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}else{return db.collection('attendance').doc(docId).set({staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,phone:state.staff.phone,date:ts,clockIn:firebase.firestore.FieldValue.serverTimestamp(),clockInLocation:state.location,clockInDistance:state.distance,clockInVideo:url,clockOut:null,clockOutLocation:null,clockOutVideo:null,createdAt:firebase.firestore.FieldValue.serverTimestamp(),updatedAt:firebase.firestore.FieldValue.serverTimestamp()})}}).then(function(){showToast(isOut?'✅ Logged Out!':'✅ Logged In!');return db.collection('attendance').doc(docId).get()}).then(function(d){state.todayRecord=d.data();state.videoBlob=null;state.videoUrl=null;state.screen='dashboard';render()}).catch(function(e){btn.disabled=false;btn.textContent='✓ Confirm '+(isOut?'Logout':'Login');showToast('Error: '+e.message,'err')})}
+  startCamera('faceVideo',function(){
+    document.getElementById('faceStatus').textContent='Look at the camera...';
+    document.getElementById('faceStatus').style.color='var(--gold)';
+    runFaceVerifyLoop();
+  });
+}
 
-function loadHistory(){if(!state.staff)return;db.collection('attendance').where('staffId','==',state.staff.id).get().then(function(s){var h='';if(s.empty){h='<div style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">No records yet</div>'}else{var a=[];s.forEach(function(d){a.push(d.data())});a.sort(function(x,y){return(y.createdAt?.seconds||0)-(x.createdAt?.seconds||0)});a.slice(0,10).forEach(function(d){var c=d.clockIn&&d.clockOut,i=c?'✅':d.clockIn?'🟢':'⚪',t=c?'Completed':d.clockIn?'In Progress':'Unknown',sub=d.clockIn?'In: '+fmtTime(d.clockIn):'';if(d.clockOut)sub+=' · Out: '+fmtTime(d.clockOut);h+='<div class="history-item"><span style="font-size:20px">'+i+'</span><div class="h-info"><div class="h-title">'+t+'</div><div class="h-sub">'+fmtDate(d.createdAt)+' · '+sub+'</div></div></div>'})}document.getElementById('historyList').innerHTML=h}).catch(function(){document.getElementById('historyList').innerHTML='<div style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">Could not load</div>'})}
+async function runFaceVerifyLoop(){
+  var video=document.getElementById('faceVideo');
+  var canvas=document.getElementById('faceCanvas');
+  var statusEl=document.getElementById('faceStatus');
+  var ctx=canvas.getContext('2d');
 
-function updateDur(){if(!state.todayRecord||!state.todayRecord.clockIn)return;var e=document.getElementById('dur');if(!e)return;var s=state.todayRecord.clockIn.toDate?state.todayRecord.clockIn.toDate():new Date(state.todayRecord.clockIn),m=Math.floor((Date.now()-s)/60000);e.textContent=Math.floor(m/60)+'h '+(m%60)+'m'}
-setInterval(updateDur,60000);
+  if(state.screen!=='face')return;
 
-render();
-console.log('✅ HOD Attendance v2 loaded — Login/Logout + 3-sec video');
-console.log('📍 Location: TESTING ('+HOD_LAT+','+HOD_LNG+') radius:'+HOD_RADIUS+'m');
+  try{
+    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:416,scoreThreshold:0.5}))
+      .withFaceLandmarks().withFaceDescriptor();
+
+    if(!detection){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      statusEl.textContent='No face detected. Adjust position.';statusEl.style.color='var(--orange)';
+      requestAnimationFrame(runFaceVerifyLoop);return;
+    }
+
+    // Draw face box
+    var dims=faceapi.matchDimensions(canvas,video,true);
+    var resized=faceapi.resizeResults(detection,dims);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    faceapi.draw.drawDetections(canvas,[resized]);
+
+    // Compare with stored descriptor
+    var storedDesc=new Float32Array(state.staff.faceDescriptor);
+    var dist=faceapi.euclideanDistance(detection.descriptor,storedDesc);
+    var matchScore=Math.max(0,1-dist).toFixed(2);
+
+    if(dist>FACE_MATCH_THRESHOLD){
+      statusEl.textContent='Face mismatch ('+(matchScore*100).toFixed(0)+'%). Try again.';statusEl.style.color='var(--red)';
+      requestAnimationFrame(runFaceVerifyLoop);return;
+    }
+
+    // Face matches! Now do blink liveness
+    statusEl.textContent='Face matched! '+(matchScore*100).toFixed(0)+'%. Hold still...';statusEl.style.color='var(--green)';
+
+    if(!state.blinkDetected){
+      document.getElementById('blinkOverlay').classList.remove('hide');
+      var blinkResult=await detectBlink(video,detection.landmarks);
+      document.getElementById('blinkOverlay').classList.add('hide');
+      if(!blinkResult){
+        statusEl.textContent='Blink not detected. Please try again.';statusEl.style.color='var(--red)';
+        requestAnimationFrame(runFaceVerifyLoop);return;
+      }
+      state.blinkDetected=true;
+    }
+
+    // All checks passed!
+    stopCamera();
+    showToast('Face verified! ✅');
+    setTimeout(function(){showPreviewAfterFace();},500);
+
+  }catch(e){
+    console.error('[FaceVerify]',e);
+    requestAnimationFrame(runFaceVerifyLoop);
+  }
+}
+
+function detectBlink(video,landmarks){
+  return new Promise(function(resolve){
+    var startTime=Date.now();var timeoutMs=5000;
+    var checkInterval=150;
+    var blinkCount=0;
+    var wasClosed=false;
+
+    var iv=setInterval(async function(){
+      if(Date.now()-startTime>timeoutMs){clearInterval(iv);resolve(false);return}
+      if(state.screen!=='face'){clearInterval(iv);resolve(false);return}
+
+      try{
+        var det=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:0.5}))
+          .withFaceLandmarks();
+        if(!det)return;
+        var ear=computeEAR(det.landmarks);
+        if(ear<BLINK_EAR_THRESHOLD&&!wasClosed){wasClosed=true}
+        else if(ear>=BLINK_EAR_THRESHOLD&&wasClosed){wasClosed=false;blinkCount++}
+        if(blinkCount>=1){clearInterval(iv);resolve(true)}
+      }catch(e){/*ignore*/}
+    },checkInterval);
+  });
+}
+
+function computeEAR(landmarks){
+  // Eye Aspect Ratio using 6 eye landmark points
+  var le=landmarks.getLeftEye();var re=landmarks.getRightEye();
+  var lEAR=(dist(le[1],le[5])+dist(le[2],le[4]))/(2*dist(le[0],le[3]));
+  var rEAR=(dist(re[1],re[5])+dist(re[2],re[4]))/(2*dist(re[0],re[3]));
+  return(lEAR+rEAR)/2;
+}
+function dist(a,b){return Math.sqrt(Math.pow(a.x-b.x,2)+Math.pow(a.y-b.y,2))}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PREVIEW AFTER FACE VERIFY
+// ═══════════════════════════════════════════════════════════════════════════
+function showPreviewAfterFace(){
+  showScreen('preview');
+  getGeo(function(res){
+    document.getElementById('pLoc').textContent=res.inside?'✅ Inside HOD':'❌ Outside';
+    document.getElementById('pLoc').className='val '+(res.inside?'green':'red');
+    document.getElementById('pDist').textContent=Math.round(res.distance)+'m';
+    document.getElementById('pTime').textContent=new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
+    document.getElementById('pType').textContent=state.isLogout?'Logout':'Login';
+    document.getElementById('pFace').textContent='✅ Matched + Blinked';
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CAMERA HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+function startCamera(videoId,onReady){
+  var constraints={video:{facingMode:state.camFacing,width:{ideal:640},height:{ideal:480}},audio:false};
+  navigator.mediaDevices.getUserMedia(constraints).then(function(stream){
+    state.camStream=stream;
+    var video=document.getElementById(videoId);
+    video.srcObject=stream;
+    video.onloadedmetadata=function(){if(onReady)onReady()};
+  }).catch(function(e){showToast('Camera error: '+e.message,'err')});
+}
+function stopCamera(){
+  if(state.camStream){state.camStream.getTracks().forEach(function(t){t.stop()});state.camStream=null}
+}
+function switchCamFace(){
+  state.camFacing=state.camFacing==='user'?'environment':'user';
+  if(state.camStream){state.camStream.getTracks().forEach(function(t){t.stop()})}
+  startFaceVerify();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GEOLOCATION
+// ═══════════════════════════════════════════════════════════════════════════
+function getGeo(cb){
+  if(!navigator.geolocation){cb&&cb({distance:99999,inside:false});return}
+  navigator.geolocation.getCurrentPosition(function(pos){
+    var d=getDist(pos.coords.latitude,pos.coords.longitude,HOD_LAT,HOD_LNG);
+    state.location={lat:pos.coords.latitude,lng:pos.coords.longitude};
+    state.distance=d;state.isInside=d<=LOGIN_RADIUS;
+    cb&&cb({distance:d,inside:state.isInside});
+  },function(){cb&&cb({distance:99999,inside:false});},{enableHighAccuracy:true,timeout:10000,maximumAge:0});
+}
+function getDist(lat1,lng1,lat2,lng2){
+  var R=6371000;var dLat=(lat2-lat1)*Math.PI/180;var dLng=(lng2-lng1)*Math.PI/180;
+  var a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIRM LOGIN / LOGOUT
+// ═══════════════════════════════════════════════════════════════════════════
+function confirmAction(){
+  if(!state.isInside){showToast('❌ Must be within '+LOGIN_RADIUS+'m of HOD','err');return}
+  state.isLogout?doLogout():doLogin();
+}
+
+function doLogin(){
+  var btn=document.getElementById('confirmBtn');btn.disabled=true;
+  btn.innerHTML='<span class="spin"></span> Saving...';
+  var today=new Date().toISOString().split('T')[0];
+  var clockInTs=firebase.firestore.FieldValue.serverTimestamp();
+  var docRef=state.recordId?db.collection('attendance').doc(state.recordId):db.collection('attendance').doc();
+  var docId=docRef.id;
+  docRef.set({
+    staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,phone:state.staff.phone,
+    date:today,clockIn:clockInTs,clockInLocation:state.location,clockInDistance:state.distance,
+    clockOut:null,clockOutLocation:null,clockOutDistance:null,clockOutVideo:null,
+    faceVerified:true,loginMethod:'face',createdAt:clockInTs,updatedAt:clockInTs,
+  },{merge:true}).then(function(){
+    var now=Date.now();
+    var sess={staffId:state.staff.id,staffName:state.staff.name,staffRole:state.staff.role,
+      phone:state.staff.phone,pin:state.staff.pin,clockIn:now,recordId:docId,hodLat:HOD_LAT,hodLng:HOD_LNG};
+    saveSession(sess);showToast('✅ Login recorded!');
+    setTimeout(function(){showDashboard(sess)},800);
+  }).catch(function(e){btn.disabled=false;btn.innerHTML='✓ Confirm Login';showToast('❌ Error: '+e.message,'err')});
+}
+
+function doLogout(){
+  var btn=document.getElementById('confirmBtn');btn.disabled=true;
+  btn.innerHTML='<span class="spin"></span> Saving...';
+  if(!state.recordId){showToast('No login record found','err');btn.disabled=false;return}
+  var clockOutTs=firebase.firestore.FieldValue.serverTimestamp();
+  db.collection('attendance').doc(state.recordId).update({
+    clockOut:clockOutTs,clockOutLocation:state.location,clockOutDistance:state.distance,
+    logoutMethod:'face',updatedAt:clockOutTs,
+  }).then(function(){
+    clearSession();showToast('✅ Logout recorded. See you tomorrow!');
+    if(timerInterval)clearInterval(timerInterval);
+    if(geoInterval)clearInterval(geoInterval);
+    setTimeout(function(){location.reload()},1500);
+  }).catch(function(e){btn.disabled=false;btn.innerHTML='✓ Confirm Logout';showToast('❌ Error: '+e.message,'err')});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DASHBOARD + LIVE TIMER + AUTO-LOGOUT
+// ═══════════════════════════════════════════════════════════════════════════
+function showDashboard(sess){
+  document.getElementById('loginFlow').classList.add('hide');
+  document.getElementById('dashScreen').classList.remove('hide');
+  document.getElementById('dashScreen').style.display='flex';
+  document.getElementById('bottomBar').style.display='block';
+  document.getElementById('confirmBtn').style.display='none';
+  document.getElementById('logoutBtn').style.display='block';
+
+  document.getElementById('dashName').textContent=sess.staffName;
+  document.getElementById('dashRole').textContent=sess.staffRole.toUpperCase();
+  document.getElementById('dashAvatar').textContent=sess.staffName.charAt(0).toUpperCase();
+
+  var loginDate=new Date(sess.clockIn);
+  document.getElementById('dashLoginTime').textContent=loginDate.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
+
+  // Live timer
+  if(timerInterval)clearInterval(timerInterval);
+  function updateTimer(){
+    var diff=Date.now()-sess.clockIn;
+    if(diff<0)diff=0;var h=Math.floor(diff/3600000),m=Math.floor((diff%3600000)/60000),s=Math.floor((diff%60000)/1000);
+    document.getElementById('dashTimer').textContent=String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+    document.getElementById('dashDuration').textContent=h+'h '+m+'m'+(s?' '+s+'s':'');
+  }
+  updateTimer();timerInterval=setInterval(updateTimer,1000);
+
+  // Start auto-logout geofence monitoring
+  startAutoLogout();
+  // Initial geo check
+  getGeo(function(res){
+    document.getElementById('dashLocation').textContent=res.inside?'Inside HOD ('+Math.round(res.distance)+'m)':Math.round(res.distance)+'m away';
+    document.getElementById('dashLocation').style.color=res.inside?'var(--green)':'var(--red)';
+  });
+  // Sync from Firestore
+  syncSessionFromFirestore(sess.recordId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO-LOGOUT: GPS polling every 60s, 3-strike rule
+// ═══════════════════════════════════════════════════════════════════════════
+function startAutoLogout(){
+  outsideStrikes=0;
+  if(geoInterval)clearInterval(geoInterval);
+
+  geoInterval=setInterval(function(){
+    // Skip if tab is in background (saves battery)
+    if(document.hidden)return;
+    // Skip if not on dashboard
+    if(state.screen!=='dashboard')return;
+
+    getGeo(function(res){
+      var banner=document.getElementById('autoLogoutBanner');
+      var gpsEl=document.getElementById('dashGpsStatus');
+
+      if(!res.inside){
+        outsideStrikes++;
+        gpsEl.textContent='Outside ('+Math.round(res.distance)+'m)';
+        gpsEl.style.color='var(--red)';
+
+        if(outsideStrikes>=MAX_OUTSIDE_STRIKES){
+          banner.classList.remove('show');
+          doAutoLogout(res.distance);
+        }else{
+          banner.classList.add('show');
+          var remaining=MAX_OUTSIDE_STRIKES-outsideStrikes;
+          document.getElementById('autoLogoutCount').textContent=remaining+' check'+(remaining>1?'s':'')+' left';
+          showToast('⚠️ You are '+Math.round(res.distance)+'m from HOD. Strike '+outsideStrikes+'/'+MAX_OUTSIDE_STRIKES,'warn');
+        }
+      }else{
+        outsideStrikes=0;
+        banner.classList.remove('show');
+        gpsEl.textContent='Inside ('+Math.round(res.distance)+'m)';
+        gpsEl.style.color='var(--green)';
+        document.getElementById('dashLocation').textContent='Inside HOD ('+Math.round(res.distance)+'m)';
+        document.getElementById('dashLocation').style.color='var(--green)';
+      }
+    });
+  },GEO_CHECK_MS);
+}
+
+function doAutoLogout(currentDistance){
+  var sess=loadSession();
+  if(!sess||!sess.recordId){clearSession();location.reload();return}
+
+  showToast('🚫 Auto-logged out: You are '+Math.round(currentDistance)+'m from HOD','err');
+  if(timerInterval)clearInterval(timerInterval);
+  if(geoInterval)clearInterval(geoInterval);
+
+  var clockOutTs=firebase.firestore.FieldValue.serverTimestamp();
+  db.collection('attendance').doc(sess.recordId).update({
+    clockOut:clockOutTs,clockOutLocation:state.location||{lat:0,lng:0},
+    clockOutDistance:currentDistance,logoutMethod:'auto_geofence',
+    updatedAt:clockOutTs,
+  }).then(function(){
+    clearSession();
+    setTimeout(function(){location.reload()},2000);
+  }).catch(function(){
+    clearSession();
+    location.reload();
+  });
+}
+
+function syncSessionFromFirestore(recordId){
+  db.collection('attendance').doc(recordId).get().then(function(doc){
+    if(doc.exists&&doc.data().clockOut){
+      clearSession();location.reload();
+    }
+  }).catch(function(){/*ignore*/});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LOGOUT FLOW (manual from dashboard)
+// ═══════════════════════════════════════════════════════════════════════════
+function startLogoutFlow(){
+  var sess=loadSession();
+  if(!sess){showToast('Session expired.','err');clearSession();setTimeout(function(){location.reload()},1000);return}
+  if(!window.confirm('Log out now? Face verification required.'))return;
+  state.staff={id:sess.staffId,name:sess.staffName,role:sess.staffRole,phone:sess.phone,pin:sess.pin,
+    faceDescriptor:null};
+  state.recordId=sess.recordId;state.isLogout=true;
+
+  // Load staff doc to get faceDescriptor
+  db.collection('staff').doc(sess.staffId).get().then(function(doc){
+    if(doc.exists&&doc.data().faceDescriptor){
+      state.staff.faceDescriptor=doc.data().faceDescriptor;
+      document.getElementById('dashScreen').classList.add('hide');
+      document.getElementById('loginFlow').classList.remove('hide');
+      ensureModelsLoaded().then(function(){startFaceVerify();});
+    }else{
+      showToast('Face data not found. Contact admin.','err');
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOAST
+// ═══════════════════════════════════════════════════════════════════════════
+function showToast(msg,type){
+  var el=document.getElementById('toast');
+  el.textContent=msg;el.className='toast '+(type==='err'?'err show':type==='warn'?'warn show':'ok show');
+  setTimeout(function(){el.classList.remove('show')},3000);
+}
 </script>
 </body>
 </html>
