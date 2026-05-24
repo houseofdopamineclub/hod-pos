@@ -352,10 +352,10 @@ export default function StaffManagement() {
 
             {showCamera ? (
               <div className="space-y-2">
-                <div className="relative rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "4/3", maxHeight: 240 }}>
+                <div className="relative rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "4/3", maxHeight: 400, width: "100%" }}>
                   <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <div className="w-32 h-40 border-2 border-dashed rounded-full" style={{ borderColor: "rgba(201,168,76,.6)" }} />
+                    <div className="w-48 h-56 border-2 border-dashed rounded-full" style={{ borderColor: "rgba(201,168,76,.6)" }} />
                   </div>
                   <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold px-3 py-1 rounded-full" style={{ background: "rgba(0,0,0,.75)", color: GOLD }}>
                     Center face in the oval
