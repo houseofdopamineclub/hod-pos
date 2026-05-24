@@ -1,7 +1,9 @@
-import { useState, useEffect } from "react";
-import { db } from "@/lib/firebase";
+import { useState, useEffect, useRef } from "react";
+import { db, storage } from "@/lib/firebase";
 import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, Timestamp } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import type { StaffRole } from "@/lib/types";
+import { Camera, Upload, X } from "lucide-react";
 
 interface StaffRecord {
   id: string;
@@ -10,6 +12,8 @@ interface StaffRecord {
   pin: string;
   role: StaffRole;
   active: boolean;
+  facePhotoUrl?: string;
+  faceDescriptor?: number[];
   createdAt?: Timestamp;
 }
 
@@ -38,6 +42,18 @@ export default function StaffManagement() {
   const [formActive, setFormActive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const [camStream, setCamStream] = useState<MediaStream | null>(null);
+
+  useEffect(() => {
+    return () => { if (camStream) camStream.getTracks().forEach((t) => t.stop()); };
+  }, [camStream]);
 
   useEffect(() => {
     const unsub = onSnapshot(
@@ -52,6 +68,8 @@ export default function StaffManagement() {
             pin: data.pin || "",
             role: (data.role || "steward") as StaffRole,
             active: data.active !== false,
+            facePhotoUrl: data.facePhotoUrl || "",
+            faceDescriptor: data.faceDescriptor || undefined,
             createdAt: data.createdAt,
           };
         });
@@ -75,6 +93,10 @@ export default function StaffManagement() {
     setEditId(null);
     setShowForm(false);
     setMessage("");
+    setPhotoFile(null);
+    setPhotoPreview(null);
+    setUploadingPhoto(false);
+    stopCamera();
   };
 
   const openNew = () => {
@@ -91,6 +113,85 @@ export default function StaffManagement() {
     setEditId(s.id);
     setShowForm(true);
     setMessage("");
+    setPhotoFile(null);
+    setPhotoPreview(s.facePhotoUrl || null);
+    setUploadingPhoto(false);
+  };
+
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setMessage("❌ Please select an image file"); return; }
+    if (file.size > 5 * 1024 * 1024) { setMessage("❌ Image must be under 5MB"); return; }
+    setPhotoFile(file);
+    setPhotoPreview(URL.createObjectURL(file));
+    setMessage("");
+  };
+
+  const uploadPhoto = async (staffId: string): Promise<string | null> => {
+    if (!photoFile) return null;
+    setUploadingPhoto(true);
+    try {
+      const ext = photoFile.name.split(".").pop() || "jpg";
+      const path = `staff-photos/${staffId}_reference.${ext}`;
+      const storageRef = ref(storage, path);
+      await uploadBytes(storageRef, photoFile);
+      const url = await getDownloadURL(storageRef);
+      await updateDoc(doc(db, "staff", staffId), { facePhotoUrl: url, updatedAt: Timestamp.now() });
+      return url;
+    } catch (e: any) {
+      console.error("[StaffManagement] Photo upload error:", e);
+      setMessage(`⚠️ Photo upload failed: ${e?.message || "Unknown error"}`);
+      return null;
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      setCamStream(stream);
+      setShowCamera(true);
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      }, 100);
+    } catch (e: any) {
+      setMessage("❌ Camera error: " + e.message);
+    }
+  };
+
+  const stopCamera = () => {
+    if (camStream) {
+      camStream.getTracks().forEach((t) => t.stop());
+      setCamStream(null);
+    }
+    setShowCamera(false);
+  };
+
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const file = new File([blob], `staff-photo-${Date.now()}.jpg`, { type: "image/jpeg" });
+        setPhotoFile(file);
+        setPhotoPreview(URL.createObjectURL(file));
+        stopCamera();
+      },
+      "image/jpeg",
+      0.9
+    );
   };
 
   const handleSave = async () => {
@@ -110,12 +211,17 @@ export default function StaffManagement() {
         updatedAt: Timestamp.now(),
       };
 
+      let staffId = editId;
+
       if (editId) {
         await updateDoc(doc(db, "staff", editId), payload);
+        if (photoFile) await uploadPhoto(editId);
         setMessage("✅ Staff updated successfully");
       } else {
         const newRef = doc(collection(db, "staff"));
         await setDoc(newRef, { ...payload, createdAt: Timestamp.now() });
+        staffId = newRef.id;
+        if (photoFile) await uploadPhoto(newRef.id);
         setMessage("✅ Staff added successfully");
       }
 
@@ -238,6 +344,62 @@ export default function StaffManagement() {
               </select>
             </div>
           </div>
+          {/* Reference Photo — Camera Capture + File Upload */}
+          <div className="mb-3 p-3 rounded" style={{ background: "hsl(240 12% 3%)", border: BORDER }}>
+            <label className="text-xs block mb-2" style={{ color: TEXT_DIM }}>📸 Reference Photo (for face recognition login)</label>
+            <input type="file" ref={fileInputRef} accept="image/*" onChange={handlePhotoSelect} className="hidden" />
+            <canvas ref={canvasRef} className="hidden" />
+
+            {showCamera ? (
+              <div className="space-y-2">
+                <div className="relative rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "4/3", maxHeight: 240 }}>
+                  <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-32 h-40 border-2 border-dashed rounded-full" style={{ borderColor: "rgba(201,168,76,.6)" }} />
+                  </div>
+                  <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold px-3 py-1 rounded-full" style={{ background: "rgba(0,0,0,.75)", color: GOLD }}>
+                    Center face in the oval
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={capturePhoto} className="flex-1 px-3 py-2 rounded text-xs font-bold" style={{ background: GOLD, color: BG }}>
+                    📸 Capture
+                  </button>
+                  <button onClick={stopCamera} className="px-3 py-2 rounded text-xs" style={{ background: "hsl(240 12% 10%)", color: TEXT_DIM, border: BORDER }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : photoPreview ? (
+              <div className="flex items-center gap-3">
+                <img src={photoPreview} alt="Preview" className="w-16 h-16 rounded-lg object-cover" style={{ border: "1px solid hsl(240 8% 18%)" }} />
+                <div className="flex-1">
+                  <div className="text-xs mb-1" style={{ color: "#22c55e" }}>✅ Photo captured</div>
+                  <button
+                    onClick={() => { setPhotoFile(null); setPhotoPreview(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                    className="text-xs px-2 py-1 rounded"
+                    style={{ background: "rgba(239,68,68,.15)", color: "#ef4444" }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button onClick={startCamera} className="flex items-center gap-1.5 px-3 py-2 rounded text-xs font-medium" style={{ background: GOLD, color: BG }}>
+                  <Camera size={14} /> Capture Live
+                </button>
+                <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 rounded text-xs" style={{ background: INPUT_BG, border: BORDER, color: TEXT_DIM }}>
+                  <Upload size={14} /> Upload File
+                </button>
+              </div>
+            )}
+            <p className="text-xs mt-2" style={{ color: "#666" }}>
+              Tip: Ask staff to look straight at the camera. Good lighting = better face match.
+            </p>
+            {uploadingPhoto && <div className="text-xs mt-1" style={{ color: GOLD }}>Uploading photo...</div>}
+          </div>
+
           <div className="flex items-center gap-3 mb-3">
             <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: TEXT_DIM }}>
               <input
@@ -306,6 +468,13 @@ export default function StaffManagement() {
                   >
                     {s.active ? "Active" : "Inactive"}
                   </span>
+                  {s.faceDescriptor ? (
+                    <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(201,168,76,.15)", color: GOLD }}>👤 Face enrolled</span>
+                  ) : s.facePhotoUrl ? (
+                    <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(245,158,11,.15)", color: "#f59e0b" }}>📸 Photo only</span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(100,100,100,.1)", color: "#666" }}>No face</span>
+                  )}
                 </div>
                 <div className="text-xs mt-1" style={{ color: TEXT_DIM }}>
                   📱 {s.phone || "No phone"} · 🏷️ {s.role}

@@ -1,163 +1,154 @@
 import { useState, useEffect } from "react";
 import { db } from "@/lib/firebase";
-import { collection, onSnapshot, query, where, orderBy } from "firebase/firestore";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { useToast } from "@/hooks/use-toast";
-import { Calendar, Clock, MapPin, Camera, Search, Download, Users, CheckCircle, AlertTriangle } from "lucide-react";
-
-// ═══════════════════════════════════════════
-// ATTENDANCE ADMIN — View all records, export
-// ═══════════════════════════════════════════
-
-type StaffRole = "manager" | "captain" | "runner" | "steward";
+import { collection, onSnapshot, query, where, orderBy, Timestamp } from "firebase/firestore";
 
 interface AttendanceRecord {
   id: string;
   staffId: string;
   staffName: string;
-  staffRole: StaffRole;
+  staffRole: string;
   phone: string;
   date: string;
-  clockIn: any; // Firestore Timestamp
+  clockIn: Timestamp | null;
   clockInLocation: { lat: number; lng: number } | null;
-  clockInDistance: number;
-  clockInPhoto: string;
-  clockOut: any; // Firestore Timestamp
+  clockInDistance: number | null;
+  clockInVideo: string | null;
+  clockOut: Timestamp | null;
   clockOutLocation: { lat: number; lng: number } | null;
-  clockOutDistance: number;
-  clockOutPhoto: string;
-  createdAt: any;
+  clockOutDistance: number | null;
+  clockOutVideo: string | null;
+  createdAt: Timestamp | null;
 }
 
-const ROLE_COLORS: Record<string, string> = {
-  manager: "bg-purple-500",
-  captain: "bg-blue-500",
-  runner: "bg-orange-500",
-  steward: "bg-green-500",
-};
+const GOLD = "#C9A84C";
+const CARD_BG = "hsl(240 12% 5%)";
+const INPUT_BG = "hsl(240 12% 8%)";
+const BORDER = "1px solid hsl(240 8% 18%)";
+const TEXT_DIM = "hsl(36 29% 60%)";
+const TEXT_MAIN = "hsl(36 29% 93%)";
 
-const ROLE_LABELS: Record<string, string> = {
-  manager: "Manager",
-  captain: "Captain",
-  runner: "Runner",
-  steward: "Steward",
-};
+function formatTime(ts: Timestamp | null): string {
+  if (!ts) return "—";
+  const d = ts.toDate();
+  return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+}
+
+function formatDate(ts: Timestamp | null): string {
+  if (!ts) return "—";
+  const d = ts.toDate();
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function getTodayStr(): string {
+  const d = new Date();
+  return d.toISOString().split("T")[0];
+}
+
+function getDuration(inTs: Timestamp | null, outTs: Timestamp | null): string {
+  if (!inTs || !outTs) return "—";
+  const diff = outTs.toMillis() - inTs.toMillis();
+  if (diff <= 0) return "—";
+  const hrs = Math.floor(diff / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  return `${hrs}h ${mins}m`;
+}
 
 export default function AttendanceAdmin() {
-  const { toast } = useToast();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
-  const [filtered, setFiltered] = useState<AttendanceRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [dateFilter, setDateFilter] = useState(() => {
-    const now = new Date();
-    return now.toISOString().split("T")[0];
-  });
-  const [roleFilter, setRoleFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [dateFilter, setDateFilter] = useState(getTodayStr());
+  const [roleFilter, setRoleFilter] = useState("all");
+  const [nameFilter, setNameFilter] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Real-time attendance records
   useEffect(() => {
+    setLoading(true);
     const q = query(
       collection(db, "attendance"),
       where("date", "==", dateFilter),
-      orderBy("clockIn", "desc")
+      orderBy("createdAt", "desc")
     );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list: AttendanceRecord[] = [];
-        snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() } as AttendanceRecord));
-        setRecords(list);
-        setLoading(false);
-      },
-      (err) => {
-        console.warn("Attendance listener error (may need index):", err);
-        // Fallback: query without orderBy
-        const fallbackQ = query(collection(db, "attendance"), where("date", "==", dateFilter));
-        onSnapshot(fallbackQ, (snap) => {
-          const list: AttendanceRecord[] = [];
-          snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() } as AttendanceRecord));
-          setRecords(list.sort((a, b) => (b.clockIn?.seconds || 0) - (a.clockIn?.seconds || 0)));
-          setLoading(false);
+    const unsub = onSnapshot(q, (snap) => {
+      const list: AttendanceRecord[] = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          staffId: data.staffId || "",
+          staffName: data.staffName || "Unknown",
+          staffRole: data.staffRole || "",
+          phone: data.phone || "",
+          date: data.date || "",
+          clockIn: data.clockIn || null,
+          clockInLocation: data.clockInLocation || null,
+          clockInDistance: data.clockInDistance || null,
+          clockInVideo: data.clockInVideo || null,
+          clockOut: data.clockOut || null,
+          clockOutLocation: data.clockOutLocation || null,
+          clockOutDistance: data.clockOutDistance || null,
+          clockOutVideo: data.clockOutVideo || null,
+          createdAt: data.createdAt || null,
+        };
+      });
+      setRecords(list);
+      setLoading(false);
+    }, (err) => {
+      console.error("[AttendanceAdmin] Firestore error:", err);
+      // Fallback without orderBy if index missing
+      const fallbackQ = query(collection(db, "attendance"), where("date", "==", dateFilter));
+      const unsub2 = onSnapshot(fallbackQ, (snap2) => {
+        const list: AttendanceRecord[] = snap2.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            staffId: data.staffId || "",
+            staffName: data.staffName || "Unknown",
+            staffRole: data.staffRole || "",
+            phone: data.phone || "",
+            date: data.date || "",
+            clockIn: data.clockIn || null,
+            clockInLocation: data.clockInLocation || null,
+            clockInDistance: data.clockInDistance || null,
+            clockInVideo: data.clockInVideo || null,
+            clockOut: data.clockOut || null,
+            clockOutLocation: data.clockOutLocation || null,
+            clockOutDistance: data.clockOutDistance || null,
+            clockOutVideo: data.clockOutVideo || null,
+            createdAt: data.createdAt || null,
+          };
         });
-      }
-    );
-    return unsub;
+        setRecords(list.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0)));
+        setLoading(false);
+      });
+      return () => unsub2();
+    });
+    return () => unsub();
   }, [dateFilter]);
 
-  // Filter records
-  useEffect(() => {
-    let result = [...records];
-    if (search) {
-      const s = search.toLowerCase();
-      result = result.filter(
-        (r) =>
-          r.staffName?.toLowerCase().includes(s) ||
-          r.phone?.includes(s)
-      );
-    }
-    if (roleFilter !== "all") {
-      result = result.filter((r) => r.staffRole === roleFilter);
-    }
-    if (statusFilter === "present") {
-      result = result.filter((r) => r.clockIn && !r.clockOut);
-    } else if (statusFilter === "completed") {
-      result = result.filter((r) => r.clockIn && r.clockOut);
-    } else if (statusFilter === "late") {
-      result = result.filter((r) => {
-        if (!r.clockIn) return false;
-        const clockInTime = r.clockIn.toDate ? r.clockIn.toDate() : new Date(r.clockIn);
-        const hour = clockInTime.getHours();
-        return hour >= 20; // Late if after 8 PM
-      });
-    }
-    setFiltered(result);
-  }, [records, search, roleFilter, statusFilter]);
+  const roles = Array.from(new Set(records.map((r) => r.staffRole).filter(Boolean)));
 
-  // Stats
-  const totalStaff = new Set(records.map((r) => r.staffId)).size;
-  const presentNow = records.filter((r) => r.clockIn && !r.clockOut).length;
-  const completedShift = records.filter((r) => r.clockIn && r.clockOut).length;
-  const lateArrivals = records.filter((r) => {
-    if (!r.clockIn) return false;
-    const d = r.clockIn.toDate ? r.clockIn.toDate() : new Date(r.clockIn);
-    return d.getHours() >= 20;
-  }).length;
+  const filtered = records.filter((r) => {
+    if (roleFilter !== "all" && r.staffRole !== roleFilter) return false;
+    if (nameFilter && !r.staffName.toLowerCase().includes(nameFilter.toLowerCase())) return false;
+    return true;
+  });
 
-  function formatTime(ts: any) {
-    if (!ts) return "--:--";
-    const d = ts.toDate ? ts.toDate() : new Date(ts);
-    return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-  }
+  const loggedInCount = records.filter((r) => r.clockIn && !r.clockOut).length;
+  const loggedOutCount = records.filter((r) => r.clockIn && r.clockOut).length;
 
-  function getDuration(inTs: any, outTs: any) {
-    if (!inTs) return "--";
-    const start = inTs.toDate ? inTs.toDate() : new Date(inTs);
-    const end = outTs ? (outTs.toDate ? outTs.toDate() : new Date(outTs)) : new Date();
-    const mins = Math.floor((end.getTime() - start.getTime()) / 60000);
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return `${h}h ${m}m`;
-  }
-
-  function exportCSV() {
-    const headers = ["Date", "Staff Name", "Role", "Phone", "Clock In", "Clock Out", "Duration", "Status"];
+  const exportCSV = () => {
+    const headers = ["Name", "Role", "Phone", "Date", "Login Time", "Logout Time", "Duration", "Login Distance(m)", "Logout Distance(m)"];
     const rows = filtered.map((r) => [
-      r.date,
       r.staffName,
-      ROLE_LABELS[r.staffRole] || r.staffRole,
+      r.staffRole,
       r.phone,
+      r.date,
       formatTime(r.clockIn),
       formatTime(r.clockOut),
       getDuration(r.clockIn, r.clockOut),
-      r.clockOut ? "Completed" : "Present",
+      r.clockInDistance != null ? Math.round(r.clockInDistance) + "m" : "—",
+      r.clockOutDistance != null ? Math.round(r.clockOutDistance) + "m" : "—",
     ]);
-    const csv = [headers, ...rows].map((row) => row.map((c) => `"${c}"`).join(",")).join("\n");
+    const csv = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -165,213 +156,210 @@ export default function AttendanceAdmin() {
     a.download = `hod-attendance-${dateFilter}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    toast({ title: "✅ Exported", description: `${filtered.length} records downloaded` });
-  }
+  };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-      <div>
-          <h1 className="text-2xl font-bold text-[#F2C744]">📊 Attendance Dashboard</h1>
-          <p className="text-sm text-gray-400 mt-1">Track staff clock-in/out with location & selfies</p>
+    <div>
+      {/* Filters Row */}
+      <div className="flex gap-3 mb-4 flex-wrap items-end">
+        <div>
+          <label className="text-xs block mb-1" style={{ color: TEXT_DIM }}>Date</label>
+          <input
+            type="date"
+            value={dateFilter}
+            onChange={(e) => setDateFilter(e.target.value)}
+            className="px-3 py-2 rounded text-sm"
+            style={{ background: INPUT_BG, border: BORDER, color: TEXT_MAIN }}
+          />
         </div>
-        <Button onClick={exportCSV} variant="outline" className="border-[#F2C744] text-[#F2C744] hover:bg-[#F2C744]/10">
-          <Download className="w-4 h-4 mr-2" /> Export CSV
-        </Button>
+        <div>
+          <label className="text-xs block mb-1" style={{ color: TEXT_DIM }}>Role</label>
+          <select
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value)}
+            className="px-3 py-2 rounded text-sm"
+            style={{ background: INPUT_BG, border: BORDER, color: TEXT_MAIN }}
+          >
+            <option value="all">All Roles</option>
+            {roles.map((r) => (
+              <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex-1 min-w-[150px]">
+          <label className="text-xs block mb-1" style={{ color: TEXT_DIM }}>Search Name</label>
+          <input
+            type="text"
+            placeholder="Search staff name..."
+            value={nameFilter}
+            onChange={(e) => setNameFilter(e.target.value)}
+            className="w-full px-3 py-2 rounded text-sm"
+            style={{ background: INPUT_BG, border: BORDER, color: TEXT_MAIN }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          className="px-4 py-2 rounded-lg text-sm font-medium"
+          style={{ background: "rgba(34,197,94,.15)", border: "1px solid rgba(34,197,94,.45)", color: "#22c55e" }}
+        >
+          📥 Export CSV
+        </button>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <Card className="bg-[#111] border-[#2A2A2A]">
-          <CardContent className="p-4 flex items-center gap-3">
-            <Users className="w-8 h-8 text-blue-400" />
-            <div>
-              <div className="text-2xl font-bold text-white">{totalStaff}</div>
-              <div className="text-xs text-gray-400 uppercase">Total Staff</div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="bg-[#111] border-[#2A2A2A]">
-          <CardContent className="p-4 flex items-center gap-3">
-            <CheckCircle className="w-8 h-8 text-green-400" />
-            <div>
-              <div className="text-2xl font-bold text-white">{presentNow}</div>
-              <div className="text-xs text-gray-400 uppercase">Present Now</div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="bg-[#111] border-[#2A2A2A]">
-          <CardContent className="p-4 flex items-center gap-3">
-            <Clock className="w-8 h-8 text-[#F2C744]" />
-            <div>
-              <div className="text-2xl font-bold text-white">{completedShift}</div>
-              <div className="text-xs text-gray-400 uppercase">Completed</div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="bg-[#111] border-[#2A2A2A]">
-          <CardContent className="p-4 flex items-center gap-3">
-            <AlertTriangle className="w-8 h-8 text-red-400" />
-            <div>
-              <div className="text-2xl font-bold text-white">{lateArrivals}</div>
-              <div className="text-xs text-gray-400 uppercase">Late Arrivals</div>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Summary */}
+      <div className="flex gap-3 mb-4 flex-wrap">
+        <div className="px-4 py-2 rounded-lg text-sm" style={{ background: CARD_BG, border: BORDER }}>
+          <span style={{ color: TEXT_DIM }}>Total Records: </span>
+          <span className="font-bold" style={{ color: GOLD }}>{filtered.length}</span>
+        </div>
+        <div className="px-4 py-2 rounded-lg text-sm" style={{ background: CARD_BG, border: BORDER }}>
+          <span style={{ color: TEXT_DIM }}>Currently Logged In: </span>
+          <span className="font-bold" style={{ color: "#22c55e" }}>{loggedInCount}</span>
+        </div>
+        <div className="px-4 py-2 rounded-lg text-sm" style={{ background: CARD_BG, border: BORDER }}>
+          <span style={{ color: TEXT_DIM }}>Logged Out: </span>
+          <span className="font-bold" style={{ color: "#ef4444" }}>{loggedOutCount}</span>
+        </div>
       </div>
 
-      {/* Filters */}
-      <Card className="bg-[#111] border-[#2A2A2A] mb-6">
-        <CardContent className="p-4">
-          <div className="flex flex-wrap gap-4 items-center">
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-[#F2C744]" />
-              <Input
-                type="date"
-                value={dateFilter}
-                onChange={(e) => setDateFilter(e.target.value)}
-                className="bg-[#1A1A1A] border-[#2A2A2A] text-white w-40"
-              />
-            </div>
-            <div className="flex gap-2">
-              {["all", "manager", "captain", "runner", "steward"].map((role) => (
-                <Button
-                  key={role}
-                  variant={roleFilter === role ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setRoleFilter(role)}
-                  className={
-                    roleFilter === role
-                      ? "bg-[#F2C744] text-black"
-                      : "border-[#2A2A2A] text-gray-400 hover:text-white"
-                  }
+      {/* Records List */}
+      {loading ? (
+        <div className="text-center py-12 text-sm" style={{ color: TEXT_DIM }}>Loading attendance records...</div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-12 rounded-lg" style={{ border: "1px dashed hsl(240 8% 18%)", color: TEXT_DIM }}>
+          No attendance records for {dateFilter}.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((r) => {
+            const isExpanded = expandedId === r.id;
+            const isComplete = r.clockIn && r.clockOut;
+            const isActive = r.clockIn && !r.clockOut;
+            return (
+              <div
+                key={r.id}
+                className="rounded-lg overflow-hidden"
+                style={{ background: CARD_BG, border: BORDER }}
+              >
+                {/* Main Row */}
+                <div
+                  className="flex items-center justify-between px-4 py-3 cursor-pointer"
+                  onClick={() => setExpandedId(isExpanded ? null : r.id)}
                 >
-                  {role === "all" ? "All Roles" : ROLE_LABELS[role]}
-                </Button>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              {[
-                { key: "all", label: "All" },
-                { key: "present", label: "Present" },
-                { key: "completed", label: "Completed" },
-                { key: "late", label: "Late" },
-              ].map((s) => (
-                <Button
-                  key={s.key}
-                  variant={statusFilter === s.key ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setStatusFilter(s.key)}
-                  className={
-                    statusFilter === s.key
-                      ? "bg-[#F2C744] text-black"
-                      : "border-[#2A2A2A] text-gray-400 hover:text-white"
-                  }
-                >
-                  {s.label}
-                </Button>
-              ))}
-            </div>
-            <div className="ml-auto relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search staff..."
-                className="pl-10 bg-[#1A1A1A] border-[#2A2A2A] text-white w-48"
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium" style={{ color: TEXT_MAIN }}>{r.staffName}</span>
+                      <span
+                        className="text-xs px-2 py-0.5 rounded"
+                        style={{ background: "hsl(240 12% 10%)", color: GOLD }}
+                      >
+                        {r.staffRole}
+                      </span>
+                      {isActive && (
+                        <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(34,197,94,.2)", color: "#22c55e" }}>
+                          🟢 Logged In
+                        </span>
+                      )}
+                      {isComplete && (
+                        <span className="text-xs px-2 py-0.5 rounded" style={{ background: "rgba(100,100,100,.2)", color: "#888" }}>
+                          ✅ Completed
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs mt-1" style={{ color: TEXT_DIM }}>
+                      📱 {r.phone || "No phone"} · 📅 {r.date}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 ml-3 text-xs" style={{ color: TEXT_DIM }}>
+                    <div className="text-center">
+                      <div className="text-xs" style={{ color: "#22c55e" }}>LOGIN</div>
+                      <div className="font-medium" style={{ color: TEXT_MAIN }}>{formatTime(r.clockIn)}</div>
+                    </div>
+                    <div style={{ color: "hsl(240 8% 25%)" }}>→</div>
+                    <div className="text-center">
+                      <div className="text-xs" style={{ color: "#ef4444" }}>LOGOUT</div>
+                      <div className="font-medium" style={{ color: TEXT_MAIN }}>{formatTime(r.clockOut)}</div>
+                    </div>
+                    <div className="text-xs ml-2" style={{ color: GOLD }}>
+                      {isExpanded ? "▲" : "▼"}
+                    </div>
+                  </div>
+                </div>
 
-      {/* Records Table */}
-      <Card className="bg-[#111] border-[#2A2A2A]">
-        <CardHeader>
-          <CardTitle className="text-[#F2C744] text-lg">
-            Attendance Records — {dateFilter} ({filtered.length})
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <div className="text-center py-10 text-gray-400">Loading records...</div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-10 text-gray-400">
-              No attendance records for this date.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-[#2A2A2A] hover:bg-transparent">
-                    <TableHead className="text-gray-400">Staff</TableHead>
-                    <TableHead className="text-gray-400">Role</TableHead>
-                    <TableHead className="text-gray-400">Clock In</TableHead>
-                    <TableHead className="text-gray-400">Clock Out</TableHead>
-                    <TableHead className="text-gray-400">Duration</TableHead>
-                    <TableHead className="text-gray-400">Location</TableHead>
-                    <TableHead className="text-gray-400">Photo</TableHead>
-                    <TableHead className="text-gray-400">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filtered.map((record) => (
-                    <TableRow key={record.id} className="border-[#2A2A2A] hover:bg-[#1A1A1A]">
-                      <TableCell>
-                        <div className="font-medium text-white">{record.staffName}</div>
-                        <div className="text-xs text-gray-400">+91 {record.phone}</div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge className={`${ROLE_COLORS[record.staffRole] || "bg-gray-500"} text-white text-xs`}>
-                          {ROLE_LABELS[record.staffRole] || record.staffRole}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-gray-300">{formatTime(record.clockIn)}</TableCell>
-                      <TableCell className="text-gray-300">{formatTime(record.clockOut)}</TableCell>
-                      <TableCell className="text-[#F2C744] font-medium">
-                        {getDuration(record.clockIn, record.clockOut)}
-                      </TableCell>
-                      <TableCell>
-                        {record.clockInDistance != null && (
-                          <div className="flex items-center gap-1 text-xs text-gray-400">
-                            <MapPin className="w-3 h-3" />
-                            {record.clockInDistance}m
-                            {record.clockInDistance <= 100 ? (
-                              <span className="text-green-400">✓</span>
-                            ) : (
-                              <span className="text-red-400">✗</span>
-                            )}
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {record.clockInPhoto && (
-                          <a
-                            href={record.clockInPhoto}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-[#F2C744] hover:underline text-xs flex items-center gap-1"
-                          >
-                            <Camera className="w-3 h-3" /> View
-                          </a>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {record.clockOut ? (
-                          <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Completed</Badge>
-                        ) : (
-                          <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 animate-pulse">Present</Badge>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                {/* Expanded Details */}
+                {isExpanded && (
+                  <div className="px-4 pb-4" style={{ borderTop: "1px solid hsl(240 8% 13%)" }}>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                      {/* Login Details */}
+                      <div className="p-3 rounded" style={{ background: "hsl(240 12% 3%)" }}>
+                        <div className="text-xs font-semibold mb-2" style={{ color: "#22c55e" }}>🟢 LOGIN DETAILS</div>
+                        <div className="space-y-1 text-xs" style={{ color: TEXT_DIM }}>
+                          <div>Time: <span style={{ color: TEXT_MAIN }}>{formatTime(r.clockIn)}</span></div>
+                          <div>Date: <span style={{ color: TEXT_MAIN }}>{formatDate(r.clockIn)}</span></div>
+                          {r.clockInLocation && (
+                            <div>Location: <span style={{ color: TEXT_MAIN }}>{r.clockInLocation.lat.toFixed(6)}, {r.clockInLocation.lng.toFixed(6)}</span></div>
+                          )}
+                          {r.clockInDistance != null && (
+                            <div>Distance from HOD: <span style={{ color: r.clockInDistance <= 200 ? "#22c55e" : "#ef4444" }}>{Math.round(r.clockInDistance)}m</span></div>
+                          )}
+                          {r.clockInVideo && (
+                            <div>
+                              <a
+                                href={r.clockInVideo}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-block mt-1 px-3 py-1 rounded text-xs font-medium"
+                                style={{ background: "rgba(201,168,76,.15)", border: "1px solid rgba(201,168,76,.4)", color: GOLD }}
+                              >
+                                🎥 View Login Video
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Logout Details */}
+                      <div className="p-3 rounded" style={{ background: "hsl(240 12% 3%)" }}>
+                        <div className="text-xs font-semibold mb-2" style={{ color: "#ef4444" }}>🔴 LOGOUT DETAILS</div>
+                        <div className="space-y-1 text-xs" style={{ color: TEXT_DIM }}>
+                          {r.clockOut ? (
+                            <>
+                              <div>Time: <span style={{ color: TEXT_MAIN }}>{formatTime(r.clockOut)}</span></div>
+                              <div>Date: <span style={{ color: TEXT_MAIN }}>{formatDate(r.clockOut)}</span></div>
+                              {r.clockOutLocation && (
+                                <div>Location: <span style={{ color: TEXT_MAIN }}>{r.clockOutLocation.lat.toFixed(6)}, {r.clockOutLocation.lng.toFixed(6)}</span></div>
+                              )}
+                              {r.clockOutDistance != null && (
+                                <div>Distance from HOD: <span style={{ color: r.clockOutDistance <= 200 ? "#22c55e" : "#ef4444" }}>{Math.round(r.clockOutDistance)}m</span></div>
+                              )}
+                              <div>Duration: <span className="font-bold" style={{ color: GOLD }}>{getDuration(r.clockIn, r.clockOut)}</span></div>
+                              {r.clockOutVideo && (
+                                <div>
+                                  <a
+                                    href={r.clockOutVideo}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-block mt-1 px-3 py-1 rounded text-xs font-medium"
+                                    style={{ background: "rgba(201,168,76,.15)", border: "1px solid rgba(201,168,76,.4)", color: GOLD }}
+                                  >
+                                    🎥 View Logout Video
+                                  </a>
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div style={{ color: "#888" }}>Not logged out yet</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
