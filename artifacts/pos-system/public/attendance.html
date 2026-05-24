@@ -44,12 +44,10 @@
   .btn-sm{padding:10px 16px;font-size:13px;border-radius:10px;width:auto;display:inline-flex;align-items:center;gap:6px}
   .btn:disabled{opacity:.45;cursor:not-allowed}
 
-  /* Camera/video — FIXED: much bigger for mobile face detection */
-  .cam-box{position:relative;border-radius:14px;overflow:hidden;background:#000;margin-bottom:10px;width:100%;aspect-ratio:4/3;max-height:60vh;min-height:300px}
+  /* Camera/video — FULL WIDTH, portrait mode for selfie */
+  .cam-box{position:relative;border-radius:14px;overflow:hidden;background:#000;margin:0 -14px 10px;width:calc(100% + 28px);aspect-ratio:3/4;max-height:65vh;min-height:350px}
   .cam-box video,.cam-box canvas,.cam-box img{width:100%;height:100%;object-fit:cover;display:block}
-  .cam-box canvas.overlay{position:absolute;top:0;left:0}
-  /* Big face oval guide */
-  .face-guide .oval{width:65%;height:70%;border:3px dashed rgba(201,168,76,.7);border-radius:50%;animation:pulse 2s infinite}
+  .cam-box canvas.overlay{position:absolute;top:0;left:0;width:100%;height:100%}
 
   .cam-row{display:flex;gap:8px;margin-bottom:10px}
   .cam-row .btn{flex:1;font-size:14px;padding:12px}
@@ -90,11 +88,11 @@
   }
   .auto-logout-banner.show{display:block}
 
-  /* Face overlay guides */
-  .face-guide{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  /* Face overlay guides — CENTERED circular oval */
+  .face-guide{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:5}
   .face-guide .oval{
-    width:55%;height:45%;border:2px dashed rgba(201,168,76,.6);border-radius:50%;
-    animation:pulse 2s infinite;
+    width:60%;height:50%;border:3px dashed rgba(201,168,76,.8);border-radius:50%;
+    animation:pulse 2s infinite;max-width:280px;max-height:320px;
   }
   @keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
   .face-status{
@@ -467,11 +465,10 @@ async function captureEnrollment(){
   document.getElementById('enrollBtn').disabled=true;
 
   try{
-    // FIXED 2026-05-24: lower threshold + bigger input for mobile
-    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:FACE_INPUT_SIZE,scoreThreshold:FACE_SCORE_THRESHOLD}))
+    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:416,scoreThreshold:0.35}))
       .withFaceLandmarks().withFaceDescriptor();
     if(!detection){
-      statusEl.textContent='No face detected. Move closer to camera, ensure good lighting.';statusEl.style.color='var(--red)';
+      statusEl.textContent='No face found. Move closer, ensure good lighting.';statusEl.style.color='var(--red)';
       document.getElementById('enrollBtn').disabled=false;return;
     }
     // Save descriptor to Firestore
@@ -510,67 +507,52 @@ function startFaceVerify(){
 
 async function runFaceVerifyLoop(){
   var video=document.getElementById('faceVideo');
-  var canvas=document.getElementById('faceCanvas');
   var statusEl=document.getElementById('faceStatus');
-  var ctx=canvas.getContext('2d');
 
   if(state.screen!=='face')return;
 
   try{
-    // FIXED 2026-05-24: lowered threshold + bigger input for mobile cameras
-    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:FACE_INPUT_SIZE,scoreThreshold:FACE_SCORE_THRESHOLD}))
+    var detection=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:416,scoreThreshold:0.35}))
       .withFaceLandmarks().withFaceDescriptor();
 
     if(!detection){
       faceMissStreak++;faceConsecutiveHits=0;
-      // Only clear canvas after 5 consecutive misses (reduces flickering)
-      if(faceMissStreak>=5){ctx.clearRect(0,0,canvas.width,canvas.height);}
-      statusEl.textContent='Looking for face... ('+faceMissStreak+')';statusEl.style.color='var(--orange)';
+      statusEl.textContent='Looking for face...';statusEl.style.color='var(--orange)';
       requestAnimationFrame(runFaceVerifyLoop);return;
     }
 
-    // Face found! Reset miss streak, increment hit counter
     faceMissStreak=0;faceConsecutiveHits++;
 
-    // Draw face box
-    var dims=faceapi.matchDimensions(canvas,video,true);
-    var resized=faceapi.resizeResults(detection,dims);
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    faceapi.draw.drawDetections(canvas,[resized]);
-
-    // Compare with stored descriptor
     var storedDesc=new Float32Array(state.staff.faceDescriptor);
     var dist=faceapi.euclideanDistance(detection.descriptor,storedDesc);
-    var matchScore=Math.max(0,1-dist).toFixed(2);
+    var matchScore=(Math.max(0,1-dist)*100).toFixed(0);
 
-    // Show progress: consecutive hits needed
-    if(faceConsecutiveHits<FACE_CONSECUTIVE_NEEDED){
-      statusEl.textContent='Scanning... '+faceConsecutiveHits+'/'+FACE_CONSECUTIVE_NEEDED+' ('+(matchScore*100).toFixed(0)+'%)';
+    if(faceConsecutiveHits<3){
+      statusEl.textContent='Hold still... '+faceConsecutiveHits+'/3';
       statusEl.style.color='var(--gold)';
       requestAnimationFrame(runFaceVerifyLoop);return;
     }
 
-    if(dist>FACE_MATCH_THRESHOLD){
-      statusEl.textContent='Face mismatch ('+(matchScore*100).toFixed(0)+'%). Try again.';statusEl.style.color='var(--red)';
+    if(dist>0.55){
+      statusEl.textContent='Mismatch ('+matchScore+'%). Try again.';statusEl.style.color='var(--red)';
       faceConsecutiveHits=0;
       requestAnimationFrame(runFaceVerifyLoop);return;
     }
 
-    // Face matches! Now do blink liveness
-    statusEl.textContent='Face matched! '+(matchScore*100).toFixed(0)+'%. Hold still...';statusEl.style.color='var(--green)';
+    statusEl.textContent='Matched! '+matchScore+'%';
+    statusEl.style.color='var(--green)';
 
     if(!state.blinkDetected){
       document.getElementById('blinkOverlay').classList.remove('hide');
       var blinkResult=await detectBlink(video,detection.landmarks);
       document.getElementById('blinkOverlay').classList.add('hide');
       if(!blinkResult){
-        statusEl.textContent='Blink not detected. Please try again.';statusEl.style.color='var(--red)';
+        statusEl.textContent='Blink not detected. Try again.';statusEl.style.color='var(--red)';
         requestAnimationFrame(runFaceVerifyLoop);return;
       }
       state.blinkDetected=true;
     }
 
-    // All checks passed!
     faceConsecutiveHits=0;
     stopCamera();
     showToast('Face verified! ✅');
@@ -594,8 +576,7 @@ function detectBlink(video,landmarks){
       if(state.screen!=='face'){clearInterval(iv);resolve(false);return}
 
       try{
-        // FIXED 2026-05-24: lower threshold for blink detection too
-        var det=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:FACE_SCORE_THRESHOLD}))
+        var det=await faceapi.detectSingleFace(video,new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:0.35}))
           .withFaceLandmarks();
         if(!det)return;
         var ear=computeEAR(det.landmarks);
