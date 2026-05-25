@@ -2,8 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover" />
     <title>HOD Venue POS System</title>
+
+    <!-- 🔴 2026-05-25 (Khushi PWA request) — "Add to Home Screen" support.
+         Once deployed, on Android Chrome: ⋮ menu → "Install app".
+         On iPhone Safari: Share → "Add to Home Screen".
+         Opens fullscreen, no browser chrome, looks/feels like a native app.
+         🛟 FALLBACK: if install prompt doesn't show on Android, user can
+         still tap ⋮ → "Add to Home Screen" manually. iOS has NO install
+         prompt API — Share → Add to Home Screen is the only way (always
+         works as long as apple-touch-icon + apple-mobile-web-app-capable
+         meta tags are present, which they are below). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#030305" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- iOS specific: makes "Add to Home Screen" launch fullscreen with
+         the dark status bar matching our black UI. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="HOD POS" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
     <meta name="description" content="HOD Venue POS System — built on Replit. Update this description to reflect the app." />
     <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
     <meta name="googlebot" content="noindex, nofollow" />
@@ -16,17 +36,41 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800;900&family=Playfair+Display:wght@700;900&display=swap" rel="stylesheet">
     <!-- 🔴 2026-05-15 (Khushi bug) — Razorpay Checkout SDK MUST be loaded
          globally for Bar Mode UPI/Card recharges. Without this, openRazorpayRecharge()
          throws "Razorpay SDK not loaded — check internet". Same script the
          customer site (hodclub.in) loads. Async OK — wallet recharge flow
          awaits window.Razorpay before opening. -->
     <script src="https://checkout.razorpay.com/v1/checkout.js" async></script>
-    <script type="module" crossorigin src="/assets/index-DR5s2cXU.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-D7LAwfti.css">
   </head>
   <body>
     <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- 🔴 2026-05-25 (Khushi PWA request) — register a pass-through
+         service worker. Android Chrome REQUIRES a registered SW before
+         it shows the "Install app" prompt. The SW deliberately does NOT
+         cache anything (see public/sw.js) — POS must always serve the
+         freshest code so anti-fraud + PIN rules can never go stale.
+         🛟 FALLBACK: failure here is silent — the app still works as a
+         regular web page, just won't offer "Add to Home Screen". -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          // Derive sw.js URL from the manifest link so the BASE_PATH that
+          // Vite injects at build time is honoured (works at root /
+          // pos.hodclub.in AND at any artifact subpath in Replit preview).
+          var manifestLink = document.querySelector('link[rel="manifest"]');
+          var swUrl = '/sw.js';
+          if (manifestLink) {
+            swUrl = new URL(manifestLink.href).pathname.replace(/manifest\.webmanifest$/, 'sw.js');
+          }
+          navigator.serviceWorker.register(swUrl).catch(function (err) {
+            console.warn('[HOD POS] Service worker registration failed:', err);
+          });
+        });
+      }
+    </script>
   </body>
 </html>
