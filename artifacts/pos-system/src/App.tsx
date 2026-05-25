@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { StaffProvider, useStaff } from "@/lib/staff-context";
+import { IdleLockOverlay, ModePickerOverlay } from "@/components/SessionOverlays";
 import LoginPage from "@/pages/LoginPage";
 import FloorView from "@/pages/FloorView";
 import TablePOS from "@/pages/TablePOS";
@@ -93,6 +94,9 @@ function App() {
         <StaffProvider>
           <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
             <AppRoutes />
+            {/* 🆕 2026-05-25 — Multi-role picker + 25-min idle lock overlays. */}
+            <ModePickerOverlay />
+            <IdleLockOverlay />
           </WouterRouter>
           <Toaster />
         </StaffProvider>
