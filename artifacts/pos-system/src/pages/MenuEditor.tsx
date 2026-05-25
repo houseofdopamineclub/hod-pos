@@ -3,6 +3,7 @@ import {
   subscribeToVenueMenuTab,
   saveVenueMenuTab,
   logAudit,
+  setMenuOverride,
 } from "@/lib/firestore";
 import {
   VENUE_MENU_TAB_LABELS,
@@ -312,7 +313,43 @@ export default function MenuEditor({ currentStaff }: Props) {
                         </button>
                       )}
                       <button
-                        onClick={() => updateItem(realCi, ii, { oos: !item.oos })}
+                        onClick={async () => {
+                          // 🔴 2026-05-25 (Khushi GO-LIVE fix) — the OOS button used
+                          // to ONLY flip a local draft flag that needed Publish to
+                          // reach hodclub.in, and NEVER reached Bar/Captain (which
+                          // read posMenuOverrides, not venueMenu). Now it does BOTH:
+                          //   (1) flips local draft (so Publish still propagates to
+                          //       customer wallet's structural list), AND
+                          //   (2) instantly writes posMenuOverrides → Bar + Captain
+                          //       see it in <2s, AND hodclub.in wallet sees it via
+                          //       the posMenuOverrides live listener (re-enabled
+                          //       same night with a per-doc limit safety cap).
+                          // Manager PIN gated so a misclick can't 86 an item.
+                          const goingOOS = !item.oos;
+                          if (!(await requireManagerPin(
+                            `${goingOOS ? "MARK OUT OF STOCK" : "MARK BACK IN STOCK"}: ${item.n}`
+                          ))) return;
+                          updateItem(realCi, ii, { oos: goingOOS });
+                          try {
+                            await setMenuOverride(item.n, {
+                              outOfStock: goingOOS,
+                              updatedBy: currentStaff?.name || "menu-editor",
+                            });
+                            if (currentStaff) {
+                              await logAudit({
+                                action: goingOOS ? "menu_out_of_stock" : "menu_back_in_stock",
+                                staffId: currentStaff.id || "",
+                                staffName: currentStaff.name,
+                                staffRole: currentStaff.role,
+                                details: { itemName: item.n, source: "menu_editor" },
+                              });
+                            }
+                          } catch (e: any) {
+                            // 🛟 FALLBACK — local draft flip already applied, so
+                            // Publish would still eventually push it. Surface error.
+                            alert(`⚠ OOS saved LOCALLY only — sync to Bar/Captain failed: ${e?.message || e}\nClick PUBLISH to retry, or use OOS/Discount tab.`);
+                          }
+                        }}
                         className="text-xs px-2 py-1 rounded"
                         style={{
                           background: item.oos ? "#ef4444" : "rgba(34,197,94,.15)",
