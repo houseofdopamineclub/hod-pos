@@ -1,14 +1,26 @@
 import { useState, useEffect, useRef } from "react";
+import { useLocation } from "wouter";
 import { useStaff } from "@/lib/staff-context";
 import { seedDefaultStaff, seedDefaultAggregatorSettings } from "@/lib/firestore";
 import { FEATURES } from "@/lib/feature-flags";
 
 export default function LoginPage() {
-  const { login, allStaff } = useStaff();
+  const { login, allStaff, currentStaff, hasRole } = useStaff();
+  const [, setLocation] = useLocation();
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [seeding, setSeeding] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // 🆕 2026-05-25 (Khushi) — OWNER/ADMIN auto-routes straight to /admin after
+  // PIN entry. Everyone else stays on this screen to tap their mode button
+  // (Captain / Bar / Door / Kitchen). This fixes "I entered 0000 but it shows
+  // me door/captain/bar instead of taking me to admin".
+  useEffect(() => {
+    if (currentStaff && hasRole("admin")) {
+      setLocation("/admin");
+    }
+  }, [currentStaff, hasRole, setLocation]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -151,12 +163,16 @@ export default function LoginPage() {
         </p>
       )}
 
-      <div className="mt-12 flex gap-4">
+      <div className="mt-12 flex gap-4 flex-wrap justify-center">
         {[
           FEATURES.captainMode && { href: "/captain", label: "Captain Mode", icon: "🪩" },
           FEATURES.barMode && { href: "/bar", label: "Bar Mode", icon: "🍸" },
           FEATURES.doorMode && { href: "/door", label: "Door Mode", icon: "🚪" },
           FEATURES.kitchenMode && { href: "/kitchen", label: "Kitchen Mode", icon: "🍳" },
+          // 🆕 2026-05-25 (Khushi) — explicit Admin Dashboard entry point so
+          // OWNER / ADMIN staff can reach reports / live monitor / staff mgmt
+          // without remembering the /admin URL.
+          FEATURES.admin && { href: "/admin", label: "Admin Dashboard", icon: "⚙️" },
         ].filter(Boolean).map((m: any) => (
           <a
             key={m.href}

@@ -192,7 +192,15 @@ export interface StaffMember {
   id?: string;
   name: string;
   pin: string;
+  /** Primary role (back-compat). Falls back to roles[0] when roles[] is set. */
   role: StaffRole;
+  /**
+   * 🆕 2026-05-25 — Multi-role support (Khushi). When present, the staff member
+   * has access to ALL listed roles (e.g. Tejas R = hostess + captain + bartender;
+   * Ganesh Poojary = captain + bartender). When absent, behave as single-role
+   * using `role`. Admin role implicitly grants access to every mode.
+   */
+  roles?: StaffRole[];
   phone?: string;
   active: boolean;
   createdAt?: Timestamp;

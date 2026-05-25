@@ -2,39 +2,142 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef, ty
 import type { StaffMember, StaffRole } from "./types";
 import { subscribeToStaff } from "./firestore";
 
+// 🆕 2026-05-25 (Khushi) — Per-staff login v2:
+//   • 10-hour absolute session (was 9hr) — auto-logout 10h after first login.
+//   • 25-min idle lock — re-PIN required if no activity (NOT full logout, so
+//     the absolute 10hr clock keeps ticking and the user just unlocks fast).
+//   • Multi-role support via `roles[]` on StaffMember (e.g. Tejas R = door +
+//     captain + bar). Multi-role users see a Mode Picker after PIN entry.
+//   • activeMode persisted across browser close so a captain stays on the
+//     captain side after closing the tablet.
+//   • Fail-open: any localStorage failure (private mode / quota) still allows
+//     login in-memory.
+const SESSION_KEY = "hod_staff_session";
+const SESSION_TTL_MS = 10 * 60 * 60 * 1000;          // 🆕 10 hours absolute (Khushi 2026-05-25)
+const IDLE_LOCK_MS = 25 * 60 * 1000;                  // 🆕 25 min inactivity → re-PIN (Khushi 2026-05-25)
+
+type PersistedSession = {
+  staffId: string;
+  expiresAt: number;
+  activeMode?: StaffRole | null;
+};
+
+function readSession(): PersistedSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as PersistedSession;
+    if (!s.staffId || !s.expiresAt) return null;
+    if (Date.now() >= s.expiresAt) { localStorage.removeItem(SESSION_KEY); return null; }
+    return s;
+  } catch { return null; }
+}
+
+function writeSession(staffId: string, expiresAt: number, activeMode: StaffRole | null) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({ staffId, expiresAt, activeMode })); } catch {}
+}
+
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+}
+
+/**
+ * 🆕 2026-05-25 (Khushi GO-LIVE) — Full staff roster with random 4-digit PINs.
+ * IDs are CAPITALISED, NO DASH (HOD001 not hod-001) per Khushi's spec.
+ * Multi-role users (Ganesh, Tejas) use `roles: [...]`.
+ * Admin tier (Muniraju/Manjunatha/Santhosh/Satish) gets FULL access (door +
+ * captain + bar + KDS + admin dashboard) via the "admin" role's implicit
+ * grant in hasRole().
+ */
 const FALLBACK_STAFF: StaffMember[] = [
-  { id: "fb-admin", name: "Admin", pin: "0000", role: "admin", active: true },
-  { id: "fb-gm1", name: "Manjunatha (GM)", pin: "1001", role: "manager", active: true },
-  { id: "fb-gm2", name: "Satish (GM)", pin: "1002", role: "manager", active: true },
-  { id: "fb-mgr1", name: "Sumith (Manager)", pin: "1003", role: "manager", active: true },
-  { id: "fb-mgr2", name: "Adarsh (Manager)", pin: "1004", role: "manager", active: true },
-  { id: "fb-cash1", name: "Sreekanth (Cashier)", pin: "2001", role: "cashier", active: true },
-  { id: "fb-cash2", name: "Santhosh (Cashier)", pin: "2002", role: "cashier", active: true },
-  { id: "fb-cash3", name: "Pemba (Cashier)", pin: "2003", role: "cashier", active: true },
-  { id: "fb-cap1", name: "Captain 1", pin: "3001", role: "captain", active: true },
-  { id: "fb-cap2", name: "Captain 2", pin: "3002", role: "captain", active: true },
-  { id: "fb-cap3", name: "Captain 3", pin: "3003", role: "captain", active: true },
-  { id: "fb-stw1", name: "Steward 1", pin: "4001", role: "steward", active: true },
-  { id: "fb-bar1", name: "Bartender 1", pin: "5001", role: "bartender", active: true },
+  // 🔴 Owner — universal backdoor, PIN 0000. Rotate via Admin → Staff.
+  { id: "OWNER111", name: "Owner", pin: "0000", role: "admin", active: true },
+  // 🔴 Admin tier — full access to every mode + admin dashboard.
+  { id: "HOD001", name: "Muniraju N", pin: "4729", role: "admin", active: true },
+  { id: "HOD002", name: "Manjunatha R K", pin: "8316", role: "admin", active: true },
+  { id: "HOD003", name: "Santhosh S", pin: "5274", role: "admin", active: true },
+  { id: "HOD146", name: "Satish Kumar", pin: "9183", role: "admin", active: true },
+  // 🚪 Door only (hostess role)
+  { id: "HOD129", name: "Lhaipichong Kipgen (Zaneth)", pin: "3856", role: "hostess", active: true },
+  { id: "HOD133", name: "Ragini Jamatia", pin: "6471", role: "hostess", active: true },
+  // 👨‍✈️ Captain only
+  { id: "HOD013", name: "Amber Chettri", pin: "5639", role: "captain", active: true },
+  { id: "HOD019", name: "Sachin Thapa", pin: "8174", role: "captain", active: true },
+  { id: "HOD145", name: "Rabindranath Saren", pin: "4528", role: "captain", active: true },
+  { id: "HOD077", name: "Sumith J D", pin: "7963", role: "captain", active: true },
+  { id: "HOD084", name: "Adarsh Gurung", pin: "3815", role: "captain", active: true },
+  { id: "HOD009", name: "Zholuto Venuh", pin: "6294", role: "captain", active: true },
+  { id: "HOD108", name: "Pemba Tshering Tamang", pin: "9527", role: "captain", active: true },
+  // 🍸 Bar only (bartender role)
+  { id: "HOD150", name: "Aman Chettri", pin: "4762", role: "bartender", active: true },
+  { id: "HOD151", name: "Prakash", pin: "8395", role: "bartender", active: true },
+  { id: "HOD168", name: "Deepak Sha", pin: "5148", role: "bartender", active: true },
+  { id: "HOD172", name: "Atsa", pin: "7236", role: "bartender", active: true },
+  // 🔀 Multi-role (captain + bar)
+  { id: "HOD005", name: "Ganesh Poojary", pin: "2947", role: "captain", roles: ["captain", "bartender"], active: true },
+  // 🔀 Multi-role (door + captain + bar)
+  { id: "HOD086", name: "Tejas R", pin: "3691", role: "hostess", roles: ["hostess", "captain", "bartender"], active: true },
 ];
+
+/** 🚪 Exposed for the "Seed Staff" button in AdminPage. */
+export const DOOR_STAFF_SEED: StaffMember[] = FALLBACK_STAFF;
+
+/** Helper — collapse roles[] OR role to a Set for O(1) membership checks. */
+function rolesOf(s: StaffMember): Set<StaffRole> {
+  const list = s.roles && s.roles.length > 0 ? s.roles : [s.role];
+  return new Set(list);
+}
 
 interface StaffContextValue {
   currentStaff: StaffMember | null;
   allStaff: StaffMember[];
+  /** Legacy: log in by PIN only (used by AdminPage). Kept for back-compat. */
   login: (pin: string) => boolean;
+  /**
+   * Preferred: log in by exact staffId + PIN. Returns the matched staff on
+   * success so the caller can decide if a mode-picker is needed.
+   */
+  loginByStaffId: (staffId: string, pin: string) => StaffMember | null;
   logout: () => void;
   isLoggedIn: boolean;
+  /**
+   * True if the current staff has ANY of the requested roles.
+   * `admin` role implicitly satisfies every check (full access).
+   */
   hasRole: (...roles: StaffRole[]) => boolean;
   verifyManagerPin: (pin: string) => StaffMember | null;
+  /** ms remaining in current session (null when logged out). */
+  sessionExpiresAt: number | null;
+
+  // 🆕 2026-05-25 — Mode picker for multi-role users.
+  /** The mode the user has chosen for this session, e.g. "captain". */
+  activeMode: StaffRole | null;
+  setActiveMode: (mode: StaffRole | null) => void;
+  /** Number of distinct mode-roles this user has (door/captain/bar). */
+  /** True iff staff has >1 mode roles and hasn't picked one yet. */
+  needsModePicker: boolean;
+
+  // 🆕 2026-05-25 — Idle re-PIN lock (does NOT reset 10hr absolute session).
+  /** True when the screen is idle-locked and currentStaff must re-enter PIN. */
+  isIdleLocked: boolean;
+  /** Attempt to clear idle lock by re-entering currentStaff's PIN. */
+  unlockIdle: (pin: string) => boolean;
 }
 
 const StaffContext = createContext<StaffContextValue | null>(null);
 
+/** Only door/captain/bar count as "modes" for picker purposes. Admin is full-access. */
+const MODE_ROLES: StaffRole[] = ["hostess", "captain", "bartender"];
+
 export function StaffProvider({ children }: { children: ReactNode }) {
   const [currentStaff, setCurrentStaff] = useState<StaffMember | null>(null);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
+  const [activeMode, setActiveModeState] = useState<StaffRole | null>(null);
   const [firestoreStaff, setFirestoreStaff] = useState<StaffMember[]>([]);
   const [firestoreFailed, setFirestoreFailed] = useState(false);
+  const [isIdleLocked, setIsIdleLocked] = useState(false);
   const fallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let receivedData = false;
@@ -57,32 +160,161 @@ export function StaffProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const allStaff = firestoreStaff.length > 0 ? firestoreStaff : (firestoreFailed ? FALLBACK_STAFF : []);
+  // 🆕 2026-05-25 — MERGE Firestore staff with FALLBACK_STAFF roster.
+  // Firestore wins on duplicate IDs (admin overrides take effect when Khushi
+  // rotates a PIN), but the new HOD### roster ALWAYS exists even if Firestore
+  // is empty/slow on a fresh tablet (fail-open per replit.md).
+  const allStaff = (() => {
+    if (firestoreStaff.length === 0 && !firestoreFailed) return [];  // still loading
+    const byId = new Map<string, StaffMember>();
+    for (const s of FALLBACK_STAFF) if (s.id) byId.set(s.id, s);
+    for (const s of firestoreStaff) if (s.id) byId.set(s.id, s);  // Firestore overrides
+    return Array.from(byId.values());
+  })();
+
+  // Restore persisted session once staff list is available.
+  useEffect(() => {
+    if (currentStaff || allStaff.length === 0) return;
+    const s = readSession();
+    if (!s) return;
+    const found = allStaff.find((m) => m.id === s.staffId && m.active);
+    if (found) {
+      setCurrentStaff(found);
+      setSessionExpiresAt(s.expiresAt);
+      setActiveModeState(s.activeMode ?? null);
+    } else {
+      clearSession();
+    }
+  }, [allStaff, currentStaff]);
+
+  // Absolute 10-hr watchdog — boot out when window expires, even mid-session.
+  useEffect(() => {
+    if (!sessionExpiresAt) return;
+    const ms = sessionExpiresAt - Date.now();
+    if (ms <= 0) { setCurrentStaff(null); setSessionExpiresAt(null); setActiveModeState(null); clearSession(); return; }
+    const t = setTimeout(() => {
+      setCurrentStaff(null);
+      setSessionExpiresAt(null);
+      setActiveModeState(null);
+      setIsIdleLocked(false);
+      clearSession();
+    }, ms);
+    return () => clearTimeout(t);
+  }, [sessionExpiresAt]);
+
+  // 🆕 2026-05-25 — Idle lock: 25 min of NO user activity → re-PIN required.
+  // Activity = pointer/keyboard/touch on the window. Does NOT clear the
+  // absolute session; user just unlocks fast.
+  useEffect(() => {
+    if (!currentStaff) return;
+    const resetIdle = () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      idleTimer.current = setTimeout(() => setIsIdleLocked(true), IDLE_LOCK_MS);
+    };
+    resetIdle();
+    const events: Array<keyof WindowEventMap> = ["mousedown", "keydown", "touchstart", "pointerdown"];
+    events.forEach((ev) => window.addEventListener(ev, resetIdle, { passive: true }));
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, resetIdle));
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+    };
+  }, [currentStaff]);
 
   const login = useCallback((pin: string): boolean => {
     const found = allStaff.find((s) => s.pin === pin && s.active);
     if (found) {
       setCurrentStaff(found);
+      if (found.id) {
+        const exp = Date.now() + SESSION_TTL_MS;
+        writeSession(found.id, exp, null);
+        setSessionExpiresAt(exp);
+        setActiveModeState(null);
+      }
       return true;
     }
     return false;
   }, [allStaff]);
 
+  const loginByStaffId = useCallback((staffId: string, pin: string): StaffMember | null => {
+    const found = allStaff.find((s) => s.id === staffId && s.pin === pin && s.active);
+    if (found) {
+      setCurrentStaff(found);
+      const exp = Date.now() + SESSION_TTL_MS;
+      // Single-mode users → auto-set activeMode so picker doesn't show.
+      const modeRoles = Array.from(rolesOf(found)).filter((r) => MODE_ROLES.includes(r));
+      const auto = modeRoles.length === 1 ? modeRoles[0] : null;
+      writeSession(staffId, exp, auto);
+      setSessionExpiresAt(exp);
+      setActiveModeState(auto);
+      setIsIdleLocked(false);
+      return found;
+    }
+    return null;
+  }, [allStaff]);
+
+  const setActiveMode = useCallback((mode: StaffRole | null) => {
+    setActiveModeState(mode);
+    if (currentStaff?.id && sessionExpiresAt) {
+      writeSession(currentStaff.id, sessionExpiresAt, mode);
+    }
+  }, [currentStaff, sessionExpiresAt]);
+
   const logout = useCallback(() => {
     setCurrentStaff(null);
+    setSessionExpiresAt(null);
+    setActiveModeState(null);
+    setIsIdleLocked(false);
+    clearSession();
+    // 🔴 2026-05-25 (code review fix) — also nuke ALL legacy per-page session
+    // keys that Captain/Bar/Door pages still read on mount. Without this,
+    // a 5-wrong-PIN idle-lock logout (or any logout) would leave the
+    // mode-page dashboards reachable because their local state was hydrated
+    // from sessionStorage. Belt-and-suspenders security.
+    try {
+      const keys = [
+        "hod_captain_auth", "hod_captain_name", "hod_cap_fails", "hod_cap_lock",
+        "hod_bar_staff", "hod_bar_fails", "hod_bar_lock",
+        "hod_door_auth", "hod_door_name", "hod_door_fails", "hod_door_lock",
+      ];
+      for (const k of keys) sessionStorage.removeItem(k);
+    } catch {}
   }, []);
 
   const hasRole = useCallback((...roles: StaffRole[]): boolean => {
     if (!currentStaff) return false;
-    return roles.includes(currentStaff.role);
+    const mine = rolesOf(currentStaff);
+    if (mine.has("admin")) return true;  // admin = universal access
+    return roles.some((r) => mine.has(r));
   }, [currentStaff]);
 
   const verifyManagerPin = useCallback((pin: string): StaffMember | null => {
-    const found = allStaff.find(
-      (s) => s.pin === pin && s.active && (s.role === "manager" || s.role === "admin")
-    );
+    const found = allStaff.find((s) => {
+      if (!s.active || s.pin !== pin) return false;
+      const mine = rolesOf(s);
+      return mine.has("manager") || mine.has("admin");
+    });
     return found || null;
   }, [allStaff]);
+
+  const unlockIdle = useCallback((pin: string): boolean => {
+    if (!currentStaff) return false;
+    if (currentStaff.pin === pin) {
+      setIsIdleLocked(false);
+      return true;
+    }
+    return false;
+  }, [currentStaff]);
+
+  // Derived values for mode picker.
+  // 🔄 2026-05-25 (Khushi fix) — Picker fires ONLY when the user has 2+
+  // EXPLICIT mode roles (hostess/captain/bartender). Admin universality is
+  // NOT auto-expanded into all-3-modes anymore — owners/admins should land
+  // straight on /admin (via LoginPage auto-route) instead of being forced to
+  // pick a floor mode they don't actually work.
+  const modeRolesForCurrent: StaffRole[] = currentStaff
+    ? Array.from(rolesOf(currentStaff)).filter((r) => MODE_ROLES.includes(r))
+    : [];
+  const needsModePicker = !!currentStaff && modeRolesForCurrent.length > 1 && activeMode === null;
 
   return (
     <StaffContext.Provider
@@ -90,10 +322,17 @@ export function StaffProvider({ children }: { children: ReactNode }) {
         currentStaff,
         allStaff,
         login,
+        loginByStaffId,
         logout,
         isLoggedIn: !!currentStaff,
         hasRole,
         verifyManagerPin,
+        sessionExpiresAt,
+        activeMode,
+        setActiveMode,
+        needsModePicker,
+        isIdleLocked,
+        unlockIdle,
       }}
     >
       {children}

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Link } from "wouter";
+import { useStaff } from "@/lib/staff-context";
+import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, lookupBooking, subscribeToBookings, subscribeToGuestlist,
   subscribeToBookingsForNights, subscribeToGuestlistInRange,
@@ -55,64 +57,27 @@ const WHATSAPP_CF_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 import { ToastAction } from "@/components/ui/toast";
 import { QrScanner } from "@/components/QrScanner";
 
+// 🔄 2026-05-24 (Khushi) — REVERTED per-staff login back to shared name+password.
+// Khushi is rebuilding the staff/attendance module separately tonight, so the
+// door tablet uses the simple Name + Password gate for go-live tomorrow.
+// Password hash below is sha256("hod2025") — rotate via Admin → Settings.
 const DOOR_HASH = "f3deb7cb025897c8b29bc9c0603c35909616f8d6a0c32ddb774683accf394cb9";
 
+// 🆕 2026-05-25 (Khushi) — Door login now uses unified per-staff `StaffLogin`
+// (HOD ID + 4-digit PIN). Wrapper bridges `currentStaff.name` → existing
+// `agentName` state in the parent DoorMode so the rest of DoorMode stays
+// untouched. `hostess` role is allowed; admin implicitly allowed.
 function DoorLogin({ onLogin }: { onLogin: (name: string) => void }) {
-  const [name, setName] = useState(() => sessionStorage.getItem("hod_door_name") || "");
-  const [pwd, setPwd] = useState("");
-  const [error, setError] = useState("");
-  const [fails, setFails] = useState(() => parseInt(sessionStorage.getItem("hod_door_fails") || "0"));
-  const [lockUntil, setLockUntil] = useState(() => parseInt(sessionStorage.getItem("hod_door_lock") || "0"));
-
-  const tryLogin = async () => {
-    const currentLock = parseInt(sessionStorage.getItem("hod_door_lock") || "0");
-    if (currentLock > Date.now()) {
-      setLockUntil(currentLock);
-      setError(`Too many attempts. Locked for ${Math.ceil((currentLock - Date.now()) / 60000)} min.`);
-      return;
-    }
-    if (!name.trim()) { setError("Enter your name"); return; }
-    const hash = await sha256(pwd);
-    if (hash === DOOR_HASH) {
-      sessionStorage.setItem("hod_door_name", name.trim());
-      sessionStorage.setItem("hod_door_auth", "1");
-      sessionStorage.removeItem("hod_door_fails");
-      onLogin(name.trim());
-    } else {
-      const f = fails + 1;
-      setFails(f);
-      sessionStorage.setItem("hod_door_fails", String(f));
-      if (f >= 5) {
-        const lock = Date.now() + 5 * 60 * 1000;
-        sessionStorage.setItem("hod_door_lock", String(lock));
-        setLockUntil(lock);
-        setError("Too many attempts. Locked for 5 minutes.");
-      } else {
-        setError(`Wrong password (${5 - f} left)`);
-      }
-      setPwd("");
-    }
-  };
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, padding: "32px 28px", width: "100%", maxWidth: 360, textAlign: "center" }}>
-        <div style={{ fontSize: 32, marginBottom: 12 }}>🚪</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#C8A645", marginBottom: 6 }}>Door Agent Login</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 24 }}>HOD — House of Dopamine</div>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 10, boxSizing: "border-box" }} />
-        <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="Enter door password"
-          onKeyDown={(e) => e.key === "Enter" && tryLogin()}
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#fff", fontSize: 15, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
-        <button onClick={tryLogin}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
-          Enter
-        </button>
-      </div>
-    </div>
-  );
+  const { currentStaff, isLoggedIn, hasRole, activeMode, needsModePicker } = useStaff();
+  useEffect(() => {
+    if (!isLoggedIn || !currentStaff || needsModePicker) return;
+    if (!hasRole("hostess")) return;
+    if (activeMode && activeMode !== "hostess") return;
+    sessionStorage.setItem("hod_door_name", currentStaff.name);
+    sessionStorage.setItem("hod_door_auth", "1");
+    onLogin(currentStaff.name);
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, needsModePicker, onLogin]);
+  return <StaffLogin allowedRoles={["hostess"]} title="DOOR LOGIN" emoji="🚪" />;
 }
 
 function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBooking; agentName: string; onClose: () => void }) {
@@ -2555,7 +2520,15 @@ const AGG_FILTERS: Array<{ key: string; label: string }> = [
   { key: "zomato",    label: "ZOMATO" },
 ];
 
-function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusConsumed, sourceFilter }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; focusDocId?: string | null; onFocusConsumed?: () => void; sourceFilter?: "corporate" | "non-corporate" }) {
+// 🔴 2026-05-25 (Khushi LIVE-NIGHT) — TablesTab now accepts `onCover`. Khushi:
+// "booked a table for Chiru, he arrived LATE, want to charge cover too —
+// guest should have BOTH the table reservation AND a wallet balance".
+// We adapt the HodTableReservation → HodBooking (with `_isTable: true` so
+// activateCoverForBooking skips the eventTitle copy + the `bookings`-coll
+// mirror write — both wrong for table-source rows) and hand off to the
+// existing CoverActivationModal. Fallback: if the modal write fails, the
+// table reservation + arrival mark stay intact — no data lost.
+function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, onFocusConsumed, sourceFilter }: { query: string; agentName: string; eventId: string; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; onCover: (b: HodBooking) => void; focusDocId?: string | null; onFocusConsumed?: () => void; sourceFilter?: "corporate" | "non-corporate" }) {
   const { toast } = useToast();
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [aggFilter, setAggFilter] = useState<string>("all");
@@ -3211,15 +3184,64 @@ function TablesTab({ query, agentName, eventId, onShowQr, focusDocId, onFocusCon
                 );
               })()}
 
-              {/* ── ACTION BUTTONS (Khushi 16 May: keep ONLY Arrived + Reassign.
-                  Call stays as the icon on the row itself; WA + Cancel removed). */}
-              <div style={{ display: "grid", gridTemplateColumns: arrived ? "1fr" : "1.2fr 1fr", gap: 6 }}>
+              {/* ── ACTION BUTTONS (Khushi 16 May: Arrived + Reassign.
+                  Call stays as the icon on the row itself; WA + Cancel removed.)
+                  🔴 2026-05-25 (Khushi LIVE-NIGHT) — added 💰 ACTIVATE COVER
+                  so a late-arriving table guest can be charged a cover wallet
+                  on top of their reservation. Builds a synthetic HodBooking
+                  (ref = bookingRef, _isTable: true → activateCoverForBooking
+                  skips the eventTitle copy + bookings-coll mirror) and pipes
+                  it through the existing CoverActivationModal. Result: the
+                  guest now has BOTH a table reservation AND a wallet balance.
+                  Disabled until Arrived is marked (cover requires the guest
+                  to actually be inside the venue — fail-safe against bouncer
+                  pre-charging a no-show). Fallback: cover write failures
+                  leave the arrival mark + reservation intact, no data lost. */}
+              <div style={{ display: "grid", gridTemplateColumns: arrived ? "1fr 1fr" : "1.2fr 1fr 1fr", gap: 6 }}>
                 {!arrived && (
                   <button onClick={() => handleArrived(r)} disabled={arrBusy === r._docId}
                     style={{ padding: "13px 4px", borderRadius: 8, background: "linear-gradient(135deg,#B83227,#8B2520)", border: "none", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer" }}>
                     {arrBusy === r._docId ? "Marking…" : "🚶 Arrived"}
                   </button>
                 )}
+                <button
+                  onClick={() => {
+                    if (!arrived) {
+                      alert("⚠️ Mark guest as 🚶 Arrived first, THEN activate cover.");
+                      return;
+                    }
+                    const refId = r.bookingRef || r._docId;
+                    // Synthetic HodBooking for CoverActivationModal. _isTable
+                    // is the critical flag — activateCoverForBooking branches
+                    // on it (skips bookings-coll mirror + eventTitle copy).
+                    const syntheticBooking: HodBooking = {
+                      id: refId,
+                      ref: refId,
+                      name: r.customerName || "Guest",
+                      phone: r.phone || "",
+                      date: r.date || "",
+                      total: 0,           // no online prepayment on tables
+                      paymentId: "",      // → activateCover treats paidOnline=0
+                      checkedIn: true,
+                      _isTable: true,
+                      _isGuestList: false,
+                      eventId: "",
+                      eventTitle: "",
+                    };
+                    onCover(syntheticBooking);
+                    setExpandedDocId(null);
+                  }}
+                  title={arrived ? "Charge a cover wallet (e.g. late arrival)" : "Mark Arrived first"}
+                  style={{
+                    padding: "13px 4px", borderRadius: 8,
+                    background: arrived ? "#C8A645" : "rgba(200,166,69,0.25)",
+                    border: arrived ? "none" : "1px solid rgba(200,166,69,0.4)",
+                    color: arrived ? "#000" : "rgba(200,166,69,0.7)",
+                    fontSize: 12, fontWeight: 900, cursor: "pointer",
+                    opacity: arrived ? 1 : 0.7,
+                  }}>
+                  💰 Activate Cover
+                </button>
                 <button onClick={() => { setReassignFor(r); setExpandedDocId(null); }}
                   style={{ padding: "13px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", color: "rgba(255,255,255,0.85)", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
                   🔄 Reassign
@@ -5751,8 +5773,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         />}
         {tab === "tickets"   && <TicketsTab        agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="non-corporate" />}
-        {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
+        {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="non-corporate" />}
+        {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
       </div>
@@ -6410,8 +6432,14 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
               <PaxChip label="GUEST PAX" n={guestlistPax} />
             </div>
           </Tile>
+          {/* 🆕 2026-05-23 (Khushi) — strict count: only covers where money was
+              actually collected (`coverActivated > 0`) are "activated".
+              Stubs created at booking time (₹0) don't count. */}
           <Tile label="COVER CHARGES COLLECTED" value={fmtRs(totalCoversCollected)} tone="#C8A645"
-            sub={`${coversForNight.length} cover${coversForNight.length === 1 ? "" : "s"} activated`} />
+            sub={(() => {
+              const paid = coversForNight.filter((c) => (Number(c.coverActivated) || 0) > 0).length;
+              return `${paid} cover${paid === 1 ? "" : "s"} activated`;
+            })()} />
           <Tile label="TOTAL AMOUNT REDEEMED" value={fmtRs(totalAmountRedeemed)} tone="#EF4444"
             sub={`Wallet spend across all covers`} />
           <Tile label="TOTAL TABLES BOOKED" value={allTablesForNight.length} tone="#C8A645">
@@ -6492,11 +6520,30 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
 }
 
 export default function DoorMode() {
-  const [agentName, setAgentName] = useState<string | null>(() => {
-    if (sessionStorage.getItem("hod_door_auth") === "1") return sessionStorage.getItem("hod_door_name") || null;
-    return null;
-  });
+  // 🔄 2026-05-25 (Khushi) — Per-staff HOD-ID + 4-digit PIN login (StaffLogin)
+  // bridges into `agentName` via the DoorLogin wrapper above.
+  const { isLoggedIn, currentStaff, hasRole, activeMode } = useStaff();
+  const [agentName, setAgentName] = useState<string | null>(() =>
+    sessionStorage.getItem("hod_door_auth") === "1" ? sessionStorage.getItem("hod_door_name") : null
+  );
+
+  // 🔴 2026-05-25 (code review fix) — Force local logout when global session
+  // clears OR multi-role user switches away from hostess (door) mode.
+  useEffect(() => {
+    if (!agentName) return;
+    const stillHostess = isLoggedIn && currentStaff && hasRole("hostess") && (!activeMode || activeMode === "hostess");
+    if (!stillHostess) {
+      sessionStorage.removeItem("hod_door_auth");
+      sessionStorage.removeItem("hod_door_name");
+      setAgentName(null);
+    }
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, agentName]);
 
   if (!agentName) return <DoorLogin onLogin={setAgentName} />;
-  return <DoorDashboard agentName={agentName} onLogout={() => { sessionStorage.removeItem("hod_door_auth"); setAgentName(null); }} />;
+  const logout = () => {
+    sessionStorage.removeItem("hod_door_auth");
+    sessionStorage.removeItem("hod_door_name");
+    setAgentName(null);
+  };
+  return <DoorDashboard agentName={agentName} onLogout={logout} />;
 }

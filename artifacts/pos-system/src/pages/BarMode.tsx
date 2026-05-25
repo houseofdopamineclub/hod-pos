@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "wouter";
+import { useStaff } from "@/lib/staff-context";
+import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
@@ -12,7 +14,10 @@ import {
   type HodCover, type HodOrderItem, type TabletFloor, type HodGuestSearchHit, type HodTransaction, type HodTabRound,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { WaiterCallBanner } from "@/components/WaiterCallBanner";
+// 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed from BarMode. Bartender
+// should ONLY see food-ready KDS popups (already wired below), NOT
+// floor-customer "Call Waiter" pings — those are for captains only.
+// import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 
 // V3 2026-05-11 — Manager PIN hash (sha256('8888')). Same constant as CaptainMode.
 // Kept inline (not imported) so BarMode stays self-contained — rotating this
@@ -137,78 +142,21 @@ interface CartItem {
   t: "food" | "drink";
 }
 
+// 🆕 2026-05-25 (Khushi) — Bar login now uses unified per-staff `StaffLogin`
+// (HOD ID + 4-digit PIN). Wrapper bridges `currentStaff.name` → existing
+// `staffName` state in BarMain so the rest of BarMode stays untouched.
+// `bartender` role is allowed; admin implicitly allowed via hasRole().
 function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
-  const [pwd, setPwd] = useState("");
-  const [staff, setStaff] = useState("");
-  const [error, setError] = useState("");
-  const [fails, setFails] = useState(() => parseInt(sessionStorage.getItem("hod_bar_fails") || "0"));
-  const [lockUntil, setLockUntil] = useState(() => parseInt(sessionStorage.getItem("hod_bar_lock") || "0"));
-
-  const tryLogin = async () => {
-    const currentLock = parseInt(sessionStorage.getItem("hod_bar_lock") || "0");
-    if (currentLock > Date.now()) {
-      setLockUntil(currentLock);
-      setError(`Locked for ${Math.ceil((currentLock - Date.now()) / 60000)} min.`);
-      return;
-    }
-    if (!staff) { setError("Select your name"); return; }
-    if (!pwd) { setError("Enter password"); return; }
-    const hash = await sha256(pwd + BAR_SALT);
-    if (hash === BAR_PIN_HASH) {
-      sessionStorage.removeItem("hod_bar_fails");
-      sessionStorage.removeItem("hod_bar_lock");
-      sessionStorage.setItem("hod_bar_staff", staff);
-      logBarSession(staff).catch(() => {});
-      onLogin(staff);
-    } else {
-      const f = fails + 1;
-      setFails(f);
-      sessionStorage.setItem("hod_bar_fails", String(f));
-      if (f >= 5) {
-        const lock = Date.now() + 30 * 60 * 1000;
-        sessionStorage.setItem("hod_bar_lock", String(lock));
-        setError("Too many attempts. Locked for 30 minutes.");
-      } else {
-        setError(`Wrong password (${5 - f} attempts left)`);
-      }
-      setPwd("");
-    }
-  };
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, padding: "32px 24px", width: "100%", maxWidth: 340, textAlign: "center" }}>
-        <div style={{ fontSize: 32, marginBottom: 8 }}>🍸</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 4 }}>Bar Mode</div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginBottom: 20 }}>HOD — House of Dopamine</div>
-
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginBottom: 8, textAlign: "left" }}>Staff</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 20 }}>
-          {BAR_STAFF.map((s) => (
-            <button key={s} onClick={() => setStaff(s)}
-              style={{ padding: "8px 14px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                background: staff === s ? "rgba(242,199,68,.15)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${staff === s ? "rgba(242,199,68,.5)" : "rgba(255,255,255,.08)"}`,
-                color: staff === s ? "#F2C744" : "rgba(255,255,255,.5)" }}>
-              {s}
-            </button>
-          ))}
-        </div>
-
-        <input type="password" placeholder="Enter bar password" value={pwd}
-          onChange={(e) => setPwd(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") tryLogin(); }}
-          style={{ width: "100%", padding: "12px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
-
-        <button onClick={tryLogin}
-          style={{ width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #F2C744, #B8951F)", color: "#0A0A0A", fontSize: 15, fontWeight: 800, cursor: "pointer", letterSpacing: 1 }}>
-          Enter
-        </button>
-
-        {error && <div style={{ fontSize: 12, color: "#EF4444", marginTop: 12 }}>{error}</div>}
-      </div>
-    </div>
-  );
+  const { currentStaff, isLoggedIn, hasRole, activeMode, needsModePicker } = useStaff();
+  useEffect(() => {
+    if (!isLoggedIn || !currentStaff || needsModePicker) return;
+    if (!hasRole("bartender")) return;
+    if (activeMode && activeMode !== "bartender") return;
+    logBarSession(currentStaff.name).catch(() => {});
+    sessionStorage.setItem("hod_bar_staff", currentStaff.name);
+    onLogin(currentStaff.name);
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, needsModePicker, onLogin]);
+  return <StaffLogin allowedRoles={["bartender"]} title="BAR LOGIN" emoji="🍸" />;
 }
 
 function WalletOverlay({ cover, staffName, onClose }: {
@@ -1965,7 +1913,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(10,10,10,.98)", border: "1px solid rgba(242,199,68,.4)", borderRadius: 12, padding: "10px 20px", fontSize: 13, fontWeight: 700, color: "#F2C744", zIndex: 99999, fontFamily: "'Space Grotesk', sans-serif" }}>{toast}</div>
       )}
 
-      <WaiterCallBanner staffName={staffName} role="bar" />
+      {/* 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed; bar only sees food-ready KDS popups. */}
 
       <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(242,199,68,.25)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -2161,7 +2109,19 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
 }
 
 export default function BarMode() {
+  const { isLoggedIn, currentStaff, hasRole, activeMode } = useStaff();
   const [staffName, setStaffName] = useState<string | null>(() => sessionStorage.getItem("hod_bar_staff") || null);
+
+  // 🔴 2026-05-25 (code review fix) — Force local logout when global session
+  // clears OR multi-role user switches away from bartender mode.
+  useEffect(() => {
+    if (!staffName) return;
+    const stillBartender = isLoggedIn && currentStaff && hasRole("bartender") && (!activeMode || activeMode === "bartender");
+    if (!stillBartender) {
+      sessionStorage.removeItem("hod_bar_staff");
+      setStaffName(null);
+    }
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, staffName]);
 
   if (!staffName) return <BarLogin onLogin={setStaffName} />;
   return <BarMain staffName={staffName} onLogout={() => { sessionStorage.removeItem("hod_bar_staff"); setStaffName(null); }} />;

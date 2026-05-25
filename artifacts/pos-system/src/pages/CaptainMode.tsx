@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactElement } from "react";
 import { Link } from "wouter";
+import { useStaff } from "@/lib/staff-context";
+import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, subscribeToHodReservations, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
@@ -405,61 +407,21 @@ function useAudioAlert() {
   }, []);
 }
 
+// 🆕 2026-05-25 (Khushi) — Captain login now uses the unified per-staff
+// `StaffLogin` (HOD ID + 4-digit PIN). Legacy shared-password screen is
+// retired. The wrapper bridges `currentStaff.name` → existing `captainName`
+// state in the parent component so the rest of CaptainMode stays untouched.
 function CaptainLogin({ onLogin }: { onLogin: (name: string) => void }) {
-  const [name, setName] = useState(() => sessionStorage.getItem("hod_captain_name") || "");
-  const [pwd, setPwd] = useState("");
-  const [error, setError] = useState("");
-  const [fails, setFails] = useState(() => parseInt(sessionStorage.getItem("hod_cap_fails") || "0"));
-  const [lockUntil, setLockUntil] = useState(() => parseInt(sessionStorage.getItem("hod_cap_lock") || "0"));
-
-  const tryLogin = async () => {
-    const currentLock = parseInt(sessionStorage.getItem("hod_cap_lock") || "0");
-    if (currentLock > Date.now()) {
-      setLockUntil(currentLock);
-      setError(`Too many attempts. Locked for ${Math.ceil((currentLock - Date.now()) / 60000)} min.`);
-      return;
-    }
-    if (!name.trim()) { setError("Please enter your name"); return; }
-    const hash = await sha256(pwd);
-    if (hash === CAPTAIN_HASH) {
-      sessionStorage.setItem("hod_captain_name", name.trim());
-      sessionStorage.removeItem("hod_cap_fails");
-      sessionStorage.removeItem("hod_cap_lock");
-      onLogin(name.trim());
-    } else {
-      const f = fails + 1;
-      setFails(f);
-      sessionStorage.setItem("hod_cap_fails", String(f));
-      if (f >= 5) {
-        const lock = Date.now() + 5 * 60 * 1000;
-        sessionStorage.setItem("hod_cap_lock", String(lock));
-        setError("Too many attempts. Locked for 5 minutes.");
-      } else {
-        setError(`Incorrect password (${5 - f} attempts left)`);
-      }
-      setPwd("");
-    }
-  };
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, padding: "32px 28px", width: "100%", maxWidth: 360, textAlign: "center" }}>
-        <div style={{ fontSize: 36, marginBottom: 12 }}>🪩</div>
-        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 23, fontWeight: 900, color: "#E5A82A", marginBottom: 6 }}>Captain Login</div>
-        <div style={{ fontSize: 14, color: "rgba(242,235,211,.8)", marginBottom: 24 }}>HOD — House of Dopamine</div>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name (e.g. Ravi)"
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 18, outline: "none", marginBottom: 10, boxSizing: "border-box" }} />
-        <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="Enter captain password"
-          onKeyDown={(e) => e.key === "Enter" && tryLogin()}
-          style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "#F2EBD3", fontSize: 18, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
-        {error && <div style={{ fontSize: 14, color: "#EF4444", marginBottom: 10 }}>{error}</div>}
-        <button onClick={tryLogin}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(229,168,42,.9),rgba(160,120,48,.8))", border: "none", color: "#000", fontSize: 18, fontWeight: 900, cursor: "pointer" }}>
-          Enter
-        </button>
-      </div>
-    </div>
-  );
+  const { currentStaff, isLoggedIn, hasRole, activeMode, needsModePicker } = useStaff();
+  useEffect(() => {
+    if (!isLoggedIn || !currentStaff || needsModePicker) return;
+    // Allow if user has captain role (admin implicitly) AND has not switched
+    // their active-mode away from captain (multi-role: Tejas/Ganesh).
+    if (!hasRole("captain")) return;
+    if (activeMode && activeMode !== "captain") return;
+    onLogin(currentStaff.name);
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, needsModePicker, onLogin]);
+  return <StaffLogin allowedRoles={["captain"]} title="CAPTAIN LOGIN" emoji="👨‍✈️" />;
 }
 
 function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tableId, floorLabel, customerName, onClose }: {
@@ -4710,6 +4672,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 }
 
 export default function CaptainMode() {
+  const { isLoggedIn, currentStaff, hasRole, activeMode } = useStaff();
   const [captainName, setCaptainName] = useState<string | null>(() => {
     const token = `hod_cap_${CAPTAIN_HASH.slice(0, 16)}_${new Date().toISOString().split("T")[0]}`;
     if (sessionStorage.getItem("hod_captain_auth") === token) return sessionStorage.getItem("hod_captain_name") || "Captain";
@@ -4721,6 +4684,20 @@ export default function CaptainMode() {
     sessionStorage.setItem("hod_captain_auth", token);
     setCaptainName(name);
   };
+
+  // 🔴 2026-05-25 (code review fix) — Force local logout whenever the global
+  // staff session is cleared (idle-lock 5-wrong, manual logout, 10hr expiry,
+  // OR mode-picker switches away from captain). Without this, the dashboard
+  // remained reachable from stale local state. Belt-and-suspenders security.
+  useEffect(() => {
+    if (!captainName) return;
+    const stillCaptain = isLoggedIn && currentStaff && hasRole("captain") && (!activeMode || activeMode === "captain");
+    if (!stillCaptain) {
+      sessionStorage.removeItem("hod_captain_auth");
+      sessionStorage.removeItem("hod_captain_name");
+      setCaptainName(null);
+    }
+  }, [isLoggedIn, currentStaff, hasRole, activeMode, captainName]);
 
   if (!captainName) return <CaptainLogin onLogin={handleLogin} />;
   return <CaptainDashboard captainName={captainName} />;

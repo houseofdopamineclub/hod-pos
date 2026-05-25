@@ -820,6 +820,42 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     }
   }
 
+  // 🔴 2026-05-25 (Khushi LIVE-NIGHT) — TABLE-BOOKING COVER MIRROR.
+  // hodclub.in/?wallet=TBL-XXX reads coverBalance/coverActivated from
+  // the tableReservations doc (NOT the covers doc — see customer site
+  // _startTableListener line ~6952). Without this mirror, activating a
+  // ₹1000 cover on a table writes to `covers` but the customer page
+  // keeps reading `tableReservations.coverBalance=0` and shows nothing.
+  // Lookup is by `bookingRef` (TBL-XXXXX) since the doc id is the
+  // composite slot key (date_tableId_HHMM). Fail-open: if the lookup
+  // misses or the write fails, the covers doc is still active and the
+  // captain Bar Mode tab can still redeem against it — only the
+  // customer-side visibility breaks.
+  if (booking._isTable && booking.ref) {
+    try {
+      const q = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", booking.ref), limit(1));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const tableDocRef = snap.docs[0].ref;
+        await updateDoc(tableDocRef, {
+          coverActivated: amount,
+          coverBalance: amount,
+          coverPaid: paidOnline,
+          coverUsed: 0,
+          coverPaymentMethod: paymentMethod,
+          ...(paymentSplit ? { coverPaymentSplit: paymentSplit } : {}),
+          coverActivatedAt: new Date().toISOString(),
+          coverActivatedBy: staffName,
+          coverDocId: docId,
+        });
+      } else {
+        console.warn("[activateCoverForBooking] no tableReservations doc found for bookingRef", booking.ref);
+      }
+    } catch (mirrorErr) {
+      console.warn("[activateCoverForBooking] table mirror write failed (non-fatal)", mirrorErr);
+    }
+  }
+
   return { id: docId, cover: { id: docId, ...cover } as HodCover };
 }
 
