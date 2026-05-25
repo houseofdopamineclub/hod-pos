@@ -598,6 +598,54 @@ export async function deleteHodEvent(id: string): Promise<void> {
   await deleteDoc(doc(db, EVENTS_COL, id));
 }
 
+// 🆕 2026-05-24 (Khushi) — Auto-cleanup of expired event posters. Khushi wants
+// posters auto-removed once an event is over so old events don't clutter the
+// customer site or door tablet (and don't bloat the events collection, which
+// every page subscribes to). Runs on EventsAdmin mount + can be called manually.
+//
+// Deletes events where `date` is more than `graceDays` days in the past
+// (default 2 — gives operator a one-day window after the event to fix any
+// reconciliation before the poster vanishes).
+//
+// 🛟 Fail-open: if any single delete fails (rules / network), it's logged and
+// skipped — the rest still delete. Returns { deleted, skipped, errors }.
+// Note: if the poster was uploaded to Firebase Storage and the doc only had
+// a URL reference, the storage object is NOT deleted here (would need
+// admin SDK / storage delete API). Firestore-side cleanup is enough for the
+// app to stop showing it.
+export async function deleteExpiredHodEvents(
+  graceDays: number = 2,
+): Promise<{ deleted: number; skipped: number; errors: string[] }> {
+  const errors: string[] = [];
+  let deleted = 0;
+  let skipped = 0;
+  try {
+    const cutoffMs = Date.now() - graceDays * 24 * 60 * 60 * 1000;
+    const cutoffDate = new Date(cutoffMs);
+    const cutoffStr =
+      `${cutoffDate.getFullYear()}-${String(cutoffDate.getMonth() + 1).padStart(2, "0")}-${String(cutoffDate.getDate()).padStart(2, "0")}`;
+    const snap = await getDocs(collection(db, EVENTS_COL));
+    for (const d of snap.docs) {
+      const data = d.data() as Partial<HodEvent>;
+      const evDate = String(data.date || "").trim();
+      // Only delete if we can confidently parse a YYYY-MM-DD that is strictly
+      // older than the cutoff. Unparseable dates are SKIPPED (fail-open — never
+      // delete an event whose date format we don't understand).
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(evDate)) { skipped++; continue; }
+      if (evDate >= cutoffStr) { skipped++; continue; }
+      try {
+        await deleteDoc(doc(db, EVENTS_COL, d.id));
+        deleted++;
+      } catch (e: any) {
+        errors.push(`${d.id}: ${e?.message || e}`);
+      }
+    }
+  } catch (e: any) {
+    errors.push(`scan failed: ${e?.message || e}`);
+  }
+  return { deleted, skipped, errors };
+}
+
 /** Coerce + default all fields the same way hodclub does, so the customer
  *  page never sees NaN/undefined and Razorpay always gets a real number. */
 function normalizeEvent(d: Partial<HodEvent>): HodEvent {
@@ -923,6 +971,73 @@ export async function ensureZeroBalanceCoverForGuest(input: {
   }
 
   return { created, docId, mirroredCheckIn };
+}
+
+// 🚶 2026-05-25 (Khushi GO-LIVE) — BAR WALK-IN.
+// Customer arrives at the bar with NO phone / NO QR / NO booking. Bartender
+// hits "+ NEW WALK-IN" → this mints a fresh zero-balance cover doc with an
+// auto-sequenced name (WALKIN-1, WALKIN-2, ... per operational night) and
+// returns the full HodCover so the WalletOverlay (menu/order screen) opens
+// immediately. Bartender then RECHARGES with cash/UPI/card and proceeds
+// through the normal pay-and-go flow.
+// Sequence is race-safe via a Firestore transaction on a per-night counter
+// doc at `posCounters/walkin-<YYYY-MM-DD>` — two bartenders tapping at the
+// same moment get distinct numbers, never the same.
+export async function createBarWalkinCover(staffName: string): Promise<HodCover> {
+  await authReady;
+  const today = getOperationalNightStr();
+  const expDate = getCoverExpiryFor(today);
+  const counterRef = doc(db, "posCounters", `walkin-${today}`);
+  const seq = await runTransaction(db, async (txn) => {
+    const snap = await txn.get(counterRef);
+    const next = ((snap.exists() ? (snap.data().seq as number) : 0) || 0) + 1;
+    txn.set(counterRef, { seq: next, updatedAt: new Date().toISOString() }, { merge: true });
+    return next;
+  });
+  const refStr = `WALKIN-${today.replace(/-/g, "")}-${seq}`;
+  const docId = refStr;
+  const ref = doc(db, COVERS_COL, docId);
+  const cover: Record<string, unknown> = {
+    bookingId: docId,
+    ref: refStr,
+    name: `WALKIN-${seq}`,
+    phone: "",
+    email: "",
+    eventId: "",
+    eventTitle: "",
+    coverPaid: 0,
+    coverActivated: 0,
+    coverBalance: 0,
+    pendingTopUp: 0,
+    coverUsed: 0,
+    diffAmount: 0,
+    diffMethod: "none",
+    paymentMethod: "walkin",
+    isGuestList: false,
+    isTableBooking: false,
+    activatedAt: new Date().toISOString(),
+    activatedBy: staffName,
+    transactions: [],
+    expiresAt: expDate.toISOString(),
+    checkedIn: true,
+    actualArrivalTime: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+    date: today,
+    topUpTotal: 0,
+    groupSize: 1,
+    coverDocId: docId,
+    // 🔴 2026-05-25 (Khushi BUG FIX) — must start with "walkin" so Reports
+    // classifyWallet() treats it as a true walk-in (source:"walk-in",
+    // payChannel:""). Previously "bar_walkin" → did NOT match
+    // startsWith("walkin") → fell through to cover branch → "⚠ UNKNOWN"
+    // pay-channel badge on the wallet row. "walkin_bar" matches cleanly.
+    source: "walkin_bar",
+    // No payment was collected at creation — bartender will recharge after.
+    // Setting paymentId="walkin_bar_<seq>" stops the cover branch from
+    // tagging this as UNKNOWN if anything ever re-classifies it.
+    paymentId: `walkin_bar_${seq}`,
+  };
+  await setDoc(ref, cover);
+  return { id: docId, ...cover } as HodCover;
 }
 
 export async function editCoverAmount(coverId: string, newAmount: number, staffName: string): Promise<void> {
