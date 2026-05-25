@@ -8,6 +8,7 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
+  subscribeToCoversForNight,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -1852,15 +1853,48 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
     return () => unsub();
   }, []);
 
+  // 🆕 2026-05-25 (Khushi STRATEGY C) — DASHBOARD INCOMING CUSTOMER ORDERS.
+  // Backstop for orphan/stale wallets: customer site writes preparing rounds
+  // with source:'customer_self_order_bar' (or _table). If bartender doesn't
+  // have that wallet open AND captain card isn't fresh (e.g. table was
+  // released + re-seated), nobody sees the order. This tile subscribes to
+  // tonight's covers, filters for ANY cover with a preparing
+  // customer_self_order_* round, and surfaces one tappable tile per cover.
+  // Tapping opens the wallet — bartender then rings/voids the round as
+  // usual via WalletOverlay. The tile auto-disappears when the round flips
+  // out of "preparing" (existing activate/void flow handles this).
+  const [incoming, setIncoming] = useState<HodCover[]>([]);
+  useEffect(() => {
+    const night = getOperationalNightStr();
+    const unsub = subscribeToCoversForNight(night, (covers) => {
+      setIncoming(covers.filter((cv) =>
+        Array.isArray(cv.tabRounds) && cv.tabRounds.some((rd: any) =>
+          rd && rd.status === 'preparing' && typeof rd.source === 'string' && rd.source.indexOf('customer_self_order') === 0
+        )
+      ));
+    });
+    return () => unsub();
+  }, []);
+
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
 
   // 🛡 BUGFIX 2026-05-08: Bar Mode must refuse table bookings (TABLE FOR 4 /
   // VVIP TABLE FOR 6). Those bills run through Captain Mode where GST + 5%
   // service charge is applied at end of night. Bar Mode is pay-and-go for
   // cover wallets only. Reject at every entry point: QR scan + search click.
+  //
+  // 🔴 2026-05-25 (Khushi GO-LIVE) — EXCEPTION for "I'M AT THE BAR" flow.
+  // When the door has activated a ₹X cover ON a table booking (coverActivated
+  // > 0), the wallet is now a real drink wallet — the customer can walk up
+  // to the bar instead of waiting for the captain (see customer site
+  // "Where are you?" picker). In that case Bar Mode SHOULD open the wallet
+  // and place the order normally; tax math stays identical to pure-cover
+  // wallets (₹X inclusive, SC + GST shown in breakdown — captain-only
+  // SC-waiver toggle does NOT apply at the bar by design).
+  // Pure unactivated tables (coverActivated===0) still bounce to Captain.
   const tryOpenCover = (cover: HodCover) => {
-    if (cover.isTableBooking) {
-      showToast("🪑 Table booking — open in Captain Mode (tax + service charge applies). Bar Mode is for cover wallets only.");
+    if (cover.isTableBooking && !((cover.coverActivated || 0) > 0)) {
+      showToast("🪑 Table not yet activated — activate cover at Door first, or open in Captain Mode.");
       return;
     }
     setActiveCover(cover);
@@ -2070,15 +2104,78 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           </button>
         </div>
 
+        {/* 🆕 2026-05-25 (Khushi STRATEGY C) — INCOMING CUSTOMER ORDERS tile.
+            Always-on backstop. Surfaces every cover whose customer has just
+            placed an order from hodclub.in (bar OR table choice). Bartender
+            taps to open the wallet and ring/void as usual. Pulsing border
+            so it can't be missed even if bartender is mid-search. */}
+        {incoming.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#A855F7", marginBottom: 10, letterSpacing: ".6px", textTransform: "uppercase" }}>
+              📥 INCOMING CUSTOMER ORDERS · {incoming.length}
+            </div>
+            {incoming.map((cv) => {
+              const preparingRound: any = (cv.tabRounds || []).find((rd: any) => rd && rd.status === 'preparing' && typeof rd.source === 'string' && rd.source.indexOf('customer_self_order') === 0);
+              const isBar = preparingRound?.source === 'customer_self_order_bar';
+              const items: HodOrderItem[] = (preparingRound?.items as HodOrderItem[]) || [];
+              const total = preparingRound?.roundTotal || 0;
+              const placedAtMs = preparingRound?.placedAt ? new Date(preparingRound.placedAt).getTime() : 0;
+              const ageSec = placedAtMs ? Math.max(0, Math.floor((Date.now() - placedAtMs) / 1000)) : 0;
+              const ageLabel = ageSec < 60 ? `${ageSec}s ago` : `${Math.floor(ageSec/60)}m ${ageSec%60}s ago`;
+              return (
+                <button key={cv.id} onClick={() => tryOpenCover(cv)}
+                  className="pulse-green"
+                  style={{ display: "block", width: "100%", textAlign: "left", padding: "14px 16px", borderRadius: 12,
+                    background: "linear-gradient(135deg,rgba(168,85,247,.18),rgba(168,85,247,.06))",
+                    border: "2px solid rgba(168,85,247,.7)",
+                    marginBottom: 8, cursor: "pointer",
+                    boxShadow: "0 0 14px rgba(168,85,247,.35)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ fontSize: 15, fontWeight: 900, color: "#fff" }}>{cv.name || cv.ref}</div>
+                    <span style={{ fontSize: 10, fontWeight: 900, padding: "3px 8px", borderRadius: 6, background: "rgba(168,85,247,.3)", color: "#E9D5FF", whiteSpace: "nowrap", letterSpacing: ".4px" }}>
+                      {isBar ? "🍸 AT BAR" : "🍽 AT TABLE"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 12, fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 6 }}>
+                    <span>{cv.ref}</span>
+                    <span>{cv.phone}</span>
+                    <span style={{ color: "#F87171", fontWeight: 800 }}>⏱ {ageLabel}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.8)", fontWeight: 700 }}>
+                    {items.map((it, i) => <span key={i}>{i > 0 ? ", " : ""}{it.qty}× {it.n}</span>)}
+                    <span style={{ color: "#E5A82A", fontWeight: 900, marginLeft: 8 }}>₹{total}</span>
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: "#A855F7", marginTop: 6, letterSpacing: ".4px", textTransform: "uppercase" }}>
+                    ▸ TAP TO OPEN WALLET & RING IN
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {results.length > 0 && (
           <div>
             <div style={{ fontSize: 12, fontWeight: 800, color: "rgba(255,255,255,.5)", marginBottom: 10 }}>{results.length} result(s)</div>
-            {results.map((cv) => (
+            {results.map((cv) => {
+              // 🔴 2026-05-25 (Khushi GO-LIVE) — Visual differentiation:
+              //   • TABLE + ACTIVATED COVER  → gold pill "🍽+🍸 TABLE WALLET", looks live (full opacity).
+              //   • TABLE + no cover yet     → purple dashed disabled look + "TABLE → CAPTAIN" pill (unchanged).
+              //   • Pure cover wallet        → normal look.
+              const tableActivated = !!cv.isTableBooking && (cv.coverActivated || 0) > 0;
+              const tableBlocked   = !!cv.isTableBooking && !tableActivated;
+              const bg     = tableActivated ? "rgba(201,168,76,.08)"  : tableBlocked ? "rgba(168,85,247,.06)"        : "rgba(255,255,255,.04)";
+              const border = tableActivated ? "1px solid rgba(201,168,76,.45)" : tableBlocked ? "1px dashed rgba(168,85,247,.35)" : "1px solid rgba(255,255,255,.08)";
+              const opacity = tableBlocked ? 0.7 : 1;
+              return (
               <button key={cv.id} onClick={() => tryOpenCover(cv)}
-                style={{ display: "block", width: "100%", textAlign: "left", padding: "14px 16px", borderRadius: 12, background: cv.isTableBooking ? "rgba(168,85,247,.06)" : "rgba(255,255,255,.04)", border: cv.isTableBooking ? "1px dashed rgba(168,85,247,.35)" : "1px solid rgba(255,255,255,.08)", marginBottom: 8, cursor: "pointer", opacity: cv.isTableBooking ? 0.7 : 1 }}>
+                style={{ display: "block", width: "100%", textAlign: "left", padding: "14px 16px", borderRadius: 12, background: bg, border, marginBottom: 8, cursor: "pointer", opacity }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                   <div style={{ fontSize: 14, fontWeight: 800, color: "#fff" }}>{cv.name}</div>
-                  {cv.isTableBooking && (
+                  {tableActivated && (
+                    <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 7px", borderRadius: 6, background: "rgba(201,168,76,.18)", color: "#C9A84C", whiteSpace: "nowrap" }}>🍽+🍸 TABLE WALLET</span>
+                  )}
+                  {tableBlocked && (
                     <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 7px", borderRadius: 6, background: "rgba(168,85,247,.15)", color: "#A855F7", whiteSpace: "nowrap" }}>🪑 TABLE → CAPTAIN</span>
                   )}
                 </div>
@@ -2088,7 +2185,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
                   <span style={{ color: (cv.coverBalance || 0) > 0 ? "#00C864" : "#EF4444", fontWeight: 800 }}>₹{(cv.coverBalance || 0).toLocaleString("en-IN")}</span>
                 </div>
               </button>
-            ))}
+              );
+            })}
           </div>
         )}
 

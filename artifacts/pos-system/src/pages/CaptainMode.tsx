@@ -3031,6 +3031,31 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                 💰 WALLET USED UP
               </div>
             )}
+            {/* 🆕 2026-05-25 (Khushi) — LIVE-AT-BAR badge. When the customer
+                (table+wallet) opens hodclub.in and places an order with the
+                "🍸 I'M AT THE BAR" picker, the customer site writes a
+                preparing round to covers.tabRounds tagged
+                source:'customer_self_order_bar'. We surface that LIVE on the
+                captain card so captain knows:
+                  (a) the customer is ordering at the bar RIGHT NOW
+                  (b) NOT to add the same items to the table tab
+                  (c) NOT to release the table / close the cover
+                Captain does NOT see a "Print KOT" CTA for this round (the
+                bartender handles bar drinks); badge is purely informational. */}
+            {linkedCover && Array.isArray(linkedCover.tabRounds) && linkedCover.tabRounds.some((rd: any) => rd && rd.status === 'preparing' && rd.source === 'customer_self_order_bar') && (
+              <div title="Customer is placing an order at the bar via their phone right now. Bartender will ring it on Bar POS. Do NOT add same items to table tab."
+                className="pulse-green"
+                style={{ marginTop: 6, marginLeft: 6, display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 6,
+                  background: "linear-gradient(135deg,rgba(123,47,190,.35),rgba(123,47,190,.15))",
+                  border: "1.5px solid rgba(168,85,247,.85)",
+                  fontSize: 12, fontWeight: 900, color: "#E9D5FF",
+                  letterSpacing: 0.5, textTransform: "uppercase",
+                  fontFamily: "'Manrope','Space Grotesk',sans-serif",
+                  boxShadow: "0 0 12px rgba(168,85,247,.5)" }}>
+                🍸 LIVE · CUSTOMER ORDERING AT BAR
+              </div>
+            )}
             {/* 🆕 2026-05-20 (Khushi spec) — ALWAYS-VISIBLE SHARE-WALLET-QR
                 button so captain can hand customer the wallet link even when
                 Meta WhatsApp delivery fails. Shows whenever ANY ref exists
