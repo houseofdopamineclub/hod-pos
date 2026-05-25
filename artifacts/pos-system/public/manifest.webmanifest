@@ -1,0 +1,20 @@
+{
+  "name": "HOD Venue POS",
+  "short_name": "HOD POS",
+  "description": "House of Dopamine — Venue POS System",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#030305",
+  "theme_color": "#030305",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
