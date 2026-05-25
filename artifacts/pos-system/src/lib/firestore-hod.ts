@@ -1234,7 +1234,10 @@ export async function updatePreparingRoundItems(
     const now = new Date().toISOString();
     if (cleaned.length === 0) {
       rounds.splice(idx, 1);
-      txn.update(ref, { tabRounds: rounds, pendingOrder: null });
+      // 🆕 2026-05-25 v2 (READ-COST FIX) — also clear the incoming-order
+      // flag when the preparing round is fully removed, so the BarMode
+      // dashboard tile doesn't keep showing an orphan with no items.
+      txn.update(ref, { tabRounds: rounds, pendingOrder: null, hasIncomingCustomerOrder: false });
       return { roundTotal: 0, removed: true };
     }
     const roundTotal = computeHodBreakdown(cleaned).grandTotal;
@@ -1299,10 +1302,52 @@ export async function activateCoverOrder(
       coverBalance: freshNewBal, coverUsed: (fd.coverUsed || 0) + total, pendingOrder: null,
       lastActivatedAt: now, lastActivatedBy: staffName,
       transactions: arrayUnion(tx), tabRounds: updRounds,
+      // 🆕 2026-05-25 (Khushi READ-COST FIX) — Clear the incoming-order
+      // flag so the BarMode dashboard tile (subscribeIncomingCustomerOrders)
+      // auto-dismisses without re-reading every cover. See helper below.
+      hasIncomingCustomerOrder: false,
     });
     return { newBalance: freshNewBal, updatedRounds: updRounds };
   });
   return result;
+}
+
+// 🆕 2026-05-25 (Khushi READ-COST FIX) — NARROW subscription for BarMode's
+// "📥 INCOMING CUSTOMER ORDERS" tile. The previous implementation used
+// subscribeToCoversForNight, which fans out reads = (all tonight's covers)
+// × (every update to any cover) × (every Bar Mode tablet). With ~100
+// covers/night and frequent transactions, this drove Firestore reads up
+// by 4-5x on test nights. This helper queries a single boolean field
+// `hasIncomingCustomerOrder` set by customer-site at-bar writes and
+// cleared in activateCoverOrder. Result-set size is typically 0-3 docs,
+// so read cost is proportional to ACTUAL pending self-orders, not the
+// whole night's covers. No composite index required (single-field where).
+// 🛟 FALLBACK: on error returns []; tile silently disappears (orphans
+// then fall back to the bartender scanning the QR + "show to bartender"
+// popup on the customer site).
+export function subscribeIncomingCustomerOrders(cb: (covers: HodCover[]) => void): Unsubscribe {
+  const q = query(collection(db, COVERS_COL), where("hasIncomingCustomerOrder", "==", true));
+  return onSnapshot(q,
+    (snap) => {
+      // 🛡 2026-05-25 v2 DEFENSIVE FILTER (architect review): only surface
+      // covers that ACTUALLY have a preparing customer_self_order round
+      // right now. Protects against orphan flags (e.g. legacy docs, manual
+      // edits, race where flag was set but round never wrote) so the tile
+      // never shows a stale/blank entry. Cost is still O(small) because
+      // the Firestore query already narrows to flagged docs.
+      const rows = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() } as HodCover))
+        .filter((cv) =>
+          Array.isArray(cv.tabRounds) && cv.tabRounds.some((rd: any) =>
+            rd && rd.status === "preparing" &&
+            typeof rd.source === "string" &&
+            rd.source.indexOf("customer_self_order") === 0
+          )
+        );
+      cb(rows);
+    },
+    () => cb([])
+  );
 }
 
 export function subscribeToHodReservations(

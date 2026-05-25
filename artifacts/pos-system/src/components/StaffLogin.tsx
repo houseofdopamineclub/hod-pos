@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
 import type { StaffMember, StaffRole } from "@/lib/types";
 
@@ -140,7 +141,15 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
   const buttonDisabled = isLocked && !isOverrideStaff(selectedStaff);
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, position: "relative" }}>
+      {/* 🚪 2026-05-26 (Khushi) — BACK button on every staff login screen so
+          a tablet isn't trapped in DOOR/BAR/CAPTAIN login if the wrong mode
+          was opened by mistake. Fixed top-left, takes you to the POS mode
+          picker at "/". No logout side-effect — login flow simply aborts. */}
+      <Link href="/"
+        style={{ position: "absolute", top: 16, left: 16, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(201,168,76,.4)", color: "#C9A84C", fontWeight: 800, fontSize: 13, textDecoration: "none", letterSpacing: 0.5, cursor: "pointer", zIndex: 10 }}>
+        ← BACK
+      </Link>
       {/* form with autoComplete=off + a hidden honeypot field block the "save password" prompt across Chrome/Safari/Edge */}
       <form
         autoComplete="off"

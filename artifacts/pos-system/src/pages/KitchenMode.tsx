@@ -40,7 +40,13 @@ function KitchenLogin() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#030305", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div style={{ minHeight: "100vh", background: "#030305", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, position: "relative" }}>
+      {/* 🚪 2026-05-26 (Khushi) — BACK button on KITCHEN LOGIN too so chef
+          tablet isn't trapped if opened by mistake. Mirrors StaffLogin. */}
+      <Link href="/"
+        style={{ position: "absolute", top: 16, left: 16, padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1px solid rgba(201,168,76,.4)", color: "#C9A84C", fontWeight: 800, fontSize: 13, textDecoration: "none", letterSpacing: 0.5, cursor: "pointer", zIndex: 10 }}>
+        ← BACK
+      </Link>
       <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.3)", borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 380, textAlign: "center" }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>🍳</div>
         <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 900, color: "#C9A84C", marginBottom: 6, letterSpacing: 1 }}>KITCHEN LOGIN</div>

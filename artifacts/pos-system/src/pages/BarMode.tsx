@@ -8,7 +8,7 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
-  subscribeToCoversForNight,
+  subscribeIncomingCustomerOrders,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -1863,16 +1863,16 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // Tapping opens the wallet — bartender then rings/voids the round as
   // usual via WalletOverlay. The tile auto-disappears when the round flips
   // out of "preparing" (existing activate/void flow handles this).
+  // 🆕 2026-05-25 v2 (READ-COST FIX) — switched from subscribeToCoversForNight
+  // to subscribeIncomingCustomerOrders. The night-scoped feed was charging
+  // reads for ALL covers on every cover update (recharges, KOTs, balance
+  // changes) — pushing Firestore reads up by 4-5x. The new helper queries
+  // only covers with `hasIncomingCustomerOrder == true` (set by customer
+  // site at-bar write, cleared in activateCoverOrder). Typical result set
+  // is 0-3 docs, so cost is proportional to actual pending self-orders.
   const [incoming, setIncoming] = useState<HodCover[]>([]);
   useEffect(() => {
-    const night = getOperationalNightStr();
-    const unsub = subscribeToCoversForNight(night, (covers) => {
-      setIncoming(covers.filter((cv) =>
-        Array.isArray(cv.tabRounds) && cv.tabRounds.some((rd: any) =>
-          rd && rd.status === 'preparing' && typeof rd.source === 'string' && rd.source.indexOf('customer_self_order') === 0
-        )
-      ));
-    });
+    const unsub = subscribeIncomingCustomerOrders(setIncoming);
     return () => unsub();
   }, []);
 

@@ -20,6 +20,10 @@ import {
   type WalletRedemption, type HodCover,
   // 2026-05-20 — COVER+TABLE linked-wallet live subscription (1-tap redeem path)
   subscribeToCoverById,
+  // 2026-05-25 v3.4 (Khushi) — fallback resolver when door didn't write
+  // linkedCoverDocId on the reservation; resolves cover by ref/bookingRef
+  // so the 1-tap green button still shows at Mark Paid time.
+  getCoverByRef,
   // 2026-05-20 — Customer-calls-captain: clear ping after captain acknowledges
   clearCustomerCallRequest,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
@@ -985,11 +989,35 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // entirely — uses linkedCoverDocId directly.
   const [linkedCover, setLinkedCover] = useState<HodCover | null>(null);
   const [oneTapBusy, setOneTapBusy] = useState(false);
+  // 🆕 2026-05-25 v3.4 (Khushi) — RESOLVED cover docId. Prefer
+  // reservation.linkedCoverDocId (set by Door's COVER+TABLE button), but
+  // fall back to a ref lookup using linkedCoverRef / bookingRef when
+  // that field wasn't written (e.g. table booked first, wallet shared
+  // separately, or pre-2026-05-20 reservations). This is what was
+  // BLOCKING Khushi's captain from seeing the 1-tap green button at
+  // settle-bill time for SMK2-style flows.
+  const [resolvedCoverDocId, setResolvedCoverDocId] = useState<string | null>(null);
   useEffect(() => {
-    if (!reservation.linkedCoverDocId) { setLinkedCover(null); return; }
-    const u = subscribeToCoverById(reservation.linkedCoverDocId, setLinkedCover);
+    let cancelled = false;
+    // Direct path — door set linkedCoverDocId on the reservation.
+    if (reservation.linkedCoverDocId) {
+      setResolvedCoverDocId(reservation.linkedCoverDocId);
+      return () => { cancelled = true; };
+    }
+    // Fallback path — try ref → cover lookup.
+    const candidate = reservation.linkedCoverRef || reservation.bookingRef || "";
+    if (!candidate) { setResolvedCoverDocId(null); return () => { cancelled = true; }; }
+    getCoverByRef(candidate).then((cv) => {
+      if (cancelled) return;
+      setResolvedCoverDocId(cv ? cv.id : null);
+    }).catch(() => { if (!cancelled) setResolvedCoverDocId(null); });
+    return () => { cancelled = true; };
+  }, [reservation.linkedCoverDocId, reservation.linkedCoverRef, reservation.bookingRef]);
+  useEffect(() => {
+    if (!resolvedCoverDocId) { setLinkedCover(null); return; }
+    const u = subscribeToCoverById(resolvedCoverDocId, setLinkedCover);
     return () => u();
-  }, [reservation.linkedCoverDocId]);
+  }, [resolvedCoverDocId]);
   const linkedBal = linkedCover ? (linkedCover.coverBalance || 0) : (reservation.linkedCoverInitial || 0);
   // Has the linked wallet already been redeemed against THIS bill? (Prevents
   // double-tap. Captain can still hit "SCAN ANOTHER WALLET" for guest #2.)
@@ -1001,23 +1029,34 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     reservation.linkedCoverRef || "",
     linkedCover?.ref || "",
     reservation.linkedCoverDocId || "",
+    resolvedCoverDocId || "",
   ].filter(Boolean));
   const linkedAlreadyRedeemed = walletRedemptions.some(
-    (e) => (e.walletDocId && e.walletDocId === reservation.linkedCoverDocId) ||
+    (e) => (e.walletDocId && (e.walletDocId === reservation.linkedCoverDocId || e.walletDocId === resolvedCoverDocId)) ||
            (e.walletRef && linkedRefCandidates.has(e.walletRef))
   );
-  const showOneTap = walletAllowed && !!reservation.linkedCoverDocId && !reservation.linkedCoverPending;
+  // 🆕 2026-05-25 v3.4 (Khushi) — gate on RESOLVED doc id (covers both the
+  // door-written path AND the fallback ref-lookup path). Auto-partial
+  // redemption is already supported below (oneTapAmount = min(payable, bal)),
+  // so wallet ₹1,000 against bill ₹1,443 will redeem ₹1,000 and leave ₹443
+  // owing on cash/card/UPI/split. The bug was that the button never showed
+  // because linkedCoverDocId was empty — now the fallback resolves it.
+  const showOneTap = walletAllowed && !!resolvedCoverDocId && !reservation.linkedCoverPending;
   const oneTapDisabled = oneTapBusy || payable <= 0 || linkedBal <= 0 || linkedAlreadyRedeemed;
   const oneTapAmount = Math.min(payable, linkedBal);
   const oneTapRedeem = async () => {
-    if (oneTapDisabled || !reservation.linkedCoverDocId) return;
+    if (oneTapDisabled || !resolvedCoverDocId) return;
     setOneTapBusy(true); setWalletErr("");
     try {
       const billCap = payable + walletPaidSoFar;
+      // Pass the redeem amount as MIN(payable, balance) so the cover never
+      // overdrafts. redeemFromWalletAtTable's transaction also has its own
+      // insufficient-balance guard — this is belt + suspenders.
+      const redeemAmt = Math.min(payable, linkedBal);
       await redeemFromWalletAtTable(
         reservation._docId,
-        reservation.linkedCoverDocId,
-        payable,
+        resolvedCoverDocId,
+        redeemAmt,
         captainName,
         billCap
       );
@@ -3980,7 +4019,15 @@ function FloorPlanView({
         s.add(t.id); return;
       }
       if (pendingFilter === "bill" && r.paymentStatus === "bill_requested") { s.add(t.id); return; }
-      if (pendingFilter === "pending" && st.state === "orange") { s.add(t.id); return; }
+      // 🐛 2026-05-25 v3.6 (Khushi BUG REPORT) — was `state === "orange"` which
+      // is WRONG per the 2026-05-20 state semantics fix above:
+      //   RED   = preparing (KOT NOT yet printed) ← what "Pending" means
+      //   ORANGE = activated (cooking)
+      // The KPI counter (line ~4440) correctly sums `preparing` rounds, so
+      // the badge said "1 PENDING" but the floor map highlighted nothing
+      // because no table was in state==="orange". Fix: gate on the actual
+      // preparing-round predicate, identical to floorStats (line ~3928).
+      if (pendingFilter === "pending" && (r.tabRounds || []).some(rd => rd.status === "preparing")) { s.add(t.id); return; }
       if (pendingFilter === "ready" && readyKDSResIds.has(r._docId)) { s.add(t.id); return; }
       if (!pendingFilter && q) {
         const hay = [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase();
@@ -4514,6 +4561,44 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           </button>
         </div>
       )}
+
+      {/* 🆕 2026-05-26 v3.8 (Khushi BUG) — When PENDING filter is on, explicitly
+          list EVERY reservation with a preparing round so an off-map walk-in
+          (Proxy-N, typo, legacy aggregator import) or a hidden-floor table is
+          never invisible. Tap a chip to open the booking modal. Mirrors the
+          orphan-calls strip for the Calling filter above. */}
+      {pendingFilter === "pending" && (() => {
+        const pendingRes = reservations.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
+        const mapIds = new Set<string>();
+        (Object.keys(HOD_TABLES) as FloorKey[]).forEach(fk =>
+          HOD_TABLES[fk].tables.forEach(t => mapIds.add(t.id.toUpperCase())));
+        if (pendingRes.length === 0) {
+          return (
+            <div style={{ padding: "0 16px", marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: "rgba(242,235,211,.55)", padding: "8px 12px", background: "rgba(255,255,255,.03)", border: "1px dashed rgba(255,255,255,.1)", borderRadius: 8 }}>
+                No tables with preparing rounds found.
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div style={{ padding: "0 16px", marginBottom: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {pendingRes.map((r) => {
+              const tid = (r.tableId || "—").toUpperCase();
+              const pcount = (r.tabRounds || []).filter(rd => rd.status === "preparing").length;
+              const onMap = mapIds.has(tid);
+              return (
+                <button key={r._docId} onClick={() => setSelectedDocId(r._docId)}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10,
+                    background: "rgba(239,68,68,.12)", border: `1.5px solid ${onMap ? "rgba(239,68,68,.5)" : "#F59E0B"}`,
+                    color: "#FCA5A5", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>
+                  🔴 {tid}{!onMap && " ⚠ off-map"} · {pcount} KOT{pcount > 1 ? "s" : ""} pending
+                </button>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* 🔔 2026-05-20 (Khushi) — surface waiterCalls that don't map to any
           open reservation today (bar walk-in / closed table / typo / different
