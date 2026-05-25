@@ -5,7 +5,7 @@ import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
-  getCoverByRef, computeHodBreakdown, updatePreparingRoundItems,
+  getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -263,6 +263,16 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // list gets the full screen height. Auto-expands when balance is low or
   // bartender hits a deficit. Tap "💰 Recharge" header to toggle manually.
   const [rechargeOpen, setRechargeOpen] = useState(false);
+  // 🔴 2026-05-25 (Khushi) — explicit success popup AFTER a recharge so the
+  // bartender must click OK before moving on. Stops the "did the recharge
+  // actually go through?" moment of doubt that toasts allowed. Once OK is
+  // tapped, the recharge panel auto-closes and PRINT KOT + BILL is one tap
+  // away.
+  const [rechargeSuccess, setRechargeSuccess] = useState<{ amount: number; newBalance: number; method: string } | null>(null);
+  // 🔴 2026-05-25 (Khushi) — collapsible "previous orders + transactions"
+  // panel so the bartender can see exactly what the customer ordered + paid
+  // earlier in the night. Mirrors the customer's wallet history view.
+  const [historyOpen, setHistoryOpen] = useState(false);
   const rechargeRowRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -489,65 +499,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
       if (!confirm(`You just recharged ₹${amt} less than a minute ago.\n\nRecharge ₹${amt} again?`)) return;
     }
 
-    // ── 2026-05-11 (Khushi Phase B anti-fraud) — UPI / CARD recharges
-    // are now REAL Razorpay-verified transactions. Bartender's tap
-    // opens Razorpay Checkout on the tablet, customer pays via their
-    // UPI app or by card, and the wallet credits ONLY after server-side
-    // signature verification. This closes the "tap-to-credit" hole
-    // where a bartender could mark fake UPI/Card payments.
-    //
-    // CASH and SPLIT remain manual (cash is physical; split is a mixed
-    // bag and needs its own UX — pending followup).
-    if (rcMethod === "upi" || rcMethod === "card") {
-      setRcBusy(true);
-      try {
-        const { openRazorpayRecharge } = await import("../lib/razorpay-checkout");
-        showToast(rcMethod === "upi"
-          ? "📱 Opening UPI payment — show tablet to customer"
-          : "💳 Opening card payment — swipe customer's card");
-        const result = await openRazorpayRecharge({
-          amount: amt,
-          coverRef: cover.id,
-          method: rcMethod,
-          customerName: cv.name,
-          customerPhone: cv.phone,
-        });
-        if (result.ok) {
-          // Server already credited the wallet & wrote the transaction
-          // with serverVerified:true. The Firestore subscription on the
-          // cover will refresh balance within ~1 sec — no need to
-          // overwrite local state here. We DO update lastRc* for the
-          // duplicate-recharge guard.
-          setLastRcAmt(amt);
-          setLastRcTime(Date.now());
-          setRcAmt("");
-          setRcAmtTouched(false);
-          showToast(
-            `✅ ${rcMethod === "upi" ? "UPI" : "CARD"} VERIFIED ₹${amt}` +
-            (typeof result.newBalance === "number"
-              ? ` — New balance: ₹${result.newBalance}`
-              : "")
-          );
-        } else if (result.reason === "cancelled") {
-          showToast("⚠ Customer cancelled — no charge made");
-        } else if (result.reason === "verify_failed") {
-          // Razorpay charged but our verify endpoint errored. Webhook
-          // backstop will credit within 30s. Surface the payment ID so
-          // bartender can confirm with customer.
-          showToast(
-            `⚠ Paid (ID: …${(result.paymentId || "").slice(-8)}) — verify slow, wallet will credit in 30s. Show this ID to customer.`
-          );
-        } else {
-          showToast(`❌ ${result.errorMessage || "Payment failed"}`);
-        }
-      } catch (e: any) {
-        showToast(`❌ Razorpay error: ${e.message || e}`);
-      }
-      setRcBusy(false);
-      return;
-    }
-
-    // CASH or SPLIT — original direct-credit path (unchanged).
+    // 🔴 2026-05-25 (Khushi) — Razorpay tablet-checkout flow REMOVED for
+    // all bar-side recharges. Pine Labs / online integration coming later;
+    // until then ALL methods (Cash / UPI / Card / Split) are MANUAL — the
+    // bartender collects the money physically and taps the matching button.
+    // This is intentionally fail-open: trust the bartender, audit later.
     setRcBusy(true);
     try {
       const newBal = await rechargeCover(cover.id, amt, rcMethod, staffName, splitArg);
@@ -557,7 +513,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
       setRcAmt("");
       setRcAmtTouched(false); // allow deficit auto-prefill to work again next time
       setRcSplit({ cash: "", upi: "", card: "" });
-      showToast(`✅ Recharged ₹${amt} — New balance: ₹${newBal}`);
+      // 🔴 2026-05-25 (Khushi) — show an explicit OK-popup instead of a toast.
+      // Bartender MUST click OK to continue. After OK, recharge panel auto-
+      // closes and PRINT KOT + BILL is right there.
+      // 🔴 2026-05-25 v2 (Khushi screenshot) — CLOSE the yellow recharge
+      // popover BEFORE showing the green popup, otherwise the yellow panel
+      // visibly stays behind/around the popup and confuses the bartender.
+      setRechargeOpen(false);
+      setRechargeSuccess({ amount: amt, newBalance: newBal, method: rcMethod });
     } catch (e: any) { showToast(`Error: ${e.message}`); }
     setRcBusy(false);
   };
@@ -1033,6 +996,187 @@ function WalletOverlay({ cover, staffName, onClose }: {
         </div>
       )}
 
+      {/* 🔴 2026-05-25 v2 (Khushi) — HISTORY PANEL, cream "YOUR TAB" UI
+          (matches what the customer sees on hodclub.in). One card with
+          dashed dividers · • Round N · status pill · ₹ amount · items
+          underneath with right-aligned prices · then TRANSACTIONS
+          section in the same cream theme so it reads as one panel. */}
+      {(() => {
+        const allRounds = (cv.tabRounds || []).filter(r => r && (r.status === "activated" || r.status === "served"));
+        const txList = (cv.transactions || []).slice().reverse();
+        const hasHistory = allRounds.length > 0 || txList.length > 0;
+        if (!hasHistory) return null;
+        const totalSpent = allRounds.reduce((s, r) => s + Number(r.roundTotal || 0), 0);
+        const totalRecharged = Number(cv.topUpTotal || 0);
+        const dashed = "1px dashed rgba(74,53,18,.35)";
+        return (
+          <div style={{ padding: "10px 12px", background: "rgba(0,0,0,.4)" }}>
+            <div style={{ background: "linear-gradient(180deg,#F7E9B8,#E9D69A)", border: "1px solid rgba(74,53,18,.35)", borderRadius: 14, color: "#3A2A0A", fontFamily: "'Space Grotesk',sans-serif", boxShadow: "0 4px 14px rgba(0,0,0,.35)", overflow: "hidden" }}>
+              {/* 🔴 2026-05-25 v3 (Khushi) — Header now shows ONLY "HISTORY
+                  — N ROUNDS" with arrow. No ₹ amount here, because the
+                  wallet balance pill above already shows a ₹ — putting
+                  another ₹ next to it confused the bartender (which is
+                  the customer's money?). Balance is shown big and clear
+                  on the FIRST line inside the panel. */}
+              <button onClick={() => setHistoryOpen(o => !o)}
+                style={{ width: "100%", padding: "14px 16px", background: "transparent", border: "none", color: "#3A2A0A", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "inherit" }}>
+                <span style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase" }}>
+                  📋 HISTORY — {allRounds.length} ROUND{allRounds.length === 1 ? "" : "S"}
+                </span>
+                <span style={{ fontSize: 18, fontWeight: 900, color: "#5A3F12" }}>
+                  {historyOpen ? "▾" : "▸"}
+                </span>
+              </button>
+
+              {historyOpen && (
+                <div style={{ padding: "0 16px 14px" }}>
+                  {/* 🔴 2026-05-25 v3 — BIG CLEAR available-balance line so the
+                      bartender never has to wonder which ₹ is the customer's
+                      spendable money. */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(10,107,47,.15)", border: "1px solid rgba(10,107,47,.4)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+                    <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", color: "#0A6B2F" }}>
+                      💰 Available balance
+                    </span>
+                    <span style={{ fontSize: 20, fontWeight: 900, color: "#0A6B2F" }}>
+                      ₹{bal.toLocaleString("en-IN")}
+                    </span>
+                  </div>
+                  <div style={{ borderTop: dashed, marginBottom: 12 }} />
+
+                  {/* PREVIOUS ORDERS — cream "YOUR TAB" style, round-by-round */}
+                  {allRounds.length > 0 && allRounds.map((r, i) => {
+                    const pillBg = r.status === "served" ? "rgba(0,160,80,.18)" : "rgba(255,170,0,.22)";
+                    const pillFg = r.status === "served" ? "#0A6B2F" : "#7A5510";
+                    const pillDot = r.status === "served" ? "#0A6B2F" : "#E0A40C";
+                    const pillLbl = r.status === "served" ? "Served" : "Activated";
+                    return (
+                      <div key={i} style={{ marginBottom: i === allRounds.length - 1 ? 0 : 14 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: 0.3 }}>
+                            • Round {r.roundNum || (i + 1)}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", background: pillBg, borderRadius: 999, fontSize: 11, fontWeight: 800, color: pillFg }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: pillDot, display: "inline-block" }} />
+                              {pillLbl}
+                            </div>
+                            <div style={{ fontSize: 17, fontWeight: 900, color: "#3A2A0A" }}>
+                              ₹{Number(r.roundTotal || 0).toLocaleString("en-IN")}
+                            </div>
+                          </div>
+                        </div>
+                        {(r.items || []).map((it, j) => (
+                          <div key={j} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, lineHeight: 1.5, color: "#3A2A0A" }}>
+                            <span>{it.qty}× {it.n}</span>
+                            <span>₹{Math.round((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}</span>
+                          </div>
+                        ))}
+                        {r.activatedAt && (
+                          <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 3 }}>
+                            {new Date(r.activatedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                            {r.activatedBy ? ` · ${r.activatedBy}` : ""}
+                          </div>
+                        )}
+                        {i < allRounds.length - 1 && <div style={{ borderTop: dashed, marginTop: 12 }} />}
+                      </div>
+                    );
+                  })}
+
+                  {/* 🔴 2026-05-25 v3 (Khushi) — TRANSACTIONS rewritten in
+                      PLAIN ENGLISH. Each line reads like a sentence anyone
+                      can understand in 1 second:
+                        💵 ₹1,000 RECHARGE DONE (Cash)
+                        🍴 ROUND 2 — Tomato Basil Soup, Innocent Passion
+                        🚫 ROUND 1 VOIDED
+                      Old format with `t.note` was a cryptic mash of item
+                      names + amount that confused the bartender. */}
+                  {txList.length > 0 && (
+                    <>
+                      <div style={{ borderTop: dashed, margin: "14px 0 10px" }} />
+                      <div style={{ fontSize: 11, fontWeight: 900, color: "#5A3F12", textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+                        💸 ALL TRANSACTIONS · Total recharged ₹{totalRecharged.toLocaleString("en-IN")}
+                      </div>
+                      <div style={{ maxHeight: 230, overflowY: "auto" }}>
+                        {txList.map((t, i) => {
+                          const type = (t.type || "").toLowerCase();
+                          const amt = Number(t.amount || 0);
+                          const when = t.timestamp ? new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—";
+                          // Classify into one of 4 buckets the bartender cares about.
+                          let icon = "💰", title = "", color = "#0A6B2F", sign = "+";
+                          if (type.includes("topup") || type.includes("recharge") || type.includes("credit")) {
+                            const method = type.includes("cash") ? "Cash"
+                              : type.includes("upi") ? "UPI"
+                              : type.includes("card") ? "Card"
+                              : type.includes("split") ? "Split"
+                              : type.includes("razorpay") ? "Online"
+                              : "Manual";
+                            icon = method === "Cash" ? "💵" : method === "UPI" ? "📱" : method === "Card" ? "💳" : method === "Split" ? "🔀" : "💰";
+                            title = `₹${amt.toLocaleString("en-IN")} RECHARGE DONE (${method})`;
+                            color = "#0A6B2F"; sign = "+";
+                          } else if (type.includes("void") || type.includes("refund")) {
+                            icon = "🚫";
+                            title = `BILL VOIDED — ₹${amt.toLocaleString("en-IN")} REFUNDED`;
+                            color = "#0A6B2F"; sign = "+";
+                          } else if (type.includes("activate") || type.includes("debit") || type.includes("order")) {
+                            // Try to match to a round number for clarity.
+                            const matchRound = (cv.tabRounds || []).find(r => r && Math.abs(Number(r.roundTotal || 0) - amt) < 1 && r.activatedAt && Math.abs(new Date(r.activatedAt).getTime() - new Date(t.timestamp || 0).getTime()) < 60000);
+                            const roundLbl = matchRound ? `ROUND ${matchRound.roundNum || "?"}` : "ORDER";
+                            const itemSummary = matchRound ? (matchRound.items || []).map(it => `${it.qty}× ${it.n}`).join(", ") : (t.note || "items");
+                            icon = "🍴";
+                            title = `${roundLbl} — ₹${amt.toLocaleString("en-IN")}`;
+                            color = "#A22020"; sign = "−";
+                            return (
+                              <div key={i} style={{ padding: "8px 0", borderBottom: i === txList.length - 1 ? "none" : dashed }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                                  <div style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A" }}>
+                                    {icon} {title}
+                                  </div>
+                                  <div style={{ color, fontSize: 14, fontWeight: 900, whiteSpace: "nowrap" }}>
+                                    {sign}₹{amt.toLocaleString("en-IN")}
+                                  </div>
+                                </div>
+                                <div style={{ fontSize: 11, color: "rgba(58,42,10,.7)", marginTop: 2 }}>
+                                  {itemSummary}
+                                </div>
+                                <div style={{ fontSize: 10, color: "rgba(58,42,10,.55)", marginTop: 1 }}>
+                                  {when}{t.staff ? ` · ${t.staff}` : ""}
+                                </div>
+                              </div>
+                            );
+                          } else {
+                            icon = "•"; title = t.note || type.toUpperCase() || "TRANSACTION";
+                          }
+                          return (
+                            <div key={i} style={{ padding: "8px 0", borderBottom: i === txList.length - 1 ? "none" : dashed }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                                <div style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A", flex: 1, paddingRight: 8 }}>
+                                  {icon} {title}
+                                </div>
+                                <div style={{ color, fontSize: 14, fontWeight: 900, whiteSpace: "nowrap" }}>
+                                  {sign}₹{amt.toLocaleString("en-IN")}
+                                </div>
+                              </div>
+                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.55)", marginTop: 2 }}>
+                                {when}{t.staff ? ` · ${t.staff}` : ""}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  <div style={{ borderTop: dashed, margin: "12px 0 8px" }} />
+                  <div style={{ fontSize: 11, fontStyle: "italic", color: "rgba(58,42,10,.65)", textAlign: "right" }}>
+                    Inclusive of all taxes (SC + GST)
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {preOrderItems.length > 0 && (
         <div style={{ background: "rgba(255,200,0,.06)", borderBottom: "1px solid rgba(255,200,0,.15)", padding: "10px 16px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -1279,29 +1423,20 @@ function WalletOverlay({ cover, staffName, onClose }: {
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             {(["cash", "upi", "card", "split"] as const).map((m) => {
-              // 2026-05-11 (Khushi): Pine Labs Plutus card-machine integration
-              // is coming. Until then, "Card" is disabled — bartender uses
-              // Cash or UPI (Razorpay-verified). This avoids the awkward
-              // "type your card number on the tablet" UX that Razorpay
-              // Checkout falls back to without a real terminal.
-              const isCardDisabled = m === "card";
-              const handleClick = () => {
-                if (isCardDisabled) {
-                  showToast("💳 Card coming soon — Pine Labs machine integration in progress. Use 📱 UPI or 💵 Cash.");
-                  return;
-                }
-                setRcMethod(m);
-              };
+              // 🔴 2026-05-25 (Khushi) — ALL 4 methods are now plain MANUAL
+              // buttons. No Razorpay tablet popup, no Pine Labs gating —
+              // bartender collects money physically (cash drawer / customer
+              // UPI app / customer card swipe) and just taps the matching
+              // button to credit the wallet. Card-machine integration is
+              // a future ticket; until then this matches the real-world
+              // flow Khushi runs tonight.
               return (
-                <button key={m} onClick={handleClick}
-                  title={isCardDisabled ? "Pine Labs Plutus machine integration in progress — use UPI or Cash for now" : undefined}
-                  style={{ flex: 1, padding: 8, borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: isCardDisabled ? "not-allowed" : "pointer",
-                    background: isCardDisabled ? "rgba(255,255,255,.02)" : (rcMethod === m ? "rgba(242,199,68,.12)" : "rgba(255,255,255,.06)"),
-                    border: `1px solid ${isCardDisabled ? "rgba(255,255,255,.04)" : (rcMethod === m ? "rgba(242,199,68,.4)" : "rgba(255,255,255,.08)")}`,
-                    color: isCardDisabled ? "rgba(255,255,255,.25)" : (rcMethod === m ? "#F2C744" : "rgba(255,255,255,.5)"),
-                    opacity: isCardDisabled ? 0.55 : 1,
-                    position: "relative" }}>
-                  {m === "cash" ? "💵 Cash" : m === "upi" ? "📱 UPI" : m === "card" ? "💳 Card · soon" : "🔀 Split"}
+                <button key={m} onClick={() => setRcMethod(m)}
+                  style={{ flex: 1, padding: 10, borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+                    background: rcMethod === m ? "rgba(242,199,68,.18)" : "rgba(255,255,255,.06)",
+                    border: `1.5px solid ${rcMethod === m ? "rgba(242,199,68,.55)" : "rgba(255,255,255,.10)"}`,
+                    color: rcMethod === m ? "#F2C744" : "rgba(255,255,255,.65)" }}>
+                  {m === "cash" ? "💵 Cash" : m === "upi" ? "📱 UPI" : m === "card" ? "💳 Card" : "🔀 Split"}
                 </button>
               );
             })}
@@ -1361,20 +1496,31 @@ function WalletOverlay({ cover, staffName, onClose }: {
           }, 0);
           const hasNewRoundSinceLastBill = printedCount > 0 && lastBillAt > 0 && latestActivatedAt > lastBillAt;
           const isTrueReprint = printedCount > 0 && !hasNewRoundSinceLastBill;
-          const dimAfterPrint = isTrueReprint && !billBusy;
+          // 🔴 2026-05-25 v2 (Khushi) — Bar Mode is CASH & CARRY. Every
+          // round prints its own bill at point of order. A second print
+          // for the SAME items is never legitimate (it just invites
+          // double-collection). So when isTrueReprint, hide the button
+          // entirely. Bartender can still VOID BILL below for refunds.
+          if (isTrueReprint) {
+            return inCooldown ? (
+              <div style={{ width: "100%", padding: 10, marginBottom: 10, borderRadius: 10, background: "rgba(0,200,100,.08)", border: "1px solid rgba(0,200,100,.3)", color: "#00E676", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
+                ✅ Bill #{printedCount} just printed · wait {cooldownLeft}s
+              </div>
+            ) : (
+              <div style={{ width: "100%", padding: 10, marginBottom: 10, borderRadius: 10, background: "rgba(0,200,100,.05)", border: "1px solid rgba(0,200,100,.25)", color: "rgba(0,230,118,.85)", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
+                ✅ Bill #{printedCount} printed · add new round to print again
+              </div>
+            );
+          }
           let label: string;
           if (billBusy) label = "Sending bill...";
           else if (hasPreparing) label = "⏳ Activate pending KOT first";
           else if (!billableRounds.length) label = "Print Bill (no activated items yet)";
-          else if (isTrueReprint && inCooldown) label = `✅ Bill #${printedCount} just printed · wait ${cooldownLeft}s`;
-          else if (isTrueReprint) label = `⚠ REPRINT SAME BILL (DUPLICATE) — #${printedCount + 1}`;
           else if (hasNewRoundSinceLastBill) label = `🖨 PRINT BILL — ₹${billTotal.toLocaleString("en-IN")} · Round ${printedCount + 1}`;
           else label = `🖨 PRINT BILL — ₹${billTotal.toLocaleString("en-IN")}`;
           const style = !canBill
             ? { background: "rgba(242,199,68,.06)", border: "1px solid rgba(242,199,68,.18)", color: "rgba(242,199,68,.4)", cursor: "not-allowed" as const }
-            : dimAfterPrint
-              ? { background: "rgba(239,68,68,.08)", border: "1.5px dashed rgba(239,68,68,.55)", color: "#EF4444", cursor: "pointer" as const }
-              : { background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", cursor: "pointer" as const, boxShadow: "0 3px 18px rgba(242,199,68,.28)" };
+            : { background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", cursor: "pointer" as const, boxShadow: "0 3px 18px rgba(242,199,68,.28)" };
           return (
             <button onClick={canBill ? handleThermalBill : undefined} disabled={!canBill}
               style={{ width: "100%", padding: 14, marginBottom: 10, borderRadius: 12, fontSize: 14, fontWeight: 900, transition: "all .2s", ...style }}>
@@ -1643,6 +1789,34 @@ function WalletOverlay({ cover, staffName, onClose }: {
           />
         );
       })()}
+
+      {/* 🔴 2026-05-25 (Khushi) — RECHARGE SUCCESS POPUP. Bartender MUST
+          click OK to dismiss. Replaces the easy-to-miss toast so the
+          bartender (and ideally the customer looking at the tablet) get
+          explicit confirmation before moving on to PRINT KOT + BILL. */}
+      {rechargeSuccess && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.75)", zIndex: 100000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "linear-gradient(135deg,#0F2515,#0A1A0F)", border: "2px solid #00C864", borderRadius: 18, padding: 22, width: "100%", maxWidth: 360, boxShadow: "0 12px 48px rgba(0,200,100,.35)", textAlign: "center" }}>
+            <div style={{ fontSize: 44, marginBottom: 6 }}>✅</div>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#00E676", marginBottom: 6, letterSpacing: 0.4 }}>
+              RECHARGE SUCCESSFUL
+            </div>
+            <div style={{ fontSize: 14, color: "rgba(255,255,255,.85)", marginBottom: 4 }}>
+              ₹{rechargeSuccess.amount.toLocaleString("en-IN")} added via {rechargeSuccess.method === "cash" ? "💵 CASH" : rechargeSuccess.method === "upi" ? "📱 UPI" : rechargeSuccess.method === "card" ? "💳 CARD" : "🔀 SPLIT"}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#F2C744", marginBottom: 18 }}>
+              New balance: ₹{rechargeSuccess.newBalance.toLocaleString("en-IN")}
+            </div>
+            <button onClick={() => { setRechargeSuccess(null); setRechargeOpen(false); }}
+              style={{ width: "100%", padding: 14, borderRadius: 10, background: "linear-gradient(135deg,#00E676,#00A050)", border: "none", color: "#000", fontSize: 16, fontWeight: 900, letterSpacing: 1, cursor: "pointer", boxShadow: "0 4px 18px rgba(0,200,100,.35)" }}>
+              OK — continue
+            </button>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginTop: 10 }}>
+              Then tap 🖨 PRINT KOT + BILL below
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1655,6 +1829,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   const [searching, setSearching] = useState(false);
   const [activeCover, setActiveCover] = useState<HodCover | null>(null);
   const [toast, setToast] = useState("");
+  // 🚶 2026-05-25 (Khushi GO-LIVE) — NEW WALK-IN button busy flag.
+  const [walkinBusy, setWalkinBusy] = useState(false);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
 
@@ -1738,8 +1914,32 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
 
       <div style={{ padding: 16 }}>
         <button onClick={() => setScanning(true)}
-          style={{ width: "100%", padding: 20, borderRadius: 16, background: "linear-gradient(135deg,rgba(242,199,68,.15),rgba(242,199,68,.05))", border: "2px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 16 }}>
+          style={{ width: "100%", padding: 20, borderRadius: 16, background: "linear-gradient(135deg,rgba(242,199,68,.15),rgba(242,199,68,.05))", border: "2px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 12 }}>
           📷 Scan Customer QR
+        </button>
+
+        {/* 🚶 2026-05-25 (Khushi GO-LIVE) — NEW WALK-IN.
+            Customer with no phone / no QR / no booking. One tap → mints a
+            zero-balance cover (WALKIN-N, sequence per operational night) and
+            opens the menu/order screen. Bartender recharges with cash/UPI/card
+            before activating KOT (same flow as a regular wallet). */}
+        <button
+          onClick={async () => {
+            if (walkinBusy) return;
+            setWalkinBusy(true);
+            try {
+              const cv = await createBarWalkinCover(staffName);
+              showToast(`✅ ${cv.name} created — add items, then RECHARGE`);
+              setActiveCover(cv);
+            } catch (e) {
+              showToast(`❌ Walk-in failed: ${(e as Error).message || "try again"}`);
+            } finally {
+              setWalkinBusy(false);
+            }
+          }}
+          disabled={walkinBusy}
+          style={{ width: "100%", padding: 18, borderRadius: 16, background: "linear-gradient(135deg,rgba(0,200,100,.18),rgba(0,200,100,.06))", border: "2px solid rgba(0,200,100,.45)", color: "#00C864", fontSize: 17, fontWeight: 900, cursor: walkinBusy ? "wait" : "pointer", marginBottom: 16, opacity: walkinBusy ? 0.6 : 1 }}>
+          {walkinBusy ? "Creating…" : "🚶 + NEW WALK-IN (no phone / no QR)"}
         </button>
 
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>

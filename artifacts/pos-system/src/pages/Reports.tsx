@@ -122,7 +122,10 @@ interface WalletRow {
   //   "free_entry"   = free_*/free_entry_* paymentId OR LADIES (entryType=female/ladies/free) — complimentary
   //   "unknown"      = booking exists but NO paymentId at all (legacy / admin-created / abandoned checkout)
   //   ""             = N/A (guestlist/walkin/aggregator — no online payment ever expected)
-  payChannel: "" | "paid_online" | "pay_at_venue" | "free_entry" | "unknown";
+  // 🔴 2026-05-25 v4 (Khushi screenshot) — WALK-IN now derives the actual
+  // recharge method from cover.transactions and reports it as cash/upi/
+  // card/split instead of the useless "WALKIN" duplicate label.
+  payChannel: "" | "paid_online" | "pay_at_venue" | "free_entry" | "unknown" | "cash" | "upi" | "card" | "split";
   // Razorpay payment id (when present) — used for the "verify on Razorpay" link
   paymentId?: string;
   isGuestList: boolean;
@@ -362,7 +365,38 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     aggregator: cAny.aggregator,
     bookingTotal: typeof (linkedBooking as any)?.total === "number" ? (linkedBooking as any).total : undefined,
   });
-  const { source, payChannel } = cls;
+  let { source, payChannel } = cls;
+  // 🔴 2026-05-25 v4 (Khushi screenshot) — WALK-IN pay column was showing
+  // "WALKIN" (just the source repeated) which told the accountant nothing
+  // about HOW the money came in. Derive the dominant recharge method from
+  // the cover's own transaction log and surface it as cash/upi/card/split.
+  if (source === "walk-in") {
+    const txs = (c.transactions || []) as Array<{ type?: string; amount?: number }>;
+    const tally: Record<string, number> = { cash: 0, upi: 0, card: 0, split: 0 };
+    for (const t of txs) {
+      const ty = String(t.type || "").toLowerCase();
+      const amt = Number(t.amount || 0);
+      if (amt <= 0) continue;
+      if (ty.includes("split")) tally.split += amt;
+      else if (ty.includes("cash")) tally.cash += amt;
+      else if (ty.includes("upi")) tally.upi += amt;
+      else if (ty.includes("card")) tally.card += amt;
+    }
+    const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+    if (top && top[1] > 0) payChannel = top[0] as WalletRow["payChannel"];
+  }
+  // 🔴 2026-05-25 v5 (Khushi screenshot) — the 2nd PAY column (after
+  // BALANCE) reads `c.paymentMethod` raw from Firestore. For walk-ins
+  // that's hard-coded to literal "walkin" (firestore-hod.ts:1015) which
+  // is useless to the accountant. Mirror the derived dominant method
+  // so both PAY columns agree. If they ever disagree on a future row,
+  // that's a tampering/data-quality flag worth investigating.
+  let resolvedPaymentMethod = c.paymentMethod || "";
+  if (source === "walk-in" && (resolvedPaymentMethod === "" || resolvedPaymentMethod.toLowerCase() === "walkin")) {
+    if (payChannel === "cash" || payChannel === "upi" || payChannel === "card" || payChannel === "split") {
+      resolvedPaymentMethod = payChannel;
+    }
+  }
   return {
     coverId: c.id, ref: c.ref || "",
     name: c.name || "",
@@ -379,7 +413,7 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     checkedIn: !!c.checkedIn,
     arrival: c.actualArrivalTime || "",
     coverActivated: activated, topUpTotal: recharged, coverUsed: used, coverBalance: balance,
-    paymentMethod: c.paymentMethod || "",
+    paymentMethod: resolvedPaymentMethod,
     tableId: c.tableId || "",
     walletBillPrints: c.walletBillPrintCount || 0,
     lastBillAt: c.lastWalletBillPrintedAt || "",
@@ -1431,6 +1465,14 @@ export default function Reports() {
                       <span style={{ fontSize: 10, fontWeight: 800, color: "#F59E0B" }}>💵 PAY AT VENUE</span>
                     ) : w.payChannel === "free_entry" ? (
                       <span style={{ fontSize: 10, fontWeight: 800, color: "#a855f7" }}>🆓 FREE ENTRY</span>
+                    ) : w.payChannel === "cash" ? (
+                      <span style={{ fontSize: 10, fontWeight: 800, color: "#F59E0B" }}>💵 CASH</span>
+                    ) : w.payChannel === "upi" ? (
+                      <span style={{ fontSize: 10, fontWeight: 800, color: "#3b82f6" }}>📱 UPI</span>
+                    ) : w.payChannel === "card" ? (
+                      <span style={{ fontSize: 10, fontWeight: 800, color: GREEN }}>💳 CARD</span>
+                    ) : w.payChannel === "split" ? (
+                      <span style={{ fontSize: 10, fontWeight: 800, color: "#a855f7" }}>🔀 SPLIT</span>
                     ) : w.payChannel === "unknown" ? (
                       <span title="Booking has no payment record. Could be legacy data, admin-created, or an abandoned checkout. VERIFY MANUALLY before reconciling."
                             style={{ fontSize: 10, fontWeight: 800, color: RED, cursor: "help" }}>⚠ UNKNOWN</span>
