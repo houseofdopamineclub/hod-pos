@@ -9,7 +9,7 @@ import {
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
-  type HodCover, type HodOrderItem, type TabletFloor, type HodGuestSearchHit, type HodTransaction,
+  type HodCover, type HodOrderItem, type TabletFloor, type HodGuestSearchHit, type HodTransaction, type HodTabRound,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
@@ -996,44 +996,101 @@ function WalletOverlay({ cover, staffName, onClose }: {
         </div>
       )}
 
-      {/* 🔴 2026-05-25 v2 (Khushi) — HISTORY PANEL, cream "YOUR TAB" UI
-          (matches what the customer sees on hodclub.in). One card with
-          dashed dividers · • Round N · status pill · ₹ amount · items
-          underneath with right-aligned prices · then TRANSACTIONS
-          section in the same cream theme so it reads as one panel. */}
+      {/* 🔴 2026-05-25 v4 (Khushi) — UNIFIED TIMELINE. Previous v3 had a
+          duplicate problem: rounds listed at top + same rounds listed
+          AGAIN inside "ALL TRANSACTIONS" (because activate-type txns
+          mirror each round). v4 merges everything into ONE chronological
+          feed, newest-first, no duplicates. Rounds rendered with full
+          item detail; recharges/voids/bills/payments inline. Color-coded
+          left border per event type. Running balance after each event.
+          Sticky balance bar on top. Summary footer. */}
       {(() => {
         const allRounds = (cv.tabRounds || []).filter(r => r && (r.status === "activated" || r.status === "served"));
-        const txList = (cv.transactions || []).slice().reverse();
-        const hasHistory = allRounds.length > 0 || txList.length > 0;
+        const allTx = (cv.transactions || []);
+        const hasHistory = allRounds.length > 0 || allTx.length > 0;
         if (!hasHistory) return null;
         const totalSpent = allRounds.reduce((s, r) => s + Number(r.roundTotal || 0), 0);
         const totalRecharged = Number(cv.topUpTotal || 0);
         const dashed = "1px dashed rgba(74,53,18,.35)";
+
+        // Unified event list. Rounds become "round" events (skip the matching
+        // activate tx to avoid the duplicate problem). Non-activate tx pass
+        // through as recharge/void/bill/payment/etc.
+        type TLE =
+          | { kind: "round"; time: number; round: HodTabRound }
+          | { kind: "recharge"; time: number; amount: number; method: string; staff?: string }
+          | { kind: "voidRefund"; time: number; amount: number; note?: string; staff?: string }
+          | { kind: "bill"; time: number; amount: number; staff?: string }
+          | { kind: "payment"; time: number; amount: number; method: string; staff?: string }
+          | { kind: "other"; time: number; amount: number; label: string; staff?: string };
+
+        const events: TLE[] = [];
+
+        // Rounds → one event each (already de-duped against activate tx below).
+        allRounds.forEach((r) => {
+          const t = r.activatedAt ? new Date(r.activatedAt).getTime() : 0;
+          events.push({ kind: "round", time: t, round: r });
+        });
+
+        // Transactions → keep only non-round events (skip "activate" /
+        // "debit" / "order" — those are mirrored by the round itself).
+        allTx.forEach((tx) => {
+          const type = (tx.type || "").toLowerCase();
+          const t = tx.timestamp ? new Date(tx.timestamp).getTime() : 0;
+          const amt = Math.abs(Number(tx.amount || 0));
+          if (type.includes("activate") || type === "debit" || type === "order") return;
+          if (type.includes("topup") || type.includes("recharge") || type.includes("credit")) {
+            const method = type.includes("cash") ? "Cash"
+              : type.includes("upi") ? "UPI"
+              : type.includes("card") ? "Card"
+              : type.includes("split") ? "Split"
+              : type.includes("razorpay") ? "Online" : "Manual";
+            events.push({ kind: "recharge", time: t, amount: amt, method, staff: tx.staff });
+          } else if (type.includes("void") || type.includes("refund")) {
+            events.push({ kind: "voidRefund", time: t, amount: amt, note: tx.note, staff: tx.staff });
+          } else if (type.includes("bill") || type.includes("print")) {
+            events.push({ kind: "bill", time: t, amount: amt, staff: tx.staff });
+          } else if (type.includes("pay") || type.includes("settle")) {
+            const method = type.includes("cash") ? "Cash" : type.includes("upi") ? "UPI" : type.includes("card") ? "Card" : "Mixed";
+            events.push({ kind: "payment", time: t, amount: amt, method, staff: tx.staff });
+          } else {
+            events.push({ kind: "other", time: t, amount: amt, label: (tx.note || tx.type || "Transaction").toUpperCase(), staff: tx.staff });
+          }
+        });
+
+        // Sort newest-first.
+        events.sort((a, b) => b.time - a.time);
+
+        // Running balance per event (computed oldest→newest, displayed
+        // newest-first). +recharge / −round / +voidRefund.
+        const oldestFirst = [...events].reverse();
+        const balAfter = new Map<number, number>();
+        let runBal = 0;
+        oldestFirst.forEach((e, idx) => {
+          if (e.kind === "recharge" || e.kind === "voidRefund") runBal += e.amount;
+          else if (e.kind === "round") runBal -= Number(e.round.roundTotal || 0);
+          balAfter.set(events.length - 1 - idx, runBal);
+        });
+
+        const fmtTime = (t: number) => t ? new Date(t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—";
         return (
           <div style={{ padding: "10px 12px", background: "rgba(0,0,0,.4)" }}>
             <div style={{ background: "linear-gradient(180deg,#F7E9B8,#E9D69A)", border: "1px solid rgba(74,53,18,.35)", borderRadius: 14, color: "#3A2A0A", fontFamily: "'Space Grotesk',sans-serif", boxShadow: "0 4px 14px rgba(0,0,0,.35)", overflow: "hidden" }}>
-              {/* 🔴 2026-05-25 v3 (Khushi) — Header now shows ONLY "HISTORY
-                  — N ROUNDS" with arrow. No ₹ amount here, because the
-                  wallet balance pill above already shows a ₹ — putting
-                  another ₹ next to it confused the bartender (which is
-                  the customer's money?). Balance is shown big and clear
-                  on the FIRST line inside the panel. */}
               <button onClick={() => setHistoryOpen(o => !o)}
                 style={{ width: "100%", padding: "14px 16px", background: "transparent", border: "none", color: "#3A2A0A", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "inherit" }}>
                 <span style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase" }}>
-                  📋 HISTORY — {allRounds.length} ROUND{allRounds.length === 1 ? "" : "S"}
+                  🧾 WALLET TIMELINE — {allRounds.length} ROUND{allRounds.length === 1 ? "" : "S"}
                 </span>
-                <span style={{ fontSize: 18, fontWeight: 900, color: "#5A3F12" }}>
-                  {historyOpen ? "▾" : "▸"}
+                <span style={{ fontSize: 11, fontWeight: 700, color: "rgba(58,42,10,.55)", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontStyle: "italic" }}>newest ↓ oldest</span>
+                  <span style={{ fontSize: 18, fontWeight: 900, color: "#5A3F12" }}>{historyOpen ? "▾" : "▸"}</span>
                 </span>
               </button>
 
               {historyOpen && (
-                <div style={{ padding: "0 16px 14px" }}>
-                  {/* 🔴 2026-05-25 v3 — BIG CLEAR available-balance line so the
-                      bartender never has to wonder which ₹ is the customer's
-                      spendable money. */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(10,107,47,.15)", border: "1px solid rgba(10,107,47,.4)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+                <div style={{ padding: "0 12px 14px" }}>
+                  {/* Sticky available-balance bar — stays visible as you scroll the timeline. */}
+                  <div style={{ position: "sticky", top: 0, zIndex: 5, display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(10,107,47,.18)", border: "1.5px solid #22C55E", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
                     <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", color: "#0A6B2F" }}>
                       💰 Available balance
                     </span>
@@ -1041,134 +1098,132 @@ function WalletOverlay({ cover, staffName, onClose }: {
                       ₹{bal.toLocaleString("en-IN")}
                     </span>
                   </div>
-                  <div style={{ borderTop: dashed, marginBottom: 12 }} />
 
-                  {/* PREVIOUS ORDERS — cream "YOUR TAB" style, round-by-round */}
-                  {allRounds.length > 0 && allRounds.map((r, i) => {
-                    const pillBg = r.status === "served" ? "rgba(0,160,80,.18)" : "rgba(255,170,0,.22)";
-                    const pillFg = r.status === "served" ? "#0A6B2F" : "#7A5510";
-                    const pillDot = r.status === "served" ? "#0A6B2F" : "#E0A40C";
-                    const pillLbl = r.status === "served" ? "Served" : "Activated";
-                    return (
-                      <div key={i} style={{ marginBottom: i === allRounds.length - 1 ? 0 : 14 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                          <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: 0.3 }}>
-                            • Round {r.roundNum || (i + 1)}
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <div style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", background: pillBg, borderRadius: 999, fontSize: 11, fontWeight: 800, color: pillFg }}>
-                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: pillDot, display: "inline-block" }} />
-                              {pillLbl}
-                            </div>
-                            <div style={{ fontSize: 17, fontWeight: 900, color: "#3A2A0A" }}>
-                              ₹{Number(r.roundTotal || 0).toLocaleString("en-IN")}
-                            </div>
-                          </div>
+                  {/* Unified scrollable timeline — newest first. */}
+                  <div style={{ maxHeight: 460, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 }}>
+                    {events.map((e, idx) => {
+                      const after = balAfter.get(idx) ?? 0;
+                      const balLine = (
+                        <div style={{ fontSize: 10, color: "rgba(58,42,10,.55)", marginTop: 1, textAlign: "right" }}>
+                          bal ₹{after.toLocaleString("en-IN")} →
                         </div>
-                        {(r.items || []).map((it, j) => (
-                          <div key={j} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, lineHeight: 1.5, color: "#3A2A0A" }}>
-                            <span>{it.qty}× {it.n}</span>
-                            <span>₹{Math.round((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}</span>
-                          </div>
-                        ))}
-                        {r.activatedAt && (
-                          <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 3 }}>
-                            {new Date(r.activatedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
-                            {r.activatedBy ? ` · ${r.activatedBy}` : ""}
-                          </div>
-                        )}
-                        {i < allRounds.length - 1 && <div style={{ borderTop: dashed, marginTop: 12 }} />}
-                      </div>
-                    );
-                  })}
+                      );
 
-                  {/* 🔴 2026-05-25 v3 (Khushi) — TRANSACTIONS rewritten in
-                      PLAIN ENGLISH. Each line reads like a sentence anyone
-                      can understand in 1 second:
-                        💵 ₹1,000 RECHARGE DONE (Cash)
-                        🍴 ROUND 2 — Tomato Basil Soup, Innocent Passion
-                        🚫 ROUND 1 VOIDED
-                      Old format with `t.note` was a cryptic mash of item
-                      names + amount that confused the bartender. */}
-                  {txList.length > 0 && (
-                    <>
-                      <div style={{ borderTop: dashed, margin: "14px 0 10px" }} />
-                      <div style={{ fontSize: 11, fontWeight: 900, color: "#5A3F12", textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
-                        💸 ALL TRANSACTIONS · Total recharged ₹{totalRecharged.toLocaleString("en-IN")}
-                      </div>
-                      <div style={{ maxHeight: 230, overflowY: "auto" }}>
-                        {txList.map((t, i) => {
-                          const type = (t.type || "").toLowerCase();
-                          const amt = Number(t.amount || 0);
-                          const when = t.timestamp ? new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—";
-                          // Classify into one of 4 buckets the bartender cares about.
-                          let icon = "💰", title = "", color = "#0A6B2F", sign = "+";
-                          if (type.includes("topup") || type.includes("recharge") || type.includes("credit")) {
-                            const method = type.includes("cash") ? "Cash"
-                              : type.includes("upi") ? "UPI"
-                              : type.includes("card") ? "Card"
-                              : type.includes("split") ? "Split"
-                              : type.includes("razorpay") ? "Online"
-                              : "Manual";
-                            icon = method === "Cash" ? "💵" : method === "UPI" ? "📱" : method === "Card" ? "💳" : method === "Split" ? "🔀" : "💰";
-                            title = `₹${amt.toLocaleString("en-IN")} RECHARGE DONE (${method})`;
-                            color = "#0A6B2F"; sign = "+";
-                          } else if (type.includes("void") || type.includes("refund")) {
-                            icon = "🚫";
-                            title = `BILL VOIDED — ₹${amt.toLocaleString("en-IN")} REFUNDED`;
-                            color = "#0A6B2F"; sign = "+";
-                          } else if (type.includes("activate") || type.includes("debit") || type.includes("order")) {
-                            // Try to match to a round number for clarity.
-                            const matchRound = (cv.tabRounds || []).find(r => r && Math.abs(Number(r.roundTotal || 0) - amt) < 1 && r.activatedAt && Math.abs(new Date(r.activatedAt).getTime() - new Date(t.timestamp || 0).getTime()) < 60000);
-                            const roundLbl = matchRound ? `ROUND ${matchRound.roundNum || "?"}` : "ORDER";
-                            const itemSummary = matchRound ? (matchRound.items || []).map(it => `${it.qty}× ${it.n}`).join(", ") : (t.note || "items");
-                            icon = "🍴";
-                            title = `${roundLbl} — ₹${amt.toLocaleString("en-IN")}`;
-                            color = "#A22020"; sign = "−";
-                            return (
-                              <div key={i} style={{ padding: "8px 0", borderBottom: i === txList.length - 1 ? "none" : dashed }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                                  <div style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A" }}>
-                                    {icon} {title}
-                                  </div>
-                                  <div style={{ color, fontSize: 14, fontWeight: 900, whiteSpace: "nowrap" }}>
-                                    {sign}₹{amt.toLocaleString("en-IN")}
-                                  </div>
+                      if (e.kind === "round") {
+                        const r = e.round;
+                        const isServed = r.status === "served";
+                        return (
+                          <div key={idx} style={{ borderLeft: "4px solid #C9A84C", background: "#FFFEF5", borderRadius: 6, padding: "8px 10px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#C9A84C", color: "#fff", fontSize: 11, fontWeight: 900, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{r.roundNum || "?"}</span>
+                                  <span style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A", letterSpacing: 0.3 }}>ROUND {r.roundNum || "?"}</span>
+                                  <span style={{ fontSize: 10, fontWeight: 800, padding: "2px 7px", borderRadius: 999, background: isServed ? "rgba(10,107,47,.18)" : "rgba(224,164,12,.22)", color: isServed ? "#0A6B2F" : "#7A5510" }}>
+                                    {isServed ? "Served" : "Activated"}
+                                  </span>
                                 </div>
-                                <div style={{ fontSize: 11, color: "rgba(58,42,10,.7)", marginTop: 2 }}>
-                                  {itemSummary}
-                                </div>
-                                <div style={{ fontSize: 10, color: "rgba(58,42,10,.55)", marginTop: 1 }}>
-                                  {when}{t.staff ? ` · ${t.staff}` : ""}
+                                {(r.items || []).map((it: HodOrderItem, j: number) => (
+                                  <div key={j} style={{ fontSize: 12, color: "#3A2A0A", paddingLeft: 30, lineHeight: 1.5 }}>
+                                    {it.qty}× <strong>{it.n}</strong> <span style={{ color: "rgba(58,42,10,.55)" }}>₹{Math.round((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}</span>
+                                  </div>
+                                ))}
+                                <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", paddingLeft: 30, marginTop: 3 }}>
+                                  {fmtTime(e.time)}{r.activatedBy ? ` · ${r.activatedBy}` : ""}
                                 </div>
                               </div>
-                            );
-                          } else {
-                            icon = "•"; title = t.note || type.toUpperCase() || "TRANSACTION";
-                          }
-                          return (
-                            <div key={i} style={{ padding: "8px 0", borderBottom: i === txList.length - 1 ? "none" : dashed }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                                <div style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A", flex: 1, paddingRight: 8 }}>
-                                  {icon} {title}
-                                </div>
-                                <div style={{ color, fontSize: 14, fontWeight: 900, whiteSpace: "nowrap" }}>
-                                  {sign}₹{amt.toLocaleString("en-IN")}
-                                </div>
-                              </div>
-                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.55)", marginTop: 2 }}>
-                                {when}{t.staff ? ` · ${t.staff}` : ""}
+                              <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                                <div style={{ fontSize: 15, fontWeight: 900, color: "#A22020" }}>−₹{Number(r.roundTotal || 0).toLocaleString("en-IN")}</div>
+                                {balLine}
                               </div>
                             </div>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
+                          </div>
+                        );
+                      }
 
-                  <div style={{ borderTop: dashed, margin: "12px 0 8px" }} />
-                  <div style={{ fontSize: 11, fontStyle: "italic", color: "rgba(58,42,10,.65)", textAlign: "right" }}>
-                    Inclusive of all taxes (SC + GST)
+                      if (e.kind === "recharge") {
+                        const icon = e.method === "Cash" ? "💵" : e.method === "UPI" ? "📱" : e.method === "Card" ? "💳" : e.method === "Split" ? "🔀" : "💰";
+                        return (
+                          <div key={idx} style={{ borderLeft: "4px solid #22C55E", background: "rgba(34,197,94,.08)", borderRadius: 6, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 900, color: "#0A6B2F" }}>{icon} RECHARGE ({e.method})</div>
+                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 2 }}>{fmtTime(e.time)}{e.staff ? ` · ${e.staff}` : ""}</div>
+                            </div>
+                            <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                              <div style={{ fontSize: 15, fontWeight: 900, color: "#0A6B2F" }}>+₹{e.amount.toLocaleString("en-IN")}</div>
+                              {balLine}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (e.kind === "voidRefund") {
+                        return (
+                          <div key={idx} style={{ borderLeft: "4px solid #EF4444", background: "rgba(239,68,68,.08)", borderRadius: 6, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 900, color: "#A22020" }}>🚫 VOID REFUND</div>
+                              {e.note && <div style={{ fontSize: 11, color: "rgba(58,42,10,.7)", marginTop: 2 }}>{e.note}</div>}
+                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 2 }}>{fmtTime(e.time)}{e.staff ? ` · ${e.staff}` : ""}</div>
+                            </div>
+                            <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                              <div style={{ fontSize: 15, fontWeight: 900, color: "#0A6B2F" }}>+₹{e.amount.toLocaleString("en-IN")}</div>
+                              {balLine}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (e.kind === "bill") {
+                        return (
+                          <div key={idx} style={{ borderLeft: "4px solid #888", background: "rgba(0,0,0,.04)", borderRadius: 6, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 900, color: "#3A2A0A" }}>🧾 BILL PRINTED</div>
+                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 2 }}>{fmtTime(e.time)}{e.staff ? ` · ${e.staff}` : ""}</div>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 800, color: "#3A2A0A", whiteSpace: "nowrap" }}>₹{e.amount.toLocaleString("en-IN")}</div>
+                          </div>
+                        );
+                      }
+
+                      if (e.kind === "payment") {
+                        return (
+                          <div key={idx} style={{ borderLeft: "4px solid #6B46C1", background: "rgba(107,70,193,.08)", borderRadius: 6, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 900, color: "#4C2A8C" }}>💳 PAID ({e.method})</div>
+                              <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 2 }}>{fmtTime(e.time)}{e.staff ? ` · ${e.staff}` : ""}</div>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 900, color: "#4C2A8C", whiteSpace: "nowrap" }}>₹{e.amount.toLocaleString("en-IN")}</div>
+                          </div>
+                        );
+                      }
+
+                      // other / fallback
+                      return (
+                        <div key={idx} style={{ borderLeft: "4px solid rgba(58,42,10,.25)", background: "rgba(0,0,0,.03)", borderRadius: 6, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: "#3A2A0A" }}>• {e.label}</div>
+                            <div style={{ fontSize: 10, color: "rgba(58,42,10,.6)", marginTop: 2 }}>{fmtTime(e.time)}{e.staff ? ` · ${e.staff}` : ""}</div>
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 800, color: "#3A2A0A", whiteSpace: "nowrap" }}>₹{e.amount.toLocaleString("en-IN")}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Summary footer — total spent / recharges / balance, one glance. */}
+                  <div style={{ borderTop: dashed, marginTop: 12, paddingTop: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#3A2A0A", padding: "2px 0" }}>
+                      <span>TOTAL SPENT</span><span style={{ fontWeight: 800 }}>₹{totalSpent.toLocaleString("en-IN")}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#3A2A0A", padding: "2px 0" }}>
+                      <span>RECHARGES</span><span style={{ fontWeight: 800, color: "#0A6B2F" }}>+₹{totalRecharged.toLocaleString("en-IN")}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, color: "#3A2A0A", padding: "6px 0 0", borderTop: "1px solid rgba(58,42,10,.18)", marginTop: 4 }}>
+                      <span style={{ fontWeight: 900 }}>BALANCE</span><span style={{ fontWeight: 900, color: "#0A6B2F" }}>₹{bal.toLocaleString("en-IN")}</span>
+                    </div>
+                    <div style={{ fontSize: 10, fontStyle: "italic", color: "rgba(58,42,10,.6)", textAlign: "right", marginTop: 6 }}>
+                      Inclusive of all taxes (SC + GST)
+                    </div>
                   </div>
                 </div>
               )}
@@ -1832,6 +1887,23 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // 🚶 2026-05-25 (Khushi GO-LIVE) — NEW WALK-IN button busy flag.
   const [walkinBusy, setWalkinBusy] = useState(false);
 
+  // 🍽 2026-05-25 v2 (Khushi safety net) — DASHBOARD-LEVEL food-ready listener.
+  // Strip inside an open wallet only fires when bartender is LOOKING at that
+  // cover. If wallet is closed → bartender misses it. This badge sits in the
+  // header at all times, pulses when ANY bar wallet has food ready, opens a
+  // popover with one-tap ✓ PICKED UP per row. 🛟 FALLBACK: failure mode is
+  // already covered by captain dashboard Fix C — both screens can clear, so
+  // a stuck row is impossible going forward. Filtered to bar covers only
+  // (coverDocId present) to avoid showing table reservations the captain owns.
+  const [readyKDSBar, setReadyKDSBar] = useState<HodKDSItem[]>([]);
+  const [readyPopoverOpen, setReadyPopoverOpen] = useState(false);
+  useEffect(() => {
+    const unsub = subscribeToReadyKDSItems((all) => {
+      setReadyKDSBar(all.filter((it) => !!it.coverDocId));
+    });
+    return () => unsub();
+  }, []);
+
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
 
   // 🛡 BUGFIX 2026-05-08: Bar Mode must refuse table bookings (TABLE FOR 4 /
@@ -1904,6 +1976,25 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 900, color: "#F2C744", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 BAR</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          {/* 🍽 2026-05-25 v2 (Khushi) — always-visible food-ready badge.
+              Pulses green when ANY bar wallet has food ready. Tap → popover
+              with one-tap ✓ PICKED UP per row. Closes the bar-side gap
+              where the in-wallet strip is invisible until bartender opens
+              that specific wallet. */}
+          {readyKDSBar.length > 0 && (
+            <button
+              onClick={() => setReadyPopoverOpen(true)}
+              className="pulse-green"
+              title="Food ready from kitchen — tap to view + clear"
+              style={{
+                padding: "6px 10px", borderRadius: 8,
+                background: "rgba(34,197,94,.18)", border: "1px solid #22C55E",
+                color: "#22C55E", fontSize: 11, fontWeight: 900, cursor: "pointer",
+                letterSpacing: 0.4, whiteSpace: "nowrap",
+              }}>
+              🍽 {readyKDSBar.length} READY
+            </button>
+          )}
           <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>👤 {staffName}</span>
           <button onClick={onLogout}
             style={{ padding: "6px 10px", borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
@@ -1911,6 +2002,85 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           </button>
         </div>
       </div>
+
+      {/* 🍽 2026-05-25 v2 (Khushi) — FOOD READY popover. Lists every bar-side
+          KDS item with status="ready" across all open bar wallets. Each row
+          shows customer name + dish + qty + ✓ PICKED UP. Tap clears just
+          that item (or all items for that cover). Audit trail kept (KDS
+          doc flips ready → picked_up). 🛟 FALLBACK: write errors are
+          swallowed by markKDSPickedUp (already try/catch); popover refreshes
+          live so a failed write reappears next snapshot. */}
+      {readyPopoverOpen && (
+        <div
+          onClick={() => setReadyPopoverOpen(false)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.7)",
+            zIndex: 100000, display: "flex", alignItems: "flex-start",
+            justifyContent: "center", padding: "60px 16px 16px",
+          }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%", maxWidth: 520, maxHeight: "80vh", overflow: "auto",
+              background: "#0A0A0A", border: "1.5px solid #22C55E",
+              borderRadius: 16, padding: 16, fontFamily: "'Space Grotesk', sans-serif",
+              boxShadow: "0 12px 40px rgba(0,0,0,.6)",
+            }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#22C55E", letterSpacing: 0.5 }}>
+                🍽 FOOD READY · {readyKDSBar.length} ITEM{readyKDSBar.length > 1 ? "S" : ""}
+              </div>
+              <button
+                onClick={() => setReadyPopoverOpen(false)}
+                style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 18, cursor: "pointer" }}>×</button>
+            </div>
+            {readyKDSBar.length === 0 ? (
+              <div style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.5)", fontSize: 13 }}>
+                Nothing ready right now.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {readyKDSBar.map((it) => (
+                  <div key={it.id}
+                    style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      gap: 10, padding: "10px 12px", borderRadius: 10,
+                      background: "rgba(34,197,94,.10)", border: "1px solid rgba(34,197,94,.35)",
+                    }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 900, color: "#FFFFFF", marginBottom: 2 }}>
+                        {it.itemName} ×{it.qty}
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.7)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {it.customerName || "—"}
+                        {it.tableLabel ? ` · ${it.tableLabel}` : ""}
+                        {it.staff ? ` · fired by ${it.staff}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (it.id) {
+                          try { await markKDSPickedUp(it.id, staffName); }
+                          catch { showToast("Could not clear — try again"); }
+                        }
+                      }}
+                      style={{
+                        background: "#22C55E", color: "#0A0A0A", border: "none",
+                        padding: "8px 12px", borderRadius: 8, fontSize: 11, fontWeight: 900,
+                        letterSpacing: 0.4, cursor: "pointer", whiteSpace: "nowrap",
+                      }}>
+                      ✓ PICKED UP
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 12, padding: 10, background: "rgba(255,255,255,.04)", borderRadius: 8, fontSize: 11, color: "rgba(255,255,255,.55)", lineHeight: 1.5 }}>
+              🛟 Tip: each tap clears ONE item. If a customer ordered 2 dishes, you'll see 2 rows — pick them up one at a time as they leave the kitchen.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{ padding: 16 }}>
         <button onClick={() => setScanning(true)}

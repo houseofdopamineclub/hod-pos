@@ -4608,6 +4608,20 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {readyGroups.map((g) => {
                 const isOpenableTable = !!g.resId && reservations.some((r) => r._docId === g.resId);
+                // 🔴 2026-05-25 (Khushi) — Captain MUST be able to clear food-ready
+                // rows whose source cover/reservation is gone (e.g. a bar wallet
+                // that auto-archived 2 days ago, leaving a zombie KDS doc that
+                // nothing in the UI can dismiss). Tap the green ✓ button → all
+                // items in this group flip to picked_up via the same Firestore
+                // helper bartender uses. 🛟 FALLBACK: any single item write that
+                // fails is swallowed by markKDSPickedUp (already try/catch);
+                // strip auto-redraws when at least one succeeds.
+                const clearGroup = async (e: React.MouseEvent) => {
+                  e.stopPropagation();
+                  for (const it of g.items) {
+                    if (it.id) { try { await markKDSPickedUp(it.id, captainName); } catch {} }
+                  }
+                };
                 return (
                   <div key={g.key}
                     onClick={() => { if (isOpenableTable) setSelectedDocId(g.resId); }}
@@ -4624,9 +4638,21 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                         {g.items.map((it) => `${it.itemName} ×${it.qty}`).join(" · ")}
                       </div>
                     </div>
-                    {isOpenableTable && (
-                      <div style={{ fontSize: 11, fontWeight: 900, color: "#22C55E", letterSpacing: 0.5, whiteSpace: "nowrap" }}>OPEN →</div>
-                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      {isOpenableTable && (
+                        <div style={{ fontSize: 11, fontWeight: 900, color: "#22C55E", letterSpacing: 0.5, whiteSpace: "nowrap" }}>OPEN →</div>
+                      )}
+                      <button
+                        onClick={clearGroup}
+                        title="Mark this food as picked up — clears the row"
+                        style={{
+                          background: "#22C55E", color: "#0A0A0A", border: "none",
+                          padding: "6px 10px", borderRadius: 6, fontSize: 11, fontWeight: 900,
+                          letterSpacing: 0.5, cursor: "pointer", whiteSpace: "nowrap",
+                          fontFamily: "'Space Grotesk', sans-serif",
+                        }}
+                      >✓ PICKED UP</button>
+                    </div>
                   </div>
                 );
               })}
