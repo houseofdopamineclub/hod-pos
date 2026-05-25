@@ -17,9 +17,16 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- 🔴 2026-05-15 (Khushi bug) — Razorpay Checkout SDK MUST be loaded
+         globally for Bar Mode UPI/Card recharges. Without this, openRazorpayRecharge()
+         throws "Razorpay SDK not loaded — check internet". Same script the
+         customer site (hodclub.in) loads. Async OK — wallet recharge flow
+         awaits window.Razorpay before opening. -->
+    <script src="https://checkout.razorpay.com/v1/checkout.js" async></script>
+    <script type="module" crossorigin src="/assets/index-DR5s2cXU.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-D7LAwfti.css">
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
