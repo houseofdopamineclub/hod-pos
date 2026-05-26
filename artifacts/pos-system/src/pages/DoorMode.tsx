@@ -56,6 +56,7 @@ const WHATSAPP_CF_BASE = "https://asia-south1-hod-tickets.cloudfunctions.net";
 
 import { ToastAction } from "@/components/ui/toast";
 import { QrScanner } from "@/components/QrScanner";
+import { centeredAlert, centeredPinPrompt } from "@/lib/centered-ui";
 
 // 🔄 2026-05-24 (Khushi) — REVERTED per-staff login back to shared name+password.
 // Khushi is rebuilding the staff/attendance module separately tonight, so the
@@ -161,6 +162,10 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   // Edit existing state
   const [editMode, setEditMode] = useState(false);
   const [editAmt, setEditAmt] = useState<string>("");
+  // 🆕 2026-05-26 v3.24 (Khushi) — in-app confirm instead of window.confirm.
+  // Floor tablets are in PWA-style fullscreen — the browser-native confirm
+  // popup looks alien and jarring. When non-null, render a styled overlay.
+  const [confirmNewAmt, setConfirmNewAmt] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,11 +214,16 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     setExisting(cover);
     const diff = amt - paidOnline;
     const collectMsg = pm === "split"
-      ? `\n\nCollect: ${paymentSplit?.cash ? `₹${paymentSplit.cash} cash ` : ""}${paymentSplit?.upi ? `+ ₹${paymentSplit.upi} UPI ` : ""}${paymentSplit?.card ? `+ ₹${paymentSplit.card} card` : ""}`.trim()
+      ? `Collect: ${paymentSplit?.cash ? `₹${paymentSplit.cash} cash ` : ""}${paymentSplit?.upi ? `+ ₹${paymentSplit.upi} UPI ` : ""}${paymentSplit?.card ? `+ ₹${paymentSplit.card} card` : ""}`.trim()
       : edcRef
-        ? `\n\n💳 EDC charged ₹${diff > 0 ? diff : amt} (ref ${edcRef}).`
-        : diff > 0 ? `\n\nCollect ₹${diff} ${pm === "cash" ? "cash" : pm === "upi" ? "UPI" : "card"}.` : "";
-    alert(`✅ Cover ₹${amt} activated for ${booking.name || "guest"}.${collectMsg}`);
+        ? `💳 EDC charged ₹${diff > 0 ? diff : amt} (ref ${edcRef}).`
+        : diff > 0 ? `Collect ₹${diff} ${pm === "cash" ? "cash" : pm === "upi" ? "UPI" : "card"}.` : "Nothing further to collect.";
+    // 🔴 2026-05-26 (Khushi) — centered branded confirmation, no browser alert.
+    await centeredAlert(
+      "COVER ACTIVATED",
+      `₹${amt.toLocaleString("en-IN")} cover for ${booking.name || "guest"} is now LIVE.\n\n${collectMsg}\n\n100% redeemable on Food & Drinks.`,
+      "success",
+    );
   };
 
   const handleActivate = async () => {
@@ -304,20 +314,30 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     setBusy(false);
   };
 
-  const handleEditSave = async () => {
+  const handleEditSave = () => {
     if (!existing) return;
     const newAmt = parseInt(editAmt, 10);
     const used = existing.coverUsed || 0;
     if (!newAmt || newAmt < used) { setErr(`Min ₹${used} (already used)`); return; }
     if (newAmt > 5000) { setErr("Max ₹5,000"); return; }
     if (newAmt === existing.coverActivated) { setErr("Amount unchanged"); return; }
-    if (!window.confirm(`Change cover ₹${existing.coverActivated} → ₹${newAmt}?`)) return;
+    // 🆕 2026-05-26 v3.24 (Khushi) — open in-app confirm overlay instead of
+    // window.confirm (which renders as an alien browser-native popup on the
+    // floor tablet).
+    setErr("");
+    setConfirmNewAmt(newAmt);
+  };
+
+  const doEditSave = async () => {
+    if (!existing || confirmNewAmt == null) return;
+    const newAmt = confirmNewAmt;
     setBusy(true); setErr("");
     try {
       await editCoverAmount(existing.id, newAmt, agentName);
       const cv = await getCoverForBooking(booking.ref || booking.id);
       if (cv) setExisting(cv);
       setEditMode(false);
+      setConfirmNewAmt(null);
     } catch (e: any) { setErr(e?.message || "Failed to edit"); }
     setBusy(false);
   };
@@ -566,6 +586,38 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
             setErr("Card charge cancelled.");
           }}
         />
+      )}
+
+      {/* 🆕 2026-05-26 v3.24 (Khushi) — in-app confirm overlay for cover edit.
+          Replaces window.confirm so the floor tablet stays inside the HOD UI
+          (no alien grey browser popup). Fail-open: tapping the dark backdrop
+          OR the gold CANCEL button closes without saving. */}
+      {confirmNewAmt != null && existing && (
+        <div onClick={(e) => { e.stopPropagation(); setConfirmNewAmt(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.75)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#0C0816", border: "1.5px solid rgba(245,158,11,.5)", borderRadius: 16, padding: 22, width: "100%", maxWidth: 340, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 8px 40px rgba(245,158,11,.25)" }}>
+            <div style={{ fontSize: 11, fontWeight: 900, color: "#F59E0B", letterSpacing: 1.5, marginBottom: 12, textAlign: "center" }}>⚠️ CONFIRM COVER EDIT</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 6 }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: "rgba(255,255,255,.5)", textDecoration: "line-through", fontVariantNumeric: "tabular-nums" }}>₹{(existing.coverActivated || 0).toLocaleString("en-IN")}</div>
+              <div style={{ fontSize: 18, color: "#F59E0B" }}>→</div>
+              <div style={{ fontSize: 26, fontWeight: 900, color: "#C8A645", fontVariantNumeric: "tabular-nums" }}>₹{confirmNewAmt.toLocaleString("en-IN")}</div>
+            </div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", textAlign: "center", marginBottom: 16, letterSpacing: .3 }}>
+              {confirmNewAmt > (existing.coverActivated || 0) ? "COLLECT EXTRA AT DOOR" : "REFUND DIFFERENCE TO GUEST"}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button onClick={() => setConfirmNewAmt(null)} disabled={busy}
+                style={{ padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid rgba(255,255,255,.25)", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                CANCEL
+              </button>
+              <button onClick={doEditSave} disabled={busy}
+                style={{ padding: 14, borderRadius: 10, background: "#F59E0B", border: "none", color: "#000", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                {busy ? "SAVING…" : "YES, CHANGE"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -875,6 +927,45 @@ function CheckInPaymentModal({
         console.warn("[CheckInPaymentModal] wallet write failed (non-fatal)", walletErr);
       }
 
+      // 🆕 2026-05-26 (Khushi) — RECHARGE SUCCESS POPUP. Mirrors the walk-in
+      // flow's confirmation feel — door girl MUST see a clear ✅ popup before
+      // the check-in modal closes so she's never unsure if the wallet went
+      // through. Fires for every hodclub.in booking kind:
+      //   • BUY COVERS / TABLE  → "✅ WALLET LIVE · ₹X READY"
+      //   • ENTRY-ONLY          → "✅ CHECKED IN · ENTRY ₹X COLLECTED (wallet ₹0)"
+      //   • GUESTLIST           → "✅ CHECKED IN · ₹0 WALLET CREATED"
+      // FAIL-OPEN: if the centeredAlert helper throws (SSR / no DOM) it falls
+      // back to window.alert — never blocks the check-in completion.
+      try {
+        const guestName = (booking.name || "GUEST").toUpperCase();
+        if (walletAmt > 0 && !isEntryOnly) {
+          const collectMsg = method === "split"
+            ? `COLLECT: ${splitCash ? `₹${splitCash} CASH ` : ""}${splitUpi ? `+ ₹${splitUpi} UPI ` : ""}${splitCard ? `+ ₹${splitCard} CARD` : ""}`.trim()
+            : method === "paid_online"
+              ? "ALREADY PAID ONLINE — NOTHING TO COLLECT."
+              : `COLLECT ₹${walletAmt} ${method === "cash" ? "CASH" : method === "upi" ? "UPI" : "CARD"}.`;
+          await centeredAlert(
+            "RECHARGE SUCCESSFUL",
+            `✅ ${guestName} CHECKED IN.\n\nWALLET LIVE · ₹${walletAmt.toLocaleString("en-IN")}\n100% REDEEMABLE ON FOOD & DRINKS.\n\n${collectMsg}`,
+            "success",
+          );
+        } else if (isEntryOnly) {
+          await centeredAlert(
+            "CHECK-IN SUCCESSFUL",
+            `✅ ${guestName} CHECKED IN.\n\nENTRY FEE ₹${amt.toLocaleString("en-IN")} ${method === "paid_online" ? "ALREADY PAID ONLINE" : `COLLECTED (${method.toUpperCase()})`}.\n\nWALLET ₹0 · GUEST CAN TOP UP AT BAR ANYTIME.`,
+            "success",
+          );
+        } else {
+          await centeredAlert(
+            "CHECK-IN SUCCESSFUL",
+            `✅ ${guestName} CHECKED IN.\n\nWALLET ₹0 CREATED · GUEST CAN TOP UP AT BAR / PHONE.`,
+            "success",
+          );
+        }
+      } catch (alertErr) {
+        console.warn("[CheckInPaymentModal] success alert failed (non-fatal)", alertErr);
+      }
+
       onConfirmed({ checkedInAt, wasNew });
     } catch (e: any) {
       setErr(e?.message || "Check-in failed");
@@ -996,7 +1087,7 @@ function CheckInPaymentModal({
   );
 }
 
-function LookupResult({ booking, agentName, onDone: _onDone }: { booking: HodBooking; agentName: string; onDone: () => void }) {
+function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null }) {
   const [done, setDone] = useState(booking.checkedIn || false);
   const [err, setErr] = useState("");
   const [showCheckInModal, setShowCheckInModal] = useState(false);
@@ -1063,63 +1154,140 @@ function LookupResult({ booking, agentName, onDone: _onDone }: { booking: HodBoo
     }
   };
 
+  // 🆕 2026-05-26 v3.20 (Khushi) — when embedded in BookingDetailModal
+  // (hideIdentity=true) drop the outer card chrome so the layout matches
+  // the guestlist modal exactly: PENDING pill → structured list box →
+  // green CHECK IN GUEST button → action grid (no box-within-a-box).
+  // Standalone search-row callers keep the outer card.
+  const containerStyle: React.CSSProperties = hideIdentity
+    ? { marginBottom: 4 }
+    : { background: "rgba(255,255,255,0.04)", border: "1px solid rgba(200,166,69,0.3)", borderRadius: 16, padding: 20, marginBottom: 16 };
   return (
-    <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(200,166,69,0.3)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, gap: 8 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 16, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{booking.name || "Guest"}</div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{booking.ref} · {booking.phone}</div>
+    <div style={containerStyle}>
+      {/* 🆕 2026-05-26 (Khushi) — when embedded inside BookingDetailModal,
+          skip the duplicate name/ref/phone row (modal header already shows
+          it boldly). Just float the CHECKED IN / PENDING badge to the right
+          so the door girl never loses the status. */}
+      {hideIdentity ? (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          {done ? (
+            <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10, whiteSpace: "nowrap" }}>✅ CHECKED IN</span>
+          ) : (
+            <span style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10 }}>PENDING</span>
+          )}
         </div>
-        {done ? (
-          <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10, whiteSpace: "nowrap" }}>✅ CHECKED IN</span>
-        ) : (
-          <span style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10 }}>PENDING</span>
-        )}
-      </div>
+      ) : (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, gap: 8 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{booking.name || "Guest"}</div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.4)", marginTop: 2 }}>{booking.ref} · {booking.phone}</div>
+          </div>
+          {done ? (
+            <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10, whiteSpace: "nowrap" }}>✅ CHECKED IN</span>
+          ) : (
+            <span style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10 }}>PENDING</span>
+          )}
+        </div>
+      )}
 
-      {/* 🔴 2026-05-21 (Khushi) — Category + breakdown card. Door girl can see
-          at a glance: WHAT KIND of booking (ticket/guestlist/entry-only/group/
-          table) and HOW MANY (3 stags, 1 couple, 5 ladies, table for 4, etc).
-          Replaces the old loose Type/Tier/Guests grid which only worked for
-          legacy bookings that filled those fields. */}
-      <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-        {(() => {
-          const desc = describeBooking(booking);
-          return (
-            <>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}55`, color: desc.categoryColor, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 999, letterSpacing: .5 }}>
-                  {desc.category}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>{desc.breakdown}</span>
-              </div>
-              {booking.eventTitle && (
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>
-                  🎵 <span style={{ color: "#fff", fontWeight: 700 }}>{booking.eventTitle}</span>
-                </div>
-              )}
-              {booking.tier && (
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)" }}>
-                  Tier: <span style={{ color: "#C8A645", fontWeight: 700 }}>{booking.tier}</span>
-                </div>
-              )}
-              {isGuestList ? (
-                <div style={{ fontSize: 12, color: "#60A5FA", fontWeight: 700, marginTop: 6 }}>
-                  📋 Free entry — no payment due
-                </div>
-              ) : payAtVenue > 0 ? (
-                <div style={{ fontSize: 12, color: "#FBBF24", fontWeight: 700, marginTop: 6 }}>
-                  💵 Pay at venue · ₹{payAtVenue}
-                </div>
-              ) : paidOnline > 0 ? (
-                <div style={{ fontSize: 12, color: "#00C864", fontWeight: 700, marginTop: 6 }}>
-                  ✅ Paid online · ₹{paidOnline}
-                </div>
-              ) : null}
-            </>
-          );
-        })()}
-      </div>
+      {/* 🆕 2026-05-26 (Khushi) — STRUCTURED INFO LIST. Replaces the loose
+          category-row card with a "label → value" list so even a brand-new
+          door girl reads the booking at a glance:
+            EVENT NAME, NAME, REFERENCE, PHONE, TICKET TYPE, QTY, PAYMENT.
+          Font: Space Grotesk (matches the customer menu scanner — Khushi
+          loves it). NO Playfair cursive anywhere here. Bigger sizes (14–17px).
+          Colors: muted-ivory labels, white values, gold/green/amber accents. */}
+      {(() => {
+        const desc = describeBooking(booking);
+        // 🆕 2026-05-26 v3.18 (Khushi) — PAYMENT must reflect what was ACTUALLY
+        // collected, not the original booking total. Customer booked Stag
+        // "Pay at venue ₹500" but at the door the girl activated a ₹999 cover
+        // and collected ₹999. So once the cover is activated, show
+        // "✓ COVER ACTIVATED · ₹{coverActivated}" — that's the real money
+        // taken. Only fall back to ticket amounts if cover is NOT yet active.
+        const coverActivated = Number(cover?.coverActivated || 0);
+        // 🆕 2026-05-26 v3.21 (Khushi) — ENTRY-ONLY tickets are a special case.
+        // The entry charge (e.g. ₹599) is what the door collects at check-in
+        // and is the BASELINE payment. If the door girl then ALSO activates
+        // a cover on top, both amounts matter — show ENTRY + COVER together,
+        // never let the cover hide the entry collection. For non-entry tickets,
+        // keep v3.18 behavior (cover replaces the ticket amount).
+        const entryAmt = isEntryOnly ? (booking.total || 0) : 0;
+        const paymentLabel = (() => {
+          if (isEntryOnly && entryAmt > 0) {
+            // Entry-only ticket: entry charge is the primary payment.
+            // Treat as PAID once the guest is checked in OR the booking was paid online.
+            const entryPaid = done || paidOnline > 0;
+            if (entryPaid && coverActivated > 0) {
+              return { txt: `✓ PAID ₹${entryAmt.toLocaleString("en-IN")} ENTRY  +  ✓ COVER ₹${coverActivated.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
+            }
+            if (entryPaid) {
+              return { txt: `✓ PAID ₹${entryAmt.toLocaleString("en-IN")} ENTRY`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
+            }
+            // Not yet checked in → original PAY AT VENUE / PAID ONLINE
+            return payAtVenue > 0
+              ? { txt: `💵 PAY AT VENUE · ₹${payAtVenue.toLocaleString("en-IN")}`, color: "#FBBF24", bg: "rgba(251,191,36,.10)", bd: "rgba(251,191,36,.40)" }
+              : { txt: `✓ PAID ONLINE · ₹${entryAmt.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
+          }
+          if (coverActivated > 0) {
+            return { txt: `✓ COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
+          }
+          if (isGuestList) {
+            return { txt: "🎁 GUEST LIST · FREE ENTRY", color: "#60A5FA", bg: "rgba(96,165,250,.10)", bd: "rgba(96,165,250,.40)" };
+          }
+          if (payAtVenue > 0) {
+            return { txt: `💵 PAY AT VENUE · ₹${payAtVenue.toLocaleString("en-IN")}`, color: "#FBBF24", bg: "rgba(251,191,36,.10)", bd: "rgba(251,191,36,.40)" };
+          }
+          if (paidOnline > 0) {
+            return { txt: `✓ PAID ONLINE · ₹${paidOnline.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
+          }
+          return { txt: "— NO PAYMENT —", color: "rgba(255,255,255,.55)", bg: "rgba(255,255,255,.04)", bd: "rgba(255,255,255,.15)" };
+        })();
+        const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
+          <div style={{ display: "grid", gridTemplateColumns: "115px 1fr", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.06)", alignItems: "center" }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, color: "rgba(255,255,255,.45)", fontFamily: "'Space Grotesk', sans-serif" }}>{label}</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#fff", fontFamily: "'Space Grotesk', sans-serif", wordBreak: "break-word" }}>{children}</div>
+          </div>
+        );
+        return (
+          <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(200,166,69,.22)", borderRadius: 12, padding: "4px 14px", marginBottom: 14, fontFamily: "'Space Grotesk', sans-serif" }}>
+            {booking.eventTitle && (
+              <Row label="EVENT">
+                <span style={{ color: "#C8A645" }}>🎵 {booking.eventTitle}</span>
+              </Row>
+            )}
+            <Row label="NAME">{booking.name || "—"}</Row>
+            {booking.ref && (
+              <Row label="REF #">
+                <span style={{ fontFamily: "monospace", color: "#C8A645", letterSpacing: .5 }}>#{booking.ref}</span>
+              </Row>
+            )}
+            {booking.phone && (
+              <Row label="PHONE">
+                <span style={{ color: "#fff" }}>📞 +91 {booking.phone}</span>
+              </Row>
+            )}
+            <Row label="TICKET TYPE">
+              <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}66`, color: desc.categoryColor, fontSize: 13, fontWeight: 900, padding: "4px 12px", borderRadius: 999, letterSpacing: .6, display: "inline-block" }}>
+                {desc.category}
+              </span>
+            </Row>
+            <Row label="QUANTITY">
+              <span style={{ fontSize: 17, fontWeight: 900, color: "#fff" }}>{desc.breakdown}</span>
+            </Row>
+            {booking.tier && (
+              <Row label="TIER">
+                <span style={{ color: "#C8A645" }}>{booking.tier}</span>
+              </Row>
+            )}
+            <Row label="PAYMENT">
+              <span style={{ background: paymentLabel.bg, border: `1px solid ${paymentLabel.bd}`, color: paymentLabel.color, fontSize: 14, fontWeight: 900, padding: "6px 12px", borderRadius: 10, letterSpacing: .5, display: "inline-block" }}>
+                {paymentLabel.txt}
+              </span>
+            </Row>
+          </div>
+        );
+      })()}
 
       {err && (
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 12, padding: 10, borderRadius: 9, marginBottom: 10 }}>
@@ -1135,8 +1303,8 @@ function LookupResult({ booking, agentName, onDone: _onDone }: { booking: HodBoo
 
       {!done && !pendingAssignment && (
         <button onClick={openCheckInModal}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(0,200,100,.9),rgba(0,160,80,.8))", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
-          ✅ Check In Guest
+          style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+          ✅ CHECK IN GUEST
         </button>
       )}
 
@@ -1857,31 +2025,37 @@ function BookingDetailModal({
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#111", border: "1.5px solid rgba(200,166,69,0.35)", borderRadius: 18, padding: 18, boxShadow: "0 24px 48px rgba(0,0,0,.6)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 8 }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "-0.3px" }}>
+        {/* 🆕 2026-05-26 v3.17 (Khushi) — removed top PaidBadge: it duplicated
+            the PAYMENT row from the structured list below (top showed wallet
+            ₹999, list showed ticket ₹500 → confusing). Payment now lives ONLY
+            in the PAYMENT row, which auto-swaps PAY AT VENUE → PAID once
+            collected. Name only in header. */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, fontFamily: "'Space Grotesk', sans-serif" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 26, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "-0.3px", textTransform: "uppercase" }}>
               {booking.name || "Guest"}
             </div>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4 }}>
-              {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
-            </div>
           </div>
-          <PaidBadge booking={booking} cover={modalCover} />
         </div>
 
-        <LookupResult booking={booking} agentName={agentName} onDone={onClose} />
+        <LookupResult booking={booking} agentName={agentName} onDone={onClose} hideIdentity cover={modalCover} />
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
+        {/* 🆕 2026-05-26 (Khushi v3.15) — bigger buttons + Space Grotesk.
+            🆕 2026-05-26 v3.23 (Khushi) — bumped marginTop 4→10 so the gap
+            between CHECK IN GUEST and the 2×2 action grid matches the
+            guestlist modal exactly (which uses marginBottom:10 on its own
+            CHECK IN GUEST button — same breathing room). */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10, fontFamily: "'Space Grotesk', sans-serif" }}>
           {!booking._isGuestList && (
             <button onClick={() => { onCover(booking); onClose(); }}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "#C8A645", border: "none", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-              💰 Activate Cover
+              style={{ padding: "16px 12px", borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+              💰 ACTIVATE COVER
             </button>
           )}
           {onSendWhatsApp && (
             <button onClick={() => onSendWhatsApp(booking)}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-              📲 Send Wallet Link to WhatsApp
+              style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid #C8A645", color: "#C8A645", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+              📲 SEND WALLET LINK
             </button>
           )}
           <button onClick={() => onShowQr({
@@ -1890,20 +2064,20 @@ function BookingDetailModal({
             customerName: booking.name || "Guest",
             reason: "Show this QR — guest scans to open their wallet & menu instantly.",
           })}
-            style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-            📱 Show Wallet QR
+            style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid #C8A645", color: "#C8A645", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+            📱 SHOW WALLET QR
           </button>
           {phoneClean && (
             <a href={`tel:${phoneClean}`}
-              style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
-              📞 Call
+              style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer", textAlign: "center", textDecoration: "none", letterSpacing: .4 }}>
+              📞 CALL
             </a>
           )}
         </div>
 
         <button onClick={onClose}
-          style={{ marginTop: 12, width: "100%", padding: 12, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-          Close
+          style={{ marginTop: 14, width: "100%", padding: 14, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "rgba(255,255,255,.7)", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .5 }}>
+          CLOSE
         </button>
       </div>
     </div>
@@ -2302,73 +2476,94 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
           onConfirmed={({ checkedInAt, wasNew }) => handleCheckInModalConfirmed(checkInTarget, checkedInAt, wasNew)}
         />
       )}
-      {detail && detailGuest && (
+      {detail && detailGuest && (() => {
+        // 🆕 2026-05-26 v3.19 (Khushi) — guestlist modal mirrors the v3.15+
+        // ticket/table booking modal: Space Grotesk everywhere, structured
+        // label→value list (EVENT / NAME / REF / PHONE / TICKET TYPE /
+        // QUANTITY / PAYMENT), bigger buttons, NO duplicate top badge.
+        // PAYMENT row checks cover.coverActivated (door girl may activate
+        // a wallet on a guestlist guest) and shows the actual amount.
+        const desc = describeBooking(adapt(detailGuest));
+        const cov = covers.find((c) => c.id === detailGuest.id || c.id === (detailGuest as any).ref) || null;
+        const coverActivated = Number(cov?.coverActivated || 0);
+        const paymentLabel = coverActivated > 0
+          ? { txt: `✓ COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" }
+          : { txt: "🎁 GUEST LIST · FREE ENTRY", color: "#60A5FA", bg: "rgba(96,165,250,.10)", bd: "rgba(96,165,250,.40)" };
+        const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
+          <div style={{ display: "grid", gridTemplateColumns: "115px 1fr", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.06)", alignItems: "center" }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, color: "rgba(255,255,255,.45)", fontFamily: "'Space Grotesk', sans-serif" }}>{label}</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#fff", fontFamily: "'Space Grotesk', sans-serif", wordBreak: "break-word" }}>{children}</div>
+          </div>
+        );
+        const phoneClean = (detailGuest.phone || "").replace(/[^\d+]/g, "");
+        return (
         <div onClick={() => setDetail(null)}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
           <div onClick={(e) => e.stopPropagation()}
-            style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#111", border: "1.5px solid rgba(200,166,69,0.35)", borderRadius: 18, padding: 18, boxShadow: "0 24px 48px rgba(0,0,0,.6)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 8 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.3 }}>
-                  {detailGuest.name || "Guest"}
-                </div>
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 4 }}>
-                  {detailGuest.phone || "no phone"}{(detailGuest as any).ref ? ` · ${(detailGuest as any).ref}` : ""}
-                </div>
+            style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#111", border: "1.5px solid rgba(200,166,69,0.35)", borderRadius: 18, padding: 18, boxShadow: "0 24px 48px rgba(0,0,0,.6)", fontFamily: "'Space Grotesk', sans-serif" }}>
+            {/* Header: name only (no duplicate badge, payment lives in list below) */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 26, fontWeight: 900, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.3, textTransform: "uppercase" }}>
+                {detailGuest.name || "Guest"}
               </div>
-              <PaidBadge booking={adapt(detailGuest)} />
             </div>
 
-            {/* 🔴 2026-05-21 (Khushi) — Guestlist modal now shows the SAME
-                category + breakdown + event card as the tickets/table flow,
-                so door staff has full context (who · what type · how many ·
-                which event) before deciding to check in / free-entry / cover. */}
-            {(() => {
-              const desc = describeBooking(adapt(detailGuest));
-              return (
-                <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}55`, color: desc.categoryColor, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 999, letterSpacing: .5 }}>
-                      {desc.category}
-                    </span>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>{desc.breakdown}</span>
-                  </div>
-                  {detailGuest.eventTitle && (
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 4 }}>
-                      🎵 <span style={{ color: "#fff", fontWeight: 700 }}>{detailGuest.eventTitle}</span>
-                    </div>
-                  )}
-                  {(detailGuest as any).joinedAt && (
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)" }}>
-                      Added: <span style={{ color: "rgba(255,255,255,.75)", fontWeight: 700 }}>{String((detailGuest as any).joinedAt).slice(0, 16).replace("T", " ")}</span>
-                    </div>
-                  )}
-                  <div style={{ fontSize: 12, color: "#60A5FA", fontWeight: 700, marginTop: 6 }}>
-                    📋 Free entry — no payment due
-                  </div>
-                </div>
-              );
-            })()}
+            {/* CHECKED IN / PENDING status pill */}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              {detailGuest.checkedIn ? (
+                <span style={{ background: "rgba(0,200,100,.15)", border: "1px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10, whiteSpace: "nowrap" }}>✅ CHECKED IN</span>
+              ) : (
+                <span style={{ background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", color: "#FBBF24", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 10 }}>PENDING</span>
+              )}
+            </div>
 
-            {detailGuest.checkedIn ? (
-              <div style={{ background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.35)", color: "#00C864", padding: 14, borderRadius: 12, fontSize: 13, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>
-                ✅ Checked in
-              </div>
-            ) : (
+            {/* Structured info list */}
+            <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(200,166,69,.22)", borderRadius: 12, padding: "4px 14px", marginBottom: 14 }}>
+              {detailGuest.eventTitle && (
+                <Row label="EVENT"><span style={{ color: "#C8A645" }}>🎵 {detailGuest.eventTitle}</span></Row>
+              )}
+              <Row label="NAME">{detailGuest.name || "—"}</Row>
+              {(detailGuest as any).ref && (
+                <Row label="REF #"><span style={{ fontFamily: "monospace", color: "#C8A645", letterSpacing: .5 }}>#{(detailGuest as any).ref}</span></Row>
+              )}
+              {detailGuest.phone && (
+                <Row label="PHONE"><span style={{ color: "#fff" }}>📞 +91 {detailGuest.phone}</span></Row>
+              )}
+              <Row label="TICKET TYPE">
+                <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}66`, color: desc.categoryColor, fontSize: 13, fontWeight: 900, padding: "4px 12px", borderRadius: 999, letterSpacing: .6, display: "inline-block" }}>
+                  {desc.category}
+                </span>
+              </Row>
+              <Row label="QUANTITY">
+                <span style={{ fontSize: 17, fontWeight: 900, color: "#fff" }}>{desc.breakdown}</span>
+              </Row>
+              {(detailGuest as any).joinedAt && (
+                <Row label="ADDED">
+                  <span style={{ color: "rgba(255,255,255,.75)" }}>{String((detailGuest as any).joinedAt).slice(0, 16).replace("T", " ")}</span>
+                </Row>
+              )}
+              <Row label="PAYMENT">
+                <span style={{ background: paymentLabel.bg, border: `1px solid ${paymentLabel.bd}`, color: paymentLabel.color, fontSize: 14, fontWeight: 900, padding: "6px 12px", borderRadius: 10, letterSpacing: .5, display: "inline-block" }}>
+                  {paymentLabel.txt}
+                </span>
+              </Row>
+            </div>
+
+            {!detailGuest.checkedIn && (
               <button onClick={() => handleToggle(detailGuest)} disabled={busyId === detailGuest.id}
-                style={{ width: "100%", padding: 14, borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
-                {busyId === detailGuest.id ? "Checking…" : "✅ Check In Guest"}
+                style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", marginBottom: 10, letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+                {busyId === detailGuest.id ? "CHECKING…" : "✅ CHECK IN GUEST"}
               </button>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <button onClick={() => { onCover(adapt(detailGuest)); setDetail(null); }}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "#C8A645", border: "none", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                💰 Activate Cover
+                style={{ padding: "16px 12px", borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+                💰 ACTIVATE COVER
               </button>
               <button onClick={() => sendGuestlistWhatsApp(detailGuest, onShowQr)}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                📲 Send Wallet Link to WhatsApp
+                style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+                📲 SEND WALLET LINK
               </button>
               <button onClick={() => onShowQr({
                 bookingRef: detailGuest.id,
@@ -2376,30 +2571,25 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
                 customerName: detailGuest.name || "Guest",
                 reason: "Show this QR — guest scans to open their guest-list pass instantly.",
               })}
-                style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid #C8A645", color: "#C8A645", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                📱 Show Wallet QR
+                style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid #C8A645", color: "#C8A645", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+                📱 SHOW WALLET QR
               </button>
-              {!detailGuest.checkedIn && (
-                <button onClick={() => handleFreeEntry(detailGuest)} disabled={busyId === detailGuest.id}
-                  style={{ padding: "12px 10px", borderRadius: 10, background: "#fff", border: "1px solid #C8A645", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-                  {busyId === detailGuest.id ? "…" : "🎁 Free Entry"}
-                </button>
-              )}
-              {detailGuest.phone && (
-                <a href={`tel:${(detailGuest.phone || "").replace(/[^\d+]/g, "")}`}
-                  style={{ padding: "12px 10px", borderRadius: 10, background: "#000", border: "1px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer", textAlign: "center", textDecoration: "none" }}>
-                  📞 Call
+              {phoneClean && (
+                <a href={`tel:${phoneClean}`}
+                  style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid rgba(255,255,255,.35)", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer", textAlign: "center", textDecoration: "none", letterSpacing: .4 }}>
+                  📞 CALL
                 </a>
               )}
             </div>
 
             <button onClick={() => setDetail(null)}
-              style={{ marginTop: 12, width: "100%", padding: 12, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.7)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-              Close
+              style={{ marginTop: 14, width: "100%", padding: 14, borderRadius: 12, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "rgba(255,255,255,.7)", fontSize: 14, fontWeight: 800, cursor: "pointer", letterSpacing: .5 }}>
+              CLOSE
             </button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
         <div onClick={() => setViewMode("all")}
@@ -2889,8 +3079,12 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
   return (
     <div>
       {/* 🔴 2026-05-16 (Khushi) — mini dashboard. 3 status tiles (tap to filter)
-          + per-aggregator strip showing booked-count per source. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+          + per-aggregator strip showing booked-count per source.
+          🆕 2026-05-26 v3.25 — bigger fonts (v3.22 pattern). BOOKED/ARRIVED/
+          NOT YET numbers bumped 26→32 with Space Grotesk + tabular-nums and
+          label 10→11. Tiles sized for both bar tablet and Android phone
+          (3-col grid stays responsive — fits even on a 320px viewport). */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
         {([
           { key: "",        label: "Booked",     val: active.length,  color: "#F2C744" },
           { key: "arrived", label: "Arrived",    val: arrivedCount,   color: "#00C864" },
@@ -2902,34 +3096,41 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
               style={{
                 background: on ? `${t.color}1f` : "rgba(255,255,255,.04)",
                 border: `2px solid ${on ? t.color : "transparent"}`,
-                borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer",
+                borderRadius: 10, padding: "14px 8px", textAlign: "center", cursor: "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
               }}>
-              <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 26, fontWeight: 900, color: t.color }}>{t.val}</div>
-              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>{t.label} {on ? "•" : ""}</div>
+              <div style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 32, fontWeight: 900, color: t.color, lineHeight: 1 }}>{t.val}</div>
+              <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: "1.2px", textTransform: "uppercase", color: "rgba(255,255,255,0.6)", marginTop: 6 }}>{t.label} {on ? "•" : ""}</div>
             </div>
           );
         })}
       </div>
 
-      {/* Per-aggregator breakdown strip (read-only quick analytics). */}
+      {/* Per-aggregator breakdown strip (read-only quick analytics).
+          🆕 v3.25 — label 9→11, number 16→20, padding 6/8 → 8/10. Still
+          flex:1 so the 4 chips stay edge-to-edge on a 331px Android phone. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
         {(["inhouse", "zomato", "swiggy", "eazydiner"] as const).map((k) => {
           const ss = SRC_STYLES[k];
           const c = ss?.color || "#C8A645";
           return (
             <div key={k} style={{
-              flex: 1, minWidth: 70,
+              flex: 1, minWidth: 64,
               background: "rgba(255,255,255,0.03)", border: `1px solid ${c}33`,
-              borderRadius: 8, padding: "6px 8px", textAlign: "center",
+              borderRadius: 8, padding: "8px 6px", textAlign: "center",
+              fontFamily: "'Space Grotesk', sans-serif",
             }}>
-              <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.6px", color: c, textTransform: "uppercase" }}>{ss?.label || k}</div>
-              <div style={{ fontSize: 16, fontWeight: 900, color: "#fff", marginTop: 2 }}>{countBySrc[k] || 0}</div>
+              <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: "0.6px", color: c, textTransform: "uppercase" }}>{ss?.label || k}</div>
+              <div style={{ fontSize: 20, fontWeight: 900, color: "#fff", marginTop: 4, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{countBySrc[k] || 0}</div>
             </div>
           );
         })}
       </div>
 
-      {/* Aggregator chips */}
+      {/* Aggregator chips
+          🆕 v3.25 — label 11→13, count badge 10→12, padding 7→9. The chip
+          row wraps freely (flexWrap), so on narrow Android it just stacks
+          onto a 2nd line — no overflow risk. */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {AGG_FILTERS.map((f) => {
           const on = aggFilter === f.key;
@@ -2938,8 +3139,8 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
           return (
             <button key={f.key} onClick={() => setAggFilter(f.key)}
               style={{
-                padding: "7px 14px", borderRadius: 20, fontSize: 11, fontWeight: 800, letterSpacing: "0.5px", cursor: "pointer",
-                textTransform: "uppercase",
+                padding: "9px 14px", borderRadius: 20, fontSize: 13, fontWeight: 900, letterSpacing: "0.5px", cursor: "pointer",
+                textTransform: "uppercase", fontFamily: "'Space Grotesk', sans-serif",
                 background: "transparent",
                 border: on ? (ss ? `2px solid ${ss.color}` : "2px solid #C8A645") : "1px solid rgba(255,255,255,0.1)",
                 color: on ? (ss ? ss.color : "#C8A645") : "rgba(255,255,255,0.5)",
@@ -2947,10 +3148,10 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
               }}>
               <span>{f.label}</span>
               <span style={{
-                fontSize: 10, fontWeight: 900, padding: "1px 6px", borderRadius: 10,
+                fontSize: 12, fontWeight: 900, padding: "2px 7px", borderRadius: 10,
                 background: on ? (ss ? `${ss.color}33` : "rgba(200,166,69,0.25)") : "rgba(255,255,255,0.08)",
                 color: on ? (ss ? ss.color : "#C8A645") : "rgba(255,255,255,0.6)",
-                minWidth: 16, textAlign: "center",
+                minWidth: 18, textAlign: "center", fontVariantNumeric: "tabular-nums",
               }}>{c}</span>
             </button>
           );
@@ -2972,64 +3173,68 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         const arrived = !!r.actualArrivalTime;
         const tableLabel = r.tableId || "—";
 
+        // 🆕 v3.25 — bigger row fonts to match v3.22 modal pattern.
+        // Name 13→15, table pill 11→14, source badge 9→11, meta 10→12,
+        // status pill 9→12, padding bumped for thumb taps. PENDING text
+        // switches to orange #FB923C (matches v3.22 status color).
         return (
           <div key={r._docId} onClick={() => setExpandedDocId(r._docId)}
             style={{ display: "flex", alignItems: "center", gap: 10,
-              padding: "10px 12px", marginBottom: 6, borderRadius: 10,
+              padding: "12px 12px", marginBottom: 6, borderRadius: 10,
               background: arrived ? "rgba(0,200,100,.04)" : "rgba(255,255,255,.03)",
               border: `1px solid ${arrived ? "rgba(0,200,100,.25)" : "rgba(255,255,255,.08)"}`,
               cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", transition: "background .15s" }}>
             {/* Table id pill */}
-            <div style={{ flexShrink: 0, minWidth: 46, textAlign: "center",
-              padding: "6px 6px", borderRadius: 6,
+            <div style={{ flexShrink: 0, minWidth: 52, textAlign: "center",
+              padding: "8px 6px", borderRadius: 6,
               background: "rgba(242,199,68,.1)", border: "1px solid rgba(242,199,68,.25)",
-              color: "#F2C744", fontSize: 11, fontWeight: 900, letterSpacing: .3, lineHeight: 1.1 }}>
+              color: "#F2C744", fontSize: 14, fontWeight: 900, letterSpacing: .3, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>
               {tableLabel}
             </div>
 
             {/* Name + agg badge + meta */}
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#fff",
-                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ fontSize: 15, fontWeight: 800, color: "#fff",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: .2 }}>
                   {r.customerName || "—"}
                 </span>
                 {isAggregator ? (
-                  <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 3,
-                    background: "#A02820", color: "#fff", letterSpacing: .4, textTransform: "uppercase" }}>
+                  <span style={{ fontSize: 11, fontWeight: 900, padding: "3px 7px", borderRadius: 3,
+                    background: "#A02820", color: "#fff", letterSpacing: .4, textTransform: "uppercase", fontVariantNumeric: "tabular-nums" }}>
                     {aggLabel}{aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
                   </span>
                 ) : (
-                  <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+                  <span style={{ fontSize: 11, fontWeight: 800, padding: "3px 7px", borderRadius: 3,
                     background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.55)",
                     letterSpacing: .4, textTransform: "uppercase" }}>
                     In-House
                   </span>
                 )}
               </div>
-              <div style={{ display: "flex", gap: 8, fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>
+              <div style={{ display: "flex", gap: 10, fontSize: 12, color: "rgba(255,255,255,.6)", marginTop: 4, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 <span>👥 {r.partySize || "?"}p</span>
                 <span>🕐 {r.arrivalTime || "—"}</span>
-                {arrived && <span style={{ color: "#00C864", fontWeight: 700 }}>✓ {r.actualArrivalTime}</span>}
+                {arrived && <span style={{ color: "#00C864", fontWeight: 800 }}>✓ {r.actualArrivalTime}</span>}
               </div>
             </div>
 
             {/* Right side: status pill + Call button */}
             <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6 }}>
               {arrived ? (
-                <span style={{ fontSize: 9, fontWeight: 700, padding: "3px 7px", borderRadius: 4,
+                <span style={{ fontSize: 11, fontWeight: 900, padding: "4px 9px", borderRadius: 4,
                   background: "rgba(0,200,100,.12)", border: "1px solid rgba(0,200,100,.3)",
-                  color: "#00C864", letterSpacing: .3 }}>✓ ARRIVED</span>
+                  color: "#00C864", letterSpacing: .4, textTransform: "uppercase" }}>✓ ARRIVED</span>
               ) : (
-                <span style={{ fontSize: 9, fontWeight: 800, padding: "3px 7px", borderRadius: 4,
-                  background: "rgba(242,199,68,.12)", border: "1px solid rgba(242,199,68,.3)",
-                  color: "#F2C744", letterSpacing: .3 }}>PENDING</span>
+                <span style={{ fontSize: 11, fontWeight: 900, padding: "4px 9px", borderRadius: 4,
+                  background: "rgba(251,146,60,.12)", border: "1px solid rgba(251,146,60,.35)",
+                  color: "#FB923C", letterSpacing: .4, textTransform: "uppercase" }}>PENDING</span>
               )}
               <button onClick={(e) => { e.stopPropagation(); handleCall(r); }}
                 title="Call guest"
-                style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 8,
+                style={{ flexShrink: 0, padding: "8px 11px", borderRadius: 8,
                   background: "rgba(0,200,100,.1)", border: "1px solid rgba(0,200,100,.35)",
-                  color: "#00C864", fontSize: 13, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>
+                  color: "#00C864", fontSize: 15, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>
                 📞
               </button>
             </div>
@@ -3070,29 +3275,42 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
               style={{ width: "100%", maxWidth: 520, background: "#0C0816",
                 border: "1.5px solid rgba(242,199,68,.4)", borderRadius: 14, padding: 18,
                 fontFamily: "'Space Grotesk', sans-serif" }}>
-              {/* Header */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 8 }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 900, color: "#F2C744", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              {/* 🆕 2026-05-26 v3.22 (Khushi) — Tables detail modal header
+                  rebuilt to match the tickets/guestlist pattern: NO cursive
+                  (dropped Playfair), Space Grotesk everywhere, BIG sizes so a
+                  brand-new door girl reads it at a glance. Top row: TABLE # +
+                  source badge (SWIGGY -30% / ZOMATO / EAZYDINER / IN-HOUSE)
+                  on the left, CLOSE on the right. Below: guest name 26px 900
+                  UPPERCASE in white, floor as a small subtitle. The old
+                  separate customer-card removed (name is in the header now). */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 900, color: "#F2C744", letterSpacing: 1, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>
                     {tableLabel}
-                    <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: ".8px", padding: "3px 7px", borderRadius: 5, background: ss.bg, border: `1px solid ${ss.border}`, color: ss.color }}>
-                      {ss.label}{isAggregator && aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
-                    </span>
                   </div>
-                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginTop: 4 }}>{r.floorLabel || r.floor || ""}</div>
+                  <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: ".8px", padding: "5px 10px", borderRadius: 6, background: ss.bg, border: `1px solid ${ss.border}`, color: ss.color, fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase" }}>
+                    {ss.label}{isAggregator && aggDiscount > 0 ? ` -${aggDiscount}%` : ""}
+                  </span>
                 </div>
                 <button onClick={() => setExpandedDocId(null)}
-                  style={{ padding: "6px 12px", borderRadius: 6, background: "transparent",
-                    border: "1px solid rgba(242,199,68,.4)", color: "#F2C744",
-                    fontSize: 11, fontWeight: 800, cursor: "pointer", letterSpacing: .5 }}>
+                  style={{ padding: "8px 14px", borderRadius: 8, background: "transparent",
+                    border: "1px solid rgba(242,199,68,.45)", color: "#F2C744",
+                    fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: .6,
+                    fontFamily: "'Space Grotesk', sans-serif", textTransform: "uppercase" }}>
                   ✕ CLOSE
                 </button>
               </div>
 
-              {/* Customer */}
-              <div style={{ marginBottom: 14, padding: 12, background: "rgba(255,255,255,.03)", borderRadius: 10 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>{r.customerName || "—"}</div>
-                {/* Phone moved below into the editable grid (Khushi 16 May). */}
+              {/* Guest name (BIG) + floor subtitle */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 900, color: "#FFFFFF", letterSpacing: .5, lineHeight: 1.1, textTransform: "uppercase", wordBreak: "break-word" }}>
+                  {r.customerName || "—"}
+                </div>
+                {(r.floorLabel || r.floor) && (
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,.55)", marginTop: 6, letterSpacing: .8, textTransform: "uppercase", fontFamily: "'Space Grotesk', sans-serif" }}>
+                    {r.floorLabel || r.floor}
+                  </div>
+                )}
               </div>
 
               {/* Aggregator warning */}
@@ -3112,11 +3330,15 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                   (editTime || "") !== (r.arrivalTime || "") ||
                   (editDate || "") !== (r.date || "") ||
                   phoneTrim !== (r.phone || "");
-                const editLabel: React.CSSProperties = { fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,.4)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 };
+                // 🆕 2026-05-26 v3.22 (Khushi) — bigger Space Grotesk labels
+                // + inputs so the door girl can read pax / time / date / phone
+                // at a glance. tabular-nums keeps numbers aligned and non-cursive.
+                const editLabel: React.CSSProperties = { fontSize: 12, fontWeight: 900, color: "#F2C744", letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, fontFamily: "'Space Grotesk', sans-serif" };
                 const editInput: React.CSSProperties = {
-                  width: "100%", padding: "8px 10px", borderRadius: 6,
-                  background: "rgba(0,0,0,.4)", border: "1px solid rgba(242,199,68,.25)",
-                  color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: "inherit", outline: "none",
+                  width: "100%", padding: "10px 12px", borderRadius: 8,
+                  background: "rgba(0,0,0,.4)", border: "1px solid rgba(242,199,68,.3)",
+                  color: "#fff", fontSize: 17, fontWeight: 800, fontFamily: "'Space Grotesk', sans-serif", outline: "none",
+                  fontVariantNumeric: "tabular-nums",
                 };
                 return (
                   <>
@@ -3138,7 +3360,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                       </div>
                       <div style={{ padding: 10, background: arrived ? "rgba(0,200,100,.08)" : "rgba(255,255,255,.03)", borderRadius: 8 }}>
                         <div style={editLabel}>Status</div>
-                        <div style={{ fontSize: 14, fontWeight: 800, color: arrived ? "#00C864" : "#F2C744", marginTop: 2 }}>
+                        <div style={{ fontSize: 17, fontWeight: 900, color: arrived ? "#00C864" : "#FB923C", marginTop: 4, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .6, textTransform: "uppercase", fontVariantNumeric: "tabular-nums" }}>
                           {arrived ? `✓ ${arrived}` : "PENDING"}
                         </div>
                       </div>
@@ -5720,14 +5942,16 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           );
         })()}
 
-        {/* Event selector chips */}
+        {/* Event selector chips
+            🆕 v3.25 — label 10→12, chips 11→13, padding 7→9. Horizontal scroll
+            so any number of events stays one row on narrow Android. */}
         {eventChips.length > 0 && (
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: "#C8A645", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 6 }}>EVENT</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#C8A645", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 8, fontFamily: "'Space Grotesk', sans-serif" }}>EVENT</div>
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
               <button onClick={() => setSelectedEventId("all")}
-                style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 20, fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
-                  textTransform: "uppercase", letterSpacing: "0.5px",
+                style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 20, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
+                  textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "'Space Grotesk', sans-serif",
                   background: selectedEventId === "all" ? "transparent" : "transparent",
                   border: `2px solid ${selectedEventId === "all" ? "#C8A645" : "rgba(255,255,255,0.1)"}`,
                   color: selectedEventId === "all" ? "#C8A645" : "rgba(255,255,255,0.5)" }}>
@@ -5741,12 +5965,12 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                 const title = (ev.title || "Event").length > 18 ? (ev.title || "").slice(0, 18) + "…" : (ev.title || "Event");
                 return (
                   <button key={ev.id} onClick={() => setSelectedEventId(ev.id)}
-                    style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 20, fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
-                      textTransform: "uppercase", letterSpacing: "0.5px",
+                    style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 20, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
+                      textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "'Space Grotesk', sans-serif",
                       background: on ? "transparent" : "transparent",
                       border: `2px solid ${on ? "#C8A645" : "rgba(255,255,255,0.1)"}`,
                       color: on ? "#C8A645" : "rgba(255,255,255,0.5)" }}>
-                    {title}<span style={{ opacity: .55, marginLeft: 6, fontWeight: 500 }}>· {dateLabel}</span>
+                    {title}<span style={{ opacity: .55, marginLeft: 6, fontWeight: 600 }}>· {dateLabel}</span>
                   </button>
                 );
               })}
@@ -5754,17 +5978,30 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           </div>
         )}
 
+        {/* 🆕 2026-05-26 v3.25 (Khushi) — bigger dashboard fonts (v3.22 pattern).
+            CONSTRAINT: 7 chips on a 331px Android phone = ~43px each, so the
+            text labels stay at 10px (any bigger and GUEST LIST / ENTRY PASS
+            wrap or clip). Only the count + padding grow — count goes 18→22,
+            padding 8→11 → bigger tap target + the number jumps out from
+            across the door. */}
         <div style={{ display: "flex", gap: 6, marginBottom: 14, paddingBottom: 4, width: "100%" }}>
           {tabs.map((t) => {
             const on = tab === t.key;
             return (
               <button key={t.key} onClick={() => setTab(t.key)}
-                style={{ flex: 1, minWidth: 0, padding: "8px 4px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap", border: "none",
+                style={{ flex: 1, minWidth: 0, padding: "11px 2px", borderRadius: 8, cursor: "pointer", border: "none", overflow: "hidden",
                   background: on ? "#C8A645" : "#5C2525",
                   color: on ? "#0A0A0A" : "#FFFFFF",
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2, lineHeight: 1.1 }}>
-                <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.6px", textTransform: "uppercase" }}>{t.label}</span>
-                <span style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 18, fontWeight: 900,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 3, lineHeight: 1.1 }}>
+                {/* 🆕 v3.25 — architect-flagged overflow guard. Real chip width
+                    on a 331px Android iframe is ~37px (parent padding 12/16 +
+                    gap 6 × 7 chips), not 43px. Label letter-spacing tightened
+                    0.6→0.2, button padding 4→2 horizontal, overflow:hidden +
+                    textOverflow:ellipsis on the label so GUEST LIST/ENTRY PASS
+                    truncate gracefully instead of bleeding into the next chip. */}
+                <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.2px", textTransform: "uppercase", fontFamily: "'Space Grotesk', sans-serif",
+                  maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</span>
+                <span style={{ fontFamily: "'Space Grotesk','Inter',system-ui,sans-serif", fontVariantNumeric: "tabular-nums", fontSize: 22, fontWeight: 900,
                   color: on ? "#0A0A0A" : "#F2C744" }}>{t.count}</span>
               </button>
             );
@@ -6005,8 +6242,12 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
   // Khushi 2026-05-20: removed the category chip strip inside ALL — the tab
   // counters in the dashboard header already show the same split, having them
   // twice was redundant.
+  // 🆕 2026-05-26 v3.25 (Khushi) — bigger row fonts (v3.22 pattern). Name
+  // 13→15, phone 11→12, subtitle 11→12, kind badge 10→11, padding 10→12.
+  // Space Grotesk + tabular-nums everywhere so the door tablet OR a phone
+  // both read big and crisp from across the lobby.
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, fontFamily: "'Space Grotesk', sans-serif" }}>
       {rows.map((row) => {
         if (row.kind === "table" || row.kind === "corporate") {
           const r = row.res;
@@ -6016,18 +6257,18 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
           const subtitle = `${(r as any).tableId || "?"} · ${(r as any).floorLabel || (r as any).floor || ""} · ${arr || "no time"}${pax ? ` · ${pax}p` : ""}`;
           return (
             <button key={row.key} onClick={() => onTableClick(r, isCorp)}
-              style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
+              style={{ textAlign: "left", padding: "12px 12px", borderRadius: 10,
                 background: `${row.tone}10`, border: `1px solid ${row.tone}40`,
-                color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontFamily: "'Space Grotesk', sans-serif" }}>
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {(r as any).customerName || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {(r as any).phone || "no phone"}</span>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: .2 }}>
+                  {(r as any).customerName || "(no name)"} <span style={{ color: "rgba(255,255,255,.45)", fontWeight: 600, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>· {(r as any).phone || "no phone"}</span>
                 </div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                   {subtitle}
                 </div>
               </div>
-              <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
+              <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 900, padding: "4px 9px", borderRadius: 10, letterSpacing: .4, textTransform: "uppercase",
                 background: `${row.tone}20`, color: row.tone, border: `1px solid ${row.tone}60` }}>
                 {row.label}
               </span>
@@ -6039,19 +6280,19 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
         const subtitle = `${b.eventTitle || ""}${b.ref ? " · " + b.ref : ""}`.replace(/^ · /, "").trim() || (b.ref || "");
         return (
           <button key={row.key} onClick={() => onBookingClick(b)}
-            style={{ textAlign: "left", padding: "10px 12px", borderRadius: 10,
+            style={{ textAlign: "left", padding: "12px 12px", borderRadius: 10,
               background: `${row.tone}10`, border: `1px solid ${row.tone}40`,
-              color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              color: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontFamily: "'Space Grotesk', sans-serif" }}>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {b.name || "(no name)"} <span style={{ color: "rgba(255,255,255,.4)", fontWeight: 500, fontSize: 11 }}>· {b.phone || "no phone"}</span>
-                {b.checkedIn && <span style={{ marginLeft: 6, fontSize: 10, color: "#34D399", fontWeight: 800 }}>✓ IN</span>}
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: .2 }}>
+                {b.name || "(no name)"} <span style={{ color: "rgba(255,255,255,.45)", fontWeight: 600, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>· {b.phone || "no phone"}</span>
+                {b.checkedIn && <span style={{ marginLeft: 6, fontSize: 11, color: "#34D399", fontWeight: 900, letterSpacing: .4 }}>✓ IN</span>}
               </div>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 {subtitle}
               </div>
             </div>
-            <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 10,
+            <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 900, padding: "4px 9px", borderRadius: 10, letterSpacing: .4, textTransform: "uppercase",
               background: `${row.tone}20`, color: row.tone, border: `1px solid ${row.tone}60` }}>
               {row.label}
             </span>

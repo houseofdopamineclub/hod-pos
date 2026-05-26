@@ -1,17 +1,18 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
-import { useStaff } from "@/lib/staff-context";
+import { useStaff, DOOR_STAFF_SEED } from "@/lib/staff-context";
 // 🔴 2026-05-09 — switched FROM menu-data.ts (314 items, prefix `m`)
 // TO hod-menu.ts (373 items, prefix `hod`). Reason: hod-menu is the
 // CANONICAL list — it matches BarMode and customer wallet (hodclub.in).
 // Admin must manage the same list everyone else sells from. Override
 // docs are now keyed by slug(name), so cross-list ID mismatch is moot.
 import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
-import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride } from "@/lib/types";
+import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride, StaffRole } from "@/lib/types";
 import {
   subscribeToHappyHour, updateHappyHour,
   subscribeToAggregatorSettings, updateAggregatorSettings,
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
+  addStaffMember, upsertStaffMember, updateStaffMember, deleteStaffMember,
   logAudit,
   subscribeToEdcDefaultVendor, setEdcDefaultVendor, type EdcDefaultVendor,
 } from "@/lib/firestore";
@@ -19,14 +20,15 @@ import { FEATURES } from "@/lib/feature-flags";
 import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
+  subscribeToDoorPricingSettings, updateDoorPricingSettings, type DoorPricingSettings,
 } from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
 import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
-import AttendanceAdmin from "./AttendanceAdmin";
-import StaffManagement from "./StaffManagement";
+import MenuCRM from "./MenuCRM";
+import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
 
 // Manager PIN gate for menu changes (OOS toggle, discount set/clear).
 // Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
@@ -40,14 +42,17 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 }
 
 export default function AdminPage() {
-  const { currentStaff, hasRole, logout } = useStaff();
+  const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "staff" | "attendance" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings" | "door-pricing">("monitor");
+  const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
+  const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [happyHour, setHappyHour] = useState<HappyHourConfig | null>(null);
   const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
   const [menuSearch, setMenuSearch] = useState("");
+  const [newStaff, setNewStaff] = useState({ name: "", pin: "", role: "steward" as StaffRole });
   const [editingHH, setEditingHH] = useState(false);
   const [hhForm, setHhForm] = useState({ enabled: false, days: [0,1,2,3,4,5,6], startTime: "12:00", endTime: "20:00", discountPercent: 10 });
   const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
@@ -60,6 +65,7 @@ export default function AdminPage() {
       subscribeToAggregatorSettings(setAggSettings),
       subscribeToMenuOverrides(setMenuOverridesState),
       subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
+      subscribeToDoorPricingSettings(setDoorPricing),
     ];
     return () => unsubs.forEach(u => u());
   }, []);
@@ -267,6 +273,13 @@ export default function AdminPage() {
     );
   };
 
+  const handleAddStaff = async () => {
+    // 🆕 2026-05-23 — Accept 4-6 digit PIN (was hard 4). Matches StaffLogin policy.
+    if (!newStaff.name || !newStaff.pin || newStaff.pin.length < 4 || newStaff.pin.length > 6) return;
+    await addStaffMember({ ...newStaff, active: true });
+    setNewStaff({ name: "", pin: "", role: "steward" });
+  };
+
   const handleSaveHappyHour = async () => {
     await updateHappyHour({
       ...hhForm,
@@ -277,6 +290,7 @@ export default function AdminPage() {
   };
 
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const roleOptions: StaffRole[] = ["admin", "manager", "cashier", "captain", "steward", "bartender", "hostess", "chef"];
 
   return (
     <div className="min-h-screen" style={{ background: "#030305", color: "hsl(36 29% 93%)" }}>
@@ -292,10 +306,10 @@ export default function AdminPage() {
       </header>
 
       <div className="flex gap-1 px-4 py-2" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
-        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "staff", "attendance", "happy-hour", "aggregator", "tablet", "settings"] as const).map((t) => (
+        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "menu-crm", "bot-knowledge", "staff", "happy-hour", "aggregator", "door-pricing", "tablet", "settings"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu" ? "OOS / Discount" : t === "attendance" ? "📍 Attendance" : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu-crm" ? "📋 Menu CRM" : t === "bot-knowledge" ? "🧠 Bot Knowledge" : t === "menu" ? "OOS / Discount" : t === "door-pricing" ? "💰 Door Pricing" : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -334,6 +348,10 @@ export default function AdminPage() {
         )}
 
         {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
+
+        {tab === "menu-crm" && <MenuCRM />}
+
+        {tab === "bot-knowledge" && <KnowledgeBaseAdmin />}
 
         {tab === "menu" && (
           <div>
@@ -429,9 +447,96 @@ export default function AdminPage() {
           </div>
         )}
 
-        {tab === "staff" && <StaffManagement />}
-
-        {tab === "attendance" && <AttendanceAdmin />}
+        {tab === "staff" && (
+          <div>
+            {/* 🆕 2026-05-23 (Khushi) — one-click seed of the 8 door-access people.
+                IDEMPOTENT: uses Emp ID (e.g. "hod-001") as the Firestore doc id, so
+                re-clicking is safe (existing docs are skipped, never overwritten —
+                that way manager-rotated PINs are preserved). */}
+            <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px dashed #C9A84C" }}>
+              <h3 className="text-sm font-semibold mb-2" style={{ color: "#C9A84C" }}>🚪 Door-Access Staff (8 people)</h3>
+              <div className="text-xs mb-2" style={{ color: "hsl(36 29% 70%)" }}>
+                One-click seed: 2 Admins + 2 GMs + HR + Store + 2 Hostesses. Default PIN = <b>100 + last 3 of Emp ID</b> (e.g. HOD-129 → 100129). Each person rotates their PIN below after first login.
+              </div>
+              <div className="text-xs mb-3 p-2 rounded" style={{ background: "#3a1d05", color: "#fca454", border: "1px solid #92400e" }}>
+                ⚠ <b>HEADS-UP:</b> GMs / HR / Store get role = <b>manager</b> → they will also have manager-PIN-gated power across the app (KOT void, comp, discount overrides, etc.), not door-only. Hostesses get role = <b>hostess</b> (door-only). Admins get <b>admin</b> (full /admin).
+              </div>
+              <button
+                onClick={async () => {
+                  if (!confirm("Seed 8 door-access staff to Firestore?\n\n• Safe to click multiple times (skips existing).\n• Default PIN = 100+last3 of Emp ID.\n• PROCEED?")) return;
+                  let created = 0, existed = 0;
+                  const failures: string[] = [];
+                  for (const s of DOOR_STAFF_SEED) {
+                    const { id, ...rest } = s;
+                    try {
+                      const result = await upsertStaffMember(id!, rest);
+                      if (result === "created") {
+                        created++;
+                        if (currentStaff) {
+                          try {
+                            await logAudit({
+                              action: "door_staff_seeded",
+                              staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+                              details: { seededId: id, seededName: s.name, seededRole: s.role },
+                            });
+                          } catch (auditErr) { console.warn("audit log failed (non-fatal)", auditErr); }
+                        }
+                      } else {
+                        existed++;
+                      }
+                    } catch (e: any) {
+                      console.error("Seed failed for", s.name, e);
+                      failures.push(`${s.name}: ${e?.message || e}`);
+                    }
+                  }
+                  const failPart = failures.length
+                    ? `\n\n❌ FAILED (${failures.length}):\n${failures.join("\n")}\n\n→ FALLBACK: open Add Staff above and add the failed ones manually.`
+                    : "";
+                  alert(`${failures.length ? "⚠ PARTIAL" : "✅ DONE"}\n\nNewly added: ${created}\nAlready existed (skipped): ${existed}${failPart}`);
+                }}
+                className="px-4 py-2 rounded text-sm font-bold"
+                style={{ background: "linear-gradient(135deg,#C9A84C,#A07830)", color: "#030305" }}
+              >
+                🚪 SEED 8 DOOR STAFF NOW
+              </button>
+            </div>
+            <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Add Staff</h3>
+              <div className="flex gap-2 flex-wrap">
+                <input placeholder="Name" value={newStaff.name} onChange={(e) => setNewStaff(s => ({...s, name: e.target.value}))}
+                  className="px-3 py-2 rounded text-sm flex-1 min-w-[150px]" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
+                <input placeholder="4-6 digit PIN" value={newStaff.pin}
+                  onChange={(e) => setNewStaff(s => ({...s, pin: e.target.value.replace(/\D/g, "").slice(0,6)}))} maxLength={6}
+                  className="px-3 py-2 rounded text-sm w-28" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
+                <select value={newStaff.role} onChange={(e) => setNewStaff(s => ({...s, role: e.target.value as StaffRole}))}
+                  className="px-3 py-2 rounded text-sm" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}>
+                  {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <button onClick={handleAddStaff} className="px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Add</button>
+              </div>
+            </div>
+            <div className="space-y-1">
+              {allStaff.map((s) => (
+                <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: "hsl(240 12% 5%)" }}>
+                  <div>
+                    <span className="text-sm">{s.name}</span>
+                    <span className="text-xs ml-2 px-2 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "#C9A84C" }}>{s.role}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
+                      className="text-xs px-2 py-1 rounded" style={{ background: s.active ? "#22c55e33" : "#ef444433", color: s.active ? "#22c55e" : "#ef4444" }}>
+                      {s.active ? "Active" : "Inactive"}
+                    </button>
+                    {hasRole("admin") && s.role !== "admin" && (
+                      <button onClick={() => s.id && deleteStaffMember(s.id)}
+                        className="text-xs px-2 py-1 rounded" style={{ background: "#ef444433", color: "#ef4444" }}>Delete</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {tab === "happy-hour" && (
           <div className="max-w-md">
@@ -549,6 +654,101 @@ export default function AdminPage() {
                   : edcDefaultVendor
                     ? `✅ Venue default: ${edcDefaultVendor === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus"}.`
                     : `No venue default set yet — Door Mode falls back to the build-time default (${(import.meta.env.VITE_EDC_VENDOR as string) === "pinelabs" ? "Pine Labs" : "Razorpay POS"}).`}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🆕 2026-05-20 (Khushi) — DOOR PRICING TOGGLE
+            Manager controls whether door girls can override walk-in prices
+            (cover / entry-only / group / table4 / vvip-6). When OFF, prices
+            lock to event values — safest default. When ON, door staff can
+            bargain with Koramangala customers; every override is logged in
+            the booking's `notes` field for review in Reports + Sheets. */}
+        {tab === "door-pricing" && (
+          <div className="space-y-4 max-w-xl">
+            <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>💰 Door Bargain Pricing</h3>
+              <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
+                When <b>ON</b>, door staff can edit the price for each walk-in (covers, entry-only, group per-head, table for 4, VVIP table for 6) — useful for Koramangala customers who bargain. Every overridden price is stamped in the booking's notes as <code>PRICE OVERRIDE: ₹X (default ₹Y) by &lt;staff&gt;</code> for your review.
+                <br /><br />
+                When <b>OFF</b>, prices lock to the event's published values — door staff cannot change them.
+              </p>
+
+              <div className="flex items-center justify-between p-4 rounded-lg" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+                <div>
+                  <div className="text-sm font-semibold" style={{ color: "hsl(36 29% 93%)" }}>
+                    Allow door staff to override prices
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
+                    {doorPricing.priceOverrideEnabled
+                      ? "✅ ON — door girls can bargain prices on every walk-in"
+                      : "🔒 OFF — prices locked to event values (safest default)"}
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (doorPricingSaving) return;
+                    const next = !doorPricing.priceOverrideEnabled;
+                    // Manager PIN gate — same as menu changes — so a stray
+                    // tablet tap can't open the bargain window.
+                    const ok = await requireManagerPinAdmin(
+                      next
+                        ? "Allow door staff to override walk-in prices?"
+                        : "Lock door walk-in prices back to event values?"
+                    );
+                    if (!ok) return;
+                    setDoorPricingSaving(true);
+                    try {
+                      await updateDoorPricingSettings(
+                        { priceOverrideEnabled: next },
+                        currentStaff?.name || "admin"
+                      );
+                      // 🛟 Optimistic UI update — the helper writes to localStorage
+                      // synchronously and tries Firestore best-effort. If Firestore
+                      // succeeds, onSnapshot will reconcile; if rules silently
+                      // reject (auth null), local state still reflects the click
+                      // so the toggle actually MOVES on this tablet.
+                      setDoorPricing({ priceOverrideEnabled: next });
+                      await logAudit({
+                        action: "DOOR_PRICING_OVERRIDE_TOGGLE",
+                        staffId: currentStaff?.id || "admin",
+                        staffName: currentStaff?.name || "admin",
+                        staffRole: (currentStaff?.role || "admin") as StaffRole,
+                        details: { enabled: next },
+                      }).catch(() => {});
+                    } catch (e: any) {
+                      alert(`❌ Could not update setting: ${e?.message || e}`);
+                    } finally {
+                      setDoorPricingSaving(false);
+                    }
+                  }}
+                  disabled={doorPricingSaving}
+                  className="relative inline-flex items-center"
+                  style={{
+                    width: 64, height: 34, borderRadius: 999,
+                    background: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(240 8% 20%)",
+                    border: "1px solid hsl(240 8% 25%)",
+                    cursor: doorPricingSaving ? "wait" : "pointer",
+                    opacity: doorPricingSaving ? 0.6 : 1,
+                    transition: "background .2s",
+                  }}
+                  aria-label="Toggle door pricing override"
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      left: doorPricing.priceOverrideEnabled ? 32 : 4,
+                      top: 3, width: 26, height: 26, borderRadius: "50%",
+                      background: "#fff", transition: "left .2s",
+                      boxShadow: "0 2px 6px rgba(0,0,0,.35)",
+                    }}
+                  />
+                </button>
+              </div>
+
+              <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
+                <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If this setting can't load, the door modal defaults to <b>OFF</b> (locked prices) so revenue is never accidentally discounted. Audit every override in <b>📋 Reports</b> — look for "PRICE OVERRIDE" in the booking notes column.
               </div>
             </div>
           </div>

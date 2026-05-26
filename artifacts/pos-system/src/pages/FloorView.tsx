@@ -5,7 +5,7 @@ import { subscribeToTableReservations, subscribeToActiveOrders, subscribeToCurre
 import { useStaff } from "@/lib/staff-context";
 import type { POSShift } from "@/lib/types";
 import { GROUND_TABLES, DINING_TABLES, SMOKING_TABLES, ROOFTOP_TABLES, SECTION_LABELS } from "@/lib/tables-config";
-import { formatINR, getDuration, formatTime, formatDate, getDurationMinutes } from "@/lib/utils-pos";
+import { formatINR, getDuration, formatTime, formatDate, getDurationMinutes, getOperationalNightStr } from "@/lib/utils-pos";
 import type { TableReservation, POSOrder, TableConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -20,12 +20,18 @@ export default function FloorView() {
   const [shift, setShift] = useState<POSShift | null>(null);
   const [now, setNow] = useState(new Date());
 
+  // 🔴 2026-05-24 (Khushi COST FIX) — Scope tableReservations to TONIGHT only.
+  // Was reading the WHOLE collection (months of history) on every tablet on
+  // every mount → with 15 tablets this was ~50% of the 2.9M reads/day.
+  // Uses getOperationalNightStr() (12pm→12pm IST) so a 2am Sunday morning
+  // floor view still groups with Saturday night's tables.
+  const today = getOperationalNightStr();
   useEffect(() => {
-    const unsub1 = subscribeToTableReservations(setReservations);
+    const unsub1 = subscribeToTableReservations(setReservations, today);
     const unsub2 = subscribeToActiveOrders(setOrders);
     const unsub3 = subscribeToCurrentShift(setShift);
     return () => { unsub1(); unsub2(); unsub3(); };
-  }, []);
+  }, [today]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 30000);

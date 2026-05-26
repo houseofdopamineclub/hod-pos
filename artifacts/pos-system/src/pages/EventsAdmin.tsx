@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   subscribeToHodEvents, createHodEvent, updateHodEvent, updateHodEventImageOnly,
-  toggleHodEventPublished, deleteHodEvent, type HodEvent,
+  toggleHodEventPublished, deleteHodEvent, deleteExpiredHodEvents, type HodEvent,
 } from "../lib/firestore-hod";
 
 type Tab = "list" | "form";
@@ -93,6 +93,23 @@ export default function EventsAdmin() {
     return unsub;
   }, []);
 
+  // 🆕 2026-05-24 (Khushi) — Auto-purge expired event posters on admin mount.
+  // Khushi: "once event is over poster must be autodeleted both from firestore
+  // and on our app too". 2-day grace window lets the operator fix any
+  // reconciliation/payment issues before the doc vanishes.
+  // 🛟 Fail-open: errors are logged only — admin tab still loads.
+  const purgedRef = useRef(false);
+  useEffect(() => {
+    if (purgedRef.current) return;
+    purgedRef.current = true;
+    deleteExpiredHodEvents(2)
+      .then((r) => {
+        if (r.deleted > 0) console.info(`[EventsAdmin] auto-purged ${r.deleted} expired event(s)`);
+        if (r.errors.length > 0) console.warn("[EventsAdmin] purge errors", r.errors);
+      })
+      .catch((e) => console.warn("[EventsAdmin] auto-purge failed", e));
+  }, []);
+
   const editing = useMemo(() => events.find((e) => e.id === editId) || null, [events, editId]);
 
   const startEdit = (ev: HodEvent) => {
@@ -165,10 +182,18 @@ export default function EventsAdmin() {
   const handleOptimizeAll = async () => {
     if (optimizeRunning.current) return;
     optimizeRunning.current = true;
-    const targets = events.filter((e) =>
-      e.image && (e.image.startsWith("data:") || e.image.startsWith("http")) &&
-      e.image.length > 150_000
-    );
+    // 💰 COST FIX 2026-05-21 — include ALL external URLs (firebasestorage, lh3, etc.)
+    // regardless of URL length, so the optimizer pulls them in and inlines as base64.
+    // Old filter required >150KB which excluded short URL strings entirely — that's
+    // why Firebase Storage poster URLs were never migrated and kept leaking ₹3,160/mo
+    // in egress fees. data: URLs still need the >150KB gate so already-small posters
+    // are skipped.
+    const targets = events.filter((e) => {
+      if (!e.image) return false;
+      if (e.image.startsWith("http")) return true;                  // any external URL → migrate
+      if (e.image.startsWith("data:") && e.image.length > 150_000) return true;  // big base64 → recompress
+      return false;
+    });
     if (targets.length === 0) {
       optimizeRunning.current = false;
       alert("All posters are already optimized — nothing to do.");

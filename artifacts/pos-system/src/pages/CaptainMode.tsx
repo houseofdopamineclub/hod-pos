@@ -46,6 +46,7 @@ import { HOD_MENU_ITEMS as MENU_ITEMS } from "@/lib/hod-menu";
 import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
+import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
 // Dynamic Link (those were shut down 2025-08-25).
@@ -99,18 +100,25 @@ const WALKIN_DISCOUNT_MAX = 10;
 function clampCaptainDiscount(raw: number): number | null {
   const n = Math.max(0, Math.floor(Number(raw) || 0));
   if (n > CAPTAIN_DISCOUNT_MAX) {
-    alert(`⚠ Captain discount is capped at ${CAPTAIN_DISCOUNT_MAX}%.\nAsk a manager to apply anything higher.`);
+    void centeredAlert(
+      "DISCOUNT CAPPED",
+      `Captain discount is capped at ${CAPTAIN_DISCOUNT_MAX}%.\nAsk a manager to apply anything higher.`,
+      "error",
+    );
     return null;
   }
   return n;
 }
 
-/** Prompt for the Manager PIN and verify against MANAGER_HASH. Returns true on success. */
+/** Prompt for the Manager PIN and verify against MANAGER_HASH. Returns true on success.
+ *  2026-05-26 — uses centeredPinPrompt + centeredAlert (HOD-branded modal,
+ *  no ugly browser popups). Fail-open: if DOM helpers throw, the helper
+ *  itself falls back to window.prompt. */
 async function requireManagerPin(reason: string): Promise<boolean> {
-  const pin = window.prompt(`🔒 Manager PIN required\n\n${reason}\n\nEnter 4-digit Manager PIN:`);
+  const pin = await centeredPinPrompt(reason);
   if (!pin) return false;
   const h = await sha256(pin.trim());
-  if (h !== MANAGER_HASH) { alert("❌ Wrong Manager PIN."); return false; }
+  if (h !== MANAGER_HASH) { await centeredAlert("WRONG MANAGER PIN", "That PIN did not match. Action cancelled.", "error"); return false; }
   return true;
 }
 
@@ -916,6 +924,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // Pre-fill manual discount with whatever the captain set on the table card (Apply panel),
   // so a custom discount applied at the table flows into Cash/Card/UPI bill calc.
   const [manualDiscount, setManualDiscount] = useState<number>(isAggregator ? 0 : (aggDiscount || 0));
+  // 🔴 2026-05-26 (Khushi) — track the discount % that was already approved
+  // via Manager PIN, so confirm() can re-check at commit time without
+  // double-prompting when the captain pre-approved in the input onBlur.
+  // Cleared whenever the discount value changes again.
+  const [discountApprovedPct, setDiscountApprovedPct] = useState<number | null>(null);
   const [serviceCharge, setServiceCharge] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1110,6 +1123,29 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     // (the panel writes the override log; we only re-prompt if the captain
     // somehow lands here with discountPct above threshold and NO panel
     // approval — defense in depth).
+    // 🔴 2026-05-26 (Khushi) — AUTHORITATIVE non-zero discount gate at commit
+    // time (defense-in-depth — the onBlur PIN gate is a UX pre-check only).
+    // Skip when: aggregator-published discount EXACTLY matches OR the captain
+    // already cleared the PIN gate for THIS specific pct in the input field
+    // (tracked via discountApprovedPct, invalidated on any keystroke).
+    if (discountPct > 0 && payMethod !== "aggregator") {
+      const aggRateMatchAtCommit =
+        aggName !== "inhouse" && Number(discountPct) === Number(aggDiscount);
+      const alreadyApprovedHere = discountApprovedPct === discountPct;
+      if (!aggRateMatchAtCommit && !alreadyApprovedHere) {
+        const ok = await requireManagerPin(
+          `Confirm ${discountPct}% discount on ₹${tabTotal} tab\n` +
+          `(value: ₹${discountAmt})\n\n` +
+          `Any non-zero discount needs a Manager PIN before billing.`,
+        );
+        if (!ok) { setError("Manager PIN required for this discount."); return; }
+        setDiscountApprovedPct(discountPct);
+        overrides.push({
+          kind: "high-discount", valueBefore: 0, valueAfter: discountPct,
+          tabTotal, reason: "any-discount commit-time gate",
+        });
+      }
+    }
     if (discountPct > HIGH_DISCOUNT_PIN_THRESHOLD) {
       // Skip the prompt if this discount was already approved at the table-
       // card panel (override log entry exists for current pct). This avoids
@@ -1402,14 +1438,27 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           )}
         </div>
 
+        {/* 🔴 2026-05-26 (Khushi spec) — Service Charge MUST stay ON. To toggle
+            OFF, the captain has to enter the Manager PIN via the centered modal
+            (no browser popup). Turning back ON is free (1 tap). */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-          <button onClick={() => setServiceCharge(!serviceCharge)}
+          <button onClick={async () => {
+            if (serviceCharge) {
+              const ok = await requireManagerPin(
+                "Service Charge is DEFAULT ON.\n\nTurning it OFF removes the 10% staff service charge from this bill.\n\nManager PIN required to disable.",
+              );
+              if (!ok) return;
+            }
+            setServiceCharge(!serviceCharge);
+          }}
             style={{ width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer", position: "relative",
               background: serviceCharge ? "rgba(229,168,42,.5)" : "rgba(255,255,255,.15)", transition: "background .2s" }}>
             <div style={{ width: 16, height: 16, borderRadius: 8, background: "#fff", position: "absolute", top: 3,
               left: serviceCharge ? 21 : 3, transition: "left .2s" }} />
           </button>
-          <span style={{ fontSize: 14, color: "rgba(242,235,211,.8)" }}>Service Charge (10%)</span>
+          <span style={{ fontSize: 14, color: "rgba(242,235,211,.8)" }}>
+            Service Charge (10%) {!serviceCharge && <span style={{ color: "#EF4444", fontWeight: 800, fontSize: 11, marginLeft: 6 }}>· WAIVED</span>}
+          </span>
         </div>
 
         {isAggregator && (
@@ -1477,17 +1526,34 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 </div>
               </div>
             )}
-            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 8 }}>Discount %</div>
-            {/* 🔴 2026-05-12 — D4: input cap is 15%, blur fires the PIN gate. */}
+            <div style={{ fontSize: 13, color: "rgba(242,235,211,.8)", marginBottom: 4 }}>
+              Discount % <span style={{ color: "#EF4444", fontWeight: 800, fontSize: 11 }}>· MANAGER PIN REQUIRED</span>
+            </div>
+            <div style={{ fontSize: 11, color: "rgba(242,235,211,.55)", marginBottom: 8, lineHeight: 1.4 }}>
+              Every discount — even 5% — needs a manager. Aggregator bills (Zomato/EazyDiner) bypass this.
+            </div>
+            {/* 🔴 2026-05-26 (Khushi spec) — D4 + ZERO TOLERANCE: ANY non-zero
+                discount needs Manager PIN now. Old behaviour only gated >25%.
+                Aggregator bills bypass (discount is preset by platform). */}
             <input type="number" value={manualDiscount || ""}
-              onChange={(e) => setManualDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
+              onChange={(e) => {
+                setManualDiscount(Math.min(CAPTAIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)));
+                // Any keystroke invalidates a prior PIN approval — confirm()
+                // will re-prompt unless the captain re-approves the new value.
+                setDiscountApprovedPct(null);
+              }}
               onBlur={async (e) => {
                 const raw = Number(e.target.value) || 0;
                 const clamped = clampCaptainDiscount(raw);
-                if (clamped === null) { setManualDiscount(0); return; }
-                if (clamped !== 0 && clamped !== Number((e.target as HTMLInputElement).defaultValue || 0)) {
-                  const ok = await requireManagerPin(`Apply ${clamped}% manual discount on this bill`);
-                  if (!ok) { setManualDiscount(0); return; }
+                if (clamped === null) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
+                if (clamped > 0) {
+                  const ok = await requireManagerPin(
+                    `Apply ${clamped}% manual discount on this bill.\n\nManager approval is required for ANY discount (Khushi rule 26 May).`,
+                  );
+                  if (!ok) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
+                  setDiscountApprovedPct(clamped);
+                } else {
+                  setDiscountApprovedPct(null);
                 }
                 setManualDiscount(clamped);
               }}
@@ -4415,8 +4481,21 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // 🛟 FALLBACK: if the tablet's floor isn't set (getTabletFloor()===null),
   // focus mode silently falls back to "show all" — we never accidentally hide
   // all reservations from a tablet whose floor wasn't configured yet.
+  // 🆕 2026-05-26 v3.38 (Khushi: "FIX MY READ ISSUES NOW, GOING IN MILLIONS")
+  // — flipped default from "off" → "on" for any tablet that has a
+  // tablet_floor configured. v3.10 shipped Focus Mode as opt-in; with 930K
+  // reads/hr observed at ~9pm we can't wait for captains to tap the pill
+  // one by one. Now: explicit "on" or "off" in localStorage wins (so a
+  // captain who DID toggle it keeps their choice). UNSET → default ON when
+  // tablet floor is configured; OFF when not (fail-safe so an unconfigured
+  // tablet never accidentally hides all reservations).
   const [focusMode, setFocusMode] = useState<boolean>(() => {
-    try { return localStorage.getItem("hod_captain_focus_mode") === "on"; } catch { return false; }
+    try {
+      const v = localStorage.getItem("hod_captain_focus_mode");
+      if (v === "on") return true;
+      if (v === "off") return false;
+      return !!getTabletFloor();
+    } catch { return false; }
   });
   const tabletFloor = getTabletFloor();
   const focusFloorKey: FloorKey | null = (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null;
