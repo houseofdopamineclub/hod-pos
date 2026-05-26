@@ -54,11 +54,17 @@ const MENU_OVERRIDES_COL = "posMenuOverrides";
 const VENUE_SETTINGS_COL = "venueSettings";
 const VENUE_MENU_COL = "venueMenu";
 
+// 🔴 2026-05-24 — REVERTED Kimi's "date filter" patch. `tableReservations` is
+// keyed by tableId (T1, T2, ...) — one doc per PHYSICAL table, ~30 docs total.
+// Docs do NOT carry a `date` field, so the filter returned 0 rows and the
+// floor went empty. This collection is tiny and is NOT a read leak.
+// `dateFilter` is kept in the signature for backwards-compat with FloorView,
+// but is intentionally ignored.
 export function subscribeToTableReservations(
-  cb: (data: Record<string, TableReservation>) => void
+  cb: (data: Record<string, TableReservation>) => void,
+  _dateFilter?: string,
 ): Unsubscribe {
-  const col = collection(db, TABLE_RES_COL);
-  return onSnapshot(col, (snap) => {
+  return onSnapshot(collection(db, TABLE_RES_COL), (snap) => {
     const result: Record<string, TableReservation> = {};
     snap.forEach((d) => {
       result[d.id] = { tableId: d.id, ...d.data() } as TableReservation;
@@ -304,6 +310,22 @@ export async function addStaffMember(staff: Omit<StaffMember, "id">): Promise<st
     createdAt: serverTimestamp(),
   });
   return ref.id;
+}
+
+/** 🆕 2026-05-23 — Idempotent upsert by stable doc id (e.g. Emp ID "hod-001").
+ * Used by the "Seed Door Staff" button so re-clicks don't duplicate rows.
+ * Returns `"created"` on first write, `"existed"` if the doc already exists
+ * (and merge happens — but PIN/role/active are NOT overwritten so an admin's
+ * later edits stay intact). */
+export async function upsertStaffMember(
+  id: string,
+  staff: Omit<StaffMember, "id">
+): Promise<"created" | "existed"> {
+  const ref = doc(db, STAFF_COL, id);
+  const snap = await getDoc(ref);
+  if (snap.exists()) return "existed";
+  await setDoc(ref, { ...staff, createdAt: serverTimestamp() });
+  return "created";
 }
 
 export async function updateStaffMember(id: string, data: Partial<StaffMember>): Promise<void> {

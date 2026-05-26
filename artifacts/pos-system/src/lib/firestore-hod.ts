@@ -4073,6 +4073,10 @@ export async function printKOT(data: {
   bookingRef?: string;
   reservationId?: string;
   customerPhone?: string;
+  /** Optional human-friendly pairing token (e.g. "T-007"). When set, the
+   *  print server renders it as a giant TOKEN line at the top of each
+   *  KOT chit — runners + bartenders pair KOT↔Bill at a glance. */
+  token?: string;
 }): Promise<boolean> {
   try {
     const tabletFloor = data.tabletFloor ?? getTabletFloor();
@@ -4109,6 +4113,7 @@ export async function printKOT(data: {
       destinations,
       prints,
       status: "pending",
+      token: data.token || null,
       createdAt: serverTimestamp(),
     });
     return true; // Firestore SDK queues offline writes — always succeeds locally
@@ -4205,6 +4210,9 @@ export async function printBill(data: {
   billNumber?: string;
   isDuplicate?: boolean;
   tabletFloor?: TabletFloor | null;
+  /** Optional pairing token — printed alongside the bill so cashier can
+   *  match it to the KOT chit(s) carrying the same token. */
+  token?: string;
 }): Promise<boolean> {
   try {
     const tabletFloor = data.tabletFloor ?? getTabletFloor();
@@ -4231,6 +4239,7 @@ export async function printBill(data: {
       destinations: [dest],
       prints,
       status: "pending",
+      token: data.token || null,
       createdAt: serverTimestamp(),
     });
     return true;

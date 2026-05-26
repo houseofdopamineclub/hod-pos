@@ -6,7 +6,6 @@ import {
   persistentMultipleTabManager,
 } from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB6YfM1DyVq0NTEWXpMdbCYuWwr9cWwbt0",
@@ -44,7 +43,6 @@ function initDb() {
 }
 export const db = initDb();
 export const auth = getAuth(app);
-export const storage = getStorage(app);
 
 // Firestore rules on `bookings` (and a few other collections) require `request.auth != null`
 // for updates/deletes. The customer site authenticates via email/password admin login;
