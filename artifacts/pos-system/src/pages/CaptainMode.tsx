@@ -3,13 +3,13 @@ import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
 import { StaffLogin } from "@/components/StaffLogin";
 import {
-  sha256, subscribeToHodReservations, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
+  sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   recordBillPrint,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
   createWalkInTable, addRoundToTable, reassignTable, createProxyTable,
-  recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, printKOTVoid,
+  recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
   voidBill, printBillVoid, assertCaptainCanVoid, recordCaptainVoidUsage,
   recordSilentPrePrintEdit,
   computeHodBreakdown, lookupOrphanZomatoPaymentByName, type TabletFloor,
@@ -35,7 +35,7 @@ import {
 // 🆕 2026-05-20 (Khushi) — Floor-plan dashboard replaces the list view. The
 // HOD_TABLES const is ported from hodclub-patched/index.html so what captain
 // taps == what the customer booked. Floor keys: dance/dining/rooftop.
-import { HOD_TABLES, type FloorKey, type FloorTable } from "@/lib/floor-plan";
+import { HOD_TABLES, TABLET_FLOOR_TO_FLOORKEY, type FloorKey, type FloorTable } from "@/lib/floor-plan";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
 import { QrScanner } from "@/components/QrScanner";
 // 🔴 2026-05-09 — switched from menu-data.ts (314 legacy items) to canonical
@@ -3857,6 +3857,7 @@ function FloorPlanView({
   reservations, customerSearch, pendingFilter, activeWaiterCallTableIds,
   readyKDSResIds,
   onSelectReservation, onSelectFreeTable,
+  focusFloorKey, focusModeOn, tabletFloorLabel, onToggleFocusMode,
 }: {
   reservations: HodTableReservation[];
   customerSearch: string;
@@ -3873,8 +3874,21 @@ function FloorPlanView({
   readyKDSResIds: Set<string>;
   onSelectReservation: (docId: string) => void;
   onSelectFreeTable: (tableId: string, floorKey: FloorKey, floorLabel: string) => void;
+  // 🆕 2026-05-26 v3.10 — Focus Mode. focusFloorKey is non-null only when ON
+  // AND the tablet has a floor set. Used to (a) render the gold status pill
+  // above the floor tabs and (b) auto-pin the SVG tab to that floor so the
+  // captain doesn't see empty-looking floors they don't own.
+  focusFloorKey: FloorKey | null;
+  focusModeOn: boolean;
+  tabletFloorLabel: string | null;
+  onToggleFocusMode: () => void;
 }) {
-  const [activeFloor, setActiveFloor] = useState<FloorKey>("dining");
+  const [activeFloor, setActiveFloor] = useState<FloorKey>(focusFloorKey || "dining");
+  // 🆕 2026-05-26 v3.10 — when focus mode flips ON (or the tablet's floor
+  // changes), snap the SVG to that floor so captain isn't staring at an empty
+  // dining map when their tablet owns rooftop. When focus mode flips OFF the
+  // captain keeps whichever tab they last had — no surprise jumps.
+  useEffect(() => { if (focusFloorKey) setActiveFloor(focusFloorKey); }, [focusFloorKey]);
   // Tick every 30s so ORANGE timers refresh on screen without re-querying Firestore.
   const [, setTick] = useState(0);
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 30000); return () => clearInterval(id); }, []);
@@ -3935,7 +3949,10 @@ function FloorPlanView({
       });
     });
     return out;
-  }, [reservationByTableId, activeWaiterCallTableIds, pendingFilter, q]);
+  // 🆕 2026-05-26 v3.10 (code-review fix) — include readyKDSResIds so the
+  // READY KPI count + auto-jump re-fire when chef bumps a new item; without
+  // this, ready-state changes were stale until another dep churned.
+  }, [reservationByTableId, activeWaiterCallTableIds, pendingFilter, q, readyKDSResIds]);
 
   // Auto-jump to floor with the first match when filter/search changes OR
   // when a NEW realtime match arrives on another floor while a filter is on
@@ -4035,7 +4052,9 @@ function FloorPlanView({
       }
     });
     return s;
-  }, [q, pendingFilter, statuses, floorData.tables, activeWaiterCallTableIds]);
+  // 🆕 2026-05-26 v3.10 (code-review fix) — include readyKDSResIds so map
+  // highlighting refreshes the moment chef bumps an item (was stale before).
+  }, [q, pendingFilter, statuses, floorData.tables, activeWaiterCallTableIds, readyKDSResIds]);
   const hasActiveFilter = !!pendingFilter || !!q;
 
   // 🛟 Off-map reservations: any non-cancelled reservation whose tableId is NOT
@@ -4208,24 +4227,95 @@ function FloorPlanView({
     <div style={{ padding: "0 12px 120px" }}>
       <style>{`@keyframes hodFlash { 0%,100%{opacity:1} 50%{opacity:.55} } .hod-flash { animation: hodFlash 1.2s ease-in-out infinite; }`}</style>
 
+      {/* 🆕 2026-05-26 v3.10 — FOCUS MODE pill. Off-by-default per-tablet flag
+          that scopes Firestore listeners + the floor map to this tablet's
+          assigned floor only. Tap to toggle. If the tablet has no floor set
+          OR focusModeOn but focusFloorKey===null (fail-safe), we show a small
+          gray "SET FLOOR FIRST" hint instead of an active pill so captain is
+          never silently hiding rows. */}
+      {tabletFloorLabel ? (
+        <button onClick={onToggleFocusMode}
+          style={{
+            width: "100%", marginTop: 8, padding: "8px 12px", borderRadius: 10,
+            background: focusModeOn && focusFloorKey ? "rgba(229,168,42,.18)" : "rgba(255,255,255,.04)",
+            border: `1.5px solid ${focusModeOn && focusFloorKey ? "#E5A82A" : "rgba(255,255,255,.12)"}`,
+            color: focusModeOn && focusFloorKey ? "#E5A82A" : "rgba(242,235,211,.7)",
+            fontSize: 11, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer",
+            textAlign: "center",
+          }}>
+          {focusModeOn && focusFloorKey
+            ? `🎯 FOCUS: ${tabletFloorLabel} ONLY · TAP TO SHOW ALL FLOORS`
+            : `👁 SHOWING ALL FLOORS · TAP TO FOCUS ON ${tabletFloorLabel} ONLY`}
+        </button>
+      ) : (
+        // 🆕 2026-05-26 v3.10 — tablet has no floor set. Show 3 tap-to-set
+        // buttons INLINE so non-technical staff (Khushi, captains) can pick
+        // their floor without touching the browser console. Writes through
+        // setTabletFloor() → same localStorage key the rest of the app reads,
+        // so it persists across reloads. Page reload after click ensures
+        // every Firestore listener picks up the new floor.
+        <div style={{
+          marginTop: 8, padding: "8px 12px", borderRadius: 10,
+          background: focusModeOn ? "rgba(239,68,68,.12)" : "rgba(255,255,255,.03)",
+          border: `1.5px solid ${focusModeOn ? "#EF4444" : "rgba(255,255,255,.10)"}`,
+        }}>
+          <div style={{
+            color: focusModeOn ? "#FCA5A5" : "rgba(242,235,211,.55)",
+            fontSize: 11, fontWeight: 900, letterSpacing: 0.6, textAlign: "center",
+            marginBottom: 8,
+          }}>
+            {focusModeOn
+              ? "⚠ FOCUS MODE IS ON BUT TABLET FLOOR NOT SET — SHOWING ALL FLOORS"
+              : "🎯 SET THIS TABLET'S FLOOR TO ENABLE FOCUS MODE"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+            {([
+              { key: "ground", label: "GROUND" },
+              { key: "first", label: "DINING (FF)" },
+              { key: "rooftop", label: "ROOFTOP" },
+            ] as { key: TabletFloor; label: string }[]).map((b) => (
+              <button key={b.key}
+                onClick={() => { setTabletFloor(b.key); location.reload(); }}
+                style={{
+                  padding: "8px 6px", borderRadius: 8,
+                  background: "rgba(229,168,42,.10)", border: "1.5px solid rgba(229,168,42,.45)",
+                  color: "#E5A82A", fontSize: 11, fontWeight: 900, letterSpacing: 0.4,
+                  cursor: "pointer",
+                }}>📍 {b.label}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Floor tabs — Ground/Dining/Rooftop */}
+      {/* 🆕 2026-05-26 v3.10 (code-review fix) — when Focus Mode is locked to
+          a floor, the OTHER tabs become disabled. Reason: their reservations
+          have been filtered upstream by the scoped sub, so tapping them would
+          render those floors as "all free" and let captain accidentally start
+          a walk-in on a table that's actually occupied. We KEEP the disabled
+          tabs visible (gray, no counter) so captain knows what they're
+          missing — clearer than hiding them entirely. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, padding: "10px 0" }}>
         {(["dance","dining","rooftop"] as FloorKey[]).map(k => {
           const active = k === activeFloor;
           const label = k === "dance" ? "GROUND" : k === "dining" ? "DINING" : "ROOFTOP";
+          const locked = !!(focusModeOn && focusFloorKey && k !== focusFloorKey);
           // Show occupancy counter per tab. Uses the same tableId-only matching
           // as the map itself (via floorStats) so legacy/aggregator rows with
           // stale or missing `floor` aren't undercounted vs the visible state.
           const occ = floorStats[k].occ;
           return (
-            <button key={k} onClick={() => setActiveFloor(k)}
+            <button key={k} onClick={() => { if (!locked) setActiveFloor(k); }}
+              disabled={locked}
+              title={locked ? "Focus Mode is ON — tap the gold pill above to see all floors" : undefined}
               style={{
                 padding: "10px 8px", borderRadius: 10,
-                background: active ? "#E5A82A" : "rgba(255,255,255,.04)",
-                color: active ? "#0A0A0A" : "#F2EBD3",
-                border: `1.5px solid ${active ? "#E5A82A" : "rgba(255,255,255,.12)"}`,
-                fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer",
-              }}>{label} <span style={{ opacity: 0.7, fontWeight: 700 }}>{occ}/{HOD_TABLES[k].tables.length}</span></button>
+                background: locked ? "rgba(255,255,255,.02)" : active ? "#E5A82A" : "rgba(255,255,255,.04)",
+                color: locked ? "rgba(242,235,211,.25)" : active ? "#0A0A0A" : "#F2EBD3",
+                border: `1.5px solid ${locked ? "rgba(255,255,255,.06)" : active ? "#E5A82A" : "rgba(255,255,255,.12)"}`,
+                fontSize: 13, fontWeight: 900, letterSpacing: 0.6,
+                cursor: locked ? "not-allowed" : "pointer",
+              }}>{locked ? "🔒 " : ""}{label}{locked ? "" : <> <span style={{ opacity: 0.7, fontWeight: 700 }}>{occ}/{HOD_TABLES[k].tables.length}</span></>}</button>
           );
         })}
       </div>
@@ -4315,6 +4405,38 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [walkInPrefill, setWalkInPrefill] = useState<string | undefined>(undefined);
   const [allTableIds, setAllTableIds] = useState<string[]>([]);
   const [allReservations, setAllReservations] = useState<HodTableReservation[]>([]);
+  // 🆕 2026-05-26 v3.10 (Khushi — Fix #1 Listener Scoping).
+  // FOCUS MODE = "this tablet shows ONLY its assigned floor's reservations".
+  // Default OFF (zero behavior change) so the deployed code is dormant until
+  // a manager flips it ON via the toggle pill above the floor tabs. State is
+  // persisted in localStorage per-tablet (key: hod_captain_focus_mode) so a
+  // tablet restart preserves the choice.
+  //
+  // 🛟 FALLBACK: if the tablet's floor isn't set (getTabletFloor()===null),
+  // focus mode silently falls back to "show all" — we never accidentally hide
+  // all reservations from a tablet whose floor wasn't configured yet.
+  const [focusMode, setFocusMode] = useState<boolean>(() => {
+    try { return localStorage.getItem("hod_captain_focus_mode") === "on"; } catch { return false; }
+  });
+  const tabletFloor = getTabletFloor();
+  const focusFloorKey: FloorKey | null = (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null;
+  // 🆕 2026-05-26 v3.10 (Khushi req) — Manager PIN gate on turning Focus OFF.
+  // Reason: without it, a captain who finds focus mode "annoying" can quietly
+  // toggle it off all night and we lose the perf win without anyone knowing.
+  // Turning Focus ON is free (no PIN) — that's the safe direction.
+  // 🛟 FALLBACK: PIN prompt failure (cancel / wrong PIN) → state stays ON,
+  // captain sees the standard "❌ Wrong Manager PIN." alert, can retry.
+  const toggleFocusMode = useCallback(async () => {
+    if (focusMode) {
+      const ok = await requireManagerPin("Turning OFF Focus Mode lets this tablet load all 3 floors again. This can slow the tablet on busy nights (1000+ bookings).");
+      if (!ok) return;
+    }
+    setFocusMode((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("hod_captain_focus_mode", next ? "on" : "off"); } catch {}
+      return next;
+    });
+  }, [focusMode]);
   const [alertBadge, setAlertBadge] = useState({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" });
   const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill" | "calling" | "ready">("");
   const [customerSearch, setCustomerSearch] = useState("");
@@ -4393,7 +4515,11 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // if a date-mismatch bug reappears).
 
   useEffect(() => {
-    const unsub = subscribeToHodReservations(date, (all) => {
+    // 🆕 2026-05-26 v3.10 — when Focus Mode is ON, use the scoped subscriber
+    // so this tablet only ingests its own floor's reservations. Off-map IDs
+    // still pass through (fail-open). When OFF (default), behaves identically
+    // to today — zero risk to existing tablets that haven't opted in.
+    const cb = (all: HodTableReservation[]) => {
       setAllTableIds(all.map(r => r.tableId));
       setAllReservations(all);
 
@@ -4429,9 +4555,12 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
       const filtered = floor ? all.filter((r) => r.floor === floor) : all;
       setReservations(filtered);
-    });
+    };
+    const unsub = focusFloorKey
+      ? subscribeToHodReservationsScoped(date, [focusFloorKey], cb)
+      : subscribeToHodReservations(date, cb);
     return () => { unsub(); prevSnapshot.current = {}; };
-  }, [date, floor, playAlert]);
+  }, [date, floor, playAlert, focusFloorKey]);
 
   useEffect(() => {
     if (beepIntervalRef.current) clearInterval(beepIntervalRef.current);
@@ -4753,6 +4882,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         readyKDSResIds={readyKDSResIds}
         onSelectReservation={(docId) => setSelectedDocId(docId)}
         onSelectFreeTable={(tableId) => { setWalkInPrefill(tableId); setShowWalkIn(true); }}
+        focusFloorKey={focusFloorKey}
+        focusModeOn={focusMode}
+        tabletFloorLabel={tabletFloor ? (tabletFloor === "ground" ? "GROUND" : tabletFloor === "first" ? "DINING" : "ROOFTOP") : null}
+        onToggleFocusMode={toggleFocusMode}
       />
 
       {showWalkIn && (

@@ -192,3 +192,31 @@ export const HOD_TABLES: Record<FloorKey, FloorData> = {
       +'<text x="380" y="790" text-anchor="middle" fill="rgba(201,168,76,.08)" font-size="22" font-weight="900" font-family="sans-serif" letter-spacing="6">ROOFTOP</text>'
   }
 };
+
+// 🆕 2026-05-26 v3.10 (Khushi — Fix #1 Listener Scoping support).
+// Look up which floor a tableId belongs to using the HOD_TABLES map.
+// Returns null for tableIds NOT in the map — caller MUST fail-open and KEEP
+// those rows visible (walk-in / proxy / aggregator / typo IDs etc.), never
+// silently drop them.
+let _floorIndex: Map<string, FloorKey> | null = null;
+export function getFloorFromTableId(tableId: string): FloorKey | null {
+  if (!_floorIndex) {
+    _floorIndex = new Map();
+    (Object.keys(HOD_TABLES) as FloorKey[]).forEach((fk) => {
+      HOD_TABLES[fk].tables.forEach((t) => {
+        _floorIndex!.set(t.id.toUpperCase(), fk);
+      });
+    });
+  }
+  if (!tableId) return null;
+  return _floorIndex.get(tableId.toUpperCase()) || null;
+}
+
+// TabletFloor (firestore-hod.ts) uses ground/first/rooftop for printer routing,
+// FloorKey (floor-plan.ts) uses dance/dining/rooftop for the SVG layout.
+// Single source-of-truth mapping so we don't drift.
+export const TABLET_FLOOR_TO_FLOORKEY: Record<"ground" | "first" | "rooftop", FloorKey> = {
+  ground: "dance",
+  first: "dining",
+  rooftop: "rooftop",
+};

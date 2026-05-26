@@ -1701,6 +1701,15 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
       const amt = total > 0 ? ` ₹${total.toLocaleString("en-IN")}` : "";
       return <span style={greenPill}>✓ PAID ONLINE{amt}</span>;
     }
+    // 🔴 2026-05-26 (Khushi v3.9) — TICKET with money owed (Stag/Couple/etc.
+    // bought on hodclub.in as "Pay at venue", entryType = "stag" / "couple"
+    // / "male" — NOT "entryonly"). After check-in we MUST assume the ₹X
+    // was collected at the door, else badge falsely reads "FREE ENTRY"
+    // and door staff thinks the guest owes nothing. Catches every paid
+    // ticket type without us maintaining an enum list.
+    if (total > 0 && !isGuestListBooking) {
+      return <span style={goldPill}>✓ PAID ₹{total.toLocaleString("en-IN")}</span>;
+    }
     // ₹0 wallet / guestlist / ticket-only walk-through — nothing collected.
     return <span style={bluePill}>🎁 FREE ENTRY</span>;
   }
