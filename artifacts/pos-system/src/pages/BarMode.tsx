@@ -2197,18 +2197,18 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // service charge is applied at end of night. Bar Mode is pay-and-go for
   // cover wallets only. Reject at every entry point: QR scan + search click.
   //
-  // 🔴 2026-05-25 (Khushi GO-LIVE) — EXCEPTION for "I'M AT THE BAR" flow.
-  // When the door has activated a ₹X cover ON a table booking (coverActivated
-  // > 0), the wallet is now a real drink wallet — the customer can walk up
-  // to the bar instead of waiting for the captain (see customer site
-  // "Where are you?" picker). In that case Bar Mode SHOULD open the wallet
-  // and place the order normally; tax math stays identical to pure-cover
-  // wallets (₹X inclusive, SC + GST shown in breakdown — captain-only
-  // SC-waiver toggle does NOT apply at the bar by design).
-  // Pure unactivated tables (coverActivated===0) still bounce to Captain.
+  // 🆕 2026-05-27 v3.42 (Khushi) — SUPERSEDES the 2026-05-25 "I'M AT THE BAR"
+  // exception. With customer-site v3.42 pre-crediting table wallets at booking
+  // time (coverActivated = ₹5,000 / ₹15,000 the moment Razorpay clears), every
+  // single HODTAB / TBL- / AGG- now has coverActivated > 0 — which would
+  // funnel ALL table guests into Bar Mode under the old exception, exactly
+  // opposite of the intended "tables = captain-served, single deduction at
+  // DONE ORDERING" flow. New rule: tables ALWAYS bounce to captain regardless
+  // of activation. The old workaround (cover-on-table for tables without a
+  // captain yet) is obsolete now that wallet pre-credit happens at booking.
   const tryOpenCover = (cover: HodCover) => {
-    if (cover.isTableBooking && !((cover.coverActivated || 0) > 0)) {
-      showToast("🪑 Table not yet activated — activate cover at Door first, or open in Captain Mode.");
+    if (cover.isTableBooking) {
+      showToast("🪑 TABLE BOOKING — ASK CUSTOMER'S CAPTAIN TO TAKE ORDER");
       return;
     }
     // 🆕 2026-05-26 v3.16 (Khushi) — REVERTED the v3.12 preview-first step.
