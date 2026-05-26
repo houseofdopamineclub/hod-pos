@@ -6,6 +6,7 @@ import {
   persistentMultipleTabManager,
 } from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB6YfM1DyVq0NTEWXpMdbCYuWwr9cWwbt0",
@@ -43,6 +44,11 @@ function initDb() {
 }
 export const db = initDb();
 export const auth = getAuth(app);
+// 🆕 2026-05-26 v3.40 — Firebase Storage export for StaffManagement.tsx
+// (staff avatar uploads). Build was failing on Cloudflare Pages because
+// the page imports { storage } here. firebase/storage SDK is already in
+// the firebase npm package — no new dependency needed.
+export const storage = getStorage(app);
 
 // Firestore rules on `bookings` (and a few other collections) require `request.auth != null`
 // for updates/deletes. The customer site authenticates via email/password admin login;
