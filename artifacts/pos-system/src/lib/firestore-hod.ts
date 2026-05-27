@@ -527,6 +527,9 @@ export interface HodEvent {
 
 export function subscribeToHodEvents(cb: (events: HodEvent[]) => void): () => void {
   // v3.94 shared listener — collapses N callers to 1 Firestore phone line.
+  // UNFILTERED — returns entire events collection. KEPT for EventsAdmin only
+  // (admin needs to manage historical events). Door/Captain/Bar should use
+  // subscribeToHodEventsRecent below — see v3.96 note.
   return _shareSubscription<HodEvent[]>(
     "events:all",
     (push) => onSnapshot(collection(db, EVENTS_COL), (snap) => {
@@ -534,6 +537,47 @@ export function subscribeToHodEvents(cb: (events: HodEvent[]) => void): () => vo
       list.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
       push(list);
     }, () => push([])),
+    cb,
+  );
+}
+
+// 🆕 2026-05-27 v3.96 — Date-scoped events subscription for operational
+// surfaces (Door/Captain/Bar). Mirrors the customer-site cutoff in v3.95:
+// only events whose `date` >= (today − daysBack) are returned. EventsAdmin
+// continues to use subscribeToHodEvents (unfiltered) because admins need to
+// edit historical events.
+//
+// Why: subscribeToHodEvents returns the ENTIRE events collection on every
+// mount + on every event doc write. As the venue accumulates months of past
+// events, every Door tablet pays 100+ reads on initial subscribe just to see
+// tonight's gig. This bounded variant caps the read cost at ~14 docs (one
+// week of past + future events).
+//
+// Shared-listener key includes daysBack so different callers with different
+// windows don't collide. Single-field index on `date` is auto-created by
+// Firestore (no composite index needed).
+//
+// 🛟 FAIL-OPEN: error callback pushes [] — caller treats as "no events", same
+// as the unfiltered variant. Calling code already tolerates empty events
+// arrays (renders cached/localStorage fallback).
+export function subscribeToHodEventsRecent(
+  daysBack: number,
+  cb: (events: HodEvent[]) => void,
+): () => void {
+  const cutoff = (() => {
+    const d = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  })();
+  return _shareSubscription<HodEvent[]>(
+    `events:recent:${cutoff}`,
+    (push) => onSnapshot(
+      query(collection(db, EVENTS_COL), where("date", ">=", cutoff), orderBy("date")),
+      (snap) => {
+        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodEvent));
+        push(list);
+      },
+      () => push([]),
+    ),
     cb,
   );
 }

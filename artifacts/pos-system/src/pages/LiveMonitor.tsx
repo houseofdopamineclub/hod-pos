@@ -59,11 +59,27 @@ export function LiveMonitor() {
   // tick every 30s so "Xm ago" labels + unpaid-30min thresholds refresh
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 30_000); return () => clearInterval(id); }, []);
 
+  // 🆕 2026-05-27 v3.96 — operational-night key. Recomputed every 5 minutes;
+  // when the string flips (12pm IST rollover) all listeners below re-mount
+  // with a fresh `since` and a fresh `today`. Was previously captured ONCE
+  // at mount with `[]` deps — meaning if an admin left LiveMonitor open
+  // across days the `since` Timestamp stayed pinned to the mount day and
+  // the listener's window grew unboundedly (after 48h the posKOTs cap of
+  // 3000 would still re-pull thousands of stale docs on every snapshot).
+  // 5-min recompute is conservative — rollover only triggers once per
+  // 24h, so worst-case the listener re-mounts ~288×/day but only ACTUALLY
+  // re-subscribes when the date string changes (state setter is a no-op
+  // when the value is identical to the previous one).
+  const [nightKey, setNightKey] = useState(getOperationalNightStr());
+  useEffect(() => {
+    const id = setInterval(() => setNightKey(getOperationalNightStr()), 5 * 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   // 1) Live reservations for tonight
   useEffect(() => {
-    const today = getOperationalNightStr();
-    return subscribeToHodReservations(today, setReservations);
-  }, []);
+    return subscribeToHodReservations(nightKey, setReservations);
+  }, [nightKey]);
 
   // 2) Live posKOTs (last ~12h, captures bill/kot prints + duplicates)
   useEffect(() => {
@@ -102,7 +118,7 @@ export function LiveMonitor() {
       setKots(allKots);
       setKotsStatus("ok");
     }, (e) => { console.warn("[LiveMonitor] posKOTs subscribe failed", e); setKotsStatus("error"); });
-  }, []);
+  }, [nightKey]);
 
   // 3) Live posAuditLog (admin-side actions: menu OOS, staff add/edit, HH change)
   useEffect(() => {
@@ -121,7 +137,7 @@ export function LiveMonitor() {
       });
       setAuditEvents(evts);
     }, (e) => console.warn("[LiveMonitor] posAuditLog subscribe failed", e));
-  }, []);
+  }, [nightKey]);
 
   // ── derive event streams from reservations ───────────────────────────────
   const { discountOverrides, sourceOverrides, voids, silentEdits, staleBills, unpaid30, openTabs, paidToday, modifiedDiscount } = useMemo(() => {

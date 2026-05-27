@@ -8,7 +8,7 @@ import {
   subscribeToHodReservations, checkInGuest, reassignTable, cancelTableReservation,
   updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
-  subscribeToHodEvents, type HodEvent,
+  subscribeToHodEvents, subscribeToHodEventsRecent, type HodEvent,
   getCoverForBooking, activateCoverForBooking, editCoverAmount,
   ensureCoverForAggregatorArrival, createAggregatorTableBooking,
   createWalkInTicketBooking, createWalkInGuestlistEntry, createWalkInTableReservation,
@@ -4786,7 +4786,9 @@ function UnifiedWalkInModal({
     // Door girl never books for a future date — the EVENT dropdown was
     // removed. If multiple events tonight, take the first; if none, leave
     // empty (booking still saves with eventTitle="").
-    const unsub = subscribeToHodEvents((all) => {
+    // v3.96 — scoped to last 7 days + future (was unfiltered). Door only
+    // ever auto-picks TONIGHT's event; historical events are never relevant.
+    const unsub = subscribeToHodEventsRecent(7, (all) => {
       setEvents(all);
       const today = TODAY_STR();
       const tonight = all.filter((e) => (e.date || "") === today);
@@ -5869,7 +5871,9 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   }, [agentName]);
 
   useEffect(() => {
-    const unsub = subscribeToHodEvents((all) => setEvents(all));
+    // v3.96 — scoped to last 7 days + future (was unfiltered). Renders the
+    // tonight + upcoming chips below; never needs historical events.
+    const unsub = subscribeToHodEventsRecent(7, (all) => setEvents(all));
     return unsub;
   }, []);
 
