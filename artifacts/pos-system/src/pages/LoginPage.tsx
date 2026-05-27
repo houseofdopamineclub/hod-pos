@@ -214,40 +214,47 @@ export default function LoginPage() {
   };
 
   // ── Submit logic — branches on Boss (PIN only) vs staff modes (id + PIN).
+  // 🆕 v3.113: navigate IMMEDIATELY on success (was: deferred to useEffect on
+  // isLoggedIn). The previous effect-based nav was racing the parent
+  // <AuthGate> in App.tsx — when isLoggedIn flipped true, AuthGate swapped
+  // <LoginPage/> for <POSRouter/> on the SAME render, unmounting LoginPage
+  // before its effect could fire. POSRouter then matched the current URL
+  // ("/") and re-rendered LoginPage (tile picker). User had to tap twice.
+  // setLocation BEFORE login() ensures the URL is "/bar" by the time the
+  // parent swap happens → POSRouter mounts BarMode directly.
+  const navigateAndClear = (target: string) => {
+    setLocation(target);
+    setPendingMode(null);
+    setPin(""); setStaffId(""); setError("");
+  };
+
   const tryLogin = (fullPin: string) => {
     if (!pendingMode) return;
     if (pendingMode.authMode === "pin") {
       // Boss Mode: PIN-only against admin/manager-tier staff.
+      const target = pendingMode.href;
       const ok = login(fullPin);
       if (!ok) { flashError("WRONG PIN"); return; }
-      // login() already set currentStaff. Re-check role; should always pass
-      // for admin/manager PINs, but a manager tapping Boss is fine too.
-      // Navigation handled in the effect below.
+      navigateAndClear(target);
       return;
     }
     // Staff mode: must have an employee ID typed.
     const id = staffId.trim().toUpperCase();
     if (!id) { flashError("ENTER EMPLOYEE ID"); return; }
+    const target = pendingMode.href;
+    const modeLabel = pendingMode.label;
+    const modeRoles = pendingMode.roles;
     const found = loginByStaffId(id, fullPin);
     if (!found) { flashError("WRONG ID OR PIN"); return; }
     // Role-gate: ensure this staff can actually enter the chosen mode.
-    const allowed = hasRoleOnStaff(found.role, found.roles, ["admin", ...pendingMode.roles]);
+    const allowed = hasRoleOnStaff(found.role, found.roles, ["admin", ...modeRoles]);
     if (!allowed) {
-      flashError(`NOT AUTHORISED FOR ${pendingMode.label.toUpperCase()}`);
+      flashError(`NOT AUTHORISED FOR ${modeLabel.toUpperCase()}`);
       logout();
       return;
     }
+    navigateAndClear(target);
   };
-
-  // Navigate when login succeeds AND a pending mode is set.
-  useEffect(() => {
-    if (isLoggedIn && pendingMode) {
-      const target = pendingMode.href;
-      setPendingMode(null);
-      setPin(""); setStaffId("");
-      setLocation(target);
-    }
-  }, [isLoggedIn, pendingMode, setLocation]);
 
   const flashError = (msg: string) => {
     setError(msg);
@@ -308,6 +315,20 @@ export default function LoginPage() {
             </span>
           </div>
 
+          {/* 🆕 v3.113: wrap inputs in a fake form with autocomplete="off" +
+              use type="text" with CSS dot-masking on the PIN field. This
+              kills the Chrome/Safari "Save password?" prompt that fires on
+              every login. Visual masking is identical to type="password". */}
+          <form
+            className="w-full contents"
+            autoComplete="off"
+            onSubmit={(e) => { e.preventDefault(); tryLogin(pin); }}
+          >
+          {/* Decoy fields — some browsers ignore autoComplete=off unless
+              there's a dummy username+password pair to "save" instead. */}
+          <input type="text" name="username" autoComplete="username" tabIndex={-1} aria-hidden="true" style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }} />
+          <input type="password" name="password" autoComplete="new-password" tabIndex={-1} aria-hidden="true" style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }} />
+
           {/* Boss = PIN only. Staff modes = ID + PIN. */}
           {pendingMode.authMode === "id-pin" && (
             <div className="w-full mb-4">
@@ -317,12 +338,17 @@ export default function LoginPage() {
               <input
                 ref={idInputRef}
                 type="text"
+                name="hod-staff-id"
                 value={staffId}
                 onChange={(e) => { setStaffId(e.target.value.toUpperCase()); setError(""); }}
                 placeholder="HOD001"
                 autoCapitalize="characters"
                 autoCorrect="off"
+                autoComplete="off"
                 spellCheck={false}
+                data-lpignore="true"
+                data-1p-ignore=""
+                data-form-type="other"
                 className="w-full px-3 py-3 rounded-lg text-center text-lg tracking-widest font-mono"
                 style={{
                   background: "hsl(240 12% 8%)",
@@ -339,14 +365,18 @@ export default function LoginPage() {
               {pendingMode.authMode === "pin" ? "BOSS PIN (0000)" : "PIN"}
             </label>
             <input
-              type="password"
+              type="text"
               inputMode="numeric"
               pattern="[0-9]*"
+              name="hod-pin-code"
               autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore=""
+              data-form-type="other"
               value={pin}
               maxLength={6}
               onChange={(e) => { setPin(e.target.value.replace(/\D/g, "").slice(0, 6)); setError(""); }}
-              onKeyDown={(e) => { if (e.key === "Enter") tryLogin(pin); }}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); tryLogin(pin); } }}
               placeholder=""
               className="w-full px-3 py-3 rounded-lg text-center text-xl tracking-widest font-mono"
               style={{
@@ -354,7 +384,9 @@ export default function LoginPage() {
                 border: `1px solid ${error ? "#ef4444" : "hsl(240 8% 18%)"}`,
                 color: "#C9A84C",
                 letterSpacing: "0.4em",
-              }}
+                WebkitTextSecurity: "disc",
+                textSecurity: "disc",
+              } as React.CSSProperties}
             />
           </div>
 
@@ -365,7 +397,7 @@ export default function LoginPage() {
           )}
 
           <button
-            onClick={() => tryLogin(pin)}
+            type="submit"
             disabled={pin.length < 4}
             className="w-full py-3 rounded-lg text-sm font-bold tracking-widest transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
@@ -375,6 +407,7 @@ export default function LoginPage() {
           >
             LOGIN →
           </button>
+          </form>
         </div>
       ) : (
         // ────────── TILE GRID (default landing) ──────────
