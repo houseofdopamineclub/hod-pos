@@ -8,7 +8,7 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
-  subscribeIncomingCustomerOrders, coverDocIdFor,
+  coverDocIdFor,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -2184,11 +2184,15 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // only covers with `hasIncomingCustomerOrder == true` (set by customer
   // site at-bar write, cleared in activateCoverOrder). Typical result set
   // is 0-3 docs, so cost is proportional to actual pending self-orders.
-  const [incoming, setIncoming] = useState<HodCover[]>([]);
-  useEffect(() => {
-    const unsub = subscribeIncomingCustomerOrders(setIncoming);
-    return () => unsub();
-  }, []);
+  // 🆕 2026-05-27 v3.104 (Khushi LIVE) — INCOMING CUSTOMER ORDERS tile REMOVED
+  // from Bar Mode. Bartender is busy all night and the purple "table for 4"
+  // notification was unclickable noise (taps did nothing because the tile only
+  // opens the wallet; customer self-orders flow through captain-side activate).
+  // Listener killed too so this Bar tablet pays ZERO reads on the
+  // hasIncomingCustomerOrder query (was a permanent onSnapshot). Tile JSX
+  // below is also gated `false &&` to keep the code archeology intact for
+  // future revival if Khushi changes her mind.
+  const [incoming] = useState<HodCover[]>([]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
 
@@ -2449,7 +2453,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             placed an order from hodclub.in (bar OR table choice). Bartender
             taps to open the wallet and ring/void as usual. Pulsing border
             so it can't be missed even if bartender is mid-search. */}
-        {incoming.length > 0 && (
+        {false && incoming.length > 0 && (
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 900, color: "#A855F7", marginBottom: 10, letterSpacing: ".6px", textTransform: "uppercase" }}>
               📥 INCOMING CUSTOMER ORDERS · {incoming.length}
