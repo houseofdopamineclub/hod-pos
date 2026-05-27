@@ -3934,15 +3934,16 @@ export async function lookupBooking(ref: string): Promise<HodBooking | null> {
     const st = await getDocs(qt);
     if (!st.empty) {
       const d = st.docs[0].data() as any;
-      // 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — pass `checkedIn` through so the
-      // BookingDetailModal status pill flips from PENDING → ✅ CHECKED IN for
-      // tables that already arrived. For tableReservations, "checked in" =
-      // `arrived: true` (set by door's "Guest Arrived" tap) OR a non-empty
-      // `actualArrivalTime` OR a positive `coverActivated` (you can't activate
-      // a ₹5,000 cover without the guest physically being at the door — Khushi
-      // rule). Also surface `tablePrePaid` so future logic can branch on
-      // pre-paid HODTAB / TBL- bookings without re-fetching.
-      const _arrived = !!(d.arrived || d.actualArrivalTime || (Number(d.coverActivated) || 0) > 0);
+      // 🆕 2026-05-27 v3.86 (Khushi LIVE-NIGHT) — `coverActivated > 0` is NO
+      // LONGER a valid arrival heuristic. v3.42 pre-credits coverActivated =
+      // tableTotal (₹5,000 / ₹15,000) at BOOKING TIME for HODTAB / TBL-, so
+      // every freshly-booked table now ships with coverActivated > 0 BEFORE
+      // any check-in. The old v3.51 heuristic (kept for legacy door-activated
+      // covers) was making the scanner say "✓ COVER ACTIVATED" for guests
+      // who hadn't physically arrived yet. Truth is now: arrived = explicit
+      // `arrived` flag OR a non-empty `actualArrivalTime`. Pre-paid balance
+      // alone proves nothing about whether the guest is on premises.
+      const _arrived = !!(d.arrived || d.actualArrivalTime);
       return { id: st.docs[0].id, ref: d.bookingRef || ref, name: d.customerName || "",
         phone: d.phone || "",
         email: d.email || "",

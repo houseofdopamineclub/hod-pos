@@ -47,6 +47,51 @@ import WaitlistView from "@/components/WaitlistView";
 import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
 import { useToast } from "@/hooks/use-toast";
 
+// 🆕 2026-05-27 v3.72 (Khushi LIVE-NIGHT) — in-app styled alert overlay.
+// Replaces native browser `alert()` (ugly grey "An embedded page at … says"
+// chrome on tablets, blocks the whole event loop, looks like a phishing
+// popup). Pure DOM so it works in any component scope without React state
+// refactors. Auto-dismisses on backdrop tap, OK tap, or Escape. Reuses
+// the gold HOD palette so it feels native to the POS.
+function showAppAlert(message: string, title?: string) {
+  if (typeof document === "undefined") return;
+  // Strip leading emoji from title for the badge if title not provided.
+  const lines = message.split("\n").map((s) => s.trim()).filter(Boolean);
+  const head = title || lines.shift() || "NOTICE";
+  const body = lines.join("\n\n");
+  const overlay = document.createElement("div");
+  overlay.setAttribute("data-hod-alert", "1");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(6px);z-index:100000;display:flex;align-items:center;justify-content:center;padding:18px;font-family:'Manrope','Space Grotesk',sans-serif;animation:hodAlertFade .15s ease-out;";
+  const card = document.createElement("div");
+  card.style.cssText = "background:#0A0A0A;border:2px solid #E5A82A;border-radius:16px;max-width:420px;width:100%;box-shadow:0 24px 64px rgba(0,0,0,.7);color:#F2EBD3;overflow:hidden;";
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  card.innerHTML =
+    '<div style="padding:18px 20px 8px;border-bottom:1px solid rgba(229,168,42,.25);">' +
+      '<div style="font-size:17px;font-weight:900;color:#F2EBD3;letter-spacing:.4px;line-height:1.3;">' + esc(head) + '</div>' +
+    '</div>' +
+    '<div style="padding:16px 20px 20px;font-size:14px;line-height:1.55;color:rgba(242,235,211,.88);font-weight:500;white-space:pre-wrap;">' + esc(body) + '</div>' +
+    '<div style="padding:0 16px 16px;">' +
+      '<button id="hod-app-alert-ok" type="button" style="width:100%;padding:14px;border-radius:11px;background:linear-gradient(135deg,#E5A82A,#B8941F);border:none;color:#0A0A0A;font-size:14px;font-weight:900;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;font-family:inherit;">OK</button>' +
+    '</div>';
+  overlay.appendChild(card);
+  if (!document.getElementById("hod-app-alert-style")) {
+    const st = document.createElement("style");
+    st.id = "hod-app-alert-style";
+    st.textContent = "@keyframes hodAlertFade{from{opacity:0}to{opacity:1}}";
+    document.head.appendChild(st);
+  }
+  function close() {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e: KeyboardEvent) { if (e.key === "Escape" || e.key === "Enter") close(); }
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
+  const okBtn = document.getElementById("hod-app-alert-ok");
+  if (okBtn) okBtn.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+}
+
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
 //   https://asia-south1-hod-tickets.cloudfunctions.net
@@ -1087,7 +1132,7 @@ function CheckInPaymentModal({
   );
 }
 
-function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null }) {
+function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover, tableIdOverride }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null; tableIdOverride?: string }) {
   // 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — table bookings track arrival on
   // `tableReservations.actualArrivalTime` / `arrived` / `coverActivated`, NOT
   // on `booking.checkedIn`. v3.50 lookupBooking now passes `checkedIn` through
@@ -1137,6 +1182,26 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
   const openCheckInModal = () => {
     if (done) {
       toast({ title: `Already checked in: ${booking.name || "Guest"}`, description: "No action taken.", duration: 3000 });
+      return;
+    }
+    // 🆕 2026-05-27 v3.73 (Khushi LIVE-NIGHT) — scanner table-assigned gate.
+    // Khushi 7:30am: scanned a TABLE OF 4 (HODTAB) QR → tapped CHECK IN +
+    // ACTIVATE COVER without assigning a table → cover went live with no
+    // table id → captain has no floor-map tile, no chime, can't take orders.
+    // Same root cause as v3.68 (captain ADD ORDER) and v3.71 (handleArrived).
+    // Block here when this is a TABLE booking with no tableId assigned.
+    // Walk-in / guestlist / entry-only HODTIC unchanged (no _isTable flag).
+    const _isTbl = !!((booking as any)._isTable || (booking as any).tableType || (booking as any).bookMode === "group");
+    // 🆕 v3.88 — tableIdOverride wins (set by BookingDetailModal after door
+    // girl successfully reassigns from within this same modal). Without this
+    // override the booking prop stays frozen with tableId="" and the gate
+    // fires forever even though Firestore has been updated.
+    const _effectiveTableId = String(tableIdOverride || (booking as any).tableId || "").trim();
+    if (_isTbl && !_effectiveTableId) {
+      showAppAlert(
+        "This is a TABLE BOOKING but no table has been assigned yet — tap REASSIGN TABLE below (or pick a table from the floor map) BEFORE you check the guest in.\n\nThe captain needs a table to take orders, route KOTs, and print the bill.",
+        "🪑 PLEASE ASSIGN THE TABLE FIRST"
+      );
       return;
     }
     setErr("");
@@ -1248,6 +1313,16 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
               : { txt: `✓ PAID ONLINE · ₹${entryAmt.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
           }
           if (coverActivated > 0) {
+            // 🆕 v3.86 — pre-paid table that hasn't physically arrived yet:
+            // amber "PRE-PAID · AWAITING ARRIVAL", not green "ACTIVATED".
+            // Triggers when this is a HODTAB / TBL- / AGG- table booking
+            // (tablePrePaid flag set on covers at booking time) AND the door
+            // hasn't marked the guest arrived. Green only once they're in.
+            const _isPrePaidTable = !!((booking as any)._isTable) && !!((cover as any)?.tablePrePaid || (booking as any)._tablePrePaid);
+            const _physicallyArrived = !!(booking as any)._arrived || !!booking.checkedIn;
+            if (_isPrePaidTable && !_physicallyArrived) {
+              return { txt: `💳 PRE-PAID · ₹${coverActivated.toLocaleString("en-IN")} (AWAITING ARRIVAL)`, color: "#FBBF24", bg: "rgba(251,191,36,.10)", bd: "rgba(251,191,36,.45)" };
+            }
             return { txt: `✓ COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#22C55E", bg: "rgba(34,197,94,.12)", bd: "rgba(34,197,94,.45)" };
           }
           if (isGuestList) {
@@ -2021,6 +2096,40 @@ function BookingDetailModal({
   onSendWhatsApp?: (b: HodBooking) => void;
 }) {
   const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
+  // 🆕 2026-05-27 v3.67 (Khushi LIVE-NIGHT) — REASSIGN button surfaced on the
+  // scanner / tickets BookingDetailModal for ground-floor table bookings
+  // (TABLE FOR 4 + VVIP TABLE FOR 6). Door girl scans QR → sees this modal →
+  // can now move the guest to a different table without leaving for TABLES tab.
+  // Gate: `_isTable: true` (set by lookupBooking for HODTAB/TBL-/AGG- refs)
+  // AND floor label / tableId indicates ground floor (C* / V* prefixes).
+  // Locked once guest has arrived — KOTs are tagged to the table, captain
+  // handles moves after arrival (same rule as TABLES tab).
+  const _floorLabelStr = String((booking as any)._floorLabel || (booking as any).floorLabel || "").toLowerCase();
+  const _tableIdStr = String((booking as any)._tableId || (booking as any).tableId || "").toUpperCase();
+  // 🆕 2026-05-27 v3.83 (Khushi LIVE-NIGHT) — was gated to ground-floor only;
+  // a TABLELESS HODTAB scan (auto-assign failed, no tableId yet, no floor
+  // label) failed BOTH branches → REASSIGN button never rendered, leaving
+  // the door girl with the alert "tap REASSIGN below" but nothing to tap.
+  // Now: ALSO show REASSIGN whenever it's a table booking with no tableId.
+  // The ReassignModal already lists every table across all floors so the
+  // door girl can place them anywhere.
+  const _isGroundFloorTable = !!(booking as any)._isTable && (
+    _floorLabelStr.includes("ground") ||
+    (!_floorLabelStr && (/^C\d/.test(_tableIdStr) || /^V\d/.test(_tableIdStr))) ||
+    !_tableIdStr
+  );
+  const _alreadyArrived = !!(booking as any)._arrived || !!booking.checkedIn;
+  const [reassignOpen, setReassignOpen] = useState(false);
+  // 🆕 2026-05-27 v3.88 (Khushi LIVE-NIGHT) — door girl scanned MALIKA's
+  // HODTAB835111 (no table assigned), tapped CHECK IN GUEST → alert told her
+  // to reassign. She tapped REASSIGN TABLE, picked a table, came back, tapped
+  // CHECK IN GUEST again → SAME alert. Root cause: the `booking` prop here is
+  // the FROZEN search-result snapshot; Firestore was updated but React never
+  // re-rendered with the new tableId. Track the reassigned id locally and
+  // pass it down so both the inline ACTIVATE COVER gate AND the LookupResult
+  // CHECK IN GUEST gate read the override after a successful reassign.
+  const [reassignedTableId, setReassignedTableId] = useState<string>("");
+  const _liveTableIdRaw = reassignedTableId || String((booking as any).tableId || "").trim();
   // 🔴 2026-05-21 (Khushi) — Live cover lookup so the modal's PaidBadge
   // matches the row badge (was showing "FREE ENTRY" while row showed
   // "✓ PAID ₹999"). Subscribe to the tonight-wide covers feed and pick
@@ -2056,7 +2165,7 @@ function BookingDetailModal({
           </div>
         </div>
 
-        <LookupResult booking={booking} agentName={agentName} onDone={onClose} hideIdentity cover={modalCover} />
+        <LookupResult booking={booking} agentName={agentName} onDone={onClose} hideIdentity cover={modalCover} tableIdOverride={reassignedTableId} />
 
         {/* 🆕 2026-05-26 (Khushi v3.15) — bigger buttons + Space Grotesk.
             🆕 2026-05-26 v3.23 (Khushi) — bumped marginTop 4→10 so the gap
@@ -2072,12 +2181,52 @@ function BookingDetailModal({
               lives on the TABLES tab row tap (✏️ Edit Cover Amount), not here.
               Cover already-activated also means the guest is on premises (Khushi
               rule), so the modal becomes view-only: SHOW QR + CALL only. */}
-          {!booking._isGuestList && Number(modalCover?.coverActivated || 0) <= 0 && (
-            <button onClick={() => { onCover(booking); onClose(); }}
-              style={{ padding: "16px 12px", borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
-              💰 ACTIVATE COVER
-            </button>
-          )}
+          {!booking._isGuestList && Number(modalCover?.coverActivated || 0) <= 0 && (() => {
+            // 🆕 2026-05-27 v3.63 (Khushi LIVE-NIGHT) — ENTRY ONLY bookings MUST go
+            // through CHECK IN GUEST first so the ₹599 entry charge is recorded and
+            // a ₹0-balance wallet is created. If door girl taps ACTIVATE COVER first
+            // it bypasses that flow and only the cover gets activated (entry charge
+            // is lost from audit). Grey out the button until check-in is done.
+            // Post-check-in, the parent's booking snapshot may be stale (modal
+            // holds a frozen prop). The live `modalCover` subscription is our
+            // source of truth: `ensureZeroBalanceCoverForGuest` (entry-only) and
+            // `activateCoverForBooking` (paid) BOTH write a covers doc inside
+            // CheckInPaymentModal.handleConfirm — so once `modalCover` exists,
+            // check-in has happened and ACTIVATE COVER is safe to enable.
+            const isEntryOnly = isOnlyEntryBooking(booking) && !booking.checkedIn && !modalCover;
+            return (
+              <button
+                onClick={() => {
+                  if (isEntryOnly) return;
+                  // 🆕 v3.73 — table-assigned gate (mirror openCheckInModal).
+                  const _isTbl = !!((booking as any)._isTable || (booking as any).tableType || (booking as any).bookMode === "group");
+                  // v3.88 — use _liveTableIdRaw so post-reassign state wins.
+                  if (_isTbl && !_liveTableIdRaw) {
+                    showAppAlert(
+                      "This is a TABLE BOOKING but no table has been assigned yet — tap REASSIGN TABLE below (or pick a table from the floor map) BEFORE you activate the cover.\n\nThe captain needs a table to take orders, route KOTs, and print the bill.",
+                      "🪑 PLEASE ASSIGN THE TABLE FIRST"
+                    );
+                    return;
+                  }
+                  onCover(booking);
+                  onClose();
+                }}
+                disabled={isEntryOnly}
+                title={isEntryOnly ? "CHECK IN GUEST FIRST — entry charge must be collected before cover" : undefined}
+                style={{
+                  padding: "16px 12px", borderRadius: 12,
+                  background: isEntryOnly ? "rgba(200,166,69,.18)" : "#C8A645",
+                  border: isEntryOnly ? "1px dashed rgba(200,166,69,.45)" : "none",
+                  color: isEntryOnly ? "rgba(200,166,69,.55)" : "#000",
+                  fontSize: 15, fontWeight: 900,
+                  cursor: isEntryOnly ? "not-allowed" : "pointer",
+                  letterSpacing: .4,
+                  lineHeight: 1.15,
+                }}>
+                {isEntryOnly ? <>💰 ACTIVATE COVER<div style={{ fontSize: 9, fontWeight: 800, marginTop: 4, letterSpacing: .6 }}>CHECK IN FIRST</div></> : "💰 ACTIVATE COVER"}
+              </button>
+            );
+          })()}
           {onSendWhatsApp && (
             <button onClick={() => onSendWhatsApp(booking)}
               style={{ padding: "16px 12px", borderRadius: 12, background: "#000", border: "1.5px solid #C8A645", color: "#C8A645", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
@@ -2099,6 +2248,49 @@ function BookingDetailModal({
               📞 CALL
             </a>
           )}
+          {/* 🆕 v3.67 (Khushi) — REASSIGN TABLE for ground-floor table bookings.
+              Spans both columns so it never wraps under the 2-col grid. Locked
+              once arrived — same rule as TABLES tab (KOTs tagged to table). */}
+          {/* 🆕 2026-05-27 v3.88 (Khushi LIVE-NIGHT) — REASSIGN TABLE button
+              was purple/lavender; Khushi: "CHANGE COLOR TO YELLOW AND BLACK
+              LIKE OTHER BUTTONS AND MAKE IT FLASHY SO DOOR GIRL KNOWS SHE
+              NEEDS TO CLICK IT AFTER THE POPUP". Now gold→black gradient
+              with pulsing gold halo + scale-bounce animation. Pulse ONLY
+              fires when no table is assigned yet (the "you must reassign"
+              state). Once a table exists or guest has arrived, button drops
+              to calm gold so it doesn't keep flashing. */}
+          {_isGroundFloorTable && (
+            <>
+              <style>{`@keyframes hod_reassign_pulse{0%,100%{box-shadow:0 0 0 0 rgba(201,168,76,.85),0 0 0 0 rgba(201,168,76,.5);transform:scale(1)}50%{box-shadow:0 0 0 10px rgba(201,168,76,0),0 0 22px 4px rgba(201,168,76,.7);transform:scale(1.025)}}`}</style>
+              <button
+                onClick={() => {
+                  if (_alreadyArrived) {
+                    showAppAlert("Reassign locked here — KOTs are tagged to this table.\n\nAsk the CAPTAIN to move the guest from Captain Mode (re-stamps active rounds).", "🪑 GUEST ALREADY ARRIVED AT THIS TABLE");
+                    return;
+                  }
+                  setReassignOpen(true);
+                }}
+                disabled={_alreadyArrived}
+                title={_alreadyArrived ? "Guest already arrived — captain handles table moves" : "Move guest to a different table"}
+                style={{
+                  gridColumn: "1 / -1",
+                  padding: "18px 12px", borderRadius: 12,
+                  background: _alreadyArrived
+                    ? "rgba(255,255,255,.03)"
+                    : (!_liveTableIdRaw
+                        ? "linear-gradient(135deg,#FFD86B 0%,#C9A84C 55%,#A07830 100%)"
+                        : "#C8A645"),
+                  border: _alreadyArrived ? "1px dashed rgba(255,255,255,.12)" : "2px solid #000",
+                  color: _alreadyArrived ? "rgba(255,255,255,.35)" : "#000",
+                  fontSize: 16, fontWeight: 900, letterSpacing: .6,
+                  cursor: _alreadyArrived ? "not-allowed" : "pointer",
+                  animation: (!_alreadyArrived && !_liveTableIdRaw) ? "hod_reassign_pulse 1.1s ease-in-out infinite" : undefined,
+                  textShadow: !_alreadyArrived ? "0 1px 0 rgba(255,255,255,.35)" : undefined,
+                }}>
+                🔄 REASSIGN TABLE
+              </button>
+            </>
+          )}
         </div>
 
         <button onClick={onClose}
@@ -2106,6 +2298,33 @@ function BookingDetailModal({
           CLOSE
         </button>
       </div>
+      {/* 🆕 v3.67 — Reassign overlay. Reservation shim built from the
+          lookupBooking output: `booking.id` IS the tableReservation doc id
+          (set on line 3946 of firestore-hod.ts). `bookedTableIds` is empty —
+          the reassignTable Firestore transaction rejects double-booking
+          server-side, so worst case the user sees an "already booked" error
+          inline (fail-open per Khushi rule; no extra subscription cost). */}
+      {reassignOpen && (
+        <ReassignModal
+          reservation={{
+            _docId: booking.id,
+            customerName: booking.name || "Guest",
+            tableId: reassignedTableId || _tableIdStr || ((booking as any)._tableId || ""),
+          } as any}
+          bookedTableIds={new Set<string>()}
+          agentName={agentName}
+          onClose={() => setReassignOpen(false)}
+          onReassigned={(tid) => {
+            // v3.88 — mirror the new id onto the frozen booking prop AND into
+            // local state so the CHECK IN GUEST / ACTIVATE COVER gates stop
+            // firing immediately. The Firestore write already happened inside
+            // ReassignModal.submit; this just unlocks the UI without forcing
+            // the door girl to close + re-search.
+            try { (booking as any).tableId = tid; } catch (_) {}
+            setReassignedTableId(tid);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2674,15 +2893,21 @@ const SRC_STYLES: Record<string, { label: string; color: string; bg: string; bor
   inhouse:      { label: "IN-HOUSE",    color: "rgba(255,255,255,.7)", bg: "rgba(255,255,255,.05)", border: "rgba(255,255,255,.18)" },
 };
 
-function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
+function ReassignModal({ reservation, bookedTableIds, agentName, onClose, onReassigned }: {
   reservation: HodTableReservation;
   bookedTableIds: Set<string>;
   agentName: string;
   onClose: () => void;
+  onReassigned?: (tableId: string, section: string) => void;
 }) {
   const [picked, setPicked] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 🆕 2026-05-27 v3.65 (Khushi LIVE-NIGHT) — keep modal open on success +
+  // show inline ✅ banner with the new table. Was auto-closing immediately so
+  // door girl couldn't visually confirm the move landed. Door girl now taps
+  // CLOSE (or backdrop) when she's done.
+  const [successTable, setSuccessTable] = useState<{ id: string; section: string } | null>(null);
 
   const sectionLabelOf = (sec?: string) => sec ? (SECTION_LABELS[sec] || sec) : "";
 
@@ -2693,7 +2918,10 @@ function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
     setBusy(true); setErr("");
     try {
       await reassignTable(reservation._docId, t.id, t.section, sectionLabelOf(t.section), agentName);
-      onClose();
+      setSuccessTable({ id: t.id, section: sectionLabelOf(t.section) });
+      setBusy(false);
+      // v3.88 — notify parent so frozen booking prop's gates unlock.
+      try { onReassigned && onReassigned(t.id, sectionLabelOf(t.section)); } catch (_) {}
     } catch (e: any) { setErr(e?.message || "Failed"); setBusy(false); }
   };
 
@@ -2702,36 +2930,54 @@ function ReassignModal({ reservation, bookedTableIds, agentName, onClose }: {
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1px solid rgba(200,166,69,0.35)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 420, maxHeight: "85vh", overflow: "auto" }}>
         <div style={{ fontSize: 16, fontWeight: 900, color: "#C8A645", marginBottom: 4 }}>🔄 Reassign Table</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
-          {reservation.customerName || "Guest"} · Currently: <b style={{ color: "#fff" }}>{reservation.tableId || "—"}</b>
+          {reservation.customerName || "Guest"} · Currently: <b style={{ color: "#fff" }}>{successTable?.id || reservation.tableId || "—"}</b>
         </div>
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6, fontWeight: 700, letterSpacing: ".5px" }}>SELECT AVAILABLE TABLE</div>
-        <select value={picked} onChange={(e) => setPicked(e.target.value)}
-          style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, marginBottom: 14, outline: "none" }}>
-          <option value="">Choose a table...</option>
-          {ALL_TABLES.map((t) => {
-            const isCurrent = t.id === reservation.tableId;
-            const isBooked = bookedTableIds.has(t.id) && !isCurrent;
-            return (
-              <option key={t.id} value={t.id} disabled={isBooked} style={{ background: "#0C0816" }}>
-                {t.name} — {sectionLabelOf(t.section)} ({t.capacity} seats){isCurrent ? " [Current]" : isBooked ? " [Booked]" : ""}
-              </option>
-            );
-          })}
-        </select>
+        {successTable ? (
+          <>
+            <div style={{ background: "rgba(34,197,94,.10)", border: "1.5px solid rgba(34,197,94,.5)", borderRadius: 14, padding: 18, textAlign: "center", marginBottom: 14 }}>
+              <div style={{ fontSize: 38, marginBottom: 6 }}>✅</div>
+              <div style={{ fontSize: 15, fontWeight: 900, color: "#22C55E", letterSpacing: .4, marginBottom: 6 }}>REASSIGN SUCCESSFUL</div>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,.85)", lineHeight: 1.55 }}>
+                {(reservation.customerName || "Guest").toUpperCase()} moved to <b style={{ color: "#C8A645" }}>{successTable.id}</b>{successTable.section ? <> on <b style={{ color: "#C8A645" }}>{successTable.section}</b></> : null}.
+              </div>
+            </div>
+            <button onClick={onClose}
+              style={{ width: "100%", padding: 14, borderRadius: 10, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .5 }}>
+              CLOSE
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 6, fontWeight: 700, letterSpacing: ".5px" }}>SELECT AVAILABLE TABLE</div>
+            <select value={picked} onChange={(e) => setPicked(e.target.value)}
+              style={{ width: "100%", padding: 12, borderRadius: 10, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 13, marginBottom: 14, outline: "none" }}>
+              <option value="">Choose a table...</option>
+              {ALL_TABLES.map((t) => {
+                const isCurrent = t.id === reservation.tableId;
+                const isBooked = bookedTableIds.has(t.id) && !isCurrent;
+                return (
+                  <option key={t.id} value={t.id} disabled={isBooked} style={{ background: "#0C0816" }}>
+                    {t.name} — {sectionLabelOf(t.section)} ({t.capacity} seats){isCurrent ? " [Current]" : isBooked ? " [Booked]" : ""}
+                  </option>
+                );
+              })}
+            </select>
 
-        {err && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{err}</div>}
+            {err && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{err}</div>}
 
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onClose} disabled={busy}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-            Cancel
-          </button>
-          <button onClick={submit} disabled={busy || !picked}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: picked ? "linear-gradient(135deg,#C8A645,#A07830)" : "rgba(242,199,68,.2)", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: picked ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
-            {busy ? "Reassigning..." : "Reassign"}
-          </button>
-        </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={onClose} disabled={busy}
+                style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                Cancel
+              </button>
+              <button onClick={submit} disabled={busy || !picked}
+                style={{ flex: 1, padding: 12, borderRadius: 10, background: picked ? "linear-gradient(135deg,#C8A645,#A07830)" : "rgba(242,199,68,.2)", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, cursor: picked ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
+                {busy ? "Reassigning..." : "Reassign"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -2917,6 +3163,20 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
   });
 
   const handleArrived = async (r: HodTableReservation) => {
+    // 🆕 2026-05-27 v3.71 (Khushi LIVE-NIGHT) — table-assigned gate at the door.
+    // Same root cause as v3.68 captain ADD ORDER block: marking a guest
+    // arrived without a table id leaves the cover orphaned — captain can't
+    // see them on the floor map and the v3.69 chime filter silently
+    // suppresses any later BILL DUE alert. Hard-block here with a popup so
+    // door girl assigns the table FIRST (Reassign / floor map), THEN marks
+    // arrived. Walk-in / aggregator flows unchanged once a table is assigned.
+    if (!String(r.tableId || "").trim()) {
+      showAppAlert(
+        "This guest has no table assigned yet — tap REASSIGN (or pick a table from the floor map) before marking ARRIVED.\n\nThe captain needs a table to take orders and print the bill.",
+        "🪑 PLEASE ASSIGN THE TABLE FIRST"
+      );
+      return;
+    }
     // 🔴 Use aggregator-aware resolver — manually created aggregator bookings
     // carry source="inhouse"/"walkin" with the brand on r.aggregator. Without
     // this, isAggregator=false → cover NOT minted, WA NOT sent (silent miss).
@@ -3512,7 +3772,12 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                       alert("🪑 GUEST ALREADY ARRIVED AT THIS TABLE.\n\nReassign locked here — KOTs are tagged to this table.\n\nAsk the CAPTAIN to move the guest from Captain Mode (re-stamps active rounds).");
                       return;
                     }
-                    setReassignFor(r); setExpandedDocId(null);
+                    // 🆕 v3.66 Khushi: keep the detail modal mounted under the
+                    // ReassignModal so CLOSE on the success banner lands the
+                    // door girl back on the customer row (C3 → CHICHU), not
+                    // the bare dashboard. Reservation prop is live from
+                    // Firestore so the new table # is reflected.
+                    setReassignFor(r);
                   }}
                   disabled={arrived}
                   title={arrived ? "Guest already arrived — captain handles table moves" : "Move guest to a different table"}
