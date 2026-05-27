@@ -1196,7 +1196,14 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
     // girl successfully reassigns from within this same modal). Without this
     // override the booking prop stays frozen with tableId="" and the gate
     // fires forever even though Firestore has been updated.
-    const _effectiveTableId = String(tableIdOverride || (booking as any).tableId || "").trim();
+    // 🆕 2026-05-27 v3.91 (Khushi LIVE-NIGHT) — TBL-KDMCK gate misfire fix.
+    // Customer-side TBL- bookings store the chosen table on the
+    // tableReservation as `tableId` (e.g. "FD5"); lookupBooking surfaces it
+    // on the booking shim as `_tableId` (underscore). The gate was only
+    // reading `.tableId`, so every customer-pre-chosen TBL- table fell
+    // through to "PLEASE ASSIGN THE TABLE FIRST" even though FD5 was
+    // already locked in at booking time. Fall back to `_tableId` too.
+    const _effectiveTableId = String(tableIdOverride || (booking as any).tableId || (booking as any)._tableId || "").trim();
     if (_isTbl && !_effectiveTableId) {
       showAppAlert(
         "This is a TABLE BOOKING but no table has been assigned yet — tap REASSIGN TABLE below (or pick a table from the floor map) BEFORE you check the guest in.\n\nThe captain needs a table to take orders, route KOTs, and print the bill.",
@@ -1357,7 +1364,11 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
             )}
             {booking.phone && (
               <Row label="PHONE">
-                <span style={{ color: "#fff" }}>📞 +91 {booking.phone}</span>
+                {/* 🆕 2026-05-27 v3.91 (Khushi LIVE-NIGHT) — customer site
+                    stores phone as "+91 9611111261" (cc + ' ' + digits) so
+                    re-prepending "+91 " here printed "+91 +91 9611111261".
+                    Strip any leading +91 / 91 / spaces, then re-prefix once. */}
+                <span style={{ color: "#fff" }}>📞 +91 {String(booking.phone || "").replace(/^\s*(?:\+?91)?[\s-]*/, "")}</span>
               </Row>
             )}
             <Row label="TICKET TYPE">
@@ -2129,7 +2140,9 @@ function BookingDetailModal({
   // pass it down so both the inline ACTIVATE COVER gate AND the LookupResult
   // CHECK IN GUEST gate read the override after a successful reassign.
   const [reassignedTableId, setReassignedTableId] = useState<string>("");
-  const _liveTableIdRaw = reassignedTableId || String((booking as any).tableId || "").trim();
+  // v3.91 — also read `_tableId` (lookupBooking sets this on TBL-/HODTAB
+  // scanner results; `.tableId` is empty on the shim).
+  const _liveTableIdRaw = reassignedTableId || String((booking as any).tableId || (booking as any)._tableId || "").trim();
   // 🔴 2026-05-21 (Khushi) — Live cover lookup so the modal's PaidBadge
   // matches the row badge (was showing "FREE ENTRY" while row showed
   // "✓ PAID ₹999"). Subscribe to the tonight-wide covers feed and pick
@@ -2771,8 +2784,9 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
               {(detailGuest as any).ref && (
                 <Row label="REF #"><span style={{ fontFamily: "monospace", color: "#C8A645", letterSpacing: .5 }}>#{(detailGuest as any).ref}</span></Row>
               )}
+              {/* v3.91 — strip pre-existing +91 to avoid double-prefix. */}
               {detailGuest.phone && (
-                <Row label="PHONE"><span style={{ color: "#fff" }}>📞 +91 {detailGuest.phone}</span></Row>
+                <Row label="PHONE"><span style={{ color: "#fff" }}>📞 +91 {String(detailGuest.phone || "").replace(/^\s*(?:\+?91)?[\s-]*/, "")}</span></Row>
               )}
               <Row label="TICKET TYPE">
                 <span style={{ background: `${desc.categoryColor}22`, border: `1px solid ${desc.categoryColor}66`, color: desc.categoryColor, fontSize: 13, fontWeight: 900, padding: "4px 12px", borderRadius: 999, letterSpacing: .6, display: "inline-block" }}>
