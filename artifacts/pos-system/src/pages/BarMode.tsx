@@ -3710,6 +3710,12 @@ function NcReportsTab({
 
       {rows.length > 0 && (
         <div style={{ border: `1px solid ${GOLD}33`, borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
+          {/* 🆕 v3.133 — horizontal scroll on mobile so all 8 columns are reachable.
+              Below ~780px the grid no longer fits; this wrapper keeps the grid
+              layout intact and lets the bartender swipe left-right to see
+              METHOD + AMOUNT instead of having columns silently cut off. */}
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+          <div style={{ minWidth: 780 }}>
           {/* COLUMN HEADERS */}
           <div style={{ display: "grid", gridTemplateColumns: "26px 0.7fr 0.5fr 1fr 0.6fr 0.9fr 0.7fr 0.8fr", gap: 10, padding: "14px 16px", background: "#141414", borderBottom: `1px solid ${GOLD}33`, fontSize: 12, fontWeight: 800, color: GOLD, letterSpacing: 1.2, whiteSpace: "nowrap" }}>
             <div></div>
@@ -3784,6 +3790,8 @@ function NcReportsTab({
               </div>
             );
           })}
+          </div>
+          </div>
         </div>
       )}
     </>
