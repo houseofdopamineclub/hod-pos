@@ -10,6 +10,72 @@ import { getOperationalNightStr, getCoverExpiryFor } from "./utils-pos";
 // the scoped subscriber MUST fail-open and keep those rows visible.
 import { getFloorFromTableId, type FloorKey } from "./floor-plan";
 
+// 🆕 2026-05-27 v3.94 — SHARED SUBSCRIPTION CACHE (Khushi LIVE-NIGHT: 13M
+// reads / 305 listeners observed 2026-05-27 ~2PM). DoorMode alone mounts
+// `subscribeToHodReservations` 7×, `subscribeToCoversForNight` 3×,
+// `subscribeToBookingsForNights` 3×, `subscribeToHodEvents` 2× per tablet
+// load — 15 phone lines for what should be ~4. Each duplicate is a billable
+// Firestore listener that pushes the same payload N times per change.
+//
+// This helper collapses N onSnapshot() calls with the same query KEY into a
+// SINGLE underlying Firestore listener that fans out to all in-process
+// subscribers. Zero call-site changes (each subscribe* function builds its
+// own key and delegates here). When the last subscriber unsubs, the shared
+// listener closes — same lifecycle as if no sharing existed.
+//
+// 🛟 FAIL-OPEN: subscriber callback errors are caught + logged so one bad
+// subscriber can't break the others. Replay-on-join (lastData) ensures a
+// late subscriber doesn't have to wait for the next Firestore push.
+//
+// Out of scope (intentionally NOT shared): subscribeToDoorPricingSettings
+// (single doc, complex localStorage seeding), per-doc covers/bookings
+// queries inside customer-site flow, anything outside this file.
+interface _SharedSub<T> {
+  unsub: Unsubscribe;
+  subscribers: Set<(data: T) => void>;
+  lastData: T | undefined;
+  hasData: boolean;
+}
+const _sharedSubs = new Map<string, _SharedSub<unknown>>();
+
+function _shareSubscription<T>(
+  key: string,
+  factory: (push: (data: T) => void) => Unsubscribe,
+  cb: (data: T) => void,
+): Unsubscribe {
+  let entry = _sharedSubs.get(key) as _SharedSub<T> | undefined;
+  if (!entry) {
+    const subscribers = new Set<(data: T) => void>();
+    const unsub = factory((data: T) => {
+      const e = _sharedSubs.get(key) as _SharedSub<T> | undefined;
+      if (!e) return;
+      e.lastData = data;
+      e.hasData = true;
+      e.subscribers.forEach((s) => {
+        try { s(data); } catch (err) { console.warn("[sharedSub] subscriber cb threw", key, err); }
+      });
+    });
+    entry = { unsub, subscribers, lastData: undefined, hasData: false };
+    _sharedSubs.set(key, entry as _SharedSub<unknown>);
+  }
+  entry.subscribers.add(cb);
+  // Replay last-known payload immediately so the new subscriber sees data
+  // without waiting for the next Firestore push (matches onSnapshot's own
+  // cached-first-emit semantics for fresh subscribers).
+  if (entry.hasData) {
+    try { cb(entry.lastData as T); } catch (err) { console.warn("[sharedSub] replay cb threw", key, err); }
+  }
+  return () => {
+    const e = _sharedSubs.get(key) as _SharedSub<T> | undefined;
+    if (!e) return;
+    e.subscribers.delete(cb);
+    if (e.subscribers.size === 0) {
+      try { e.unsub(); } catch {}
+      _sharedSubs.delete(key);
+    }
+  };
+}
+
 export interface HodCover {
   id: string;
   ref: string;
@@ -460,11 +526,16 @@ export interface HodEvent {
 }
 
 export function subscribeToHodEvents(cb: (events: HodEvent[]) => void): () => void {
-  return onSnapshot(collection(db, EVENTS_COL), (snap) => {
-    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodEvent));
-    list.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-    cb(list);
-  }, () => cb([]));
+  // v3.94 shared listener — collapses N callers to 1 Firestore phone line.
+  return _shareSubscription<HodEvent[]>(
+    "events:all",
+    (push) => onSnapshot(collection(db, EVENTS_COL), (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodEvent));
+      list.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      push(list);
+    }, () => push([])),
+    cb,
+  );
 }
 
 /** Create a new event (auto-generated id). Returns the new id. */
@@ -1451,13 +1522,24 @@ export function subscribeIncomingCustomerOrders(cb: (covers: HodCover[]) => void
 export function subscribeToHodReservations(
   date: string, cb: (reservations: HodTableReservation[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, TABLE_RES_COL), where("date", "==", date));
-  return onSnapshot(q, (snap) => {
-    const all: HodTableReservation[] = [];
-    snap.forEach((d) => all.push({ _docId: d.id, ...d.data() } as HodTableReservation));
-    all.sort((a, b) => (a.arrivalTime || "").localeCompare(b.arrivalTime || ""));
-    cb(all);
-  }, () => cb([]));
+  // v3.94 shared listener keyed on date — DoorMode mounts this 7× per tablet
+  // (today, calToday, bookingDate, ReassignModal date, ×2 cross-night, picked
+  // tables). All same-date subscribers now share ONE Firestore phone line.
+  // subscribeToHodReservationsScoped also benefits transparently since it
+  // wraps this function.
+  return _shareSubscription<HodTableReservation[]>(
+    `res:${date || "_blank"}`,
+    (push) => {
+      const q = query(collection(db, TABLE_RES_COL), where("date", "==", date));
+      return onSnapshot(q, (snap) => {
+        const all: HodTableReservation[] = [];
+        snap.forEach((d) => all.push({ _docId: d.id, ...d.data() } as HodTableReservation));
+        all.sort((a, b) => (a.arrivalTime || "").localeCompare(b.arrivalTime || ""));
+        push(all);
+      }, () => push([]));
+    },
+    cb,
+  );
 }
 
 // 🆕 2026-05-26 v3.10 — Scoped reservations listener (Fix #1: Listener Scoping).
@@ -4039,10 +4121,17 @@ export function subscribeToBookingsForNights(
 ): Unsubscribe {
   const unique = Array.from(new Set((nights || []).filter(Boolean))).slice(0, 10);
   if (unique.length === 0) { cb([]); return () => {}; }
-  return onSnapshot(
-    query(collection(db, BOOKINGS_COL), where("date", "in", unique)),
-    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking))),
-    () => cb([]),
+  // v3.94 shared listener — keyed on the SORTED unique-nights tuple so two
+  // callers passing [today, calToday] in either order share one phone line.
+  const key = `bk:${[...unique].sort().join(",")}`;
+  return _shareSubscription<HodBooking[]>(
+    key,
+    (push) => onSnapshot(
+      query(collection(db, BOOKINGS_COL), where("date", "in", unique)),
+      (snap) => push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking))),
+      () => push([]),
+    ),
+    cb,
   );
 }
 
@@ -4065,14 +4154,19 @@ export function subscribeToGuestlistInRange(
   cb: (guests: HodGuestlistEntry[]) => void,
 ): Unsubscribe {
   if (!fromDateInclusive || !toDateExclusive) { cb([]); return () => {}; }
-  return onSnapshot(
-    query(
-      collection(db, GUESTLIST_COL),
-      where("joinedAt", ">=", fromDateInclusive),
-      where("joinedAt", "<", toDateExclusive),
+  // v3.94 shared listener — keyed on [from, to) window.
+  return _shareSubscription<HodGuestlistEntry[]>(
+    `gl:${fromDateInclusive}:${toDateExclusive}`,
+    (push) => onSnapshot(
+      query(
+        collection(db, GUESTLIST_COL),
+        where("joinedAt", ">=", fromDateInclusive),
+        where("joinedAt", "<", toDateExclusive),
+      ),
+      (snap) => push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry))),
+      () => push([]),
     ),
-    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry))),
-    () => cb([]),
+    cb,
   );
 }
 
@@ -4099,10 +4193,17 @@ export function subscribeToCoversForNight(
   cb: (covers: HodCover[]) => void,
 ): Unsubscribe {
   if (!night) { cb([]); return () => {}; }
-  return onSnapshot(
-    query(collection(db, COVERS_COL), where("date", "==", night)),
-    (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodCover))),
-    () => cb([]),
+  // v3.94 shared listener — keyed on night. DoorMode mounts this 3× per
+  // tablet (allCovers + 2 distinct setCovers state hooks); all now share
+  // ONE Firestore phone line.
+  return _shareSubscription<HodCover[]>(
+    `cov:${night}`,
+    (push) => onSnapshot(
+      query(collection(db, COVERS_COL), where("date", "==", night)),
+      (snap) => push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodCover))),
+      () => push([]),
+    ),
+    cb,
   );
 }
 
