@@ -2699,6 +2699,12 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
     date: (g.joinedAt || g.entryTime || "").slice(0, 10),
   } as any);
 
+  // 🆕 2026-05-27 v3.99 (Khushi) — in-app confirm overlay for FREE ENTRY
+  // (replaces the v3.98 window.confirm which rendered as an alien grey
+  // browser popup on the floor tablet — matches the v3.24 cover-edit
+  // overlay pattern at line ~640).
+  const [confirmFreeEntry, setConfirmFreeEntry] = useState<HodGuestlistEntry | null>(null);
+
   const handleFreeEntry = async (g: HodGuestlistEntry) => {
     if (busyId === g.id) return;
     setBusyId(g.id);
@@ -2809,10 +2815,59 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
             </div>
 
             {!detailGuest.checkedIn && (
-              <button onClick={() => handleToggle(detailGuest)} disabled={busyId === detailGuest.id}
+              // 🆕 2026-05-27 v3.99 (Khushi) — guestlist detail modal: green
+              // primary CTA opens the in-app FREE ENTRY confirm overlay
+              // (rendered below). v3.98 used window.confirm; v3.99 swaps to
+              // the v3.24-style in-app overlay so the floor tablet stays in
+              // the HOD UI (no alien browser popup).
+              <button onClick={() => setConfirmFreeEntry(detailGuest)} disabled={busyId === detailGuest.id}
                 style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", marginBottom: 10, letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
-                {busyId === detailGuest.id ? "CHECKING…" : "✅ CHECK IN GUEST"}
+                {busyId === detailGuest.id ? "ACTIVATING…" : "🎁 FREE ENTRY"}
               </button>
+            )}
+
+            {/* 🆕 2026-05-27 v3.99 — in-app FREE ENTRY confirm overlay (v3.24-style).
+                Fail-open: tapping the dark backdrop OR CANCEL closes without
+                activating. Uses zIndex 10001 to sit above the booking detail
+                modal. ACTIVATE COVER button below remains untouched — door
+                girl can use that path if she wants to collect cover instead. */}
+            {confirmFreeEntry && (
+              <div onClick={() => { if (busyId !== confirmFreeEntry.id) setConfirmFreeEntry(null); }}
+                style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+                <div onClick={(e) => e.stopPropagation()}
+                  style={{ background: "#0A0F0A", border: "1.5px solid rgba(34,197,94,.55)", borderRadius: 16, padding: 22, width: "100%", maxWidth: 360, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 8px 40px rgba(34,197,94,.25)" }}>
+                  <div style={{ fontSize: 11, fontWeight: 900, color: "#22C55E", letterSpacing: 1.5, marginBottom: 14, textAlign: "center" }}>🎁 CONFIRM FREE ENTRY</div>
+                  <div style={{ fontSize: 20, fontWeight: 900, color: "#fff", textAlign: "center", marginBottom: 4 }}>
+                    {confirmFreeEntry.name || "Guest"}
+                  </div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", textAlign: "center", marginBottom: 16, letterSpacing: .4 }}>
+                    GUESTLIST · NO COVER
+                  </div>
+                  <div style={{ background: "rgba(34,197,94,.08)", border: "1px solid rgba(34,197,94,.25)", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.85)", lineHeight: 1.55 }}>
+                      ✅ Activate ₹0 wallet for the customer<br/>
+                      ✅ Mark guest checked-in
+                    </div>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginTop: 8, fontStyle: "italic" }}>
+                      Tap ACTIVATE COVER instead if you want to collect cover at door.
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <button onClick={() => setConfirmFreeEntry(null)} disabled={busyId === confirmFreeEntry.id}
+                      style={{ padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid rgba(255,255,255,.25)", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                      CANCEL
+                    </button>
+                    <button onClick={async () => {
+                      const g = confirmFreeEntry;
+                      await handleFreeEntry(g);
+                      setConfirmFreeEntry(null);
+                    }} disabled={busyId === confirmFreeEntry.id}
+                      style={{ padding: 14, borderRadius: 10, background: "#22C55E", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+                      {busyId === confirmFreeEntry.id ? "ACTIVATING…" : "YES, FREE ENTRY"}
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -3176,6 +3231,13 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
     else countBySrc.inhouse += 1;
   });
 
+  // 🆕 2026-05-27 v3.101 (Khushi) — in-app overlay shown after a successful
+  // ARRIVED tap. Replaces the silent toast-only flow with an explicit "GUEST
+  // ARRIVED ON <time> · <date>" confirmation so the door girl gets visible
+  // closure on a 1-tap action that has irreversible side effects (cover mint
+  // + WhatsApp for aggregators). Backdrop tap = dismiss; OK button = dismiss.
+  const [arrivedConfirm, setArrivedConfirm] = useState<{ name: string; arrTime: string; date: string; tableId: string } | null>(null);
+
   const handleArrived = async (r: HodTableReservation) => {
     // 🆕 2026-05-27 v3.71 (Khushi LIVE-NIGHT) — table-assigned gate at the door.
     // Same root cause as v3.68 captain ADD ORDER block: marking a guest
@@ -3218,6 +3280,10 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
       arrTime = result.arrivalTime;
       processedAt = result.processedAt;
       if (!result.wasNew) {
+        // 🆕 2026-05-27 v3.101 — even on a no-op re-tap, show the in-app overlay
+        // so the door girl gets the same visible confirmation (with the original
+        // arrival time) instead of just a silent toast.
+        setArrivedConfirm({ name: r.customerName || "Guest", arrTime, date: r.date || "", tableId: r.tableId || "" });
         toast({
           title: `Already arrived: ${r.customerName || "Guest"}`,
           description: `Marked ${arrTime} earlier — no new WhatsApp sent.`,
@@ -3226,6 +3292,9 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         setArrBusy("");
         return;
       }
+      // 🆕 2026-05-27 v3.101 — surface the in-app overlay as the primary
+      // confirmation (toast below stays as the Undo affordance for inhouse).
+      setArrivedConfirm({ name: r.customerName || "Guest", arrTime, date: r.date || "", tableId: r.tableId || "" });
 
       // Aggregator arrivals: customer never went through hodclub.in, so they have
       // no covers doc and never got a HOD WhatsApp. Mint a zero-balance wallet
@@ -3551,6 +3620,43 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         <ReassignModal reservation={reassignFor} bookedTableIds={bookedTableIds} agentName={agentName} onClose={() => setReassignFor(null)} />
       )}
 
+      {/* 🆕 2026-05-27 v3.101 (Khushi) — in-app GUEST ARRIVED confirmation
+          overlay. Shown after handleArrived succeeds. zIndex 10002 so it
+          sits above the detail modal (9998) AND the reassign modal. */}
+      {arrivedConfirm && (
+        <div onClick={() => setArrivedConfirm(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10002, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#0A140A", border: "1.5px solid rgba(0,200,100,.55)", borderRadius: 16, padding: 24, width: "100%", maxWidth: 360, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 8px 40px rgba(0,200,100,.25)", textAlign: "center" }}>
+            <div style={{ fontSize: 44, marginBottom: 6 }}>🚶</div>
+            <div style={{ fontSize: 11, fontWeight: 900, color: "#00C864", letterSpacing: 1.5, marginBottom: 10 }}>GUEST ARRIVED</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#fff", marginBottom: 4, textTransform: "uppercase", wordBreak: "break-word" }}>
+              {arrivedConfirm.name}
+            </div>
+            {arrivedConfirm.tableId && (
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,.55)", letterSpacing: .5, marginBottom: 14 }}>
+                TABLE {arrivedConfirm.tableId}
+              </div>
+            )}
+            <div style={{ background: "rgba(0,200,100,.10)", border: "1px solid rgba(0,200,100,.30)", borderRadius: 10, padding: 14, marginBottom: 18 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: 1, marginBottom: 4 }}>ARRIVED AT</div>
+              <div style={{ fontSize: 26, fontWeight: 900, color: "#00C864", fontVariantNumeric: "tabular-nums", letterSpacing: .5 }}>
+                {arrivedConfirm.arrTime || "—"}
+              </div>
+              {arrivedConfirm.date && (
+                <div style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,.65)", marginTop: 4, letterSpacing: .5 }}>
+                  {arrivedConfirm.date}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setArrivedConfirm(null)}
+              style={{ width: "100%", padding: 14, borderRadius: 10, background: "#00C864", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, letterSpacing: .6, cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 14px rgba(0,200,100,.35)" }}>
+              ✓ OK
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 🔴 Detail modal — opens on row tap, shows full meta + actions.
           Khushi 16 May: aggregator emails (esp. Zomato) only carry name reliably —
           PAX/TIME/DATE must be hand-editable here at the door. Audit trail kept
@@ -3661,7 +3767,10 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                       <div style={{ padding: 10, background: arrived ? "rgba(0,200,100,.08)" : "rgba(255,255,255,.03)", borderRadius: 8 }}>
                         <div style={editLabel}>Status</div>
                         <div style={{ fontSize: 17, fontWeight: 900, color: arrived ? "#00C864" : "#FB923C", marginTop: 4, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: .6, textTransform: "uppercase", fontVariantNumeric: "tabular-nums" }}>
-                          {arrived ? `✓ ${arrived}` : "PENDING"}
+                          {/* 🆕 2026-05-27 v3.101 (Khushi) — was `✓ ${arrived}`
+                              which rendered as "✓ TRUE" (arrived is a boolean).
+                              Now shows the actual stamped arrival time. */}
+                          {arrived ? `✓ ${r.actualArrivalTime}` : "PENDING"}
                         </div>
                       </div>
                     </div>
@@ -5906,8 +6015,33 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     try { const url = new URL(data); ref = url.searchParams.get("verify") || url.searchParams.get("ref") || url.searchParams.get("wallet") || url.searchParams.get("id") || data; } catch {}
     try {
       const b = await lookupBooking(ref);
-      if (b) setScanDetail(b);
-      else alert("No booking found for this QR code");
+      if (!b) { alert("No booking found for this QR code"); return; }
+      // 🆕 2026-05-27 v3.100 (Khushi LIVE-NIGHT) — TABLE bookings (TBL-/HODTAB/
+      // AGG-) opened the generic BookingDetailModal which showed "CHECK IN
+      // GUEST" + "Activate Cover" — wrong for tables (tables have a richer
+      // detail modal with editable pax/time/date/phone + Arrived + Reassign,
+      // same one used when you tap a row in the TABLES tab). Now: detect
+      // _isTable, find the matching tableReservation doc in tonight's
+      // subscription, switch to TABLES/CORPORATE tab, and pop that exact
+      // modal via the existing focusDocId mechanism.
+      // 🛟 FAIL-OPEN: if the table doc isn't in tonight's subscription (e.g.
+      // cross-night, or subscription hasn't loaded yet), fall back to the
+      // legacy BookingDetailModal — door girl is NEVER stranded.
+      if ((b as any)._isTable) {
+        const allTables: HodTableReservation[] = [];
+        const seen = new Set<string>();
+        Object.values(tableResByDate).forEach((rows) => rows.forEach((r) => {
+          if (!r._docId || seen.has(r._docId)) return;
+          seen.add(r._docId); allTables.push(r);
+        }));
+        const match = allTables.find((r) => r.bookingRef === b.id || r.bookingRef === b.ref || r._docId === b.id);
+        if (match && match._docId) {
+          setTab(isCorporateTableRes(match) ? "corporate" : "tables");
+          setTablesFocusDocId(match._docId);
+          return;
+        }
+      }
+      setScanDetail(b);
     } catch { alert("Lookup failed"); }
   };
 
