@@ -23,7 +23,14 @@ import {
 import { db } from "./firebase";
 import { getOperationalNightStr } from "./utils-pos";
 
-export type NcRole = "DJ" | "OWNER" | "INFLUENCER" | "PROMOTER" | "OTHER";
+// 🆕 2026-05-27 v3.115 — MANAGER added to the role list (Khushi: floor
+// managers eat/drink on the house too; need their own audit bucket).
+export type NcRole = "DJ" | "OWNER" | "INFLUENCER" | "PROMOTER" | "MANAGER" | "OTHER";
+
+// 🆕 2026-05-27 v3.115 — payment method captured on settlement so the
+// morning report can split NC RECOVERED (cash/upi/card) vs NC WAIVED
+// (manager wrote it off). Optional for back-compat with v3.114 rows.
+export type NcPaymentMethod = "cash" | "upi" | "card" | "waived";
 
 export interface BillDueItem {
   n: string;        // item name
@@ -48,6 +55,14 @@ export interface BillDueDoc {
   createdAt?: { seconds: number; nanoseconds: number } | null;
   clearedAt?: string | null;
   clearedBy?: string | null;
+  /** 🆕 v3.115 — how the guest paid when settling. `waived` = manager wrote it
+   *  off (still needs Manager PIN). Reports tab buckets by this. */
+  paymentMethod?: NcPaymentMethod | null;
+  /** 🆕 v3.120 — bartender-applied discount on this row at clear time.
+   *  0–50 is bartender-only; >50 needs Manager PIN. WAIVE = 100. */
+  discountPct?: number | null;
+  /** 🆕 v3.120 — amount actually collected after discount (₹). */
+  finalAmount?: number | null;
   token?: string | null;
 }
 
@@ -84,15 +99,27 @@ export async function createBillDue(input: Omit<BillDueDoc, "status" | "createdA
 
 export function subscribeBillDue(cb: (rows: BillDueDoc[]) => void) {
   // Scoped to TONIGHT only so the badge count doesn't accumulate over time.
+  // 🔴 v3.116 BUGFIX — REMOVED the `orderBy("createdAt","desc")` from the
+  // query. Composite-index `operationalNight ASC + createdAt DESC` did not
+  // exist on hod-tickets → the query failed silently → fail-open returned
+  // an empty list → BILL DUE tab showed ₹0 even though rows were being
+  // written. Now we sort client-side (max ~50 rows per night, trivial cost)
+  // so the single-field `where` works on every Firebase project out of the
+  // box with NO index setup.
   const night = getOperationalNightStr();
   const q = query(
     collection(db, COL),
     where("operationalNight", "==", night),
-    orderBy("createdAt", "desc"),
   );
   return onSnapshot(q, (snap) => {
     const out: BillDueDoc[] = [];
     snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Omit<BillDueDoc, "id">) }));
+    // Sort newest-first client-side (replaces removed orderBy).
+    out.sort((a, b) => {
+      const aT = a.createdAt?.seconds || 0;
+      const bT = b.createdAt?.seconds || 0;
+      return bT - aT;
+    });
     cb(out);
   }, (err) => {
     // FAIL-OPEN: surface as empty list rather than crashing the bar tab.
@@ -101,11 +128,17 @@ export function subscribeBillDue(cb: (rows: BillDueDoc[]) => void) {
   });
 }
 
-export async function clearBillDue(id: string, staff: string): Promise<void> {
+export async function clearBillDue(
+  id: string, staff: string, paymentMethod: NcPaymentMethod = "cash",
+  discountPct = 0, finalAmount?: number,
+): Promise<void> {
   await updateDoc(doc(db, COL, id), {
     status: "cleared",
     clearedAt: new Date().toISOString(),
     clearedBy: staff,
+    paymentMethod,
+    discountPct: discountPct || 0,
+    finalAmount: typeof finalAmount === "number" ? finalAmount : null,
   });
 }
 

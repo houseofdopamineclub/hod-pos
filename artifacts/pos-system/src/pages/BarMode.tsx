@@ -21,7 +21,7 @@ import { getOperationalNightStr } from "@/lib/utils-pos";
 import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 import {
   getNextToken, createBillDue, subscribeBillDue, clearBillDue, sendBillDueWhatsApp,
-  type BillDueDoc, type NcRole,
+  type BillDueDoc, type BillDueItem, type NcRole, type NcPaymentMethod,
 } from "@/lib/bill-due";
 // 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed from BarMode. Bartender
 // should ONLY see food-ready KDS popups (already wired below), NOT
@@ -2758,7 +2758,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         />
       )}
       {activeCover && <WalletOverlay key={activeCover.id} cover={activeCover} staffName={staffName} onClose={() => { setActiveCover(null); setResults([]); }} />}
-      {ncOpen && <NcModal staffName={staffName} onClose={() => setNcOpen(false)} />}
+      {ncOpen && <NcModal staffName={staffName} priorRows={billDueRows} onClose={() => setNcOpen(false)} />}
 
       {/* 🆕 v3.114 (Khushi LIVE): in-app modal for "no wallet found" QR scans.
           Was a tiny top-of-screen toast — bartender misread or missed it.
@@ -2810,54 +2810,141 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
 // ledger row — guest still has paper KOT, ledger row will show on the
 // BILL DUE tab.
 // ─────────────────────────────────────────────────────────────────────
-function NcModal({ staffName, onClose }: { staffName: string; onClose: () => void }) {
+// 🆕 2026-05-27 v3.115 — NC v2 (Khushi LIVE):
+// 1) ITEM PICKER reuses the SAME modal layout as ADD ORDER (category tabs,
+//    search, qty steppers) — bartender muscle memory unchanged. No more
+//    typed name/price/qty boxes (fat-finger risk eliminated).
+// 2) COMP RULE NOW PER-UNIT: 1 free DRINK + 1 free FOOD per NC ticket.
+//    If guest orders 3× Old Monk → 1 free + 2 charged. Previously the whole
+//    line was free regardless of qty — silent revenue leak.
+// 3) MANAGER PIN gate ONLY when BILL DUE > ₹0. Clean comps (1+1, due = 0)
+//    are friction-free. Fast path for the common case.
+// 4) MANAGER added to role dropdown.
+// 5) NC ALSO supported via custom typed line (off-menu items like
+//    "OWNER's special bottle" still possible) — small button below picker.
+function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRows: BillDueDoc[]; onClose: () => void }) {
+  const GOLD = "#C9A84C";
+  type NcItem = { n: string; p: number; qty: number; t: "food" | "drink" };
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [role, setRole] = useState<NcRole>("DJ");
   const [approvedBy, setApprovedBy] = useState("");
-  type NcItem = { n: string; p: number; qty: number; t: "food" | "drink" };
   const [lines, setLines] = useState<NcItem[]>([]);
-  const [draftN, setDraftN] = useState("");
-  const [draftP, setDraftP] = useState("");
-  const [draftQ, setDraftQ] = useState("1");
-  const [draftT, setDraftT] = useState<"food" | "drink">("drink");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-
-  const addLine = () => {
-    setErr("");
-    const nm = draftN.trim();
-    const p = parseFloat(draftP) || 0;
-    const q = parseInt(draftQ) || 1;
-    if (!nm || p <= 0 || q <= 0) { setErr("Item needs a name + price + qty."); return; }
-    setLines((L) => [...L, { n: nm, p, qty: q, t: draftT }]);
-    setDraftN(""); setDraftP(""); setDraftQ("1");
-  };
-  const removeLine = (i: number) => setLines((L) => L.filter((_, idx) => idx !== i));
-
-  // Mark first food + first drink as free → those lines comp; everything
-  // else lands on the BILL DUE ledger.
-  const itemsForLedger = (() => {
-    let foodCompUsed = false, drinkCompUsed = false;
-    return lines.map((it) => {
-      let free = false;
-      if (it.t === "food" && !foodCompUsed) { free = true; foodCompUsed = true; }
-      else if (it.t === "drink" && !drinkCompUsed) { free = true; drinkCompUsed = true; }
-      return { ...it, free };
-    });
+  // Item picker state (mirrors BarMain ADD ORDER overlay — same UX).
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickSearch, setPickSearch] = useState("");
+  const [pickGroup, setPickGroup] = useState<string>(GROUP_ORDER[0] || "spirits");
+  // 🔴 v3.115 (architect fix) — lineKey includes `t` so a custom off-menu
+  // "WATER" priced ₹50 as DRINK doesn't collide with a "WATER" ₹50 FOOD
+  // (would silently merge and corrupt the comp split).
+  const lineKey = (n: string, p: number, t: "food" | "drink") => `${n}::${p}::${t}`;
+  const lineMap = (() => {
+    const m: Record<string, NcItem> = {};
+    lines.forEach((l) => { m[lineKey(l.n, l.p, l.t)] = l; });
+    return m;
   })();
-  const amountDue = itemsForLedger.reduce((s, it) => s + (it.free ? 0 : (it.p * it.qty)), 0);
+
+  const bumpLine = (it: { n: string; p: number; t: "food" | "drink" }, delta: number) => {
+    setLines((L) => {
+      const key = lineKey(it.n, it.p, it.t);
+      const existing = L.find((l) => lineKey(l.n, l.p, l.t) === key);
+      if (!existing) {
+        if (delta <= 0) return L;
+        return [...L, { n: it.n, p: it.p, qty: delta, t: it.t }];
+      }
+      const nextQty = existing.qty + delta;
+      if (nextQty <= 0) return L.filter((l) => lineKey(l.n, l.p, l.t) !== key);
+      return L.map((l) => lineKey(l.n, l.p, l.t) === key ? { ...l, qty: nextQty } : l);
+    });
+  };
+  const removeLine = (key: string) => setLines((L) => L.filter((l) => lineKey(l.n, l.p, l.t) !== key));
+
+  // 🆕 v3.115 — PER-UNIT comp logic. Each line with qty>1 splits into a
+  // qty-1 COMP row (if first of its type) + a qty-rest BILLABLE row. Same
+  // line at qty=1 becomes a single COMP row. Subsequent same-type lines are
+  // 100% billable. Output feeds both the on-screen review and the BillDue
+  // ledger items[] array (so settlement WhatsApp + Reports tab honour split).
+  // 🆕 v3.122 — comp allowance is PER-GUEST-PER-NIGHT (not per-ticket). If
+  // SPIDY already redeemed his free drink an hour ago, the next NC ticket
+  // must bill the next drink in full. We scan TONIGHT's open + cleared
+  // BillDue rows whose phone matches (10-digit normalised) and pre-flip
+  // the comp flags. Same-phone match also bridges typo'd names.
+  const _digits = (s: string) => (s || "").replace(/\D/g, "").slice(-10);
+  const phoneKey = _digits(phone);
+  const priorComps = (() => {
+    let f = false, d = false;
+    if (phoneKey.length < 10) return { f, d };
+    for (const r of priorRows || []) {
+      if (_digits(r.customerPhone || "") !== phoneKey) continue;
+      for (const it of (r.items || [])) {
+        if (!it.free) continue;
+        if (it.t === "food") f = true;
+        else if (it.t === "drink") d = true;
+      }
+    }
+    return { f, d };
+  })();
+  const splitForLedger = (() => {
+    let foodCompUsed = priorComps.f, drinkCompUsed = priorComps.d;
+    const out: (NcItem & { free: boolean })[] = [];
+    for (const it of lines) {
+      const canComp = (it.t === "food" && !foodCompUsed) || (it.t === "drink" && !drinkCompUsed);
+      if (canComp) {
+        out.push({ ...it, qty: 1, free: true });
+        if (it.qty > 1) out.push({ ...it, qty: it.qty - 1, free: false });
+        if (it.t === "food") foodCompUsed = true; else drinkCompUsed = true;
+      } else {
+        out.push({ ...it, free: false });
+      }
+    }
+    return out;
+  })();
+  const amountDue = splitForLedger.reduce((s, it) => s + (it.free ? 0 : it.p * it.qty), 0);
+  const compCount = splitForLedger.filter((s) => s.free).length;
+
+  // Picker filter — same normalisation + groups as ADD ORDER.
+  const normLocal = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const pickerItems = MENU_ITEMS.filter((m) => {
+    if (pickSearch) {
+      const q = normLocal(pickSearch);
+      const groupLabel = (GROUP_LABELS[m.group] || m.group).toLowerCase();
+      const hay = normLocal(`${m.name} ${m.category} ${groupLabel}`);
+      return hay.includes(q);
+    }
+    return m.group === pickGroup;
+  });
+  const pickerGroups = GROUP_ORDER.filter((g) => MENU_ITEMS.some((m) => m.group === g));
 
   const submit = async () => {
+    if (busy) return; // 🔴 v3.115 (architect fix) — hard re-entry guard.
     setErr("");
     if (!name.trim()) { setErr("Guest name required."); return; }
     if (!approvedBy.trim()) { setErr("'Approved by' required."); return; }
     if (lines.length === 0) { setErr("Add at least one item."); return; }
+    // 🆕 v3.115 — Manager PIN gate ONLY when BILL DUE > 0 (option B). Clean
+    // comps (1 drink + 1 food, due = 0) skip the prompt entirely.
+    if (amountDue > 0) {
+      const pin = await centeredPinPrompt(
+        `MANAGER PIN — ₹${amountDue.toLocaleString("en-IN")} will be added to BILL DUE for ${name.trim()} (${role}).`,
+      );
+      if (!pin) return;
+      const h = await sha256(pin);
+      if (h !== BAR_MANAGER_HASH) {
+        await centeredAlert("WRONG PIN", "NC NOT LOGGED.", "error");
+        return;
+      }
+    }
     setBusy(true);
     try {
       const token = getNextToken();
-      // 1) KOT to the floor (paper for bar/kitchen). Fire-and-forget.
-      const kotItems: HodOrderItem[] = lines.map((it) => ({ n: it.n, p: it.p, qty: it.qty, t: it.t, cat: "" }));
+      // 1) KOT — print split items so kitchen/bar sees the (COMP) tag on
+      //    the 1 free unit and a separate line for the billable rest.
+      const kotItems: HodOrderItem[] = splitForLedger.map((it) => ({
+        n: it.free ? `${it.n} (COMP)` : it.n,
+        p: it.p, qty: it.qty, t: it.t, cat: "",
+      }));
       const total = lines.reduce((s, it) => s + it.p * it.qty, 0);
       printKOT({
         tableId: "NC", floorLabel: `NC · ${role}`,
@@ -2868,109 +2955,229 @@ function NcModal({ staffName, onClose }: { staffName: string; onClose: () => voi
         roundTotal: total,
         token,
       }).catch(() => {});
-      // 2) Log BILL DUE ledger row (only the non-free items count toward dues).
+      // 2) Ledger row — uses the split items (with free flags per unit).
       const dueId = await createBillDue({
         customerName: name.trim(),
         customerPhone: phone.replace(/\D/g, ""),
         role, approvedBy: approvedBy.trim(),
-        items: itemsForLedger,
+        items: splitForLedger,
         amountDue,
         staff: staffName,
         token,
       });
-      // 3) WhatsApp guest with the breakdown. Fail-open.
+      // 3) WhatsApp — only if there's actually money owed.
       if (amountDue > 0 && phone.replace(/\D/g, "").length >= 10) {
-        sendBillDueWhatsApp(phone, name.trim(), amountDue, itemsForLedger, token).catch(() => {});
+        sendBillDueWhatsApp(phone, name.trim(), amountDue, splitForLedger, token).catch(() => {});
       }
       await centeredAlert(
         "✅ NC LOGGED",
-        `Token ${token}\nDue: ₹${amountDue.toLocaleString("en-IN")} (1 food + 1 drink comped)\nLedger # ${dueId.slice(-6).toUpperCase()}`,
+        `Token ${token}\n${compCount} COMPED · ₹${amountDue.toLocaleString("en-IN")} DUE\nLedger # ${dueId.slice(-6).toUpperCase()}`,
         "success",
       );
       onClose();
     } catch (e: any) {
-      setErr(e?.message || "Failed to log NC. Try again.");
+      // 🔴 v3.116 — surface the actual error via a big in-app alert so the
+      // bartender doesn't miss it on a screen full of items (was tiny red
+      // inline text → easy to miss → row lost without anyone noticing).
+      const msg = e?.message || "Failed to log NC. Try again.";
+      setErr(msg);
+      await centeredAlert("⚠️ NC NOT LOGGED", msg, "error");
     }
     setBusy(false);
   };
 
+  // ── PICKER OVERLAY (same modal style as ADD ORDER) ─────────────────────
+  if (showPicker) {
+    return createPortal(
+      <div style={{ position: "fixed", inset: 0, zIndex: 10001, background: "#030305", display: "flex", flexDirection: "column", fontFamily: "'Space Grotesk',sans-serif" }}>
+        <div style={{ padding: "14px 16px 12px", background: "#0A0A0A", borderBottom: `1px solid ${GOLD}55`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexShrink: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, letterSpacing: 0.4, textTransform: "uppercase", lineHeight: 1.15 }}>🎁 NC — ADD ITEMS</div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.7)", fontWeight: 700, marginTop: 4, letterSpacing: 0.3, textTransform: "uppercase" }}>{name || "GUEST"} · {role}{staffName ? ` · ${staffName}` : ""}</div>
+          </div>
+          <button onClick={() => setShowPicker(false)} aria-label="Close menu"
+            style={{ padding: "8px 12px", borderRadius: 10, background: "transparent", border: `1.5px solid ${GOLD}`, color: GOLD, fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, flexShrink: 0 }}>× DONE</button>
+        </div>
+        <div style={{ padding: "10px 16px 0", background: "#030305", flexShrink: 0 }}>
+          <input value={pickSearch} onChange={(e) => setPickSearch(e.target.value)} placeholder="Search"
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: `1px solid ${GOLD}`, color: "#fff", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${pickerGroups.length}, 1fr)`, gap: 6, marginBottom: 8 }}>
+            {pickerGroups.map((g) => {
+              const active = pickGroup === g;
+              return (
+                <button key={g} onClick={() => setPickGroup(g)}
+                  style={{
+                    padding: "14px 6px", borderRadius: 4, fontSize: 12, fontWeight: 800, letterSpacing: 1, cursor: "pointer",
+                    background: active ? GOLD : "transparent",
+                    color: active ? "#030305" : GOLD,
+                    border: `1px solid ${GOLD}`,
+                    textTransform: "uppercase",
+                  }}>{GROUP_LABELS[g] || g}</button>
+              );
+            })}
+          </div>
+          <div style={{ height: 1, background: "rgba(255,255,255,.05)" }} />
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px", background: "#030305" }}>
+          {pickerItems.length === 0 && (
+            <div style={{ textAlign: "center", padding: 30, color: "rgba(255,255,255,.4)", fontSize: 13 }}>No items found</div>
+          )}
+          {pickerItems.map((item) => {
+            const t: "food" | "drink" = item.group === "food" ? "food" : "drink";
+            const existing = lineMap[lineKey(item.name, item.price, t)];
+            const qty = existing?.qty || 0;
+            const showVeg = item.group === "food";
+            return (
+              <div key={`${item.id}-${item.category}-${item.name}`}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
+                <div style={{ flex: 1, paddingRight: 8, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 16, color: "#fff", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.2, lineHeight: 1.25 }}>
+                    {showVeg && (
+                      <span style={{ display: "inline-block", width: 12, height: 12, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
+                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 5, height: 5, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
+                      </span>
+                    )}
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
+                  </div>
+                  <div style={{ fontSize: 14, color: "rgba(255,255,255,.7)", marginTop: 4, fontWeight: 700, lineHeight: 1.2 }}>₹{item.price}</div>
+                </div>
+                {qty === 0 ? (
+                  <button onClick={() => bumpLine({ n: item.name, p: item.price, t }, 1)}
+                    style={{ padding: "10px 18px", borderRadius: 6, background: GOLD, border: "none", color: "#030305", fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", flexShrink: 0 }}>ADD +</button>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <button onClick={() => bumpLine({ n: item.name, p: item.price, t }, -1)}
+                      style={{ width: 34, height: 34, borderRadius: 6, background: GOLD, border: "none", color: "#030305", fontSize: 18, fontWeight: 900, cursor: "pointer", padding: 0 }}>−</button>
+                    <span style={{ fontSize: 17, fontWeight: 900, color: GOLD, minWidth: 22, textAlign: "center" }}>{qty}</span>
+                    <button onClick={() => bumpLine({ n: item.name, p: item.price, t }, 1)}
+                      style={{ width: 34, height: 34, borderRadius: 6, background: GOLD, border: "none", color: "#030305", fontSize: 18, fontWeight: 900, cursor: "pointer", padding: 0 }}>+</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ flexShrink: 0, padding: "10px 14px 18px", background: "#0A0A0A", borderTop: `1px solid ${GOLD}55` }}>
+          <button onClick={() => setShowPicker(false)}
+            style={{ width: "100%", padding: "16px 12px", borderRadius: 12, fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, textTransform: "uppercase",
+              background: GOLD, border: `1.5px solid ${GOLD}`, color: "#030305" }}>
+            ✓ DONE · {lines.reduce((s, l) => s + l.qty, 0)} ITEMS · ₹{amountDue.toLocaleString("en-IN")} DUE
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  // ── REVIEW SCREEN ──────────────────────────────────────────────────────
   return createPortal(
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, maxHeight: "90vh", overflowY: "auto", background: "#0A0A0A", border: "2px solid rgba(168,85,247,.5)", borderRadius: 16, padding: 20, color: "#fff" }}>
-        <div style={{ fontSize: 18, fontWeight: 900, color: "#E9D5FF", marginBottom: 4 }}>🎁 NC — NO CHARGE</div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 14 }}>
-          House rule: <b style={{ color: "#E9D5FF" }}>1 food + 1 drink FREE</b>. Anything beyond → BILL DUE → WhatsApp to guest. Audit captured.
+      <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "100%", maxWidth: 640, maxHeight: "94vh", overflowY: "auto", background: "#0A0A0A", border: `2px solid ${GOLD}`, borderRadius: 18, padding: 26, color: "#fff" }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 18 }}>
+          <div style={{ fontSize: 22, fontWeight: 900, color: GOLD, letterSpacing: 0.5, textTransform: "uppercase" }}>🎁 NC — NO CHARGE</div>
+          <button type="button" onClick={onClose}
+            style={{ background: "transparent", border: "1px solid rgba(255,255,255,.22)", color: "rgba(255,255,255,.75)", fontSize: 11, fontWeight: 800, letterSpacing: 1, padding: "8px 14px", borderRadius: 6, cursor: "pointer" }}>
+            ✕ CANCEL
+          </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="GUEST NAME"
-            style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 13 }} />
-          <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="PHONE (10 digits)" inputMode="numeric"
-            style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 13 }} />
-          <select value={role} onChange={(e) => setRole(e.target.value as NcRole)}
-            style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 13 }}>
-            {(["DJ","OWNER","INFLUENCER","PROMOTER","OTHER"] as NcRole[]).map((r) =>
-              <option key={r} value={r} style={{ background: "#0A0A0A" }}>{r}</option>
-            )}
-          </select>
-          <input value={approvedBy} onChange={(e) => setApprovedBy(e.target.value)} placeholder="APPROVED BY"
-            style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.15)", color: "#fff", fontSize: 13 }} />
+        {/* 🛡 v3.121 — decoy + form-level autocomplete kill browser "Save password?" prompt */}
+        <form autoComplete="off" onSubmit={(e) => e.preventDefault()}>
+        <div style={{ position: "absolute", left: -9999, top: -9999, opacity: 0, pointerEvents: "none" }} aria-hidden="true">
+          <input type="text" name="username" autoComplete="username" tabIndex={-1} />
+          <input type="password" name="password" autoComplete="new-password" tabIndex={-1} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+          <div>
+            <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Guest Name *</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} name="hod-nc-guest" autoComplete="off" data-lpignore="true" data-1p-ignore="" data-form-type="other"
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 14, fontWeight: 600 }} />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Phone (10 digits)</label>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="numeric" name="hod-nc-phone" autoComplete="off" data-lpignore="true" data-1p-ignore="" data-form-type="other"
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 14, fontWeight: 600 }} />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Role</label>
+            <select value={role} onChange={(e) => setRole(e.target.value as NcRole)} name="hod-nc-role" autoComplete="off"
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 14, fontWeight: 700 }}>
+              {(["DJ","INFLUENCER","PROMOTER","MANAGER","OWNER","OTHER"] as NcRole[]).map((r) =>
+                <option key={r} value={r} style={{ background: "#0A0A0A" }}>{r}</option>
+              )}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Approved By *</label>
+            <input value={approvedBy} onChange={(e) => setApprovedBy(e.target.value)} name="hod-nc-approver" autoComplete="off" data-lpignore="true" data-1p-ignore="" data-form-type="other"
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 14, fontWeight: 600 }} />
+          </div>
         </div>
 
-        <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 10, marginTop: 6 }}>
-          <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,.55)", marginBottom: 8, letterSpacing: 0.5 }}>ADD ITEMS</div>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 0.6fr 1fr auto", gap: 6, marginBottom: 8 }}>
-            <input value={draftN} onChange={(e) => setDraftN(e.target.value)} placeholder="Item name"
-              style={{ padding: 8, borderRadius: 6, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 12 }} />
-            <input value={draftP} onChange={(e) => setDraftP(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="₹"
-              inputMode="decimal"
-              style={{ padding: 8, borderRadius: 6, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 12 }} />
-            <input value={draftQ} onChange={(e) => setDraftQ(e.target.value.replace(/\D/g, ""))} placeholder="Qty"
-              inputMode="numeric"
-              style={{ padding: 8, borderRadius: 6, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 12 }} />
-            <select value={draftT} onChange={(e) => setDraftT(e.target.value as "food" | "drink")}
-              style={{ padding: 8, borderRadius: 6, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 12 }}>
-              <option value="drink" style={{ background: "#0A0A0A" }}>🍸</option>
-              <option value="food" style={{ background: "#0A0A0A" }}>🍴</option>
-            </select>
-            <button onClick={addLine}
-              style={{ padding: "8px 10px", borderRadius: 6, background: "rgba(168,85,247,.2)", border: "1px solid rgba(168,85,247,.5)", color: "#E9D5FF", fontSize: 12, fontWeight: 900, cursor: "pointer" }}>+</button>
+        {(priorComps.f || priorComps.d) && (
+          <div style={{ background: "rgba(239,68,68,.10)", border: "1px solid rgba(239,68,68,.45)", borderRadius: 8, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: "#FCA5A5", fontWeight: 700, letterSpacing: 0.3 }}>
+            ⚠ THIS GUEST HAS ALREADY USED A FREE {priorComps.f && priorComps.d ? "DRINK + FOOD" : priorComps.f ? "FOOD" : "DRINK"} TONIGHT. NEW ITEMS WILL BE FULLY BILLED.
           </div>
-          {itemsForLedger.length > 0 && (
-            <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: 8, marginBottom: 10 }}>
-              {itemsForLedger.map((it, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", fontSize: 12 }}>
+        )}
+        <button type="button" onClick={() => setShowPicker(true)}
+          style={{ width: "100%", padding: "14px 12px", borderRadius: 10, marginBottom: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#030305", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, textTransform: "uppercase" }}>
+          + ADD ITEMS FROM MENU
+        </button>
+
+        {splitForLedger.length > 0 && (
+          <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            {splitForLedger.map((it, i) => {
+              const key = lineKey(it.n, it.p, it.t);
+              return (
+                <div key={`${key}-${i}-${it.free ? "c" : "b"}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", fontSize: 13 }}>
                   <span style={{ color: it.free ? "#22C55E" : "#fff" }}>
                     {it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}
-                    {it.free && <span style={{ color: "#22C55E", fontWeight: 900, marginLeft: 6 }}>· COMP</span>}
+                    {it.free && <span style={{ color: "#22C55E", fontWeight: 900, marginLeft: 6, fontSize: 11, letterSpacing: 0.5 }}>· COMP</span>}
                   </span>
-                  <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                     <span style={{ color: it.free ? "#22C55E" : "#F2C744", fontWeight: 800 }}>
                       {it.free ? "FREE" : `₹${(it.p * it.qty).toLocaleString("en-IN")}`}
                     </span>
-                    <button onClick={() => removeLine(i)}
-                      style={{ background: "transparent", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 14 }}>×</button>
+                    {!it.free && (
+                      <button onClick={() => removeLine(key)}
+                        title="Remove this line"
+                        style={{ background: "transparent", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 16 }}>×</button>
+                    )}
                   </span>
                 </div>
-              ))}
-              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(255,255,255,.08)", marginTop: 6, paddingTop: 6, fontSize: 13, fontWeight: 900 }}>
-                <span style={{ color: "rgba(255,255,255,.6)" }}>BILL DUE</span>
-                <span style={{ color: "#EF4444" }}>₹{amountDue.toLocaleString("en-IN")}</span>
-              </div>
+              );
+            })}
+            <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(255,255,255,.08)", marginTop: 8, paddingTop: 8, fontSize: 11, color: "rgba(34,197,94,.85)", fontWeight: 800 }}>
+              <span>🎁 COMPED</span><span>{compCount} UNIT{compCount === 1 ? "" : "S"}</span>
             </div>
-          )}
-        </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 15, fontWeight: 900 }}>
+              <span style={{ color: "rgba(255,255,255,.6)" }}>💸 BILL DUE</span>
+              <span style={{ color: amountDue > 0 ? "#EF4444" : "#22C55E" }}>₹{amountDue.toLocaleString("en-IN")}</span>
+            </div>
+          </div>
+        )}
 
         {err && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 10 }}>{err}</div>}
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onClose} disabled={busy}
-            style={{ flex: 1, padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)", fontSize: 13, fontWeight: 700, cursor: busy ? "not-allowed" : "pointer" }}>
-            Cancel
-          </button>
-          <button onClick={submit} disabled={busy}
-            style={{ flex: 1.6, padding: 12, borderRadius: 10, background: "rgba(168,85,247,.2)", border: "1px solid rgba(168,85,247,.6)", color: "#E9D5FF", fontSize: 13, fontWeight: 900, cursor: busy ? "wait" : "pointer", letterSpacing: 0.5 }}>
-            {busy ? "Logging…" : "🖨 PRINT NC KOT + LOG"}
-          </button>
-        </div>
+        <button type="button" onClick={submit} disabled={busy}
+          style={{ width: "100%", padding: "16px 12px", borderRadius: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#030305", fontSize: 15, fontWeight: 900, cursor: busy ? "wait" : "pointer", letterSpacing: 0.6, textTransform: "uppercase" }}>
+          {busy ? "LOGGING…" : amountDue > 0 ? "🖨 PRINT NC KOT + LOG (MANAGER PIN)" : "🖨 PRINT NC KOT + LOG"}
+        </button>
+        </form>
+
+        {/* 🆕 v3.128 — BUSY OVERLAY. Covers the NC modal body during the
+            Firestore write so nothing red (BILL DUE ₹, × remove buttons,
+            prior-comp banner) can flash between the PIN prompt closing and
+            the success popup opening. */}
+        {busy && (
+          <div style={{
+            position: "absolute", inset: 0, background: "rgba(10,10,10,.96)", borderRadius: 18,
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, zIndex: 5,
+          }}>
+            <div style={{ width: 44, height: 44, border: `3px solid ${GOLD}33`, borderTopColor: GOLD, borderRadius: "50%", animation: "ncSpin 0.8s linear infinite" }} />
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 900, color: GOLD, letterSpacing: 0.5 }}>LOGGING NC…</div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: 0.5, textTransform: "uppercase" }}>Printing KOT · writing ledger</div>
+            <style>{`@keyframes ncSpin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        )}
       </div>
     </div>,
     document.body,
@@ -2985,79 +3192,480 @@ function NcModal({ staffName, onClose }: { staffName: string; onClose: () => voi
 // after operational-night rollover (subscribeBillDue is night-scoped).
 // ─────────────────────────────────────────────────────────────────────
 function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffName: string; onClose: () => void }) {
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const open = rows.filter((r) => r.status === "open");
-  const cleared = rows.filter((r) => r.status !== "open");
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // 🔴 v3.117 — clean comps (₹0 due) NEVER need settlement, so they don't
+  // belong in BILL DUE at all. Filter them out at the view layer (the
+  // ledger row still exists for audit, just not surfaced as "to clear").
+  const open = rows.filter((r) => r.status === "open" && (r.amountDue || 0) > 0);
+  const cleared = rows.filter((r) => r.status !== "open" && (r.amountDue || 0) > 0);
   const totalOpen = open.reduce((s, r) => s + (r.amountDue || 0), 0);
 
-  const handleClear = async (r: BillDueDoc) => {
-    if (!r.id) return;
-    const pin = await centeredPinPrompt(`Manager PIN to mark ₹${(r.amountDue || 0).toLocaleString("en-IN")} cleared for ${r.customerName}.`);
-    if (!pin) return;
-    const h = await sha256(pin);
-    if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Bill stays OPEN.", "error"); return; }
-    setBusyId(r.id);
+  // 🆕 v3.120 — GROUP open rows by phone (same guest = one row). Falls
+  // back to name+role when phone missing. ONE MARK CLEARED button per
+  // guest clears every tab in the group atomically.
+  type Group = {
+    key: string;
+    ids: string[];
+    customerName: string;
+    customerPhone: string;
+    role: NcRole;
+    tokens: string[];
+    approvedBys: string[];
+    staffs: string[];
+    items: BillDueItem[];
+    amountDue: number;
+    totalBill: number;
+    compValue: number;
+    perRowDue: Record<string, number>;
+  };
+  const groups: Group[] = (() => {
+    const m = new Map<string, Group>();
+    for (const r of open) {
+      const cleanPhone = (r.customerPhone || "").replace(/\D/g, "");
+      const key = cleanPhone.length >= 10 ? cleanPhone : `name:${r.customerName}|${r.role}`;
+      let g = m.get(key);
+      if (!g) {
+        g = { key, ids: [], customerName: r.customerName, customerPhone: r.customerPhone, role: r.role, tokens: [], approvedBys: [], staffs: [], items: [], amountDue: 0, totalBill: 0, compValue: 0, perRowDue: {} };
+        m.set(key, g);
+      }
+      if (r.id) { g.ids.push(r.id); g.perRowDue[r.id] = r.amountDue || 0; }
+      if (r.token && !g.tokens.includes(r.token)) g.tokens.push(r.token);
+      if (r.approvedBy && !g.approvedBys.includes(r.approvedBy)) g.approvedBys.push(r.approvedBy);
+      if (r.staff && !g.staffs.includes(r.staff)) g.staffs.push(r.staff);
+      g.items.push(...(r.items || []));
+      g.amountDue += r.amountDue || 0;
+      // 🆕 v3.124 — totalBill = gross value (if nothing was comped), compValue = freebie value.
+      for (const it of (r.items || [])) {
+        const lineValue = (it.p || 0) * (it.qty || 0);
+        g.totalBill += lineValue;
+        if (it.free) g.compValue += lineValue;
+      }
+    }
+    return Array.from(m.values());
+  })();
+
+  // 🆕 2026-05-27 v3.115 — payment method captured at settlement so the
+  // morning Reports tab can split NC RECOVERED (cash/upi/card) vs NC
+  // WAIVED (manager wrote off). `pendingClear` holds the group mid-flow.
+  // 🆕 v3.120 — discount picker now lives in the inline panel; ≤50 is
+  // bartender-only, >50 needs Manager PIN. WAIVE always needs PIN.
+  const [pendingClear, setPendingClear] = useState<Group | null>(null);
+  const [discPct, setDiscPct] = useState<number>(0);
+  const [discInput, setDiscInput] = useState<string>("0");
+  // 🆕 v3.126 — two-step settlement: tap a payment method to SELECT it (live
+  // highlight), then a single CONFIRM "SETTLE BILL" button triggers the
+  // PIN/clear flow. Prevents accidental settles from a stray tap.
+  const [selectedMethod, setSelectedMethod] = useState<NcPaymentMethod | null>(null);
+  // 🆕 v3.126 — expandable per-row transaction history on the CLEARED table.
+  const [expandedClearedId, setExpandedClearedId] = useState<string | null>(null);
+
+  const openPanel = (g: Group) => { setPendingClear(g); setDiscPct(0); setDiscInput("0"); setSelectedMethod(null); };
+  // 🆕 v3.126 — live discount: typing the % immediately recomputes the breakdown.
+  // Empty input → 0%. Clamp to 0–100.
+  const onDiscChange = (v: string) => {
+    setDiscInput(v);
+    const raw = v.trim();
+    const n = raw === "" ? 0 : Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
+    setDiscPct(n);
+  };
+  const applyDiscount = () => {
+    const n = Math.max(0, Math.min(100, parseInt(discInput, 10) || 0));
+    setDiscPct(n);
+    setDiscInput(String(n));
+  };
+
+  const finalizeClear = async (g: Group, method: NcPaymentMethod) => {
+    if (!g.ids.length) return;
+    if (busyKey) return; // 🔴 v3.115 (architect fix) — hard re-entry guard.
+    const effPct = method === "waived" ? 100 : Math.max(0, Math.min(100, discPct));
+    const needPin = method === "waived" || effPct > 50;
+    const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
+    const verb = method === "waived" ? "WAIVE" : "MARK CLEARED";
+    if (needPin) {
+      const reason = method === "waived"
+        ? `WRITE-OFF ₹${g.amountDue.toLocaleString("en-IN")} for ${g.customerName}`
+        : `${effPct}% DISCOUNT on ₹${g.amountDue.toLocaleString("en-IN")} → collect ₹${finalAmt.toLocaleString("en-IN")} (${method.toUpperCase()}) for ${g.customerName}`;
+      const pin = await centeredPinPrompt(`Manager PIN to ${verb}. ${reason}.`);
+      if (!pin) return;
+      const h = await sha256(pin);
+      if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Bill stays OPEN.", "error"); return; }
+    }
+    setBusyKey(g.key);
+    setPendingClear(null);
     try {
-      await clearBillDue(r.id, staffName);
-      await centeredAlert("✅ CLEARED", `${r.customerName} marked paid.`, "success");
+      for (const id of g.ids) {
+        const rowDue = g.perRowDue[id] || 0;
+        const rowFinal = Math.round(rowDue * (1 - effPct / 100));
+        await clearBillDue(id, staffName, method, effPct, rowFinal);
+      }
+      const msg = method === "waived"
+        ? `${g.customerName} written off by ${staffName} (${g.ids.length} ${g.ids.length === 1 ? "tab" : "tabs"}).`
+        : effPct > 0
+          ? `${g.customerName} paid ₹${finalAmt.toLocaleString("en-IN")} (${method.toUpperCase()}) · ${effPct}% off`
+          : `${g.customerName} paid ₹${finalAmt.toLocaleString("en-IN")} (${method.toUpperCase()}).`;
+      await centeredAlert(method === "waived" ? "🕊 WAIVED" : "✅ CLEARED", msg, "success");
     } catch (e: any) {
       await centeredAlert("FAILED", e?.message || "Could not mark cleared.", "error");
     }
-    setBusyId(null);
+    setBusyKey(null);
   };
 
+  // 🔴 v3.117 — DASHBOARD-style fullscreen table (Khushi: "PROPER TABLE
+  // INSTEAD OF DIALOGUE BOX … SAME THEME, SAME FONT, NO PURPLE, ONE FOOD
+  // ITEM PER ROW, LOOK LIKE A DASHBOARD"). HOD palette: black #030305 +
+  // gold #C9A84C, Playfair Display + Space Grotesk. Items render vertically
+  // (one per line) inside the ITEMS cell.
+  const GOLD = "#C9A84C";
+  const RED = "#EF4444";
+
   return createPortal(
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto", background: "#0A0A0A", border: "2px solid rgba(239,68,68,.5)", borderRadius: 16, padding: 20, color: "#fff" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-          <div style={{ fontSize: 18, fontWeight: 900, color: "#FCA5A5" }}>💸 BILL DUE — TONIGHT</div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)" }}>{open.length} open · ₹{totalOpen.toLocaleString("en-IN")}</div>
+    <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "#030305", color: "#fff", display: "flex", flexDirection: "column", fontFamily: "'Space Grotesk', sans-serif" }}>
+      {/* HEADER */}
+      <div style={{ padding: "18px 24px 14px", borderBottom: `1px solid ${GOLD}33`, background: "#0A0A0A", display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 28, fontWeight: 900, color: GOLD, letterSpacing: 0.5, lineHeight: 1 }}>BILL DUE — TONIGHT</div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 6, letterSpacing: 0.4, textTransform: "uppercase", fontWeight: 600 }}>
+            NC tabs awaiting payment · Manager PIN required to clear
+          </div>
         </div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 14 }}>
-          NC tabs awaiting payment. Tap MARK CLEARED when guest settles. Manager PIN required. <b>No blink — calm tab.</b>
+        <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", letterSpacing: 1, fontWeight: 700 }}>OPEN</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#fff" }}>{open.length}</div>
+          </div>
+          <div style={{ width: 1, height: 36, background: "rgba(255,255,255,.12)" }} />
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", letterSpacing: 1, fontWeight: 700 }}>TOTAL DUE</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: RED }}>₹{totalOpen.toLocaleString("en-IN")}</div>
+          </div>
+          <button onClick={onClose}
+            style={{ marginLeft: 12, padding: "10px 18px", borderRadius: 8, background: "transparent", border: `1.5px solid ${GOLD}`, color: GOLD, fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 1 }}>
+            ✕ CLOSE
+          </button>
         </div>
-        {open.length === 0 && cleared.length === 0 && (
-          <div style={{ textAlign: "center", padding: "30px 10px", color: "rgba(255,255,255,.4)", fontSize: 13 }}>
-            No NC tabs tonight. 🎉
-          </div>
-        )}
-        {open.map((r) => (
-          <div key={r.id} style={{ background: "rgba(239,68,68,.05)", border: "1px solid rgba(239,68,68,.35)", borderRadius: 10, padding: 12, marginBottom: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-              <span style={{ fontSize: 14, fontWeight: 900, color: "#fff" }}>{r.customerName}</span>
-              <span style={{ fontSize: 16, fontWeight: 900, color: "#EF4444" }}>₹{(r.amountDue || 0).toLocaleString("en-IN")}</span>
-            </div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 6 }}>
-              {r.role} · {r.customerPhone || "no phone"} · Approved by {r.approvedBy} · Staff {r.staff}
-              {r.token && <span style={{ color: "#F2C744", marginLeft: 6, fontWeight: 800 }}>· {r.token}</span>}
-            </div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.7)", marginBottom: 8 }}>
-              {(r.items || []).map((it, i) => (
-                <span key={i}>{i > 0 ? " · " : ""}{it.qty}× {it.n}{it.free ? " (COMP)" : ` ₹${it.p * it.qty}`}</span>
-              ))}
-            </div>
-            <button onClick={() => handleClear(r)} disabled={busyId === r.id}
-              style={{ width: "100%", padding: 10, borderRadius: 8, background: "rgba(34,197,94,.15)", border: "1px solid #22C55E", color: "#22C55E", fontSize: 12, fontWeight: 900, cursor: busyId === r.id ? "wait" : "pointer", letterSpacing: 0.5 }}>
-              {busyId === r.id ? "Clearing…" : "✓ MARK CLEARED (Manager PIN)"}
-            </button>
-          </div>
-        ))}
-        {cleared.length > 0 && (
-          <div style={{ marginTop: 10, opacity: 0.6 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.5)", margin: "10px 0 6px", letterSpacing: 0.6 }}>CLEARED TONIGHT</div>
-            {cleared.map((r) => (
-              <div key={r.id} style={{ background: "rgba(34,197,94,.05)", border: "1px solid rgba(34,197,94,.25)", borderRadius: 8, padding: 8, marginBottom: 6, fontSize: 11, display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#fff" }}>✓ {r.customerName} <span style={{ color: "rgba(255,255,255,.45)" }}>· by {r.clearedBy || "-"}</span></span>
-                <span style={{ color: "#22C55E", fontWeight: 800 }}>₹{(r.amountDue || 0).toLocaleString("en-IN")}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        <button onClick={onClose}
-          style={{ marginTop: 14, width: "100%", padding: 12, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.65)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
-          Close
-        </button>
       </div>
+
+      {/* TABLE */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "0 24px 24px" }}>
+        {open.length === 0 && cleared.length === 0 && (
+          <div style={{ textAlign: "center", padding: "80px 20px", color: "rgba(255,255,255,.4)", fontSize: 16, fontStyle: "italic", fontFamily: "'Playfair Display', serif" }}>
+            No NC tabs awaiting settlement tonight.
+          </div>
+        )}
+
+        {open.length > 0 && (
+          <>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "18px 0 8px" }}>
+              <div style={{ fontSize: 11, color: GOLD, letterSpacing: 1.5, fontWeight: 800 }}>OPEN — AWAITING SETTLEMENT</div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", letterSpacing: 0.5 }}>{open.length} {open.length === 1 ? "tab" : "tabs"}</div>
+            </div>
+            <div style={{ border: `1px solid ${GOLD}33`, borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
+              {/* COLUMN HEADERS */}
+              <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.7fr 1fr 2.2fr 0.7fr 1.1fr", gap: 14, padding: "12px 16px", background: "#141414", borderBottom: `1px solid ${GOLD}33`, fontSize: 10, fontWeight: 800, color: GOLD, letterSpacing: 1.2, whiteSpace: "nowrap" }}>
+                <div>GUEST</div>
+                <div>ROLE · TOKEN</div>
+                <div>APPROVED BY</div>
+                <div>ITEMS</div>
+                <div style={{ textAlign: "right" }}>DUE</div>
+                <div style={{ textAlign: "center" }}>ACTION</div>
+              </div>
+              {/* ROWS — grouped by guest (phone). 🆕 v3.120 */}
+              {groups.map((g, idx) => {
+                const isBusy = busyKey === g.key;
+                const isPending = pendingClear?.key === g.key;
+                const effPct = Math.max(0, Math.min(100, discPct));
+                const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
+                return (
+                <div key={g.key}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.7fr 1fr 2.2fr 0.7fr 1.1fr", gap: 14, padding: "14px 16px", borderTop: idx === 0 ? "none" : "1px solid rgba(201,168,76,.12)", alignItems: "start" }}>
+                    {/* GUEST */}
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", letterSpacing: 0.3, textTransform: "uppercase" }}>{g.customerName}</div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginTop: 2, fontWeight: 600 }}>{g.customerPhone || "—"}</div>
+                      {g.ids.length > 1 && (
+                        <div style={{ fontSize: 10, color: GOLD, marginTop: 4, fontWeight: 800, letterSpacing: 0.5 }}>{g.ids.length} TABS</div>
+                      )}
+                    </div>
+                    {/* ROLE + TOKEN(S) — 🆕 v3.123 unified lineHeight so baselines match APPROVED BY */}
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: GOLD, letterSpacing: 0.5, lineHeight: 1.2, height: 14 }}>{g.role}</div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginTop: 4, fontWeight: 700, lineHeight: 1.2, minHeight: 13 }}>{g.tokens.join(" · ") || ""}</div>
+                    </div>
+                    {/* APPROVED BY + STAFF */}
+                    <div>
+                      <div style={{ fontSize: 12, color: "#fff", fontWeight: 700, textTransform: "uppercase", lineHeight: 1.2, height: 14 }}>{g.approvedBys.join(" · ") || "—"}</div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", marginTop: 4, letterSpacing: 0.3, lineHeight: 1.2, minHeight: 13 }}>by {g.staffs.join(", ")}</div>
+                    </div>
+                    {/* ITEMS — one per line, combined across tabs */}
+                    <div>
+                      {g.items.map((it, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, color: it.free ? "rgba(201,168,76,.7)" : "rgba(255,255,255,.85)", padding: "2px 0", fontWeight: it.free ? 600 : 700 }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {it.qty}× {it.n}{it.free ? " · COMP" : ""}
+                          </span>
+                          <span style={{ flexShrink: 0, color: it.free ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.6)" }}>
+                            {it.free ? "FREE" : `₹${(it.p * it.qty).toLocaleString("en-IN")}`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {/* DUE */}
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 18, fontWeight: 900, color: RED, lineHeight: 1, whiteSpace: "nowrap" }}>
+                        ₹{g.amountDue.toLocaleString("en-IN")}
+                      </div>
+                    </div>
+                    {/* ACTION */}
+                    <div style={{ textAlign: "center" }}>
+                      <button onClick={() => openPanel(g)} disabled={isBusy}
+                        style={{ padding: "10px 8px", borderRadius: 6, background: "transparent", border: `1.5px solid ${GOLD}`, color: GOLD, fontSize: 10.5, fontWeight: 900, cursor: isBusy ? "wait" : "pointer", letterSpacing: 0.6, width: "100%", whiteSpace: "nowrap" }}>
+                        {isBusy ? "CLEARING…" : "MARK CLEARED"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );})}
+            </div>
+          </>
+        )}
+
+        {cleared.length > 0 && (
+          <>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "24px 0 8px" }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1.5, fontWeight: 800 }}>CLEARED TONIGHT · TRANSACTION HISTORY</div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", letterSpacing: 0.5 }}>{cleared.length} settled</div>
+                {/* 🆕 v3.126 — DOWNLOAD CSV REPORT for the operational night */}
+                <button type="button" onClick={() => {
+                  const esc = (v: any) => {
+                    const s = String(v ?? "");
+                    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                  };
+                  const header = ["Time","Guest","Phone","Role","ApprovedBy","ClearedBy","Items","TotalBill","Comp","Due","DiscountPct","DiscountAmt","FinalPaid","Method"];
+                  const lines = [header.join(",")];
+                  for (const r of cleared) {
+                    const itemsStr = (r.items || []).map(it => `${it.qty}x ${it.n}${it.free ? " (COMP)" : ` @${it.p}`}`).join(" | ");
+                    const total = (r.items || []).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
+                    const comp = (r.items || []).filter(it => it.free).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
+                    const due = r.amountDue || 0;
+                    const pct = r.discountPct || 0;
+                    const final = typeof r.finalAmount === "number" ? r.finalAmount : due;
+                    const dAmt = due - final;
+                    lines.push([
+                      r.clearedAt || "", r.customerName, r.customerPhone || "", r.role, r.approvedBy || "",
+                      r.clearedBy || "", itemsStr, total, comp, due, pct, dAmt, final,
+                      r.paymentMethod === "waived" ? "WAIVED" : (r.paymentMethod || ""),
+                    ].map(esc).join(","));
+                  }
+                  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `HOD-BillDue-${getOperationalNightStr()}.csv`;
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+                  style={{ padding: "8px 14px", borderRadius: 6, background: "transparent", border: `1.5px solid ${GOLD}`, color: GOLD, fontSize: 10, fontWeight: 900, cursor: "pointer", letterSpacing: 1, textTransform: "uppercase" }}>
+                  ⬇ DOWNLOAD CSV
+                </button>
+              </div>
+            </div>
+            <div style={{ border: "1px solid rgba(255,255,255,.1)", borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "0.3fr 1.2fr 0.8fr 1fr 0.8fr 0.9fr 0.7fr", gap: 12, padding: "10px 16px", background: "#141414", borderBottom: "1px solid rgba(255,255,255,.08)", fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.5)", letterSpacing: 1.2, whiteSpace: "nowrap" }}>
+                <div></div>
+                <div>GUEST</div>
+                <div>ROLE</div>
+                <div>CLEARED BY</div>
+                <div style={{ textAlign: "center" }}>METHOD</div>
+                <div style={{ textAlign: "right" }}>PAID</div>
+                <div style={{ textAlign: "right" }}>DISC</div>
+              </div>
+              {cleared.map((r, idx) => {
+                const total = (r.items || []).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
+                const comp = (r.items || []).filter(it => it.free).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
+                const due = r.amountDue || 0;
+                const pct = r.discountPct || 0;
+                const final = typeof r.finalAmount === "number" ? r.finalAmount : due;
+                const dAmt = due - final;
+                const isExpanded = expandedClearedId === r.id;
+                const isWaived = r.paymentMethod === "waived";
+                return (
+                  <div key={r.id} style={{ borderTop: idx === 0 ? "none" : "1px solid rgba(255,255,255,.05)" }}>
+                    <div onClick={() => setExpandedClearedId(isExpanded ? null : (r.id || null))}
+                      style={{ display: "grid", gridTemplateColumns: "0.3fr 1.2fr 0.8fr 1fr 0.8fr 0.9fr 0.7fr", gap: 12, padding: "10px 16px", alignItems: "center", fontSize: 12, cursor: "pointer", background: isExpanded ? "rgba(201,168,76,.06)" : "transparent" }}>
+                      <div style={{ color: GOLD, fontSize: 14, fontWeight: 900, textAlign: "center" }}>{isExpanded ? "▾" : "▸"}</div>
+                      <div style={{ color: "#fff", fontWeight: 700, textTransform: "uppercase" }}>✓ {r.customerName}</div>
+                      <div style={{ color: GOLD, fontWeight: 700, fontSize: 11 }}>{r.role}</div>
+                      <div style={{ color: "rgba(255,255,255,.7)", fontWeight: 600, fontSize: 11 }}>{r.clearedBy || "—"}</div>
+                      <div style={{ textAlign: "center", fontSize: 10, fontWeight: 800, letterSpacing: 0.8, color: isWaived ? "rgba(255,255,255,.5)" : GOLD, textTransform: "uppercase" }}>
+                        {isWaived ? "WAIVED" : (r.paymentMethod || "—")}
+                      </div>
+                      <div style={{ textAlign: "right", color: isWaived ? "rgba(255,255,255,.45)" : "#22C55E", fontWeight: 900, fontFamily: "'Space Grotesk', monospace" }}>
+                        ₹{final.toLocaleString("en-IN")}
+                      </div>
+                      <div style={{ textAlign: "right", color: pct > 0 ? GOLD : "rgba(255,255,255,.35)", fontWeight: 700, fontSize: 11 }}>
+                        {pct > 0 ? `${pct}%` : "—"}
+                      </div>
+                    </div>
+                    {/* 🆕 v3.126 — EXPANDABLE TRANSACTION DETAIL */}
+                    {isExpanded && (
+                      <div style={{ padding: "12px 20px 16px 44px", background: "#0F0F0F", borderTop: `1px solid ${GOLD}22`, borderBottom: idx === cleared.length - 1 ? "none" : `1px solid ${GOLD}22` }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 24 }}>
+                          {/* ITEMS COLUMN */}
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>ITEMS ORDERED</div>
+                            {(r.items || []).length === 0 && <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", fontStyle: "italic" }}>No items recorded.</div>}
+                            {(r.items || []).map((it, i) => (
+                              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 12, color: it.free ? "rgba(201,168,76,.6)" : "#fff" }}>
+                                <span style={{ fontWeight: 600 }}>{it.qty}× {it.n}{it.free && " (COMP)"}</span>
+                                <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>
+                                  {it.free ? "FREE" : `₹${((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}`}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          {/* BREAKDOWN COLUMN */}
+                          <div style={{ background: "rgba(255,255,255,.03)", border: `1px solid ${GOLD}22`, borderRadius: 8, padding: "10px 12px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "rgba(255,255,255,.75)" }}>
+                              <span>TOTAL BILL</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{total.toLocaleString("en-IN")}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "#22C55E" }}>
+                              <span>COMP GIVEN</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>− ₹{comp.toLocaleString("en-IN")}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "#fff", fontWeight: 800, borderTop: `1px solid ${GOLD}22`, marginTop: 3, paddingTop: 6 }}>
+                              <span>DUE</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{due.toLocaleString("en-IN")}</span>
+                            </div>
+                            {pct > 0 && (
+                              <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: GOLD }}>
+                                <span>DISCOUNT ({pct}%)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>− ₹{dAmt.toLocaleString("en-IN")}</span>
+                              </div>
+                            )}
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0 2px", fontSize: 13, color: isWaived ? "rgba(255,255,255,.55)" : "#22C55E", fontWeight: 900, borderTop: `1.5px solid ${GOLD}`, marginTop: 4 }}>
+                              <span>FINAL PAID</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>{isWaived ? "WAIVED" : `₹${final.toLocaleString("en-IN")}`}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 6, letterSpacing: 0.3 }}>
+                              {r.clearedAt ? new Date(r.clearedAt).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" }) : "—"} · {(r.paymentMethod || "—").toUpperCase()} · APPROVED BY {r.approvedBy || "—"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* 🆕 v3.124 — SETTLEMENT POPUP MODAL (separate from row, full breakdown) */}
+      {pendingClear && (() => {
+        const g = pendingClear;
+        const effPct = Math.max(0, Math.min(100, discPct));
+        const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
+        const discountSaved = g.amountDue - finalAmt;
+        return (
+          <div onClick={(e) => { e.stopPropagation(); setPendingClear(null); }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <div onClick={(e) => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 560, maxHeight: "94vh", overflowY: "auto", background: "#0A0A0A", border: `2px solid ${GOLD}`, borderRadius: 18, padding: 26, color: "#fff", boxShadow: "0 24px 60px rgba(0,0,0,.7)" }}>
+              {/* HEADER */}
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, fontWeight: 900, color: GOLD, letterSpacing: 0.5 }}>SETTLE BILL</div>
+                <button type="button" onClick={() => setPendingClear(null)}
+                  style={{ background: "transparent", border: "1px solid rgba(255,255,255,.18)", color: "rgba(255,255,255,.65)", fontSize: 10, fontWeight: 800, letterSpacing: 1, padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>✕ CLOSE</button>
+              </div>
+              <div style={{ fontSize: 14, color: "#fff", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{g.customerName} <span style={{ color: GOLD, fontWeight: 700 }}>· {g.role}</span></div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 14 }}>{g.customerPhone || "—"} · {g.ids.length} {g.ids.length === 1 ? "TAB" : "TABS"} · APPROVED BY {g.approvedBys.join(" · ") || "—"}</div>
+
+              {/* 🆕 v3.127 — ITEMS ORDERED list so bartender + guest can see exactly what's on the tab before settling. */}
+              <div style={{ background: "rgba(255,255,255,.03)", border: `1px solid ${GOLD}22`, borderRadius: 10, padding: "10px 14px", marginBottom: 14, maxHeight: 180, overflowY: "auto" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>ITEMS ORDERED</div>
+                {g.items.length === 0 && <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", fontStyle: "italic" }}>No items recorded.</div>}
+                {g.items.map((it, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 13, color: it.free ? "rgba(201,168,76,.65)" : "#fff" }}>
+                    <span style={{ fontWeight: 600 }}>{it.qty}× {it.n}{it.free && " (COMP)"}</span>
+                    <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>
+                      {it.free ? "FREE" : `₹${((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* BREAKDOWN BLOCK */}
+              <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.25)", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "rgba(255,255,255,.8)", fontWeight: 700 }}>
+                  <span>TOTAL BILL</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.totalBill.toLocaleString("en-IN")}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "#22C55E", fontWeight: 700 }}>
+                  <span>COMP GIVEN</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{g.compValue.toLocaleString("en-IN")}</span>
+                </div>
+                <div style={{ borderTop: `1px solid ${GOLD}33`, margin: "6px 0" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 14, color: "#fff", fontWeight: 800 }}>
+                  <span>BILL DUE</span><span style={{ fontFamily: "'Space Grotesk', monospace", color: "#EF4444" }}>₹{g.amountDue.toLocaleString("en-IN")}</span>
+                </div>
+                {effPct > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: GOLD, fontWeight: 700 }}>
+                    <span>DISCOUNT ({effPct}%)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{discountSaved.toLocaleString("en-IN")}</span>
+                  </div>
+                )}
+                <div style={{ borderTop: `2px solid ${GOLD}`, margin: "8px 0 4px" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "8px 0 4px" }}>
+                  <span style={{ fontSize: 14, color: "#fff", fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase" }}>COLLECT</span>
+                  <span style={{ fontFamily: "'Space Grotesk', monospace", fontSize: 30, fontWeight: 900, color: "#22C55E" }}>₹{finalAmt.toLocaleString("en-IN")}</span>
+                </div>
+              </div>
+
+              {/* DISCOUNT INPUT — 🆕 v3.126 live-recompute, no APPLY needed */}
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>DISCOUNT %</div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <input type="number" min={0} max={100} value={discInput}
+                    onChange={(e) => onDiscChange(e.target.value)}
+                    onFocus={(e) => e.target.select()}
+                    placeholder="0"
+                    style={{ width: 140, padding: "14px 16px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: `1.5px solid ${GOLD}`, color: "#fff", fontSize: 22, fontWeight: 900, textAlign: "center", fontFamily: "'Space Grotesk', monospace" }} />
+                  {discPct > 0 && (<div style={{ fontSize: 12, color: GOLD, fontWeight: 800, letterSpacing: 0.5 }}>✓ {discPct}% LIVE</div>)}
+                  {discPct > 50 && (<div style={{ fontSize: 10, color: "#FACC15", fontWeight: 800, letterSpacing: 0.5 }}>⚠ MANAGER PIN</div>)}
+                </div>
+              </div>
+
+              {/* PAYMENT METHOD GRID — 🆕 v3.126 select-then-confirm (no auto-clear) */}
+              <div style={{ fontSize: 11, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>PAID BY</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+                {(["cash","upi","card","waived"] as NcPaymentMethod[]).map((m) => {
+                  const sel = selectedMethod === m;
+                  return (
+                    <button key={m} type="button" onClick={() => setSelectedMethod(m)}
+                      style={{
+                        padding: "16px 8px", borderRadius: 8, fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+                        background: sel ? GOLD : "transparent",
+                        border: `1.5px solid ${GOLD}`,
+                        color: sel ? "#030305" : GOLD,
+                        boxShadow: sel ? `0 0 0 3px ${GOLD}44` : "none",
+                        transition: "all .15s",
+                      }}>{m === "waived" ? "WAIVE" : m}</button>
+                  );
+                })}
+              </div>
+
+              {/* 🆕 v3.126 — SINGLE CONFIRM CTA. Disabled until a method is picked. */}
+              <button type="button" disabled={!selectedMethod || !!busyKey}
+                onClick={() => selectedMethod && finalizeClear(g, selectedMethod)}
+                style={{
+                  width: "100%", padding: "18px 16px", borderRadius: 10, fontSize: 16, fontWeight: 900, letterSpacing: 1.4, textTransform: "uppercase",
+                  background: selectedMethod ? "#22C55E" : "rgba(255,255,255,.06)",
+                  border: `1.5px solid ${selectedMethod ? "#22C55E" : "rgba(255,255,255,.18)"}`,
+                  color: selectedMethod ? "#030305" : "rgba(255,255,255,.4)",
+                  cursor: selectedMethod && !busyKey ? "pointer" : "not-allowed",
+                }}>
+                {busyKey ? "SETTLING…" : selectedMethod
+                  ? `SETTLE BILL · ₹${finalAmt.toLocaleString("en-IN")} · ${selectedMethod === "waived" ? "WAIVE" : selectedMethod.toUpperCase()}`
+                  : "SELECT PAYMENT METHOD"}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </div>,
     document.body,
   );

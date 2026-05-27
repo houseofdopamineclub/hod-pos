@@ -46,9 +46,10 @@ export function centeredPinPrompt(reason: string): Promise<string | null> {
         <div style="font-size:42px;line-height:1;margin-bottom:6px">🔒</div>
         <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:900;color:${GOLD};margin-bottom:8px">MANAGER PIN REQUIRED</div>
         <div style="font-size:13px;color:rgba(242,235,211,.78);margin-bottom:16px;line-height:1.4">${reason.replace(/</g, "&lt;")}</div>
-        <input id="hod-pin-input" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="6"
-          placeholder="• • • •"
-          style="width:100%;padding:14px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:${IVORY};font-size:22px;letter-spacing:8px;text-align:center;outline:none;box-sizing:border-box;font-weight:800" />
+        <input id="hod-pin-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="6"
+          name="hod-mgr-pin-code" data-lpignore="true" data-1p-ignore="" data-form-type="other"
+          placeholder=""
+          style="width:100%;padding:14px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:${IVORY};font-size:22px;letter-spacing:8px;text-align:center;outline:none;box-sizing:border-box;font-weight:800;-webkit-text-security:disc;text-security:disc" />
         <div id="hod-pin-err" style="font-size:13px;color:#EF4444;font-weight:700;margin-top:8px;min-height:18px"></div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button id="hod-pin-cancel" style="flex:1;padding:12px;border-radius:10px;background:transparent;border:1px solid rgba(255,255,255,.18);color:rgba(242,235,211,.7);font-size:14px;font-weight:800;cursor:pointer">CANCEL</button>
