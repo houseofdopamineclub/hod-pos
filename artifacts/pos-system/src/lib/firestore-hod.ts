@@ -997,11 +997,39 @@ export async function ensureZeroBalanceCoverForGuest(input: {
   const expDate = getCoverExpiryFor(today);
   const isFreeEntry = input.source === "guestlist";
 
-  // Race-safe atomic create: if another tap/device beat us, the txn read sees the
-  // existing doc and we no-op. No TOCTOU window between getDoc + setDoc.
+  // Race-safe atomic upsert.
+  //   • Doc missing → create the full ₹0 cover (original behavior).
+  //   • Doc exists & already arrived (checkedIn:true OR actualArrivalTime set)
+  //       → no-op, idempotent (concurrent double-taps / retries).
+  //   • Doc exists but pre-arrival stub (v3.92 customer-site floor-picker TBL-*
+  //       writes a ₹0 cover at booking time so `?wallet=TBL-XXX` resolves;
+  //       that stub has NO checkedIn / actualArrivalTime) → STAMP arrival
+  //       fields onto the existing doc. Without this stamp, customer's covers
+  //       onSnapshot never fires on scanner check-in → wallet stays "locked"
+  //       until manual refresh (Khushi LIVE-NIGHT 2026-05-27 v3.93).
   const created = await runTransaction(db, async (txn) => {
     const snap = await txn.get(ref);
-    if (snap.exists()) return false;
+    const nowIso = new Date().toISOString();
+    const arrivalLabel = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+    if (snap.exists()) {
+      const ex = snap.data() as any;
+      const alreadyArrived = !!ex?.checkedIn || !!ex?.actualArrivalTime;
+      if (alreadyArrived) return false;
+      // Pre-arrival stub from v3.92 — stamp arrival fields so the customer
+      // wallet listener fires immediately. We only touch arrival-related
+      // fields; balance / paymentMethod / source / activator stay as-is so
+      // we never accidentally overwrite a real activation that raced in.
+      txn.update(ref, {
+        checkedIn: true,
+        actualArrivalTime: arrivalLabel,
+        activatedAt: nowIso,
+        activatedBy: input.staffName,
+        // Backfill identity in case the stub was written with sparse fields.
+        ...(ex?.name ? {} : { name: input.name || "Guest" }),
+        ...(ex?.phone ? {} : { phone: (input.phone || "").replace(/\D/g, "").slice(-10) }),
+      } as any);
+      return true;
+    }
     const cover: Record<string, unknown> = {
       bookingId: docId,
       ref: docId,
@@ -1018,12 +1046,12 @@ export async function ensureZeroBalanceCoverForGuest(input: {
       diffMethod: "free_entry",
       paymentMethod: isFreeEntry ? "free_entry" : "ticket_only",
       isGuestList: isFreeEntry,
-      activatedAt: new Date().toISOString(),
+      activatedAt: nowIso,
       activatedBy: input.staffName,
       transactions: [],
       expiresAt: expDate.toISOString(),
       checkedIn: true,
-      actualArrivalTime: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+      actualArrivalTime: arrivalLabel,
       date: today,
       topUpTotal: 0,
       groupSize: 1,
