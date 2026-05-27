@@ -1150,6 +1150,13 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
   const [done, setDone] = useState(booking.checkedIn || _tableAlreadyArrived || false);
   const [err, setErr] = useState("");
   const [showCheckInModal, setShowCheckInModal] = useState(false);
+  // 🆕 2026-05-27 v3.102 (Khushi) — BUY COVERS "Ladies Free" (entryType "female",
+  // price 0) is functionally a free entry. Show the same FREE ENTRY flow as
+  // guestlist (v3.99) instead of opening the payment modal — there's nothing
+  // to charge. ACTIVATE COVER stays as a sibling for the case where door girl
+  // wants to collect cover anyway. Paid BUY COVERS (Stag/Couple) are UNCHANGED.
+  const [showFreeConfirm, setShowFreeConfirm] = useState(false);
+  const [freeBusy, setFreeBusy] = useState(false);
   const { toast } = useToast();
   // Cross-collection search may surface an aggregator booking that has not
   // yet been assigned a table (auto-assign still pending or flagged for
@@ -1178,6 +1185,56 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
     (booking._isTable || isModalTable) ? "table" : booking._isGuestList ? "guestlist" : "booking";
   const ciKey = ciSource === "booking" ? (booking.id || booking.ref) : (booking.ref || booking.id);
   const isEntryOnly = isOnlyEntryBooking(booking);
+
+  // 🆕 2026-05-27 v3.102 — Ladies Free detection. Customer site (hodclub-patched
+  // /index.html ~line 2599) sets `entryType: 'female'` on the BUY COVERS Ladies
+  // option, which is always price 0. NOT guestlist (those start with
+  // 'guestlist_'), NOT a table. We additionally require total === 0 as belt-
+  // and-braces in case future paid 'female' tiers ever ship.
+  const _entryTypeLc = String((booking as any).entryType || "").toLowerCase();
+  // Architect-flagged tightening: also exclude any record that smells like a
+  // table (tableType set OR bookMode==='group') — mirrors `isModalTable` below
+  // so future table-shaped 'female' records can never accidentally land here.
+  const _smellsLikeTable = !!(booking as any).tableType || (booking as any).bookMode === "group";
+  const isLadiesFreeCovers =
+    !booking._isGuestList
+    && !(booking as any)._isTable
+    && !_smellsLikeTable
+    && (_entryTypeLc === "female" || _entryTypeLc === "ladies")
+    && Number(booking.total || 0) === 0;
+
+  const handleLadiesFreeEntry = async () => {
+    if (freeBusy) return;
+    setFreeBusy(true);
+    try {
+      const docId = booking.id || booking.ref;
+      const refKey = booking.ref || booking.id;
+      await ensureZeroBalanceCoverForGuest({
+        bookingRef: refKey,
+        sourceDocId: docId,
+        name: booking.name || "Guest",
+        phone: booking.phone || "",
+        source: "booking",
+        eventId: booking.eventId || "",
+        eventTitle: booking.eventTitle || "",
+        staffName: agentName,
+      });
+      // Mirror is best-effort inside ensureZeroBalance; call checkInGuest too so
+      // the bookings doc gets checkedInBy=agentName (mirror writes a generic
+      // "(bar wallet open)" suffix). Idempotent — already-checked-in returns wasNew=false.
+      await checkInGuest(docId, "booking", agentName).catch(() => {});
+      setDone(true);
+      setShowFreeConfirm(false);
+      toast({
+        title: `🎁 Free entry: ${booking.name || "Guest"}`,
+        description: "₹0 wallet activated · checked in. Customer can top up at the bar or via hodclub.in.",
+        duration: 6000,
+      });
+    } catch (e: any) {
+      toast({ title: "Free entry failed", description: e?.message || "Try again", variant: "destructive" });
+    }
+    setFreeBusy(false);
+  };
 
   const openCheckInModal = () => {
     if (done) {
@@ -1406,10 +1463,21 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
       )}
 
       {!done && !pendingAssignment && (
-        <button onClick={openCheckInModal}
-          style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
-          ✅ CHECK IN GUEST
-        </button>
+        // 🆕 2026-05-27 v3.102 (Khushi) — Ladies Free BUY COVERS swaps the
+        // primary CTA to FREE ENTRY (matches the guestlist v3.99 pattern).
+        // Everything else (Stag/Couple BUY COVERS, entry-only, tables, etc.)
+        // keeps the existing CHECK IN GUEST → payment modal flow.
+        isLadiesFreeCovers ? (
+          <button onClick={() => setShowFreeConfirm(true)} disabled={freeBusy}
+            style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+            {freeBusy ? "ACTIVATING…" : "🎁 FREE ENTRY"}
+          </button>
+        ) : (
+          <button onClick={openCheckInModal}
+            style={{ width: "100%", padding: 16, borderRadius: 12, background: "#22C55E", border: "none", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: .4, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+            ✅ CHECK IN GUEST
+          </button>
+        )
       )}
 
       {showCheckInModal && (
@@ -1422,6 +1490,46 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
           onClose={() => setShowCheckInModal(false)}
           onConfirmed={handleModalConfirmed}
         />
+      )}
+
+      {/* 🆕 2026-05-27 v3.102 (Khushi) — in-app FREE ENTRY confirm overlay
+          for Ladies Free BUY COVERS. Mirrors the v3.99 guestlist overlay
+          (no alien browser popup). zIndex 10001 so it sits above the
+          BookingDetailModal (zIndex 100). Backdrop tap = cancel (gated
+          by freeBusy so it can't dismiss mid-activation). */}
+      {showFreeConfirm && (
+        <div onClick={() => { if (!freeBusy) setShowFreeConfirm(false); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#0A0F0A", border: "1.5px solid rgba(34,197,94,.55)", borderRadius: 16, padding: 22, width: "100%", maxWidth: 360, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "0 8px 40px rgba(34,197,94,.25)" }}>
+            <div style={{ fontSize: 11, fontWeight: 900, color: "#22C55E", letterSpacing: 1.5, marginBottom: 14, textAlign: "center" }}>🎁 CONFIRM FREE ENTRY</div>
+            <div style={{ fontSize: 20, fontWeight: 900, color: "#fff", textAlign: "center", marginBottom: 4 }}>
+              {booking.name || "Guest"}
+            </div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", textAlign: "center", marginBottom: 16, letterSpacing: .4 }}>
+              BUY COVERS · LADIES · FREE
+            </div>
+            <div style={{ background: "rgba(34,197,94,.08)", border: "1px solid rgba(34,197,94,.25)", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.85)", lineHeight: 1.55 }}>
+                ✅ Activate ₹0 wallet for the customer<br/>
+                ✅ Mark guest checked-in
+              </div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginTop: 8, fontStyle: "italic" }}>
+                Tap ACTIVATE COVER instead if you want to collect cover at door.
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button onClick={() => setShowFreeConfirm(false)} disabled={freeBusy}
+                style={{ padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid rgba(255,255,255,.25)", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                CANCEL
+              </button>
+              <button onClick={handleLadiesFreeEntry} disabled={freeBusy}
+                style={{ padding: 14, borderRadius: 10, background: "#22C55E", border: "none", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 14px rgba(34,197,94,.35)" }}>
+                {freeBusy ? "ACTIVATING…" : "YES, FREE ENTRY"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -2221,8 +2329,14 @@ function BookingDetailModal({
                     );
                     return;
                   }
+                  // 🆕 2026-05-27 v3.102 (Khushi) — was `onClose()` after
+                  // onCover, which dismissed the parent modal as soon as
+                  // door girl tapped ACTIVATE COVER. If she then cancelled
+                  // the cover sub-modal, nothing was left on screen.
+                  // Now the parent modal stays open underneath the cover
+                  // sub-flow; only the explicit CLOSE button at the bottom
+                  // of this modal dismisses it.
                   onCover(booking);
-                  onClose();
                 }}
                 disabled={isEntryOnly}
                 title={isEntryOnly ? "CHECK IN GUEST FIRST — entry charge must be collected before cover" : undefined}
@@ -2871,7 +2985,11 @@ function GuestlistTab({ agentName, query, eventId, onCover, onShowQr }: { agentN
             )}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <button onClick={() => { onCover(adapt(detailGuest)); setDetail(null); }}
+              {/* 🆕 2026-05-27 v3.102 (Khushi) — was `setDetail(null)` after
+                  onCover, which dismissed the guestlist modal as soon as door
+                  girl tapped ACTIVATE COVER. Now the modal stays open under
+                  the cover sub-flow; explicit CLOSE button below dismisses it. */}
+              <button onClick={() => { onCover(adapt(detailGuest)); }}
                 style={{ padding: "16px 12px", borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
                 💰 ACTIVATE COVER
               </button>
