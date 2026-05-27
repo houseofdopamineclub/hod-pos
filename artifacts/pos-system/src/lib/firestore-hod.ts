@@ -765,6 +765,22 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
   const today = getOperationalNightStr();
   const expDate = getCoverExpiryFor(today);
 
+  // 🆕 2026-05-27 v3.50 (Khushi LIVE-NIGHT) — detect table bookings EARLY so we
+  // can stamp `isTableBooking: true` onto the covers doc itself. Bug we're
+  // fixing: customer site wallet listener (`hodclub-patched/index.html` line
+  // 7625) picks up the COVERS doc once it exists. If isTableBooking isn't on
+  // that doc, the order-placed popup falls to bartender copy ("show to
+  // bartender") instead of captain copy ("captain will be with you shortly").
+  // Same detection logic as the mirror block below — kept duplicated here
+  // because we need the flag at cover-write time, and we want both writes to
+  // succeed/fail independently (fail-open).
+  const _earlyTtype = String((booking as any).tableType || "").toLowerCase();
+  const _earlyRefStr = String(booking.ref || "");
+  const _earlyLooksLikeTableRef = _earlyRefStr.startsWith("HODTAB") || _earlyRefStr.startsWith("TBL-") || _earlyRefStr.startsWith("AGG-");
+  const _coverIsTable = !!booking._isTable
+    || _earlyTtype === "table4" || _earlyTtype === "vip" || _earlyTtype === "vvip"
+    || _earlyLooksLikeTableRef;
+
   const cover: Record<string, unknown> = {
     bookingId,
     ref: booking.ref || bookingId,
@@ -775,6 +791,15 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     // Skip eventTitle for table-source bookings — they have no event, and
     // earlier code copied the table id into here by mistake (see lookupBooking).
     eventTitle: booking._isTable ? "" : (booking.eventTitle || ""),
+    // v3.50: stamp the table flag so customer-side covers listener routes the
+    // order-placed popup to the captain branch (cv.isTableBooking check at
+    // hodclub-patched/index.html ~line 6515).
+    isTableBooking: _coverIsTable,
+    ...(_coverIsTable ? {
+      tableId: String((booking as any)._tableId || (booking as any).tableId || ""),
+      floorLabel: String((booking as any)._floorLabel || (booking as any).floorLabel || ""),
+      bookingRef: booking.ref || bookingId,
+    } : {}),
     coverPaid: paidOnline,
     coverActivated: amount,
     coverBalance: amount,
@@ -835,7 +860,27 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
   // misses or the write fails, the covers doc is still active and the
   // captain Bar Mode tab can still redeem against it — only the
   // customer-side visibility breaks.
-  if (booking._isTable && booking.ref) {
+  // 🆕 2026-05-27 v3.49 (Khushi LIVE-NIGHT) — broadened gate. HODTAB Razorpay
+  // bookings loaded from `bookings` carry `tableType: 'table4'|'vip'|'vvip'`
+  // but DO NOT carry the `_isTable` flag (that flag is only set by paths
+  // that synthesise a booking from a tableReservations doc — DoorMode line
+  // 3448, BookingDetailModal). Door's scanner check-in path → handleConfirm
+  // → activateCoverForBooking with the raw bookings-coll object, so the
+  // mirror never fired for cash-pending or even Razorpay-paid HODTAB bookings
+  // checked in via the QR scanner. Result: POS showed "✓ COVER ACTIVATED
+  // ₹5,000" (reads `covers`) but customer wallet stayed at ₹0 (reads
+  // `tableReservations.coverBalance`). Now we also trigger the mirror when
+  // (a) tableType is set, or (b) the ref looks like a table ref (HODTAB/
+  // TBL-/AGG-). Same defensive lookup `where bookingRef==ref` so a non-
+  // table ref that accidentally matches one of these patterns still no-ops
+  // safely on `snap.empty`.
+  const _ttype = String((booking as any).tableType || "").toLowerCase();
+  const _refStr = String(booking.ref || "");
+  const _looksLikeTableRef = _refStr.startsWith("HODTAB") || _refStr.startsWith("TBL-") || _refStr.startsWith("AGG-");
+  const _isTableForMirror = !!booking._isTable
+    || _ttype === "table4" || _ttype === "vip" || _ttype === "vvip"
+    || _looksLikeTableRef;
+  if (_isTableForMirror && booking.ref) {
     try {
       const q = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", booking.ref), limit(1));
       const snap = await getDocs(q);
@@ -1083,6 +1128,7 @@ export async function createBarWalkinCover(staffName: string): Promise<HodCover>
 export async function editCoverAmount(coverId: string, newAmount: number, staffName: string): Promise<void> {
   if (newAmount > 5000) throw new Error("Cover amount cannot exceed ₹5,000");
   const ref = doc(db, COVERS_COL, coverId);
+  let _coverRef = ""; let _newBalAfter = 0;
   await runTransaction(db, async (txn) => {
     const snap = await txn.get(ref);
     if (!snap.exists()) throw new Error("Cover not found");
@@ -1091,6 +1137,8 @@ export async function editCoverAmount(coverId: string, newAmount: number, staffN
     const oldAmount = data.coverActivated || 0;
     if (newAmount < used) throw new Error(`Amount cannot be less than ₹${used} (already used)`);
     const newBal = newAmount - used;
+    _coverRef = String(data.ref || "");
+    _newBalAfter = Math.max(0, newBal);
     txn.update(ref, {
       coverActivated: newAmount,
       coverBalance: Math.max(0, newBal),
@@ -1100,6 +1148,24 @@ export async function editCoverAmount(coverId: string, newAmount: number, staffN
       } as HodTransaction),
     });
   });
+  // 🆕 2026-05-27 v3.49 — mirror edits to tableReservations for table refs so
+  // customer wallet (which reads tableReservations.coverBalance, not covers)
+  // stays in sync. Fail-open: if mirror fails, cover edit still succeeded.
+  const _looksLikeTableRef = _coverRef.startsWith("HODTAB") || _coverRef.startsWith("TBL-") || _coverRef.startsWith("AGG-");
+  if (_coverRef && _looksLikeTableRef) {
+    try {
+      const q = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", _coverRef), limit(1));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        await updateDoc(snap.docs[0].ref, {
+          coverActivated: newAmount,
+          coverBalance: _newBalAfter,
+        });
+      }
+    } catch (mErr) {
+      console.warn("[editCoverAmount] table mirror failed (non-fatal)", mErr);
+    }
+  }
 }
 
 export function subscribeToCover(coverId: string, cb: (cover: HodCover | null) => void): Unsubscribe {
@@ -3854,6 +3920,48 @@ export async function searchBookingsAndAggregators(
 }
 
 export async function lookupBooking(ref: string): Promise<HodBooking | null> {
+  // 🆕 2026-05-27 v3.50 (Khushi LIVE-NIGHT) — TABLE refs (HODTAB/TBL-/AGG-)
+  // resolve to the tableReservations doc FIRST. Without this, scanning a
+  // HODTAB QR at the door opened the TICKET modal (because saveBooking also
+  // writes a bookings doc, which q1 was finding first) — bypassing the table
+  // flow (floor/table label, captain-flow cover activation). Now scanner +
+  // search + row-tap all land on the same TABLE BookingDetailModal for table
+  // refs. Non-table refs are unchanged (q1 still runs first).
+  const _r = String(ref || "");
+  const _isTableRef = _r.startsWith("HODTAB") || _r.startsWith("TBL-") || _r.startsWith("AGG-");
+  if (_isTableRef) {
+    const qt = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", ref), limit(1));
+    const st = await getDocs(qt);
+    if (!st.empty) {
+      const d = st.docs[0].data() as any;
+      // 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — pass `checkedIn` through so the
+      // BookingDetailModal status pill flips from PENDING → ✅ CHECKED IN for
+      // tables that already arrived. For tableReservations, "checked in" =
+      // `arrived: true` (set by door's "Guest Arrived" tap) OR a non-empty
+      // `actualArrivalTime` OR a positive `coverActivated` (you can't activate
+      // a ₹5,000 cover without the guest physically being at the door — Khushi
+      // rule). Also surface `tablePrePaid` so future logic can branch on
+      // pre-paid HODTAB / TBL- bookings without re-fetching.
+      const _arrived = !!(d.arrived || d.actualArrivalTime || (Number(d.coverActivated) || 0) > 0);
+      return { id: st.docs[0].id, ref: d.bookingRef || ref, name: d.customerName || "",
+        phone: d.phone || "",
+        email: d.email || "",
+        eventTitle: "",
+        _isTable: true,
+        checkedIn: _arrived,
+        ...({
+          _tableId: d.tableId || "",
+          _floorLabel: d.floorLabel || "",
+          _arrived,
+          _actualArrivalTime: d.actualArrivalTime || "",
+          _tablePrePaid: !!d.tablePrePaid,
+          _coverActivated: Number(d.coverActivated) || 0,
+          _coverBalance: Number(d.coverBalance) || 0,
+        } as object),
+      } as HodBooking;
+    }
+  }
+
   const q1 = query(collection(db, BOOKINGS_COL), where("ref", "==", ref), limit(1));
   const s1 = await getDocs(q1);
   if (!s1.empty) return { id: s1.docs[0].id, ...s1.docs[0].data() } as HodBooking;

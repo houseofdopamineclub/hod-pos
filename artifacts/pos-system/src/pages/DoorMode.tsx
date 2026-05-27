@@ -1088,7 +1088,21 @@ function CheckInPaymentModal({
 }
 
 function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null }) {
-  const [done, setDone] = useState(booking.checkedIn || false);
+  // 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — table bookings track arrival on
+  // `tableReservations.actualArrivalTime` / `arrived` / `coverActivated`, NOT
+  // on `booking.checkedIn`. v3.50 lookupBooking now passes `checkedIn` through
+  // for tables; this fallback also flips `done` true the moment the live
+  // cover subscription reports `coverActivated > 0` (covers the case where
+  // door activated the cover from a row tap in the TABLES tab while the
+  // modal is still open from a stale scan).
+  const _tableAlreadyArrived = !!(
+    (booking as any)._isTable && (
+      (booking as any)._arrived
+      || (booking as any)._actualArrivalTime
+      || Number((booking as any)._coverActivated || 0) > 0
+    )
+  );
+  const [done, setDone] = useState(booking.checkedIn || _tableAlreadyArrived || false);
   const [err, setErr] = useState("");
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const { toast } = useToast();
@@ -1101,6 +1115,10 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
 
   // Sync local "done" with subscription updates (so list-row check-ins reflect here too)
   useEffect(() => { if (booking.checkedIn) setDone(true); }, [booking.checkedIn]);
+  // v3.51: live cover subscription → coverActivated > 0 also flips done.
+  useEffect(() => {
+    if ((booking as any)._isTable && Number(cover?.coverActivated || 0) > 0) setDone(true);
+  }, [cover?.coverActivated, booking]);
 
   const isCash = !!(booking.paymentId && booking.paymentId.startsWith("cash_"));
   const isGuestList = !!booking._isGuestList;
@@ -2046,7 +2064,15 @@ function BookingDetailModal({
             guestlist modal exactly (which uses marginBottom:10 on its own
             CHECK IN GUEST button — same breathing room). */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10, fontFamily: "'Space Grotesk', sans-serif" }}>
-          {!booking._isGuestList && (
+          {/* 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — hide ACTIVATE COVER when a
+              cover is already live (`modalCover.coverActivated > 0`). Was
+              showing for Putti's HODTAB after door already activated ₹5,000 →
+              door girl could double-tap and either re-prompt or surface a
+              "Cover already activated" error. Cover editing (top-up / refund)
+              lives on the TABLES tab row tap (✏️ Edit Cover Amount), not here.
+              Cover already-activated also means the guest is on premises (Khushi
+              rule), so the modal becomes view-only: SHOW QR + CALL only. */}
+          {!booking._isGuestList && Number(modalCover?.coverActivated || 0) <= 0 && (
             <button onClick={() => { onCover(booking); onClose(); }}
               style={{ padding: "16px 12px", borderRadius: 12, background: "#C8A645", border: "none", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
               💰 ACTIVATE COVER
@@ -3261,7 +3287,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         // Canonical bucket for styling; raw brand name for label lookups.
         const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
         const ss = SRC_STYLES[src] || SRC_STYLES.inhouse;
-        const arrived = r.actualArrivalTime;
+        const arrived = !!r.actualArrivalTime;
         const tableLabel = r.tableId || "(unassigned)";
         const isAggregator = src !== "inhouse";
         const aggName = (r.aggregator || r.source || "inhouse").toLowerCase();
@@ -3473,9 +3499,33 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                   }}>
                   💰 Activate Cover
                 </button>
-                <button onClick={() => { setReassignFor(r); setExpandedDocId(null); }}
-                  style={{ padding: "13px 4px", borderRadius: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", color: "rgba(255,255,255,0.85)", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
-                  🔄 Reassign
+                {/* 🆕 2026-05-27 v3.48 (Khushi LIVE-NIGHT) — Reassign locks
+                    once the guest is ARRIVED. Once seated, KOTs are tagged to
+                    their table and any reassignment from the door tablet
+                    would leave kitchen/bar tickets pointing at the wrong
+                    table. Captain has their own table-move flow that also
+                    re-stamps in-flight rounds. Disabled state still renders
+                    so door staff sees WHY (avoid silent missing button). */}
+                <button
+                  onClick={() => {
+                    if (arrived) {
+                      alert("🪑 GUEST ALREADY ARRIVED AT THIS TABLE.\n\nReassign locked here — KOTs are tagged to this table.\n\nAsk the CAPTAIN to move the guest from Captain Mode (re-stamps active rounds).");
+                      return;
+                    }
+                    setReassignFor(r); setExpandedDocId(null);
+                  }}
+                  disabled={arrived}
+                  title={arrived ? "Guest already arrived — captain handles table moves" : "Move guest to a different table"}
+                  style={{
+                    padding: "13px 4px", borderRadius: 8,
+                    background: arrived ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
+                    border: arrived ? "1px dashed rgba(255,255,255,0.12)" : "1px solid rgba(255,255,255,0.18)",
+                    color: arrived ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.85)",
+                    fontSize: 12, fontWeight: 800,
+                    cursor: arrived ? "not-allowed" : "pointer",
+                    opacity: arrived ? 0.6 : 1,
+                  }}>
+                  {arrived ? "🔒 Reassign" : "🔄 Reassign"}
                 </button>
               </div>
             </div>
@@ -5773,8 +5823,34 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           );
           type Hit = { key: string; tab: typeof tab; label: string; name: string; phone: string; subtitle: string; ref: string; onClick: () => void; tone: string };
           const hits: Hit[] = [];
+          // 🆕 2026-05-27 v3.50 (Khushi LIVE-NIGHT) — collect refs that ALREADY
+          // exist in tonight's tableReservations FIRST. v3.47 alone was not
+          // enough: if a HODTAB booking's `tableType` field wasn't set on the
+          // `bookings` doc (legacy / cash-pending paths), isTableBooking(b)
+          // returned false and the TICKET badge slipped through alongside the
+          // TABLE badge. Now we also dedup by ref: any booking whose ref is
+          // already on a tableReservations row tonight is skipped under
+          // TICKETS, guaranteed. TABLE badge always wins.
+          const tonightTableRefs = new Set<string>();
+          for (const rows of Object.values(tableResByDate)) {
+            for (const r of rows) {
+              if ((r as any).status === "cancelled") continue;
+              const tref = String((r as any).bookingRef || "").toLowerCase();
+              if (tref) tonightTableRefs.add(tref);
+            }
+          }
           for (const b of todayBookings) {
             if (!matches(b.name, b.phone, b.ref)) continue;
+            // 🆕 2026-05-27 v3.47 (Khushi LIVE-NIGHT) — TABLE bookings (HODTAB
+            // table4/vip) must NOT appear under TONIGHT MATCHES as a TICKETS
+            // badge. Post-v3.44 they also exist in tableReservations and
+            // surface in the TABLES tab — the door girl was getting TWO
+            // entries for the same guest with TWO separate "Activate Cover"
+            // paths → double/triple ₹15K activations. Skip here; the
+            // tableReservations match below still surfaces them under TABLES.
+            if (isTableBooking(b)) continue;
+            // v3.50 ref-based safety net (covers legacy/cash-pending HODTABs).
+            if (b.ref && tonightTableRefs.has(b.ref.toLowerCase())) continue;
             // 🔴 2026-05-20 (Khushi) — GROUP tab removed; group bookings route
             // to TICKETS alongside the rest.
             const tabKey: typeof tab = isOnlyEntryBooking(b) ? "onlyentry" : "tickets";
@@ -6124,6 +6200,21 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
 
   const rows: Row[] = [];
 
+  // 🆕 2026-05-27 v3.50 (Khushi LIVE-NIGHT) — collect refs that already exist
+  // in tonight's tableReservations so we can suppress the duplicate TICKET row
+  // for HODTAB bookings. Same belt-and-braces logic as the TONIGHT MATCHES
+  // search dedup: TABLE badge wins, TICKET row hidden. Covers legacy /
+  // cash-pending HODTABs whose `bookings` doc lacks `tableType` and therefore
+  // slip past the isTableBooking(b) check below.
+  const tonightTableRefs = new Set<string>();
+  for (const list of Object.values(tableResByDate)) {
+    for (const r of list) {
+      if ((r as any).status === "cancelled") continue;
+      const tref = String((r as any).bookingRef || "").toLowerCase();
+      if (tref) tonightTableRefs.add(tref);
+    }
+  }
+
   // TICKETS / ENTRY PASS / GROUP (non-guestlist bookings)
   for (const b of allBookings) {
     const d = (b.date || "").slice(0, 10);
@@ -6131,6 +6222,12 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
     if (isGuestlistBooking(b)) continue;
     if (!inEvent(b)) continue;
     if (!matches(b.name, b.phone, b.ref)) continue;
+    // v3.50: skip TABLE bookings here — they render below under TABLES with
+    // floor/table info. Belt-and-braces: isTableBooking check (catches
+    // bookings with tableType set) + ref-set check (catches legacy bookings
+    // where tableType wasn't written).
+    if (isTableBooking(b)) continue;
+    if (b.ref && tonightTableRefs.has(b.ref.toLowerCase())) continue;
     const isEntry = isOnlyEntryBooking(b);
     rows.push({
       kind: isEntry ? "entry" : "ticket",
