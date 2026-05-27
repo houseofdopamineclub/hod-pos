@@ -5,7 +5,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { StaffProvider, useStaff } from "@/lib/staff-context";
 import { IdleLockOverlay, ModePickerOverlay } from "@/components/SessionOverlays";
 import LoginPage from "@/pages/LoginPage";
-import FloorView from "@/pages/FloorView";
+// 🆕 2026-05-27 v3.105 (Khushi) — FloorView (legacy table-grid POS) RETIRED.
+// Root "/" now redirects to /admin which is the new BOSS MODE landing
+// (Reports + Audit + Admin tabs). Kept the FloorView component file on disk
+// for code archeology; just no longer imported / routed.
 import TablePOS from "@/pages/TablePOS";
 import BillView from "@/pages/BillView";
 import Reports from "@/pages/Reports";
@@ -13,7 +16,10 @@ import KOTView from "@/pages/KOTView";
 import ShiftView from "@/pages/ShiftView";
 import AdminPage from "@/pages/AdminPage";
 import AuditPage from "@/pages/AuditPage";
-import AggregatorPage from "@/pages/AggregatorPage";
+// 🆕 2026-05-27 v3.106 (Khushi LIVE) — AggregatorPage RETIRED. Tab removed
+// from Boss Mode + /aggregator route dropped. File kept on disk for code
+// archeology (same as FloorView). Cloud Function `pollAggregatorEmails`
+// owns aggregator booking ingestion now.
 import CaptainMode from "@/pages/CaptainMode";
 import BarMode from "@/pages/BarMode";
 import DoorMode from "@/pages/DoorMode";
@@ -46,15 +52,20 @@ function POSRouter() {
   }, [setLocation]);
   return (
     <Switch>
-      {FEATURES.floorView && <Route path="/" component={FloorView} />}
+      {/* 🆕 v3.105 — "/" now renders the 5-tile mode picker (was FloorView).
+          Was briefly a Redirect → /admin, but every mode page has a "← BACK"
+          link to "/" and non-admin staff would land on AdminPage's
+          "Access denied". LoginPage works whether logged in (tile picker
+          shown; PIN UI inert for logged-in users — admins auto-route to
+          /admin via its own useEffect) or logged out (PIN gate). */}
+      <Route path="/" component={LoginPage} />
       {FEATURES.tablePos && <Route path="/table/:tableId" component={TablePOS} />}
       {FEATURES.billing && <Route path="/bill/:tableId" component={BillView} />}
-      {FEATURES.reports && <Route path="/reports" component={Reports} />}
+      {FEATURES.reports && <Route path="/reports"><Reports /></Route>}
       {FEATURES.kot && <Route path="/kot" component={KOTView} />}
       {FEATURES.shift && <Route path="/shift" component={ShiftView} />}
       {FEATURES.admin && <Route path="/admin" component={AdminPage} />}
-      {FEATURES.audit && <Route path="/audit" component={AuditPage} />}
-      {FEATURES.aggregatorSync && <Route path="/aggregator" component={AggregatorPage} />}
+      {FEATURES.audit && <Route path="/audit"><AuditPage /></Route>}
       <Route component={NotFound} />
     </Switch>
   );

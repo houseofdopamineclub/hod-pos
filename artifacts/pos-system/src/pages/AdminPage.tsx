@@ -7,10 +7,15 @@ import { useStaff, DOOR_STAFF_SEED } from "@/lib/staff-context";
 // Admin must manage the same list everyone else sells from. Override
 // docs are now keyed by slug(name), so cross-list ID mismatch is moot.
 import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
-import type { StaffMember, HappyHourConfig, AggregatorSettings, MenuOverride, StaffRole } from "@/lib/types";
+import type { StaffMember, MenuOverride, StaffRole } from "@/lib/types";
+// 🆕 2026-05-27 v3.106 (Khushi LIVE) — Happy Hour, Aggregators, and Legacy
+// Dashboard tabs RETIRED. Venue does not use happy-hour pricing; aggregator
+// commission/budget config is unused since v3.x (handled by Cloud Function
+// `pollAggregatorEmails` + per-source defaults). Legacy Dashboard iframe was
+// a hodclub.in admin mirror — superseded by native tabs here. All three
+// dropped from imports + state + JSX. Underlying firestore helpers
+// (`subscribeToHappyHour`, etc.) kept in firestore.ts for code archeology.
 import {
-  subscribeToHappyHour, updateHappyHour,
-  subscribeToAggregatorSettings, updateAggregatorSettings,
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
   addStaffMember, upsertStaffMember, updateStaffMember, deleteStaffMember,
   logAudit,
@@ -29,6 +34,11 @@ import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
 import MenuCRM from "./MenuCRM";
 import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
+// 🆕 2026-05-27 v3.105 (Khushi LIVE) — Audit folded INTO Boss Mode as a tab
+// (was a separate /audit page). Khushi wants Reports + Audit + Admin all
+// reachable from one Boss Mode landing, not scattered across the killed
+// FloorView header strip. /audit route still works (deep links don't break).
+import AuditPage from "./AuditPage";
 
 // Manager PIN gate for menu changes (OOS toggle, discount set/clear).
 // Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
@@ -44,25 +54,23 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "events" | "dashboard" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "aggregator" | "happy-hour" | "tablet" | "locks" | "settings" | "door-pricing">("monitor");
+  // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
+  const [tab, setTab] = useState<"monitor" | "reports" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
-  const [happyHour, setHappyHour] = useState<HappyHourConfig | null>(null);
-  const [aggSettings, setAggSettings] = useState<AggregatorSettings[]>([]);
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
   const [menuSearch, setMenuSearch] = useState("");
   const [newStaff, setNewStaff] = useState({ name: "", pin: "", role: "steward" as StaffRole });
-  const [editingHH, setEditingHH] = useState(false);
-  const [hhForm, setHhForm] = useState({ enabled: false, days: [0,1,2,3,4,5,6], startTime: "12:00", endTime: "20:00", discountPercent: 10 });
   const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
   const [edcSaving, setEdcSaving] = useState(false);
   const [edcSaveMsg, setEdcSaveMsg] = useState("");
 
   useEffect(() => {
+    // 🆕 v3.106 — removed subscribeToHappyHour + subscribeToAggregatorSettings
+    // (those tabs deleted). Side benefit: 2 fewer onSnapshot listeners per
+    // tablet that opens Boss Mode → smaller read footprint.
     const unsubs = [
-      subscribeToHappyHour(setHappyHour),
-      subscribeToAggregatorSettings(setAggSettings),
       subscribeToMenuOverrides(setMenuOverridesState),
       subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
       subscribeToDoorPricingSettings(setDoorPricing),
@@ -91,18 +99,6 @@ export default function AdminPage() {
     }
     setEdcSaving(false);
   };
-
-  useEffect(() => {
-    if (happyHour) {
-      setHhForm({
-        enabled: happyHour.enabled,
-        days: happyHour.days || [],
-        startTime: happyHour.startTime || "12:00",
-        endTime: happyHour.endTime || "20:00",
-        discountPercent: happyHour.discountPercent || 10,
-      });
-    }
-  }, [happyHour]);
 
   if (!hasRole("admin", "manager")) {
     return (
@@ -280,24 +276,16 @@ export default function AdminPage() {
     setNewStaff({ name: "", pin: "", role: "steward" });
   };
 
-  const handleSaveHappyHour = async () => {
-    await updateHappyHour({
-      ...hhForm,
-      appliesTo: "all",
-      updatedBy: currentStaff?.name,
-    });
-    setEditingHH(false);
-  };
-
-  const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const roleOptions: StaffRole[] = ["admin", "manager", "cashier", "captain", "steward", "bartender", "hostess", "chef"];
 
   return (
     <div className="min-h-screen" style={{ background: "#030305", color: "hsl(36 29% 93%)" }}>
       <header className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
         <div className="flex items-center gap-4">
-          <button onClick={() => navigate("/")} className="text-sm" style={{ color: "#C9A84C" }}>← Floor</button>
-          <h1 className="text-lg font-semibold" style={{ color: "#C9A84C" }}>Admin Panel</h1>
+          {/* 🆕 v3.105 — "Floor" was the old FloorView (RETIRED). Back button
+              now logs out → returns to the 5-tile mode picker (LoginPage). */}
+          <button onClick={logout} className="text-sm" style={{ color: "#C9A84C" }}>← Modes</button>
+          <h1 className="text-lg font-semibold" style={{ color: "#C9A84C" }}>👑 BOSS MODE</h1>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs" style={{ color: "hsl(36 29% 60%)" }}>{currentStaff?.name}</span>
@@ -305,47 +293,62 @@ export default function AdminPage() {
         </div>
       </header>
 
-      <div className="flex gap-1 px-4 py-2" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
-        {(["monitor", "reports", "events", "locks", "dashboard", "menu", "menu-editor", "menu-crm", "bot-knowledge", "staff", "happy-hour", "aggregator", "door-pricing", "tablet", "settings"] as const).map((t) => (
-          <button key={t} onClick={() => setTab(t)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-            style={{ background: tab === t ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t ? "#030305" : "hsl(36 29% 70%)" }}>
-            {t === "monitor" ? "🔴 Live Monitor" : t === "reports" ? "📋 Reports" : t === "events" ? "🎟 Events" : t === "locks" ? "🔓 Locks" : t === "happy-hour" ? "Happy Hour" : t === "aggregator" ? "Aggregators" : t === "dashboard" ? "📊 Legacy Dashboard" : t === "tablet" ? "🖨 This Tablet" : t === "settings" ? "⚙️ Settings" : t === "menu-editor" ? "📋 Menu Editor" : t === "menu-crm" ? "📋 Menu CRM" : t === "bot-knowledge" ? "🧠 Bot Knowledge" : t === "menu" ? "OOS / Discount" : t === "door-pricing" ? "💰 Door Pricing" : t.charAt(0).toUpperCase() + t.slice(1)}
-          </button>
-        ))}
+      {/* 🆕 v3.106 — tabs grouped by purpose for cleaner UX. Group dividers
+          are subtle vertical lines between sections, no visual heaviness. */}
+      <div className="flex gap-1 px-4 py-2 flex-wrap items-center" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
+        {(() => {
+          const groups: Array<Array<{ id: typeof tab; label: string }>> = [
+            // Daily ops — what the boss looks at every night.
+            [
+              { id: "monitor",     label: "🔴 Live Monitor" },
+              { id: "reports",     label: "📋 Reports" },
+              { id: "audit",       label: "🛡 Audit" },
+            ],
+            // Content — events + menu management.
+            [
+              { id: "events",      label: "🎟 Events" },
+              { id: "menu",        label: "OOS / Discount" },
+              { id: "menu-editor", label: "📋 Menu Editor" },
+              { id: "menu-crm",    label: "📋 Menu CRM" },
+              { id: "bot-knowledge", label: "🧠 Bot Knowledge" },
+            ],
+            // Staff & security.
+            [
+              { id: "staff",       label: "Staff" },
+              { id: "locks",       label: "🔓 Locks" },
+            ],
+            // Settings — venue + device level.
+            [
+              { id: "door-pricing", label: "💰 Door Pricing" },
+              { id: "tablet",       label: "🖨 This Tablet" },
+              { id: "settings",     label: "⚙️ Settings" },
+            ],
+          ];
+          return groups.flatMap((grp, gi) => [
+            ...grp.map((t) => (
+              <button key={t.id} onClick={() => setTab(t.id)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                style={{ background: tab === t.id ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t.id ? "#030305" : "hsl(36 29% 70%)" }}>
+                {t.label}
+              </button>
+            )),
+            gi < groups.length - 1 ? <div key={`div-${gi}`} className="mx-1 h-6 w-px" style={{ background: "hsl(240 8% 18%)" }} /> : null,
+          ]);
+        })()}
       </div>
 
       <div className="p-4">
         {tab === "monitor" && <LiveMonitor />}
-        {tab === "reports" && <Reports />}
+        {tab === "reports" && <Reports embedded />}
+
+        {/* 🆕 v3.105 — Audit embedded directly. AuditPage is self-contained
+            (own data fetch, own filters), so it drops in clean as a tab. */}
+        {tab === "audit" && <AuditPage embedded />}
 
         {tab === "events" && <EventsAdmin />}
 
         {tab === "locks" && <CaptainLocksTab adminName={currentStaff?.name || "admin"} />}
 
-        {tab === "dashboard" && (
-          // Embed the full hodclub.in admin dashboard (copied to public/admin.html).
-          // Same Firestore project (hod-tickets), same admin token, identical UI.
-          // Only visible here because the parent route already enforced
-          // hasRole("admin","manager") via staff PIN — door staff cannot reach this.
-          <div>
-            <div className="flex items-center gap-2 mb-3 flex-wrap">
-              <span className="text-xs" style={{ color: "hsl(36 29% 50%)" }}>
-                Live mirror of hodclub.in admin dashboard — same data, same controls.
-              </span>
-              <div className="flex-1" />
-              <button onClick={() => window.open("/admin.html?admin=hod_k9x7_dpm26_mQ3r", "_blank", "noopener")}
-                className="px-3 py-1 rounded text-xs font-medium"
-                style={{ background: "rgba(201,168,76,.15)", border: "1px solid rgba(201,168,76,.35)", color: "#C9A84C" }}>
-                ↗ Open in New Tab
-              </button>
-            </div>
-            <iframe
-              src="/admin.html?admin=hod_k9x7_dpm26_mQ3r"
-              title="HOD Admin Dashboard"
-              style={{ width: "100%", height: "calc(100vh - 220px)", minHeight: 500, border: "1px solid hsl(240 8% 18%)", borderRadius: 10, background: "#fff" }}
-            />
-          </div>
-        )}
+        {/* 🆕 v3.106 — Legacy Dashboard tab REMOVED (hodclub.in admin iframe). */}
 
         {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
 
@@ -538,57 +541,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        {tab === "happy-hour" && (
-          <div className="max-w-md">
-            <div className="p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold" style={{ color: "#C9A84C" }}>Happy Hour Settings</h3>
-                <button onClick={() => { setHhForm(f => ({...f, enabled: !f.enabled})); setEditingHH(true); }}
-                  className="px-3 py-1 rounded text-xs font-medium"
-                  style={{ background: hhForm.enabled ? "#22c55e" : "#ef4444", color: "#fff" }}>
-                  {hhForm.enabled ? "ON" : "OFF"}
-                </button>
-              </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Active Days</label>
-                  <div className="flex gap-1">
-                    {dayLabels.map((d, i) => (
-                      <button key={i} onClick={() => { setHhForm(f => ({...f, days: f.days.includes(i) ? f.days.filter(x => x !== i) : [...f.days, i]})); setEditingHH(true); }}
-                        className="w-10 h-8 rounded text-xs font-medium"
-                        style={{ background: hhForm.days.includes(i) ? "#C9A84C" : "hsl(240 12% 10%)", color: hhForm.days.includes(i) ? "#030305" : "hsl(36 29% 60%)" }}>
-                        {d}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex gap-4">
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Start Time</label>
-                    <input type="time" value={hhForm.startTime} onChange={(e) => { setHhForm(f => ({...f, startTime: e.target.value})); setEditingHH(true); }}
-                      className="px-3 py-2 rounded text-sm" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>End Time</label>
-                    <input type="time" value={hhForm.endTime} onChange={(e) => { setHhForm(f => ({...f, endTime: e.target.value})); setEditingHH(true); }}
-                      className="px-3 py-2 rounded text-sm" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Discount %</label>
-                  <input type="number" value={hhForm.discountPercent} onChange={(e) => { setHhForm(f => ({...f, discountPercent: Number(e.target.value)})); setEditingHH(true); }}
-                    className="px-3 py-2 rounded text-sm w-24" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                </div>
-                <p className="text-xs" style={{ color: "hsl(36 29% 50%)" }}>Applies to all food and drink items during active hours.</p>
-                {editingHH && (
-                  <button onClick={handleSaveHappyHour} className="w-full py-2 rounded-lg text-sm font-semibold" style={{ background: "#C9A84C", color: "#030305" }}>
-                    Save Happy Hour Settings
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* 🆕 v3.106 — Happy Hour tab REMOVED (venue does not run happy-hour pricing). */}
 
         {tab === "tablet" && (
           <div className="max-w-xl space-y-4">
@@ -754,41 +707,9 @@ export default function AdminPage() {
           </div>
         )}
 
-        {tab === "aggregator" && (
-          <div className="space-y-4">
-            {aggSettings.map((agg) => (
-              <div key={agg.name} className="p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-                <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>{agg.displayName}</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Commission %</label>
-                    <input type="number" value={agg.commissionPercent}
-                      onChange={(e) => updateAggregatorSettings(agg.name, { ...agg, commissionPercent: Number(e.target.value) })}
-                      className="px-3 py-2 rounded text-sm w-full" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Current Discount Tier %</label>
-                    <input type="number" value={agg.currentDiscountTier}
-                      onChange={(e) => updateAggregatorSettings(agg.name, { ...agg, currentDiscountTier: Number(e.target.value) })}
-                      className="px-3 py-2 rounded text-sm w-full" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>Monthly Ad Budget</label>
-                    <input type="number" value={agg.monthlyAdBudget}
-                      onChange={(e) => updateAggregatorSettings(agg.name, { ...agg, monthlyAdBudget: Number(e.target.value) })}
-                      className="px-3 py-2 rounded text-sm w-full" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                  <div>
-                    <label className="text-xs block mb-1" style={{ color: "hsl(36 29% 60%)" }}>GST on Commission %</label>
-                    <input type="number" value={agg.commissionGstPercent}
-                      onChange={(e) => updateAggregatorSettings(agg.name, { ...agg, commissionGstPercent: Number(e.target.value) })}
-                      className="px-3 py-2 rounded text-sm w-full" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* 🆕 v3.106 — Aggregators tab REMOVED. Commission / ad-budget config
+            unused; aggregator bookings are ingested by Cloud Function
+            `pollAggregatorEmails` with per-source defaults baked in. */}
       </div>
     </div>
   );
