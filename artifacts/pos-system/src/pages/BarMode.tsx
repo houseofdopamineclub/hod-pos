@@ -3407,6 +3407,11 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
               <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", letterSpacing: 0.5 }}>{open.length} {open.length === 1 ? "tab" : "tabs"}</div>
             </div>
             <div style={{ border: `1px solid ${GOLD}33`, borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
+              {/* 🆕 v3.134 — horizontal scroll on mobile for the OPEN table too.
+                  Same pattern as the CLEARED tab — 6 columns don't fit on a
+                  phone, so wrap in overflowX:auto + a minWidth on the grid. */}
+              <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ minWidth: 820 }}>
               {/* COLUMN HEADERS */}
               <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.7fr 1fr 2.2fr 0.7fr 1.1fr", gap: 14, padding: "12px 16px", background: "#141414", borderBottom: `1px solid ${GOLD}33`, fontSize: 10, fontWeight: 800, color: GOLD, letterSpacing: 1.2, whiteSpace: "nowrap" }}>
                 <div>GUEST</div>
@@ -3472,6 +3477,8 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                   </div>
                 </div>
               );})}
+              </div>
+              </div>
             </div>
           </>
         )}
