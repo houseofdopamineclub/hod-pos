@@ -2635,9 +2635,9 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           </button>
           <button onClick={() => setBillDueOpen(true)}
             style={{ flex: 1, padding: 14, borderRadius: 12,
-              background: openBillDueCount > 0 ? "linear-gradient(135deg,rgba(239,68,68,.22),rgba(239,68,68,.05))" : "rgba(255,255,255,.04)",
-              border: `2px solid ${openBillDueCount > 0 ? "#EF4444" : "rgba(255,255,255,.12)"}`,
-              color: openBillDueCount > 0 ? "#FCA5A5" : "rgba(255,255,255,.55)",
+              background: openBillDueCount > 0 ? "linear-gradient(135deg,rgba(245,158,11,.22),rgba(245,158,11,.05))" : "rgba(255,255,255,.04)",
+              border: `2px solid ${openBillDueCount > 0 ? "#F59E0B" : "rgba(255,255,255,.12)"}`,
+              color: openBillDueCount > 0 ? "#FCD34D" : "rgba(255,255,255,.55)",
               fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer" }}>
             💸 BILL DUE ({openBillDueCount})
           </button>
@@ -3151,7 +3151,7 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 15, fontWeight: 900 }}>
               <span style={{ color: "rgba(255,255,255,.6)" }}>💸 BILL DUE</span>
-              <span style={{ color: amountDue > 0 ? "#EF4444" : "#22C55E" }}>₹{amountDue.toLocaleString("en-IN")}</span>
+              <span style={{ color: amountDue > 0 ? "#F59E0B" : "#22C55E" }}>₹{amountDue.toLocaleString("en-IN")}</span>
             </div>
           </div>
         )}
@@ -3256,8 +3256,32 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
   // highlight), then a single CONFIRM "SETTLE BILL" button triggers the
   // PIN/clear flow. Prevents accidental settles from a stray tap.
   const [selectedMethod, setSelectedMethod] = useState<NcPaymentMethod | null>(null);
-  // 🆕 v3.126 — expandable per-row transaction history on the CLEARED table.
+  // 🆕 v3.131 — internal two-tab toggle ("OPEN" vs "NC REPORTS / HISTORY")
+  // inside this same modal. Khushi wanted the cleared transaction history
+  // accessible from inside BILL DUE, not as a separate top-level button.
+  const [tab, setTab] = useState<"open" | "history">("open");
   const [expandedClearedId, setExpandedClearedId] = useState<string | null>(null);
+  const tsOf = (r: BillDueDoc): number => {
+    if (r.clearedAt) { const t = Date.parse(r.clearedAt); if (!isNaN(t)) return t; }
+    if (r.createdAt && typeof (r.createdAt as any).seconds === "number") return (r.createdAt as any).seconds * 1000;
+    return 0;
+  };
+  const fmtTime = (r: BillDueDoc): string => {
+    const t = tsOf(r);
+    return t ? new Date(t).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" }) : "—";
+  };
+  const allHistory = [...rows].sort((a, b) => tsOf(b) - tsOf(a));
+  const clearedAll = allHistory.filter((r) => r.status !== "open");
+  // 🔴 v3.131 architect fix — RECOVERED must include legacy cleared rows that
+  // were written before paymentMethod was added (v3.114 and earlier). Treat
+  // ANY non-waived cleared row as recovered; only paymentMethod === "waived"
+  // is genuinely written off.
+  const totalRecovered = clearedAll
+    .filter((r) => r.paymentMethod !== "waived")
+    .reduce((s, r) => s + (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)), 0);
+  const totalWaived = clearedAll
+    .filter((r) => r.paymentMethod === "waived")
+    .reduce((s, r) => s + (r.amountDue || 0), 0);
 
   const openPanel = (g: Group) => { setPendingClear(g); setDiscPct(0); setDiscInput("0"); setSelectedMethod(null); };
   // 🆕 v3.126 — live discount: typing the % immediately recomputes the breakdown.
@@ -3345,15 +3369,38 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
         </div>
       </div>
 
+      {/* 🆕 v3.131 — INTERNAL TAB STRIP inside the BILL DUE modal. */}
+      <div style={{ display: "flex", gap: 8, padding: "10px 24px", background: "#0A0A0A", borderBottom: `1px solid ${GOLD}22` }}>
+        {([
+          { id: "open" as const, label: `🟡 OPEN (${open.length})` },
+          { id: "history" as const, label: `📊 CLEARED (${clearedAll.length})` },
+        ]).map((t) => {
+          const active = tab === t.id;
+          return (
+            <button key={t.id} type="button" onClick={() => setTab(t.id)}
+              style={{
+                padding: "8px 18px", borderRadius: 8, fontSize: 12, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase",
+                background: active ? GOLD : "transparent",
+                border: `1.5px solid ${active ? GOLD : "rgba(255,255,255,.18)"}`,
+                color: active ? "#030305" : "rgba(255,255,255,.75)",
+                cursor: "pointer",
+              }}>{t.label}</button>
+          );
+        })}
+      </div>
+
       {/* TABLE */}
       <div style={{ flex: 1, overflowY: "auto", padding: "0 24px 24px" }}>
-        {open.length === 0 && cleared.length === 0 && (
+        {tab === "open" && open.length === 0 && (
           <div style={{ textAlign: "center", padding: "80px 20px", color: "rgba(255,255,255,.4)", fontSize: 16, fontStyle: "italic", fontFamily: "'Playfair Display', serif" }}>
             No NC tabs awaiting settlement tonight.
+            <div style={{ fontSize: 12, marginTop: 12, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: 0.5, fontStyle: "normal", color: "rgba(255,255,255,.35)" }}>
+              Cleared transactions live under the 📊 CLEARED tab above.
+            </div>
           </div>
         )}
 
-        {open.length > 0 && (
+        {tab === "open" && open.length > 0 && (
           <>
             <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "18px 0 8px" }}>
               <div style={{ fontSize: 11, color: GOLD, letterSpacing: 1.5, fontWeight: 800 }}>OPEN — AWAITING SETTLEMENT</div>
@@ -3429,132 +3476,19 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
           </>
         )}
 
-        {cleared.length > 0 && (
-          <>
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "24px 0 8px" }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1.5, fontWeight: 800 }}>CLEARED TONIGHT · TRANSACTION HISTORY</div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", letterSpacing: 0.5 }}>{cleared.length} settled</div>
-                {/* 🆕 v3.126 — DOWNLOAD CSV REPORT for the operational night */}
-                <button type="button" onClick={() => {
-                  const esc = (v: any) => {
-                    const s = String(v ?? "");
-                    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-                  };
-                  const header = ["Time","Guest","Phone","Role","ApprovedBy","ClearedBy","Items","TotalBill","Comp","Due","DiscountPct","DiscountAmt","FinalPaid","Method"];
-                  const lines = [header.join(",")];
-                  for (const r of cleared) {
-                    const itemsStr = (r.items || []).map(it => `${it.qty}x ${it.n}${it.free ? " (COMP)" : ` @${it.p}`}`).join(" | ");
-                    const total = (r.items || []).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-                    const comp = (r.items || []).filter(it => it.free).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-                    const due = r.amountDue || 0;
-                    const pct = r.discountPct || 0;
-                    const final = typeof r.finalAmount === "number" ? r.finalAmount : due;
-                    const dAmt = due - final;
-                    lines.push([
-                      r.clearedAt || "", r.customerName, r.customerPhone || "", r.role, r.approvedBy || "",
-                      r.clearedBy || "", itemsStr, total, comp, due, pct, dAmt, final,
-                      r.paymentMethod === "waived" ? "WAIVED" : (r.paymentMethod || ""),
-                    ].map(esc).join(","));
-                  }
-                  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url; a.download = `HOD-BillDue-${getOperationalNightStr()}.csv`;
-                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                  URL.revokeObjectURL(url);
-                }}
-                  style={{ padding: "8px 14px", borderRadius: 6, background: "transparent", border: `1.5px solid ${GOLD}`, color: GOLD, fontSize: 10, fontWeight: 900, cursor: "pointer", letterSpacing: 1, textTransform: "uppercase" }}>
-                  ⬇ DOWNLOAD CSV
-                </button>
-              </div>
-            </div>
-            <div style={{ border: "1px solid rgba(255,255,255,.1)", borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "0.3fr 1.2fr 0.8fr 1fr 0.8fr 0.9fr 0.7fr", gap: 12, padding: "10px 16px", background: "#141414", borderBottom: "1px solid rgba(255,255,255,.08)", fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.5)", letterSpacing: 1.2, whiteSpace: "nowrap" }}>
-                <div></div>
-                <div>GUEST</div>
-                <div>ROLE</div>
-                <div>CLEARED BY</div>
-                <div style={{ textAlign: "center" }}>METHOD</div>
-                <div style={{ textAlign: "right" }}>PAID</div>
-                <div style={{ textAlign: "right" }}>DISC</div>
-              </div>
-              {cleared.map((r, idx) => {
-                const total = (r.items || []).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-                const comp = (r.items || []).filter(it => it.free).reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-                const due = r.amountDue || 0;
-                const pct = r.discountPct || 0;
-                const final = typeof r.finalAmount === "number" ? r.finalAmount : due;
-                const dAmt = due - final;
-                const isExpanded = expandedClearedId === r.id;
-                const isWaived = r.paymentMethod === "waived";
-                return (
-                  <div key={r.id} style={{ borderTop: idx === 0 ? "none" : "1px solid rgba(255,255,255,.05)" }}>
-                    <div onClick={() => setExpandedClearedId(isExpanded ? null : (r.id || null))}
-                      style={{ display: "grid", gridTemplateColumns: "0.3fr 1.2fr 0.8fr 1fr 0.8fr 0.9fr 0.7fr", gap: 12, padding: "10px 16px", alignItems: "center", fontSize: 12, cursor: "pointer", background: isExpanded ? "rgba(201,168,76,.06)" : "transparent" }}>
-                      <div style={{ color: GOLD, fontSize: 14, fontWeight: 900, textAlign: "center" }}>{isExpanded ? "▾" : "▸"}</div>
-                      <div style={{ color: "#fff", fontWeight: 700, textTransform: "uppercase" }}>✓ {r.customerName}</div>
-                      <div style={{ color: GOLD, fontWeight: 700, fontSize: 11 }}>{r.role}</div>
-                      <div style={{ color: "rgba(255,255,255,.7)", fontWeight: 600, fontSize: 11 }}>{r.clearedBy || "—"}</div>
-                      <div style={{ textAlign: "center", fontSize: 10, fontWeight: 800, letterSpacing: 0.8, color: isWaived ? "rgba(255,255,255,.5)" : GOLD, textTransform: "uppercase" }}>
-                        {isWaived ? "WAIVED" : (r.paymentMethod || "—")}
-                      </div>
-                      <div style={{ textAlign: "right", color: isWaived ? "rgba(255,255,255,.45)" : "#22C55E", fontWeight: 900, fontFamily: "'Space Grotesk', monospace" }}>
-                        ₹{final.toLocaleString("en-IN")}
-                      </div>
-                      <div style={{ textAlign: "right", color: pct > 0 ? GOLD : "rgba(255,255,255,.35)", fontWeight: 700, fontSize: 11 }}>
-                        {pct > 0 ? `${pct}%` : "—"}
-                      </div>
-                    </div>
-                    {/* 🆕 v3.126 — EXPANDABLE TRANSACTION DETAIL */}
-                    {isExpanded && (
-                      <div style={{ padding: "12px 20px 16px 44px", background: "#0F0F0F", borderTop: `1px solid ${GOLD}22`, borderBottom: idx === cleared.length - 1 ? "none" : `1px solid ${GOLD}22` }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 24 }}>
-                          {/* ITEMS COLUMN */}
-                          <div>
-                            <div style={{ fontSize: 10, fontWeight: 800, color: GOLD, letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>ITEMS ORDERED</div>
-                            {(r.items || []).length === 0 && <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)", fontStyle: "italic" }}>No items recorded.</div>}
-                            {(r.items || []).map((it, i) => (
-                              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 12, color: it.free ? "rgba(201,168,76,.6)" : "#fff" }}>
-                                <span style={{ fontWeight: 600 }}>{it.qty}× {it.n}{it.free && " (COMP)"}</span>
-                                <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>
-                                  {it.free ? "FREE" : `₹${((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}`}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                          {/* BREAKDOWN COLUMN */}
-                          <div style={{ background: "rgba(255,255,255,.03)", border: `1px solid ${GOLD}22`, borderRadius: 8, padding: "10px 12px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "rgba(255,255,255,.75)" }}>
-                              <span>TOTAL BILL</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{total.toLocaleString("en-IN")}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "#22C55E" }}>
-                              <span>COMP GIVEN</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>− ₹{comp.toLocaleString("en-IN")}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: "#fff", fontWeight: 800, borderTop: `1px solid ${GOLD}22`, marginTop: 3, paddingTop: 6 }}>
-                              <span>DUE</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{due.toLocaleString("en-IN")}</span>
-                            </div>
-                            {pct > 0 && (
-                              <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 11, color: GOLD }}>
-                                <span>DISCOUNT ({pct}%)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>− ₹{dAmt.toLocaleString("en-IN")}</span>
-                              </div>
-                            )}
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0 2px", fontSize: 13, color: isWaived ? "rgba(255,255,255,.55)" : "#22C55E", fontWeight: 900, borderTop: `1.5px solid ${GOLD}`, marginTop: 4 }}>
-                              <span>FINAL PAID</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>{isWaived ? "WAIVED" : `₹${final.toLocaleString("en-IN")}`}</span>
-                            </div>
-                            <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 6, letterSpacing: 0.3 }}>
-                              {r.clearedAt ? new Date(r.clearedAt).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" }) : "—"} · {(r.paymentMethod || "—").toUpperCase()} · APPROVED BY {r.approvedBy || "—"}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </>
+        {tab === "history" && (
+          <NcReportsTab
+            rows={allHistory}
+            clearedAll={clearedAll}
+            totalRecovered={totalRecovered}
+            totalWaived={totalWaived}
+            expandedId={expandedClearedId}
+            onToggleExpand={(id) => setExpandedClearedId((prev) => prev === id ? null : id)}
+            fmtTime={fmtTime}
+            tsOf={tsOf}
+          />
         )}
+
       </div>
 
       {/* 🆕 v3.124 — SETTLEMENT POPUP MODAL (separate from row, full breakdown) */}
@@ -3601,7 +3535,7 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                 </div>
                 <div style={{ borderTop: `1px solid ${GOLD}33`, margin: "6px 0" }} />
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 14, color: "#fff", fontWeight: 800 }}>
-                  <span>BILL DUE</span><span style={{ fontFamily: "'Space Grotesk', monospace", color: "#EF4444" }}>₹{g.amountDue.toLocaleString("en-IN")}</span>
+                  <span>BILL DUE</span><span style={{ fontFamily: "'Space Grotesk', monospace", color: "#F59E0B" }}>₹{g.amountDue.toLocaleString("en-IN")}</span>
                 </div>
                 {effPct > 0 && (
                   <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: GOLD, fontWeight: 700 }}>
@@ -3668,6 +3602,191 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
       })()}
     </div>,
     document.body,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🆕 v3.131 (2026-05-27) — NC REPORTS as an INTERNAL TAB of BillDueModal.
+// Full transaction history of every NC logged during the current
+// operational night. Read-only dashboard with expandable rows + CSV
+// download. Lives INSIDE the BILL DUE modal so the bartender doesn't
+// have to leave/re-enter — toggle pill at the top switches OPEN <-> HISTORY.
+// ─────────────────────────────────────────────────────────────────────
+function NcReportsTab({
+  rows, clearedAll, totalRecovered, totalWaived,
+  expandedId, onToggleExpand, fmtTime, tsOf,
+}: {
+  rows: BillDueDoc[];
+  clearedAll: BillDueDoc[];
+  totalRecovered: number;
+  totalWaived: number;
+  expandedId: string | null;
+  onToggleExpand: (id: string) => void;
+  fmtTime: (r: BillDueDoc) => string;
+  tsOf: (r: BillDueDoc) => number;
+}) {
+  const GOLD = "#C9A84C";
+  void clearedAll;
+  const compGiven = rows.reduce((s, r) => {
+    const items = (r.items || []) as Array<{ qty?: number; p?: number; price?: number; free?: boolean }>;
+    return s + items.filter((it) => it.free).reduce((ss, it) => ss + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+  }, 0);
+
+  const downloadCsv = () => {
+    const esc = (v: unknown) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const cols = ["Time","Status","Guest","Phone","Role","Token","ApprovedBy","LoggedBy","ClearedBy","Method","Items","TotalBill","CompValue","Due","DiscountPct","FinalPaid"];
+    const lines = [cols.join(",")];
+    for (const r of rows) {
+      const items = (r.items || []) as Array<{ qty?: number; n?: string; name?: string; p?: number; price?: number; free?: boolean }>;
+      const itemStr = items.map((it) => `${it.qty || 0}x ${it.n ?? it.name ?? ""}${it.free ? " (COMP)" : ""}`).join(" | ");
+      const totalBill = items.reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+      const compVal = items.filter((it) => it.free).reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+      const ts = tsOf(r);
+      lines.push([
+        ts ? new Date(ts).toISOString() : "",
+        r.status === "open" ? "OPEN" : (r.paymentMethod === "waived" ? "WAIVED" : "PAID"),
+        r.customerName || "",
+        r.customerPhone || "",
+        r.role || "",
+        r.token || "",
+        r.approvedBy || "",
+        r.staff || "",
+        r.clearedBy || "",
+        r.paymentMethod || "",
+        itemStr,
+        totalBill,
+        compVal,
+        r.amountDue || 0,
+        typeof r.discountPct === "number" ? r.discountPct : "",
+        typeof r.finalAmount === "number" ? r.finalAmount : "",
+      ].map(esc).join(","));
+    }
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `HOD-NC-Reports-${getOperationalNightStr()}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const statusBadge = (r: BillDueDoc) => {
+    if (r.status === "open") return { label: "OPEN", bg: "rgba(245,158,11,.18)", fg: "#F59E0B", brd: "#F59E0B" };
+    if (r.paymentMethod === "waived") return { label: "WAIVED", bg: "rgba(160,160,160,.18)", fg: "#C0C0C0", brd: "#888" };
+    return { label: "PAID", bg: "rgba(34,197,94,.18)", fg: "#22C55E", brd: "#22C55E" };
+  };
+
+  return (
+    <>
+      {/* KPI strip + CSV button */}
+      <div style={{ display: "flex", gap: 12, margin: "18px 0 12px", flexWrap: "wrap", alignItems: "stretch" }}>
+        {[
+          { l: "LOGGED",      v: String(rows.length),                              c: "#fff" },
+          { l: "RECOVERED",   v: `₹${totalRecovered.toLocaleString("en-IN")}`,    c: "#22C55E" },
+          { l: "WAIVED",      v: `₹${totalWaived.toLocaleString("en-IN")}`,       c: "#F59E0B" },
+          { l: "COMP GIVEN",  v: `₹${compGiven.toLocaleString("en-IN")}`,         c: GOLD },
+        ].map((k) => (
+          <div key={k.l} style={{ flex: "1 1 140px", padding: "14px 16px", background: "#0A0A0A", border: `1px solid ${GOLD}33`, borderRadius: 8 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", letterSpacing: 1, fontWeight: 800 }}>{k.l}</div>
+            <div style={{ fontSize: 26, fontWeight: 900, color: k.c, marginTop: 6, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: 0.3 }}>{k.v}</div>
+          </div>
+        ))}
+        <button onClick={downloadCsv} disabled={!rows.length}
+          style={{ padding: "0 22px", borderRadius: 8, background: rows.length ? GOLD : "rgba(201,168,76,.2)", border: "none",
+            color: "#030305", fontSize: 14, fontWeight: 900, letterSpacing: 1, cursor: rows.length ? "pointer" : "not-allowed",
+            opacity: rows.length ? 1 : 0.5, whiteSpace: "nowrap" }}>
+          ⬇ DOWNLOAD CSV
+        </button>
+      </div>
+
+      {rows.length === 0 && (
+        <div style={{ textAlign: "center", padding: "60px 20px", color: "rgba(255,255,255,.4)", fontSize: 17, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}>
+          No NC tabs logged tonight.
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div style={{ border: `1px solid ${GOLD}33`, borderRadius: 8, overflow: "hidden", background: "#0A0A0A" }}>
+          {/* COLUMN HEADERS */}
+          <div style={{ display: "grid", gridTemplateColumns: "26px 0.7fr 0.5fr 1fr 0.6fr 0.9fr 0.7fr 0.8fr", gap: 10, padding: "14px 16px", background: "#141414", borderBottom: `1px solid ${GOLD}33`, fontSize: 12, fontWeight: 800, color: GOLD, letterSpacing: 1.2, whiteSpace: "nowrap" }}>
+            <div></div>
+            <div>TIME</div>
+            <div>STATUS</div>
+            <div>GUEST</div>
+            <div>ROLE</div>
+            <div>HANDLED BY</div>
+            <div>METHOD</div>
+            <div style={{ textAlign: "right" }}>AMOUNT</div>
+          </div>
+          {rows.map((r, idx) => {
+            const id = r.id || String(idx);
+            const isOpen = expandedId === id;
+            const badge = statusBadge(r);
+            const items = (r.items || []) as Array<{ qty?: number; n?: string; name?: string; p?: number; price?: number; free?: boolean }>;
+            const totalBill = items.reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+            const showAmt = typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0);
+            const amtColor = r.status === "open" ? "#F59E0B" : (r.paymentMethod === "waived" ? "#C0C0C0" : "#22C55E");
+            return (
+              <div key={id} style={{ borderTop: idx === 0 ? "none" : "1px solid rgba(201,168,76,.12)" }}>
+                <button type="button" onClick={() => onToggleExpand(id)}
+                  style={{ width: "100%", display: "grid", gridTemplateColumns: "26px 0.7fr 0.5fr 1fr 0.6fr 0.9fr 0.7fr 0.8fr", gap: 10, padding: "16px 16px", alignItems: "center", background: isOpen ? "rgba(201,168,76,.06)" : "transparent", border: "none", color: "#fff", textAlign: "left", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif" }}>
+                  <div style={{ color: GOLD, fontSize: 16, fontWeight: 900 }}>{isOpen ? "▾" : "▸"}</div>
+                  <div style={{ fontSize: 13, color: "rgba(255,255,255,.8)", fontWeight: 700 }}>{fmtTime(r)}</div>
+                  <div>
+                    <span style={{ display: "inline-block", padding: "4px 10px", borderRadius: 4, background: badge.bg, border: `1px solid ${badge.brd}`, color: badge.fg, fontSize: 11, fontWeight: 900, letterSpacing: 0.8 }}>{badge.label}</span>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.customerName || "—"}</div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.5)", marginTop: 3, fontWeight: 600 }}>{r.customerPhone || ""}</div>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: GOLD, letterSpacing: 0.4 }}>{r.role || "—"}</div>
+                  <div style={{ fontSize: 13, color: "rgba(255,255,255,.8)", fontWeight: 600 }}>
+                    {r.clearedBy ? <>cleared: <span style={{ color: "#fff", fontWeight: 800 }}>{r.clearedBy}</span></> : <span style={{ color: "rgba(255,255,255,.4)" }}>—</span>}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: r.paymentMethod ? "#fff" : "rgba(255,255,255,.35)", textTransform: "uppercase", letterSpacing: 0.6 }}>{r.paymentMethod || "—"}</div>
+                  <div style={{ textAlign: "right", fontSize: 18, fontWeight: 900, color: amtColor, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: 0.3 }}>₹{showAmt.toLocaleString("en-IN")}</div>
+                </button>
+                {isOpen && (
+                  <div style={{ padding: "16px 20px 18px 44px", background: "#080808", borderTop: `1px dashed ${GOLD}22`, display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 28 }}>
+                    <div>
+                      <div style={{ fontSize: 12, color: GOLD, fontWeight: 800, letterSpacing: 1.2, marginBottom: 8 }}>ITEMS</div>
+                      {items.length === 0 && <div style={{ fontSize: 14, color: "rgba(255,255,255,.4)" }}>—</div>}
+                      {items.map((it, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: it.free ? "rgba(201,168,76,.7)" : "rgba(255,255,255,.85)", fontWeight: it.free ? 600 : 700 }}>
+                          <span>{it.qty || 0}× {it.n ?? it.name ?? ""}{it.free ? " · COMP" : ""}</span>
+                          <span style={{ color: it.free ? "rgba(201,168,76,.5)" : "rgba(255,255,255,.6)" }}>{it.free ? "FREE" : `₹${((it.qty || 0) * (it.p ?? it.price ?? 0)).toLocaleString("en-IN")}`}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 12, color: GOLD, fontWeight: 800, letterSpacing: 1.2, marginBottom: 8 }}>BREAKDOWN</div>
+                      {[
+                        ["Token", r.token || "—"],
+                        ["Approved by", r.approvedBy || "—"],
+                        ["Logged by", r.staff || "—"],
+                        ["Total bill", `₹${totalBill.toLocaleString("en-IN")}`],
+                        ["Due", `₹${(r.amountDue || 0).toLocaleString("en-IN")}`],
+                        ...(typeof r.discountPct === "number" && r.discountPct > 0 ? [["Discount", `${r.discountPct}%`]] : []),
+                        ...(typeof r.finalAmount === "number" ? [["Final paid", `₹${r.finalAmount.toLocaleString("en-IN")}`]] : []),
+                        ...(r.clearedAt ? [["Cleared at", new Date(r.clearedAt).toLocaleString("en-IN")]] : []),
+                      ].map(([k, v], i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: "rgba(255,255,255,.85)" }}>
+                          <span style={{ color: "rgba(255,255,255,.5)", fontWeight: 600 }}>{k}</span>
+                          <span style={{ fontWeight: 800 }}>{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
 }
 
