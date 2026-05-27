@@ -4168,13 +4168,62 @@ export function subscribeToBookingsForNights(
   // v3.94 shared listener — keyed on the SORTED unique-nights tuple so two
   // callers passing [today, calToday] in either order share one phone line.
   const key = `bk:${[...unique].sort().join(",")}`;
+  // 🆕 2026-05-27 v3.97 — CONVERTED FROM onSnapshot → one-shot get() + 30s
+  // poll + visibilitychange (mirrors customer-site v3.95 events pattern).
+  //
+  // WHY: Query Insights 2026-05-27 ~14:55 ranked this query #1 by read load
+  // — `tableReservations WHERE date IN [?]` at 646 reads/sample with only
+  // ~7 writes/hr in the entire database. The reads were almost ENTIRELY
+  // initial-read cost on listener re-subscribe (mobile network blips +
+  // tablet sleep/wake) NOT write-fanout. onSnapshot here is the wrong tool:
+  // door staff don't need sub-second freshness on booking lists (bookings
+  // arrive over hours; the door view is a roster, not a live ticker).
+  //
+  // TRADEOFF (accepted): door girl sees a new walk-in / aggregator booking
+  // up to 30s after it lands in Firestore. Foreground return → instant
+  // refresh via visibilitychange. Captain alerts that DO need real-time
+  // (cover activated, KOT printed) are on separate, narrower listeners.
+  //
+  // 🛟 FAIL-OPEN: try/catch around every getDocs → push([]). Tab-hidden →
+  // ZERO reads (visibilitychange-gated). Cleanup returns clearInterval +
+  // removeEventListener so calling unsub twice is safe.
   return _shareSubscription<HodBooking[]>(
     key,
-    (push) => onSnapshot(
-      query(collection(db, BOOKINGS_COL), where("date", "in", unique)),
-      (snap) => push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking))),
-      () => push([]),
-    ),
+    (push) => {
+      let stopped = false;
+      const fetchAndPush = async () => {
+        if (stopped) return;
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        try {
+          const snap = await getDocs(query(collection(db, BOOKINGS_COL), where("date", "in", unique)));
+          if (stopped) return;
+          push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking)));
+        } catch (e) {
+          console.warn("[subscribeToBookingsForNights] poll failed", e);
+          if (!stopped) push([]);
+        }
+      };
+      // Initial fetch (no gate — caller mounted; fetch even if backgrounded
+      // so callers get their first paint).
+      void (async () => {
+        try {
+          const snap = await getDocs(query(collection(db, BOOKINGS_COL), where("date", "in", unique)));
+          if (stopped) return;
+          push(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodBooking)));
+        } catch (e) {
+          console.warn("[subscribeToBookingsForNights] initial fetch failed", e);
+          if (!stopped) push([]);
+        }
+      })();
+      const id = setInterval(fetchAndPush, 30_000);
+      const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") void fetchAndPush(); };
+      if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis);
+      return () => {
+        stopped = true;
+        clearInterval(id);
+        if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis);
+      };
+    },
     cb,
   );
 }
