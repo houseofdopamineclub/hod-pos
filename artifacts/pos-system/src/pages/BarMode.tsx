@@ -168,6 +168,91 @@ function BarLogin({ onLogin }: { onLogin: (staff: string) => void }) {
   return <StaffLogin allowedRoles={["bartender"]} title="BAR LOGIN" emoji="🍸" />;
 }
 
+// v3.114 — In-app discount picker. Quick-chip grid (0/10/20/30/40/50%) + custom %
+// input. Above 50% reveals Manager PIN field (validated via BAR_MANAGER_HASH).
+// No browser popups. Fail-open: Cancel always closes without changing state.
+function DiscountModal({ current, onApply, onClose }: {
+  current: number; onApply: (pct: number) => void; onClose: () => void;
+}) {
+  const [pctStr, setPctStr] = useState(String(current));
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const pct = Math.max(0, Math.min(100, parseFloat(pctStr) || 0));
+  const needsMgr = pct > 50;
+  const handleApply = async () => {
+    setErr("");
+    if (pct < 0 || pct > 100) { setErr("ENTER A % BETWEEN 0 AND 100"); return; }
+    if (!needsMgr) { onApply(pct); return; }
+    if (pin.length !== 4) { setErr("ENTER 4-DIGIT MANAGER PIN (8888)"); return; }
+    setBusy(true);
+    const h = await sha256(pin);
+    setBusy(false);
+    if (h !== BAR_MANAGER_HASH) { setErr("WRONG MANAGER PIN"); setPin(""); return; }
+    onApply(pct);
+  };
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.85)", zIndex: 100000, display: "flex", justifyContent: "center", alignItems: "center", padding: 16, backdropFilter: "blur(3px)", fontFamily: "'Space Grotesk',sans-serif" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 420, background: "linear-gradient(135deg, rgba(28,22,10,.99), rgba(10,8,4,.99))", border: "2px solid rgba(242,199,68,.6)", borderRadius: 18, padding: 22, position: "relative", boxShadow: "0 16px 56px rgba(0,0,0,.85)", color: "#fff" }}>
+        <button onClick={onClose} title="Close"
+          style={{ position: "absolute", top: 12, right: 14, width: 36, height: 36, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1.5px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 0, fontWeight: 900 }}>×</button>
+        <div style={{ fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 14, paddingRight: 42, letterSpacing: .5 }}>
+          🏷️ APPLY DISCOUNT
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,.6)", marginBottom: 14, fontWeight: 700, letterSpacing: .3 }}>
+          UP TO 50% — BARTENDER · ABOVE 50% — MANAGER PIN
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 14 }}>
+          {[0, 10, 20, 30, 40, 50].map((q) => {
+            const sel = pct === q;
+            return (
+              <button key={q} onClick={() => { setPctStr(String(q)); setPin(""); setErr(""); }}
+                style={{ padding: "14px 6px", borderRadius: 10, fontSize: 18, fontWeight: 900, cursor: "pointer",
+                  background: sel ? "rgba(242,199,68,.22)" : "rgba(255,255,255,.05)",
+                  border: `2px solid ${sel ? "rgba(242,199,68,.65)" : "rgba(255,255,255,.10)"}`,
+                  color: sel ? "#F2C744" : "rgba(255,255,255,.75)" }}>
+                {q}%
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.85)", letterSpacing: 1.2, marginBottom: 6 }}>OR ENTER CUSTOM %</div>
+          <div style={{ display: "flex", alignItems: "center", background: "rgba(0,0,0,.55)", border: "2px solid rgba(242,199,68,.45)", borderRadius: 12, padding: "4px 14px" }}>
+            <input type="number" value={pctStr} onChange={(e) => { setPctStr(e.target.value); setErr(""); if (parseFloat(e.target.value) <= 50) setPin(""); }} placeholder="0"
+              style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#fff", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
+            <span style={{ fontSize: 26, fontWeight: 900, color: "#F2C744", marginLeft: 6 }}>%</span>
+          </div>
+        </div>
+        {needsMgr && (
+          <div style={{ marginBottom: 14, background: "rgba(239,68,68,.10)", border: "1.5px solid rgba(239,68,68,.4)", borderRadius: 12, padding: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#EF4444", letterSpacing: 1.2, marginBottom: 6 }}>
+              🔒 MANAGER PIN REQUIRED ({pct}% &gt; 50%)
+            </div>
+            <input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={4}
+              value={pin} onChange={(e) => { setPin(e.target.value.replace(/\D/g, "").slice(0, 4)); setErr(""); }}
+              placeholder="• • • •"
+              style={{ width: "100%", boxSizing: "border-box", padding: "14px 12px", borderRadius: 10, background: "rgba(0,0,0,.55)", border: "1.5px solid rgba(239,68,68,.5)", color: "#fff", fontSize: 22, letterSpacing: 12, textAlign: "center", outline: "none", fontWeight: 900, ...({ WebkitTextSecurity: "disc", textSecurity: "disc" } as React.CSSProperties) }} />
+          </div>
+        )}
+        {err && <div style={{ fontSize: 13, color: "#EF4444", marginBottom: 10, textAlign: "center", fontWeight: 800 }}>{err}</div>}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} disabled={busy}
+            style={{ flex: 1, padding: "14px 10px", borderRadius: 12, background: "transparent", border: "1.5px solid rgba(255,255,255,.18)", color: "rgba(255,255,255,.7)", fontSize: 14, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer", letterSpacing: .5 }}>
+            CANCEL
+          </button>
+          <button onClick={handleApply} disabled={busy}
+            style={{ flex: 1.6, padding: "14px 10px", borderRadius: 12, background: busy ? "rgba(242,199,68,.25)" : "linear-gradient(135deg,#F2C744,#A07F2E)", border: "2px solid rgba(242,199,68,.7)", color: "#000", fontSize: 15, fontWeight: 900, cursor: busy ? "not-allowed" : "pointer", letterSpacing: .5, boxShadow: "0 4px 18px rgba(242,199,68,.4)" }}>
+            {busy ? "..." : `✓ APPLY ${pct}%`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WalletOverlay({ cover, staffName, onClose }: {
   cover: HodCover; staffName: string; onClose: () => void;
 }) {
@@ -239,7 +324,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // SC defaults OFF; turning ON also requires Manager PIN (Khushi rule —
   // SC must be a deliberate decision, not a tap-by-accident).
   const [barDiscPct, setBarDiscPct] = useState(0);
-  const [scOn, setScOn] = useState(false);
+  const [scOn, setScOn] = useState(true);
   // Per-session token for KOT↔Bill pairing. Fresh per print. Displayed in
   // the success overlay so bartender can call it out to the runner / cashier.
   const [lastToken, setLastToken] = useState<string | null>(null);
@@ -248,30 +333,29 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // is hidden by default; bartender taps ADD ORDER in the bottom button
   // row to reveal it. Keeps the wallet a clean ticket-style read at a glance.
   const [showAddOrder, setShowAddOrder] = useState(false);
+  // v3.114 — over-balance acknowledgement: shows a one-shot popup the moment
+  // the cart total exceeds wallet balance. OK dismisses it AND suppresses
+  // the inline disabled banner. Re-arms automatically the next time cart goes
+  // back under balance (so a fresh overage shows the popup again).
+  const [overAck, setOverAck] = useState(false);
 
-  // Manager-gated discount editor.
-  const requestDiscount = useCallback(async () => {
-    const raw = window.prompt("Discount % (0-100):", String(barDiscPct));
-    if (raw === null) return;
-    const n = Math.max(0, Math.min(100, parseFloat(raw) || 0));
-    if (n <= 50) { setBarDiscPct(n); showToast(`✅ Discount set to ${n}%`); return; }
-    const pin = await centeredPinPrompt(`Discount above 50% (${n}%) needs Manager PIN.`);
-    if (!pin) return;
-    const h = await sha256(pin);
-    if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Manager PIN did not match. Discount not applied.", "error"); return; }
-    setBarDiscPct(n);
-    showToast(`✅ Discount set to ${n}% (manager-approved)`);
-  }, [barDiscPct]); // eslint-disable-line react-hooks/exhaustive-deps
+  // v3.114 — in-app discount picker (replaces window.prompt). Bartender can
+  // apply 0/10/20/30/40/50% in one tap or type a custom %; above 50% reveals
+  // an in-app Manager PIN field (no browser popups anywhere).
+  const [discOpen, setDiscOpen] = useState(false);
+  const requestDiscount = useCallback(() => { setDiscOpen(true); }, []);
 
-  // Manager-gated SC toggle. OFF→ON needs PIN; ON→OFF is free.
+  // v3.114 (Khushi) — SC defaults ON. ON→OFF needs Manager PIN (revenue
+  // protection). OFF→ON is free (re-enabling the default). Uses in-app
+  // centeredPinPrompt + centeredAlert — NO browser popups.
   const requestScToggle = useCallback(async () => {
-    if (scOn) { setScOn(false); showToast("Service Charge OFF"); return; }
-    const pin = await centeredPinPrompt("Turning Service Charge ON needs Manager PIN.");
+    if (!scOn) { setScOn(true); showToast("✅ Service Charge ON"); return; }
+    const pin = await centeredPinPrompt("Turning Service Charge OFF needs Manager PIN.");
     if (!pin) return;
     const h = await sha256(pin);
-    if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Service Charge stays OFF.", "error"); return; }
-    setScOn(true);
-    showToast("✅ Service Charge ON (manager-approved)");
+    if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Service Charge stays ON.", "error"); return; }
+    setScOn(false);
+    showToast("⚠ Service Charge OFF (manager-approved)");
   }, [scOn]);
 
   /** Single source of truth for the printed-bill math. Honors barDiscPct +
@@ -317,8 +401,26 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const cartItemsForTax: HodOrderItem[] = Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }));
   const cartBreakdown = computeHodBreakdown(cartItemsForTax);
   const cartTotal = cartBreakdown.grandTotal;
-  const activeTotal = preOrderTotal + cartTotal;
+  // v3.114 — activeTotal now honors barDiscPct + scOn so the "RECHARGE
+  // REQUIRED" amount Khushi sees matches EXACTLY what the bill will charge.
+  // Mirrors computePrintAmounts() math (line 363) so deficit, recharge
+  // suggestion, ADD ROUND button, and printed bill all agree to the rupee.
+  const activeTotal = (() => {
+    const allItems: HodOrderItem[] = [...preOrderItems, ...Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }))];
+    const sub = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
+    const disc = Math.round(sub * (Math.min(100, Math.max(0, barDiscPct)) / 100));
+    const taxBase = Math.max(0, sub - disc);
+    const sc = scOn ? Math.round(taxBase * 0.10) : 0;
+    const taxAmt = Math.round((taxBase + sc) * 0.05);
+    return taxBase + sc + taxAmt;
+  })();
   const hasItems = preOrderItems.length > 0 || Object.keys(cart).length > 0;
+
+  // v3.114 — auto-rearm the over-balance popup whenever cart drops back under
+  // balance (so a fresh overage on the NEXT item add fires the popup again).
+  useEffect(() => {
+    if (activeTotal <= bal && overAck) setOverAck(false);
+  }, [activeTotal, bal, overAck]);
 
   const cooldownKey = `hod_act_${cover.id}`;
   const recentAct = sessionStorage.getItem(cooldownKey);
@@ -623,8 +725,12 @@ function WalletOverlay({ cover, staffName, onClose }: {
     });
     if (!allItems.length) { showToast("Select items first"); return; }
     if (isExpired) { showToast("Wallet has expired. Cannot activate."); return; }
-    const breakdown = computeHodBreakdown(allItems);
-    const total = breakdown.grandTotal;
+    // v3.114 — SINGLE SOURCE OF TRUTH for activation total. Uses
+    // computePrintAmounts so it honors barDiscPct + scOn, matching exactly
+    // what the canActivate gate, ADD ROUND label, deficit/recharge prefill,
+    // and the printed bill all use. Pre-v3.114 this used computeHodBreakdown
+    // which ignored discount/SC → wallet would debit more than the bill.
+    const total = computePrintAmounts(allItems).total;
     if (total > bal) { showToast("Insufficient balance. Recharge first."); return; }
 
     // V4 2026-05-11 — webhook tick gate. If a recent online recharge has not
@@ -831,9 +937,12 @@ function WalletOverlay({ cover, staffName, onClose }: {
               ⚠ Chit will print "DUPLICATE / REPRINT" header.<br/>Do NOT hand a 2nd copy to the guest.
             </div>
           )}
-          <button onClick={() => { setBillDone(null); onClose(); }}
+          {/* v3.114 — Khushi: success modal must NOT auto-close the wallet.
+              Bartender taps "DONE" to dismiss this confirmation and returns
+              to the wallet view (still has its own × close button up top). */}
+          <button onClick={() => { setBillDone(null); setActDone(false); setCart({}); }}
             style={{ width: "100%", padding: 14, borderRadius: 12, background: `${goldBg.replace(",.5)", ",.15)")}`, border: `1.5px solid ${goldBg}`, color: goldFg, fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
-            ✓ Done — Close Wallet
+            ✓ DONE
           </button>
         </div>
       </div>
@@ -858,9 +967,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
               <div style={{ fontSize: 22, fontWeight: 900, color: "#00C864" }}>₹{actResult.newBal.toLocaleString("en-IN")}</div>
             </div>
           </div>
-          <button onClick={onClose}
+          {/* v3.114 — stay on wallet view after KOT print; bartender closes
+              manually via the × on the wallet header. */}
+          <button onClick={() => { setActDone(false); setActResult(null); setCart({}); }}
             style={{ width: "100%", padding: 14, borderRadius: 12, background: "rgba(0,200,100,.12)", border: "1.5px solid rgba(0,200,100,.3)", color: "#00C864", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
-            ✓ Done
+            ✓ DONE
           </button>
         </div>
       </div>
@@ -1052,7 +1163,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
               const rdBreak = computeHodBreakdown(rd.items || []);
               const rdTotal = rdBreak.grandTotal;
               return (
-                <div key={idx} style={{ borderTop: idx === 0 ? "2px dashed rgba(229,168,42,.40)" : "1px dashed rgba(229,168,42,.25)", padding: "10px 0 8px" }}>
+                <div key={idx} style={{ borderTop: idx === 0 ? "none" : "1px dashed rgba(229,168,42,.25)", padding: "10px 0 8px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
                     <span style={{ fontSize: 17, fontWeight: 900, color: "#E5A82A", letterSpacing: 0.3, fontVariantNumeric: "tabular-nums" }}>● ROUND {rd.roundNum || idx + 1}</span>
                     <span style={{ fontSize: 13, fontWeight: 900, color: isServed ? "#22c55e" : "#F2C744", letterSpacing: 0.4, display: "inline-flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>
@@ -1086,7 +1197,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
                     <span style={{ fontSize: 11, color: "rgba(255,255,255,.7)", fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", fontFamily: "'Space Grotesk',sans-serif" }}>
                       INCLUSIVE OF ALL TAXES <span style={{ opacity: 0.6, fontSize: 10 }}>▾ VIEW BREAKDOWN</span>
                     </span>
-                    <span style={{ fontSize: 16, fontWeight: 900, color: "#E5A82A", fontVariantNumeric: "tabular-nums", fontFamily: "'Space Grotesk',sans-serif" }}>
+                    {/* v3.114 — Khushi: total amount must be BOLD WHITE and
+                        bigger so bartender + customer can read the grand total
+                        across the bar without leaning in. */}
+                    <span style={{ fontSize: 26, fontWeight: 900, color: "#FFFFFF", fontVariantNumeric: "tabular-nums", fontFamily: "'Space Grotesk',sans-serif", letterSpacing: 0.5 }}>
                       ₹{b.grandTotal.toLocaleString("en-IN")}
                     </span>
                   </summary>
@@ -1171,6 +1285,59 @@ function WalletOverlay({ cover, staffName, onClose }: {
           </div>
         );
       })()}
+
+      {/* 🆕 v3.114 (Khushi LIVE): customer pre-order list moved ABOVE the
+          WALLET ACTIONS card. Bartender reads what was ordered FIRST, then
+          taps PRINT KOT+BILL below — natural top-to-bottom flow. */}
+      {preOrderItems.length > 0 && (
+        <div style={{ background: "rgba(255,200,0,.10)", borderBottom: "1.5px solid rgba(255,200,0,.35)", padding: "14px 16px", fontFamily: "'Space Grotesk',sans-serif" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 900, color: "#FFD700", letterSpacing: 0.3, textTransform: "uppercase" }}>📋 CUSTOMER PRE-ORDER — TAP −/+ IF OUT OF STOCK</div>
+            {editBusy && <div style={{ fontSize: 12, fontWeight: 800, color: "#FFD700" }}>Saving…</div>}
+          </div>
+          {preOrderItems.map((it, i) => {
+            const adjust = async (delta: number) => {
+              if (editBusy) return;
+              const next = preOrderItems.map((x, ix) => ix === i ? { ...x, qty: Math.max(0, (x.qty || 0) + delta) } : x);
+              const cleaned = next.filter((x) => (x.qty || 0) > 0);
+              if (cleaned.length === 0 && !confirm("Removing the last item will cancel the customer's order. Continue?")) return;
+              setEditBusy(true);
+              try { await updatePreparingRoundItems(cover.id, next, staffName); }
+              catch (e: any) { showToast(e?.message || "Edit failed"); }
+              setEditBusy(false);
+            };
+            const remove = async () => {
+              if (editBusy) return;
+              if (!confirm(`Remove "${it.n}" from customer's order? (out of stock / unavailable)`)) return;
+              const next = preOrderItems.map((x, ix) => ix === i ? { ...x, qty: 0 } : x);
+              const cleaned = next.filter((x) => (x.qty || 0) > 0);
+              if (cleaned.length === 0 && !confirm("This was the last item — the entire order will be cancelled. Continue?")) return;
+              setEditBusy(true);
+              try { await updatePreparingRoundItems(cover.id, next, staffName); }
+              catch (e: any) { showToast(e?.message || "Remove failed"); }
+              setEditBusy(false);
+            };
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+                <div style={{ flex: 1, fontSize: 17, fontWeight: 800, color: "#fff" }}>{it.n}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button onClick={() => adjust(-1)} disabled={editBusy}
+                    style={{ width: 34, height: 34, borderRadius: 8, background: "rgba(255,255,255,.08)", border: "1.5px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 18, fontWeight: 900, cursor: editBusy ? "not-allowed" : "pointer" }}>−</button>
+                  <span style={{ fontSize: 18, fontWeight: 900, color: "#FFD700", minWidth: 24, textAlign: "center" }}>{it.qty}</span>
+                  <button onClick={() => adjust(1)} disabled={editBusy}
+                    style={{ width: 34, height: 34, borderRadius: 8, background: "rgba(255,255,255,.08)", border: "1.5px solid rgba(255,255,255,.18)", color: "#fff", fontSize: 18, fontWeight: 900, cursor: editBusy ? "not-allowed" : "pointer" }}>+</button>
+                </div>
+                <div style={{ minWidth: 70, textAlign: "right", fontSize: 16, fontWeight: 900, color: "#FFD700" }}>₹{computeHodBreakdown([it]).grandTotal}</div>
+                <button onClick={remove} disabled={editBusy} title="Out of stock — remove"
+                  style={{ width: 34, height: 34, borderRadius: 8, background: "rgba(239,68,68,.15)", border: "1.5px solid rgba(239,68,68,.45)", color: "#EF4444", fontSize: 15, fontWeight: 900, cursor: editBusy ? "not-allowed" : "pointer" }}>🗑</button>
+              </div>
+            );
+          })}
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 900, color: "#FFD700", marginTop: 10, letterSpacing: 0.3, textTransform: "uppercase" }}>
+            <span>ORDER TOTAL (INCL. TAX)</span><span>₹{preOrderTotal.toLocaleString("en-IN")}</span>
+          </div>
+        </div>
+      )}
 
       {/* 🆕 2026-05-26 v3.29 (Khushi screenshot: "MOVE THIS UP IN THE CENTER /
           LIKE HOW WE HAVE BOX IN THE CAPATIN MODE") — Captain-style ACTION
@@ -1265,15 +1432,18 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 {kotLabel}
               </button>
             )}
-            {/* Disabled-state hint banner so bartender still sees WHY they can't print yet. */}
-            {!canPrintKotBill && (actBusy || billBusy || blocked || tickGateBlocked || over) && (
+            {/* Disabled-state hint banner. v3.114 — for over-balance we now
+                show a one-shot popup (see overAck modal below) and SUPPRESS
+                this inline banner once acknowledged. Other disabled states
+                (busy, blocked, tick gate) still surface inline. */}
+            {!canPrintKotBill && (actBusy || billBusy || blocked || tickGateBlocked) && (
               <div style={{
                 width: "100%", padding: "14px 12px", marginBottom: 10, borderRadius: 12,
                 fontSize: 14, fontWeight: 900, letterSpacing: 0.4, textTransform: "uppercase",
                 textAlign: "center", fontFamily: "'Space Grotesk',sans-serif",
-                background: tickGateBlocked ? "rgba(242,199,68,.10)" : over ? "rgba(239,68,68,.10)" : "rgba(107,107,138,.15)",
-                border: `1.5px solid ${tickGateBlocked ? "rgba(242,199,68,.4)" : over ? "rgba(239,68,68,.45)" : "rgba(107,107,138,.3)"}`,
-                color: tickGateBlocked ? "#F2C744" : over ? "#EF4444" : "rgba(220,220,220,.7)",
+                background: tickGateBlocked ? "rgba(242,199,68,.10)" : "rgba(107,107,138,.15)",
+                border: `1.5px solid ${tickGateBlocked ? "rgba(242,199,68,.4)" : "rgba(107,107,138,.3)"}`,
+                color: tickGateBlocked ? "#F2C744" : "rgba(220,220,220,.7)",
               }}>
                 {kotLabel}
               </div>
@@ -1373,55 +1543,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
           recharge portal, VOID BILL action). Khushi: "AS ITS CLEARLY
           VISIBLE IN BETWEEN". */}
 
-      {preOrderItems.length > 0 && (
-        <div style={{ background: "rgba(255,200,0,.06)", borderBottom: "1px solid rgba(255,200,0,.15)", padding: "10px 16px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: "#ffc800" }}>📋 Customer Pre-Order — tap −/+ if out of stock</div>
-            {editBusy && <div style={{ fontSize: 10, color: "rgba(255,200,0,.6)" }}>Saving…</div>}
-          </div>
-          {preOrderItems.map((it, i) => {
-            const adjust = async (delta: number) => {
-              if (editBusy) return;
-              const next = preOrderItems.map((x, ix) => ix === i ? { ...x, qty: Math.max(0, (x.qty || 0) + delta) } : x);
-              const cleaned = next.filter((x) => (x.qty || 0) > 0);
-              if (cleaned.length === 0 && !confirm("Removing the last item will cancel the customer's order. Continue?")) return;
-              setEditBusy(true);
-              try { await updatePreparingRoundItems(cover.id, next, staffName); }
-              catch (e: any) { showToast(e?.message || "Edit failed"); }
-              setEditBusy(false);
-            };
-            const remove = async () => {
-              if (editBusy) return;
-              if (!confirm(`Remove "${it.n}" from customer's order? (out of stock / unavailable)`)) return;
-              const next = preOrderItems.map((x, ix) => ix === i ? { ...x, qty: 0 } : x);
-              const cleaned = next.filter((x) => (x.qty || 0) > 0);
-              if (cleaned.length === 0 && !confirm("This was the last item — the entire order will be cancelled. Continue?")) return;
-              setEditBusy(true);
-              try { await updatePreparingRoundItems(cover.id, next, staffName); }
-              catch (e: any) { showToast(e?.message || "Remove failed"); }
-              setEditBusy(false);
-            };
-            return (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
-                <div style={{ flex: 1, fontSize: 13, color: "#fff" }}>{it.n}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <button onClick={() => adjust(-1)} disabled={editBusy}
-                    style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: editBusy ? "not-allowed" : "pointer" }}>−</button>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: "#ffc800", minWidth: 18, textAlign: "center" }}>{it.qty}</span>
-                  <button onClick={() => adjust(1)} disabled={editBusy}
-                    style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: editBusy ? "not-allowed" : "pointer" }}>+</button>
-                </div>
-                <div style={{ minWidth: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#F2C744" }}>₹{computeHodBreakdown([it]).grandTotal}</div>
-                <button onClick={remove} disabled={editBusy} title="Out of stock — remove"
-                  style={{ width: 26, height: 26, borderRadius: 6, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)", color: "#EF4444", fontSize: 12, cursor: editBusy ? "not-allowed" : "pointer" }}>🗑</button>
-              </div>
-            );
-          })}
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 800, color: "#ffc800", marginTop: 6 }}>
-            <span>Order Total (incl. tax)</span><span>₹{preOrderTotal.toLocaleString("en-IN")}</span>
-          </div>
-        </div>
-      )}
+      {/* v3.114: original preOrderItems block here moved ABOVE the WALLET
+          ACTIONS card (top-to-bottom flow: read order → tap PRINT KOT+BILL). */}
 
       {/* 🆕 2026-05-26 v3.27 (Khushi screenshots — captain-parity fix) — Menu
           picker is now a FIXED FULL-SCREEN OVERLAY (z-index 80) on top of the
@@ -1486,17 +1609,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
             const showVeg = item.group === "food";
             return (
               <div key={`${item.id}-${item.category}-${item.name}`}
-                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px dashed rgba(255,255,255,.06)" }}>
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: "1px dashed rgba(255,255,255,.08)" }}>
                 <div style={{ flex: 1, paddingRight: 8, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#fff", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.2, lineHeight: 1.2 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 16, color: "#fff", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.2, lineHeight: 1.25 }}>
                     {showVeg && (
-                      <span style={{ display: "inline-block", width: 10, height: 10, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
-                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 4, height: 4, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
+                      <span style={{ display: "inline-block", width: 12, height: 12, border: `1.5px solid ${item.isVeg ? "#22c55e" : "#dc2626"}`, borderRadius: 2, position: "relative", flexShrink: 0 }}>
+                        <span style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 5, height: 5, borderRadius: "50%", background: item.isVeg ? "#22c55e" : "#dc2626" }} />
                       </span>
                     )}
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
                   </div>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 1, fontWeight: 600, lineHeight: 1.2 }}>
+                  <div style={{ fontSize: 14, color: "rgba(255,255,255,.7)", marginTop: 4, fontWeight: 700, lineHeight: 1.2 }}>
                     {/* 🔴 2026-05-20 (Khushi Bug 4) — DISPLAY-ONLY tax-inclusive.
                         Show the customer-facing rounded ₹ (SC + GST baked in)
                         so bar / captain / customer all match. Underlying menu
@@ -1516,14 +1639,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 </div>
                 {qty === 0 ? (
                   <button onClick={() => addToCart(item)}
-                    style={{ padding: "5px 12px", borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.3, cursor: "pointer", flexShrink: 0 }}>ADD +</button>
+                    style={{ padding: "10px 18px", borderRadius: 6, background: "#A02820", border: "none", color: "#fff", fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", flexShrink: 0 }}>ADD +</button>
                 ) : (
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                     <button onClick={() => updateCartQty(item.id, -1)}
-                      style={{ width: 24, height: 24, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", padding: 0 }}>−</button>
-                    <span style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", minWidth: 16, textAlign: "center" }}>{qty}</span>
+                      style={{ width: 34, height: 34, borderRadius: 6, background: "#A02820", border: "none", color: "#fff", fontSize: 18, fontWeight: 900, cursor: "pointer", padding: 0 }}>−</button>
+                    <span style={{ fontSize: 17, fontWeight: 900, color: "#F2C744", minWidth: 22, textAlign: "center" }}>{qty}</span>
                     <button onClick={() => updateCartQty(item.id, 1)}
-                      style={{ width: 24, height: 24, borderRadius: 4, background: "#A02820", border: "none", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", padding: 0 }}>+</button>
+                      style={{ width: 34, height: 34, borderRadius: 6, background: "#A02820", border: "none", color: "#fff", fontSize: 18, fontWeight: 900, cursor: "pointer", padding: 0 }}>+</button>
                   </div>
                 )}
               </div>
@@ -1570,94 +1693,146 @@ function WalletOverlay({ cover, staffName, onClose }: {
             escapes that trap and lets it float over the entire viewport. */}
         {rechargeOpen && typeof document !== "undefined" && document.body && createPortal(
           <div onClick={() => setRechargeOpen(false)}
-            style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.55)", zIndex: 99990, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60, paddingBottom: 20, paddingLeft: 12, paddingRight: 12, backdropFilter: "blur(2px)", overflowY: "auto" }}>
-        <div ref={rechargeRowRef} onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100vh - 80px)", overflowY: "auto", background: "linear-gradient(135deg, rgba(35,28,12,.99), rgba(15,10,5,.99))", border: "1.5px solid rgba(242,199,68,.55)", borderRadius: 14, padding: 14, position: "relative", boxShadow: "0 12px 48px rgba(0,0,0,.7)" }}>
-          <button onClick={() => setRechargeOpen(false)} title="Close"
-            style={{ position: "absolute", top: 8, right: 10, width: 28, height: 28, borderRadius: 8, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", color: "#EF4444", fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0, fontWeight: 900 }}>×</button>
-          <div style={{ fontSize: 13, fontWeight: 900, color: "#F2C744", marginBottom: 10, paddingRight: 32 }}>
-            ➕ RECHARGE WALLET · Bal ₹{bal.toLocaleString("en-IN")}
-          </div>
-          {/* V3 2026-05-11 — deficit hint banner. Surfaces the EXACT shortfall
-              (and the auto-rounded ₹50 recharge suggestion) so the bartender
-              can just hit ➕ Recharge. Pulses gold to grab attention. */}
-          {deficit > 0 && (() => {
-            // 2026-05-15 (Khushi BUG FIX) — banner now truthful. If input
-            // matches the exact shortfall, say "pre-filled". Otherwise prompt
-            // bartender to tap RESET (no more "pre-filled ₹884" lie next to
-            // a stale ₹87 in the input).
-            const currentAmt = parseInt(rcAmt) || 0;
-            const matches = currentAmt === suggestedRecharge;
-            return (
-              <div style={{ background: "rgba(239,68,68,.10)", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, fontSize: 12, fontWeight: 800, color: "#EF4444", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · {matches ? `pre-filled ₹${suggestedRecharge.toLocaleString("en-IN")}` : `tap RESET → ₹${suggestedRecharge.toLocaleString("en-IN")}`}</span>
-                <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
-                  style={{ padding: "4px 8px", borderRadius: 6, background: matches ? "rgba(242,199,68,.15)" : "rgba(242,199,68,.30)", border: "1px solid rgba(242,199,68,.4)", color: "#F2C744", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-                  ↻ RESET
-                </button>
+            style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.78)", zIndex: 99990, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 40, paddingBottom: 20, paddingLeft: 12, paddingRight: 12, backdropFilter: "blur(3px)", overflowY: "auto", fontFamily: "'Space Grotesk',sans-serif" }}>
+            <div ref={rechargeRowRef} onClick={(e) => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 460, maxHeight: "calc(100vh - 60px)", overflowY: "auto", background: "linear-gradient(135deg, rgba(28,22,10,.99), rgba(10,8,4,.99))", border: "2px solid rgba(242,199,68,.55)", borderRadius: 18, padding: 22, position: "relative", boxShadow: "0 16px 56px rgba(0,0,0,.8)" }}>
+              <button onClick={() => setRechargeOpen(false)} title="Close"
+                style={{ position: "absolute", top: 12, right: 14, width: 36, height: 36, borderRadius: 10, background: "rgba(239,68,68,.18)", border: "1.5px solid rgba(239,68,68,.5)", color: "#EF4444", fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 0, fontWeight: 900 }}>×</button>
+
+              {/* HEADER */}
+              <div style={{ fontSize: 20, fontWeight: 900, color: "#F2C744", marginBottom: 14, paddingRight: 42, letterSpacing: .5 }}>
+                ➕ RECHARGE WALLET
               </div>
-            );
-          })()}
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="Recharge amount"
-              style={{ flex: 1, background: "rgba(0,0,0,.55)", border: `1px solid ${deficit > 0 ? "rgba(239,68,68,.5)" : "rgba(242,199,68,.35)"}`, borderRadius: 8, padding: "10px 12px", color: "#fff", fontSize: 15, outline: "none", fontWeight: deficit > 0 ? 800 : 400 }} />
-            <button onClick={doRecharge} disabled={rcBusy}
-              style={{ padding: "10px 16px", borderRadius: 8, background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1px solid rgba(242,199,68,.6)", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap", boxShadow: "0 2px 12px rgba(242,199,68,.3)" }}>
-              {rcBusy ? "..." : "➕ Recharge"}
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-            {[500, 999, 1499, 2000].map((a) => (
-              <button key={a} onClick={() => { setRcAmt(String(a)); setRcAmtTouched(true); }}
-                style={{ padding: "6px 10px", borderRadius: 7, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.08)", color: "rgba(255,255,255,.5)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                +₹{a}
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {(["cash", "upi", "card", "split"] as const).map((m) => {
-              // 🔴 2026-05-25 (Khushi) — ALL 4 methods are now plain MANUAL
-              // buttons. No Razorpay tablet popup, no Pine Labs gating —
-              // bartender collects money physically (cash drawer / customer
-              // UPI app / customer card swipe) and just taps the matching
-              // button to credit the wallet. Card-machine integration is
-              // a future ticket; until then this matches the real-world
-              // flow Khushi runs tonight.
-              return (
-                <button key={m} onClick={() => setRcMethod(m)}
-                  style={{ flex: 1, padding: 10, borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
-                    background: rcMethod === m ? "rgba(242,199,68,.18)" : "rgba(255,255,255,.06)",
-                    border: `1.5px solid ${rcMethod === m ? "rgba(242,199,68,.55)" : "rgba(255,255,255,.10)"}`,
-                    color: rcMethod === m ? "#F2C744" : "rgba(255,255,255,.65)" }}>
-                  {m === "cash" ? "💵 Cash" : m === "upi" ? "📱 UPI" : m === "card" ? "💳 Card" : "🔀 Split"}
-                </button>
-              );
-            })}
-          </div>
-          {rcMethod === "split" && (
-            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-              {(["cash", "upi", "card"] as const).map((k) => (
-                <div key={k}>
-                  <div style={{ fontSize: 9, color: "rgba(255,255,255,.4)", textTransform: "uppercase", letterSpacing: .6, marginBottom: 3, textAlign: "center" }}>
-                    {k === "cash" ? "💵 Cash" : k === "upi" ? "📱 UPI" : "💳 Card"}
-                  </div>
-                  <input type="number" value={rcSplit[k]} onChange={(e) => setRcSplit(s => ({ ...s, [k]: e.target.value }))} placeholder="0"
-                    style={{ width: "100%", boxSizing: "border-box", background: "rgba(0,0,0,.55)", border: "1px solid rgba(242,199,68,.3)", borderRadius: 7, padding: "7px 8px", color: "#fff", fontSize: 13, textAlign: "center", outline: "none" }} />
+
+              {/* GREEN BALANCE CARD — customer's available balance */}
+              <div style={{ background: "rgba(0,200,100,.10)", border: "2px solid rgba(0,200,100,.55)", borderRadius: 12, padding: "14px 16px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 0 0 1px rgba(0,200,100,.18) inset" }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(0,200,100,.75)", letterSpacing: 1.2, marginBottom: 4 }}>AVAILABLE BALANCE</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "rgba(255,255,255,.75)" }}>{cv.name || cv.tableId || "WALLET"}</div>
                 </div>
-              ))}
-              {(() => {
-                const amt = parseInt(rcAmt) || 0;
-                const sum = (parseInt(rcSplit.cash) || 0) + (parseInt(rcSplit.upi) || 0) + (parseInt(rcSplit.card) || 0);
-                const ok = amt > 0 && sum === amt;
+                <div style={{ fontSize: 30, fontWeight: 900, color: "#00E676", textShadow: "0 0 14px rgba(0,200,100,.4)" }}>
+                  ₹{bal.toLocaleString("en-IN")}
+                </div>
+              </div>
+
+              {/* DEFICIT BANNER (if any) */}
+              {deficit > 0 && (() => {
+                const currentAmt = parseInt(rcAmt) || 0;
+                const matches = currentAmt === suggestedRecharge;
                 return (
-                  <div style={{ gridColumn: "1 / -1", fontSize: 10, textAlign: "center", marginTop: 2, color: ok ? "#00C864" : "rgba(255,255,255,.5)", fontWeight: 700 }}>
-                    Sum: ₹{sum} {amt > 0 && `/ ₹${amt}`} {ok ? "✓" : sum > amt ? "(over)" : ""}
+                  <div style={{ background: "rgba(239,68,68,.12)", border: "1.5px solid rgba(239,68,68,.45)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, fontSize: 13, fontWeight: 800, color: "#EF4444", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · {matches ? `set to ₹${suggestedRecharge.toLocaleString("en-IN")}` : `tap RESET → ₹${suggestedRecharge.toLocaleString("en-IN")}`}</span>
+                    <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
+                      style={{ padding: "6px 10px", borderRadius: 8, background: matches ? "rgba(242,199,68,.18)" : "rgba(242,199,68,.35)", border: "1px solid rgba(242,199,68,.5)", color: "#F2C744", fontSize: 12, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap" }}>
+                      ↻ RESET
+                    </button>
                   </div>
                 );
               })()}
+
+              {/* AMOUNT INPUT — big */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.85)", letterSpacing: 1.2, marginBottom: 6 }}>ENTER AMOUNT</div>
+                <div style={{ display: "flex", alignItems: "center", background: "rgba(0,0,0,.55)", border: `2px solid ${deficit > 0 ? "rgba(239,68,68,.55)" : "rgba(242,199,68,.45)"}`, borderRadius: 12, padding: "4px 14px" }}>
+                  <span style={{ fontSize: 26, fontWeight: 900, color: "#F2C744", marginRight: 6 }}>₹</span>
+                  <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="0"
+                    style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#fff", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
+                </div>
+              </div>
+
+              {/* PAYMENT METHOD */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.85)", letterSpacing: 1.2, marginBottom: 8 }}>PAYMENT METHOD</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+                  {(["cash", "upi", "card", "split"] as const).map((m) => (
+                    <button key={m} onClick={() => setRcMethod(m)}
+                      style={{ padding: "14px 6px", borderRadius: 10, fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: .3,
+                        background: rcMethod === m ? "rgba(242,199,68,.22)" : "rgba(255,255,255,.05)",
+                        border: `2px solid ${rcMethod === m ? "rgba(242,199,68,.65)" : "rgba(255,255,255,.10)"}`,
+                        color: rcMethod === m ? "#F2C744" : "rgba(255,255,255,.65)" }}>
+                      <div style={{ fontSize: 20, marginBottom: 4 }}>{m === "cash" ? "💵" : m === "upi" ? "📱" : m === "card" ? "💳" : "🔀"}</div>
+                      {m === "cash" ? "CASH" : m === "upi" ? "UPI" : m === "card" ? "CARD" : "SPLIT"}
+                    </button>
+                  ))}
+                </div>
+                {rcMethod === "split" && (
+                  <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    {(["cash", "upi", "card"] as const).map((k) => (
+                      <div key={k}>
+                        <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", textTransform: "uppercase", letterSpacing: .8, marginBottom: 4, textAlign: "center", fontWeight: 800 }}>
+                          {k === "cash" ? "💵 CASH" : k === "upi" ? "📱 UPI" : "💳 CARD"}
+                        </div>
+                        <input type="number" value={rcSplit[k]} onChange={(e) => setRcSplit(s => ({ ...s, [k]: e.target.value }))} placeholder="0"
+                          style={{ width: "100%", boxSizing: "border-box", background: "rgba(0,0,0,.55)", border: "1.5px solid rgba(242,199,68,.35)", borderRadius: 8, padding: "10px 8px", color: "#fff", fontSize: 16, fontWeight: 800, textAlign: "center", outline: "none" }} />
+                      </div>
+                    ))}
+                    {(() => {
+                      const amt = parseInt(rcAmt) || 0;
+                      const sum = (parseInt(rcSplit.cash) || 0) + (parseInt(rcSplit.upi) || 0) + (parseInt(rcSplit.card) || 0);
+                      const ok = amt > 0 && sum === amt;
+                      return (
+                        <div style={{ gridColumn: "1 / -1", fontSize: 12, textAlign: "center", marginTop: 4, color: ok ? "#00E676" : "rgba(255,255,255,.55)", fontWeight: 800 }}>
+                          SUM: ₹{sum} {amt > 0 && `/ ₹${amt}`} {ok ? "✓" : sum > amt ? "(OVER)" : ""}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+
+              {/* DISCOUNT — opt-in dropdown. Default 0% (no discount) so
+                  bartender has to deliberately pick one per order. Presets up
+                  to 50% apply on the spot; CUSTOM (> 50%) opens in-app
+                  Manager PIN modal. */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(242,199,68,.85)", letterSpacing: 1.2, marginBottom: 6 }}>DISCOUNT (OPTIONAL)</div>
+                <select value={barDiscPct <= 50 ? String(barDiscPct) : "custom"}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "custom") { setBarDiscPct(0); requestDiscount(); return; }
+                    setBarDiscPct(Math.max(0, Math.min(50, parseInt(v) || 0)));
+                  }}
+                  style={{ width: "100%", boxSizing: "border-box", background: "rgba(0,0,0,.55)", border: "2px solid rgba(242,199,68,.45)", borderRadius: 12, padding: "14px 14px", color: barDiscPct > 0 ? "#F2C744" : "#fff", fontSize: 16, fontWeight: 900, outline: "none", cursor: "pointer", appearance: "none", WebkitAppearance: "none", backgroundImage: "linear-gradient(45deg, transparent 50%, #F2C744 50%), linear-gradient(135deg, #F2C744 50%, transparent 50%)", backgroundPosition: "calc(100% - 18px) center, calc(100% - 12px) center", backgroundSize: "6px 6px, 6px 6px", backgroundRepeat: "no-repeat" }}>
+                  {[0, 5, 10, 15, 20, 25, 30, 40, 50].map((q) => (
+                    <option key={q} value={String(q)} style={{ background: "#1a1208", color: "#fff" }}>
+                      {q === 0 ? "NO DISCOUNT (0%)" : `${q}%`}
+                    </option>
+                  ))}
+                  <option value="custom" style={{ background: "#1a1208", color: "#F2C744" }}>CUSTOM % (MANAGER PIN)</option>
+                </select>
+              </div>
+
+              {/* SERVICE TAX toggle — default ON. OFF needs Manager PIN. */}
+              <button onClick={requestScToggle}
+                style={{ width: "100%", padding: "12px 14px", marginBottom: 14, borderRadius: 12, background: scOn ? "rgba(242,199,68,.12)" : "rgba(242,199,68,.04)", border: `1.5px solid rgba(242,199,68,.55)`, color: "#F2C744", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .5, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>🧾 SERVICE TAX (10%)</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 13, fontWeight: 900, opacity: .95 }}>{scOn ? "ON" : "OFF (MGR)"}</span>
+                  <span style={{ width: 44, height: 24, borderRadius: 999, background: scOn ? "rgba(242,199,68,.7)" : "rgba(255,255,255,.18)", position: "relative", transition: "background .15s" }}>
+                    <span style={{ position: "absolute", top: 2, left: scOn ? 22 : 2, width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.4)", transition: "left .15s" }} />
+                  </span>
+                </span>
+              </button>
+
+              {/* BIG RECHARGE CTA */}
+              <button onClick={doRecharge} disabled={rcBusy || !rcAmt || parseInt(rcAmt) < 1}
+                style={{ width: "100%", padding: "16px 14px", borderRadius: 14, background: rcBusy || !rcAmt ? "rgba(242,199,68,.25)" : "linear-gradient(135deg,#F2C744,#A07F2E)", border: "2px solid rgba(242,199,68,.7)", color: "#000", fontSize: 17, fontWeight: 900, cursor: rcBusy ? "not-allowed" : "pointer", letterSpacing: .6, boxShadow: "0 4px 18px rgba(242,199,68,.4)" }}>
+                {rcBusy ? "PROCESSING..." : `➕ RECHARGE ₹${parseInt(rcAmt) || 0}`}
+              </button>
             </div>
-          )}
-        </div>
           </div>,
+          document.body
+        )}
+
+        {/* v3.114 — DISCOUNT modal (in-app, no browser popup). Quick chips
+            0/10/20/30/40/50% one-tap; custom % input; above 50% reveals
+            inline Manager PIN field (validated via BAR_MANAGER_HASH). */}
+        {discOpen && typeof document !== "undefined" && document.body && createPortal(
+          <DiscountModal
+            current={barDiscPct}
+            onApply={(pct) => { setBarDiscPct(pct); setDiscOpen(false); showToast(`✅ Discount set to ${pct}%`); }}
+            onClose={() => setDiscOpen(false)}
+          />,
           document.body
         )}
 
@@ -1858,6 +2033,34 @@ function WalletOverlay({ cover, staffName, onClose }: {
               style={{ width: "100%", padding: 10, borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: ssBusy ? "not-allowed" : "pointer",
                 background: "transparent", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.6)" }}>
               ← Cancel (don't activate)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* v3.114 — OVER-BALANCE popup. Fires the moment cart total exceeds
+          wallet balance. OK dismisses and suppresses the inline disabled
+          banner; the RECHARGE button below keeps pulsing red. Re-arms when
+          cart goes back under balance. Fail-open: never blocks any action. */}
+      {activeTotal > bal && !overAck && !showAddOrder && (
+        <div
+          onClick={() => setOverAck(true)}
+          style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,.78)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: "'Space Grotesk',sans-serif" }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: "#1a0e0e", border: "2.5px solid #EF4444", borderRadius: 16, padding: "28px 24px", maxWidth: 420, width: "100%", textAlign: "center", boxShadow: "0 12px 48px rgba(239,68,68,.4)" }}>
+            <div style={{ fontSize: 44, marginBottom: 8 }}>⚠️</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444", letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 12 }}>
+              RECHARGE OF ₹{(activeTotal - bal).toLocaleString("en-IN")} REQUIRED
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "rgba(255,255,255,.85)", lineHeight: 1.5, marginBottom: 20 }}>
+              Cart total ₹{activeTotal.toLocaleString("en-IN")} exceeds wallet balance ₹{bal.toLocaleString("en-IN")}.
+              <br /><br />
+              Tap the red <span style={{ color: "#EF4444", fontWeight: 900 }}>RECHARGE ₹{(activeTotal - bal).toLocaleString("en-IN")}</span> button below to add funds.
+            </div>
+            <button onClick={() => setOverAck(true)}
+              style={{ width: "100%", padding: "16px 14px", borderRadius: 12, fontSize: 17, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, textTransform: "uppercase",
+                background: "linear-gradient(135deg,#F2C744,#A07F2E)", border: "1.5px solid rgba(242,199,68,.65)", color: "#000", boxShadow: "0 4px 22px rgba(242,199,68,.32)" }}>
+              ✓ OK, GOT IT
             </button>
           </div>
         </div>
@@ -2135,6 +2338,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   const [scanning, setScanning] = useState(false);
   // 🆕 2026-05-26 (Khushi big-night batch) — NC + BILL DUE.
   const [ncOpen, setNcOpen] = useState(false);
+  // 🆕 v3.114 (Khushi LIVE): in-app modal for no-wallet-found scans (replaces tiny top toast).
+  const [noWalletQr, setNoWalletQr] = useState<string | null>(null);
   const [billDueOpen, setBillDueOpen] = useState(false);
   const [billDueRows, setBillDueRows] = useState<BillDueDoc[]>([]);
   useEffect(() => subscribeBillDue(setBillDueRows), []);
@@ -2232,8 +2437,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
     try {
       const cover = await getCoverByRef(ref);
       if (cover) tryOpenCover(cover);
-      else showToast("No wallet found for this QR code");
-    } catch { showToast("Error looking up QR code"); }
+      else setNoWalletQr(ref);
+    } catch { setNoWalletQr(ref); }
   };
 
   const handleSearch = async () => {
@@ -2425,7 +2630,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             Manager PIN gates "Mark Cleared" on each row. */}
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <button onClick={() => setNcOpen(true)}
-            style={{ flex: 1, padding: 14, borderRadius: 12, background: "linear-gradient(135deg,rgba(168,85,247,.20),rgba(168,85,247,.06))", border: "2px solid rgba(168,85,247,.55)", color: "#E9D5FF", fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer" }}>
+            style={{ flex: 1, padding: 14, borderRadius: 12, background: "rgba(201,168,76,.08)", border: "2px solid #C9A84C", color: "#C9A84C", fontSize: 14, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer" }}>
             🎁 NC — DJ / OWNER / PROMOTER
           </button>
           <button onClick={() => setBillDueOpen(true)}
@@ -2552,8 +2757,42 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
           onOpen={() => { setActiveCover(previewCover); setPreviewCover(null); }}
         />
       )}
-      {activeCover && <WalletOverlay cover={activeCover} staffName={staffName} onClose={() => { setActiveCover(null); setResults([]); }} />}
+      {activeCover && <WalletOverlay key={activeCover.id} cover={activeCover} staffName={staffName} onClose={() => { setActiveCover(null); setResults([]); }} />}
       {ncOpen && <NcModal staffName={staffName} onClose={() => setNcOpen(false)} />}
+
+      {/* 🆕 v3.114 (Khushi LIVE): in-app modal for "no wallet found" QR scans.
+          Was a tiny top-of-screen toast — bartender misread or missed it.
+          Now: centered red-bordered card, clear instruction to activate in
+          Door Mode, big dismiss button. Fail-open: scan again any time. */}
+      {noWalletQr && (
+        <div
+          onClick={() => setNoWalletQr(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10003, padding: 24 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 380, width: "100%", background: "#0d0a0a", border: "2px solid #EF4444", borderRadius: 18, padding: 28, textAlign: "center", boxShadow: "0 0 60px rgba(239,68,68,.35)" }}
+          >
+            <div style={{ fontSize: 48, marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: "#FCA5A5", marginBottom: 10, letterSpacing: 0.5 }}>
+              NO WALLET FOUND
+            </div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginBottom: 6, fontFamily: "monospace", wordBreak: "break-all" }}>
+              QR: {noWalletQr}
+            </div>
+            <div style={{ fontSize: 15, color: "#fff", lineHeight: 1.5, marginBottom: 22, marginTop: 14 }}>
+              This QR is <b>not activated yet</b>.<br />
+              Please ask the guest to <b style={{ color: "#C9A84C" }}>activate at DOOR MODE</b> first, then scan again here.
+            </div>
+            <button
+              onClick={() => setNoWalletQr(null)}
+              style={{ width: "100%", padding: 14, borderRadius: 12, background: "#C9A84C", color: "#030305", fontSize: 15, fontWeight: 900, letterSpacing: 1, border: "none", cursor: "pointer" }}
+            >
+              OK, GOT IT
+            </button>
+          </div>
+        </div>
+      )}
       {billDueOpen && <BillDueModal rows={billDueRows} staffName={staffName} onClose={() => setBillDueOpen(false)} />}
     </div>
   );
