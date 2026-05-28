@@ -4004,6 +4004,7 @@ function FloorPlanView({
   readyKDSResIds,
   onSelectReservation, onSelectFreeTable,
   focusFloorKey, focusModeOn, tabletFloorLabel, onToggleFocusMode,
+  tableCallRequestCount, onOpenTableQrModal,
 }: {
   reservations: HodTableReservation[];
   customerSearch: string;
@@ -4028,6 +4029,11 @@ function FloorPlanView({
   focusModeOn: boolean;
   tabletFloorLabel: string | null;
   onToggleFocusMode: () => void;
+  // 🆕 v3.139 — count of pending table-QR call_waiter/place_order rows + handler
+  // to open the fullscreen modal. Lives on parent CaptainMode so the subscribe +
+  // ack stay co-located with the chime + alert badge state.
+  tableCallRequestCount: number;
+  onOpenTableQrModal: () => void;
 }) {
   const [activeFloor, setActiveFloor] = useState<FloorKey>(focusFloorKey || "dining");
   // 🆕 2026-05-26 v3.10 — when focus mode flips ON (or the tablet's floor
@@ -4441,6 +4447,36 @@ function FloorPlanView({
         </div>
       )}
 
+      {/* 🆕 v3.139 (Khushi 28-May) — TABLE QR access pill. Sits ABOVE the floor
+          tabs. Pulses red with a count when any pending table-QR request is
+          waiting (call_waiter OR place_order). Tap → opens fullscreen modal
+          with the call list + ACKNOWLEDGE buttons. When zero pending, the
+          pill renders muted ("0") so captain can still open the modal to
+          confirm everything's clear / view past acks via the listener cache. */}
+      <button
+        onClick={onOpenTableQrModal}
+        style={{
+          width: "100%", marginTop: 4, padding: "12px 14px", borderRadius: 12,
+          background: tableCallRequestCount > 0
+            ? "linear-gradient(90deg,#7f1d1d,#dc2626,#7f1d1d)"
+            : "rgba(255,255,255,.04)",
+          border: `2px solid ${tableCallRequestCount > 0 ? "#EF4444" : "rgba(255,255,255,.12)"}`,
+          color: tableCallRequestCount > 0 ? "#F2EBD3" : "rgba(242,235,211,.65)",
+          fontSize: 13, fontWeight: 900, letterSpacing: 1, textTransform: "uppercase",
+          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between",
+          fontFamily: "'Manrope','Space Grotesk',sans-serif",
+          animation: tableCallRequestCount > 0 ? "hodCallPulse 1.2s ease-in-out infinite" : "none",
+          boxShadow: tableCallRequestCount > 0 ? "0 6px 22px rgba(239,68,68,.35)" : "none",
+        }}
+      >
+        <span>🛎 TABLE QR{tableCallRequestCount > 0 ? ` · ${tableCallRequestCount} PENDING` : ""}</span>
+        <span style={{
+          fontSize: 11, fontWeight: 900, letterSpacing: 0.4,
+          background: tableCallRequestCount > 0 ? "rgba(0,0,0,.4)" : "rgba(255,255,255,.06)",
+          padding: "4px 10px", borderRadius: 6,
+        }}>{tableCallRequestCount > 0 ? "TAP TO OPEN" : "0 — TAP TO VIEW"}</span>
+      </button>
+
       {/* Floor tabs — Ground/Dining/Rooftop */}
       {/* 🆕 2026-05-26 v3.10 (code-review fix) — when Focus Mode is locked to
           a floor, the OTHER tabs become disabled. Reason: their reservations
@@ -4759,6 +4795,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // rendered as a fixed-position overlay below — zero impact on floor plan.
   // 🛟 FAIL-OPEN: subscribe → [] on error; chime guarded by try/catch.
   const [tableCallRequests, setTableCallRequests] = useState<HodTableCallRequest[]>([]);
+  // 🆕 v3.139 (Khushi 28-May) — TABLE QR moved from floating banner to a
+  // dedicated TAB above the floor selector. Tab pulses red when pending > 0.
+  // Click → fullscreen modal with the same row + ACKNOWLEDGE UI we already had.
+  const [showTableQrModal, setShowTableQrModal] = useState(false);
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
   // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
   // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
@@ -4850,67 +4890,85 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   return (
     <div className="captain-v2" style={{ minHeight: "100vh", background: "#050507", color: "#F2EBD3", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
       <WaiterCallBanner staffName={captainName} role="captain" />
-      {/* 🆕 2026-05-28 v3.138 — TABLE-QR walk-in call banner. Fixed-position
-          top-right overlay, gold border, pulses red when any pending row
-          exists. Each row = ACKNOWLEDGE button + tableId + customer + items
-          summary. Independent of floor-plan paint logic (zero coupling).
-          Hidden when empty. */}
-      {tableCallRequests.length > 0 && (
-        <div style={{
-          position: "fixed", top: 70, right: 12, zIndex: 999, maxWidth: 360, width: "calc(100vw - 24px)",
-          background: "linear-gradient(135deg,#0A0A0A,#1F1F1F)",
-          border: "2px solid #EF4444", borderRadius: 14,
-          boxShadow: "0 12px 36px rgba(239,68,68,.45)",
-          maxHeight: "70vh", overflowY: "auto",
-          animation: "hodCallPulse 1.2s ease-in-out infinite",
+      {/* 🆕 v3.139 (Khushi 28-May) — TABLE QR fullscreen modal. Opens from the
+          pulsing TABLE QR pill below the floor tabs. Same row + ACKNOWLEDGE
+          design as the previous floating banner — just bigger and accessed
+          on-demand via the tab pill so it doesn't permanently eat real estate.
+          Captain still gets the chime + 8s alert badge on new rows. */}
+      {showTableQrModal && (
+        <div onClick={() => setShowTableQrModal(false)} style={{
+          position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.82)",
+          display: "flex", alignItems: "flex-start", justifyContent: "center",
+          padding: "60px 12px 24px", overflowY: "auto",
         }}>
-          <div style={{
-            padding: "10px 14px", background: "linear-gradient(90deg,#7f1d1d,#dc2626,#7f1d1d)",
-            color: "#F2EBD3", fontSize: 13, fontWeight: 900, letterSpacing: 1,
-            textTransform: "uppercase", borderTopLeftRadius: 12, borderTopRightRadius: 12,
-            position: "sticky", top: 0,
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "100%", maxWidth: 560,
+            background: "linear-gradient(135deg,#0A0A0A,#1F1F1F)",
+            border: "2px solid #EF4444", borderRadius: 16,
+            boxShadow: "0 16px 48px rgba(239,68,68,.45)",
           }}>
-            🛎 TABLE QR · {tableCallRequests.length} PENDING
-          </div>
-          <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-            {tableCallRequests.map((r) => {
-              const mins = Math.max(0, Math.floor((Date.now() - new Date(r.createdAt).getTime()) / 60000));
-              const isOrder = r.type === "place_order";
-              const itemSummary = (r.items || []).map((i) => `${i.name}×${i.qty}`).join(" · ");
-              const total = (r.items || []).reduce((s, i) => s + (i.price || 0) * (i.qty || 0), 0);
-              return (
-                <div key={r.id} style={{
-                  background: "rgba(0,0,0,.5)", border: `1.5px solid ${isOrder ? "#F2C744" : "#EF4444"}`,
-                  borderRadius: 10, padding: "10px 12px",
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: isOrder ? "#F2C744" : "#FCA5A5", letterSpacing: 0.6 }}>
-                      {isOrder ? "📋 NEW ORDER" : "🛎 CALL WAITER"} · {r.tableId}
-                    </div>
-                    <div style={{ fontSize: 10, color: "rgba(242,235,211,.6)", fontWeight: 700 }}>
-                      {mins === 0 ? "JUST NOW" : `${mins}m ago`}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#F2EBD3", marginBottom: 2 }}>
-                    {r.customerName || "Guest"} · {r.customerPhone || "—"}
-                  </div>
-                  {isOrder && itemSummary && (
-                    <div style={{ fontSize: 11, color: "rgba(242,235,211,.78)", lineHeight: 1.4, marginBottom: 6, wordBreak: "break-word" }}>
-                      {itemSummary}{total > 0 ? ` · ₹${total.toLocaleString("en-IN")}` : ""}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => acknowledgeTableCallRequest(r.id, captainName)}
-                    style={{
-                      width: "100%", padding: "8px 12px", marginTop: 4,
-                      background: "#F2C744", color: "#0A0A0A", border: "none", borderRadius: 8,
-                      fontSize: 12, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase",
-                      cursor: "pointer", fontFamily: "'Space Grotesk',sans-serif",
-                    }}
-                  >✓ ACKNOWLEDGE · ON IT</button>
+            <div style={{
+              padding: "14px 18px", background: "linear-gradient(90deg,#7f1d1d,#dc2626,#7f1d1d)",
+              color: "#F2EBD3", fontSize: 15, fontWeight: 900, letterSpacing: 1.2,
+              textTransform: "uppercase", borderTopLeftRadius: 14, borderTopRightRadius: 14,
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span>🛎 TABLE QR · {tableCallRequests.length} PENDING</span>
+              <button onClick={() => setShowTableQrModal(false)} style={{
+                background: "rgba(0,0,0,.4)", border: "1px solid rgba(255,255,255,.3)",
+                color: "#F2EBD3", borderRadius: 8, padding: "5px 12px",
+                fontSize: 11, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer",
+              }}>✕ CLOSE</button>
+            </div>
+            <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10, maxHeight: "78vh", overflowY: "auto" }}>
+              {tableCallRequests.length === 0 ? (
+                <div style={{ padding: "40px 16px", textAlign: "center", color: "rgba(242,235,211,.55)", fontSize: 13, fontWeight: 700 }}>
+                  No pending table-QR requests right now.
                 </div>
-              );
-            })}
+              ) : tableCallRequests.map((r) => {
+                const mins = Math.max(0, Math.floor((Date.now() - new Date(r.createdAt).getTime()) / 60000));
+                const isOrder = r.type === "place_order";
+                const itemSummary = (r.items || []).map((i) => `${i.name}×${i.qty}`).join(" · ");
+                const total = (r.items || []).reduce((s, i) => s + (i.price || 0) * (i.qty || 0), 0);
+                return (
+                  <div key={r.id} style={{
+                    background: "rgba(0,0,0,.5)", border: `1.5px solid ${isOrder ? "#F2C744" : "#EF4444"}`,
+                    borderRadius: 10, padding: "12px 14px",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <div style={{ fontSize: 13, fontWeight: 900, color: isOrder ? "#F2C744" : "#FCA5A5", letterSpacing: 0.6 }}>
+                        {isOrder ? "📋 NEW ORDER" : "🛎 CALL WAITER"} · {r.tableId}
+                      </div>
+                      <div style={{ fontSize: 10, color: "rgba(242,235,211,.6)", fontWeight: 700 }}>
+                        {mins === 0 ? "JUST NOW" : `${mins}m ago`}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "#F2EBD3", marginBottom: 2 }}>
+                      {r.customerName || "Guest"} · {r.customerPhone || "—"}
+                    </div>
+                    {r.customerEmail && (
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(242,235,211,.55)", marginBottom: 4 }}>
+                        {r.customerEmail}
+                      </div>
+                    )}
+                    {isOrder && itemSummary && (
+                      <div style={{ fontSize: 12, color: "rgba(242,235,211,.85)", lineHeight: 1.5, marginBottom: 8, wordBreak: "break-word" }}>
+                        {itemSummary}{total > 0 ? ` · ₹${total.toLocaleString("en-IN")}` : ""}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => acknowledgeTableCallRequest(r.id, captainName)}
+                      style={{
+                        width: "100%", padding: "10px 12px", marginTop: 4,
+                        background: "#F2C744", color: "#0A0A0A", border: "none", borderRadius: 8,
+                        fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase",
+                        cursor: "pointer", fontFamily: "'Space Grotesk',sans-serif",
+                      }}
+                    >✓ ACKNOWLEDGE · ON IT</button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -5174,6 +5232,8 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         focusModeOn={focusMode}
         tabletFloorLabel={tabletFloor ? (tabletFloor === "ground" ? "GROUND" : tabletFloor === "first" ? "DINING" : "ROOFTOP") : null}
         onToggleFocusMode={toggleFocusMode}
+        tableCallRequestCount={tableCallRequests.length}
+        onOpenTableQrModal={() => setShowTableQrModal(true)}
       />
 
       {showWalkIn && (
