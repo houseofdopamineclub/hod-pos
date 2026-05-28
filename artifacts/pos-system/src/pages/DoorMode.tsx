@@ -389,10 +389,10 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#0C0816", border: "1.5px solid rgba(200,166,69,0.3)", borderRadius: 18, padding: 22, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: "#C8A645", letterSpacing: 1.5, marginBottom: 10 }}>💰 COVER CHARGE</div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>{booking.name || "Guest"}</div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginBottom: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#030305", border: "1.5px solid #C9A84C", borderRadius: 18, padding: 24, width: "100%", maxWidth: 440, maxHeight: "92vh", overflowY: "auto", fontFamily: "'Space Grotesk', system-ui, sans-serif" }}>
+        <div style={{ fontSize: 14, fontWeight: 900, color: "#C9A84C", letterSpacing: 2, marginBottom: 12 }}>💰 COVER CHARGE</div>
+        <div style={{ fontSize: 20, fontWeight: 900, color: "#fff", letterSpacing: .5 }}>{(booking.name || "GUEST").toUpperCase()}</div>
+        <div style={{ fontSize: 13, color: "rgba(255,255,255,.6)", marginBottom: 18, marginTop: 4 }}>
           {booking.eventTitle || ""}{booking._isGuestList ? " · Guest List" : paidOnline > 0 ? ` · Paid online ₹${paidOnline}` : isCash ? ` · 💵 Pay at venue ₹${booking.total || 0}` : ""}
         </div>
 
@@ -404,47 +404,47 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           <div style={{ textAlign: "center", padding: 24, color: "rgba(255,255,255,.5)", fontSize: 12 }}>Checking cover status…</div>
         ) : existing ? (
           <>
-            <div style={{ background: "rgba(0,200,100,.06)", border: "1px solid rgba(0,200,100,.25)", borderRadius: 14, padding: 14, marginBottom: 10 }}>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 8 }}>✅ ALREADY ACTIVATED</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, textAlign: "center" }}>
-                <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 8 }}>
-                  <div style={{ fontSize: 9, color: "rgba(255,255,255,.5)" }}>ACTIVATED</div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#C8A645" }}>₹{(existing.coverActivated || 0).toLocaleString("en-IN")}</div>
+            <div style={{ background: "#0A0A0A", border: "1px solid #C9A84C55", borderRadius: 14, padding: 16, marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 10 }}>✅ ALREADY ACTIVATED</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, textAlign: "center" }}>
+                <div style={{ background: "rgba(201,168,76,.08)", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.6)", letterSpacing: .8 }}>ACTIVATED</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#C9A84C", marginTop: 2 }}>₹{(existing.coverActivated || 0).toLocaleString("en-IN")}</div>
                 </div>
-                <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 8 }}>
-                  <div style={{ fontSize: 9, color: "rgba(255,255,255,.5)" }}>USED</div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#EF4444" }}>₹{(existing.coverUsed || 0).toLocaleString("en-IN")}</div>
+                <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.6)", letterSpacing: .8 }}>USED</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#fff", marginTop: 2 }}>₹{(existing.coverUsed || 0).toLocaleString("en-IN")}</div>
                 </div>
-                <div style={{ background: "rgba(255,255,255,.04)", borderRadius: 8, padding: 8 }}>
-                  <div style={{ fontSize: 9, color: "rgba(255,255,255,.5)" }}>BALANCE</div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: (existing.coverBalance || 0) > 0 ? "#00C864" : "rgba(255,255,255,.5)" }}>₹{(existing.coverBalance || 0).toLocaleString("en-IN")}</div>
+                <div style={{ background: "rgba(201,168,76,.08)", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.6)", letterSpacing: .8 }}>BALANCE</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#C9A84C", marginTop: 2 }}>₹{(existing.coverBalance || 0).toLocaleString("en-IN")}</div>
                 </div>
               </div>
               {(existing.paymentMethod || existing.activatedBy) && (
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 8, textAlign: "center" }}>
-                  {existing.paymentMethod ? `Paid via ${existing.paymentMethod}` : ""}{existing.activatedBy ? ` · by ${existing.activatedBy}` : ""}
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.55)", marginTop: 10, textAlign: "center" }}>
+                  {existing.paymentMethod ? `PAID VIA ${String(existing.paymentMethod).toUpperCase()}` : ""}{existing.activatedBy ? ` · BY ${String(existing.activatedBy).toUpperCase()}` : ""}
                 </div>
               )}
             </div>
             {editMode ? (
-              <div style={{ background: "rgba(245,158,11,.06)", border: "1px solid rgba(245,158,11,.25)", borderRadius: 12, padding: 12, marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "#F59E0B", marginBottom: 8 }}>EDIT AMOUNT — Min ₹{existing.coverUsed || 0} · Max ₹5,000</div>
-                <input type="number" value={editAmt} onChange={(e) => setEditAmt(e.target.value)}
-                  style={{ width: "100%", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1.5px solid rgba(245,158,11,.4)", color: "#fff", fontSize: 16, fontWeight: 800, outline: "none", marginBottom: 8, boxSizing: "border-box" }} />
+              <div style={{ background: "rgba(201,168,76,.08)", border: "1px solid #C9A84C66", borderRadius: 12, padding: 14, marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#C9A84C", marginBottom: 10, letterSpacing: 1 }}>EDIT AMOUNT — MIN ₹{existing.coverUsed || 0} · MAX ₹5,000</div>
+                <input type="number" inputMode="numeric" value={editAmt} onChange={(e) => setEditAmt(e.target.value)}
+                  style={{ width: "100%", padding: 14, borderRadius: 10, background: "#0A0A0A", border: "1.5px solid #C9A84C", color: "#fff", fontSize: 22, fontWeight: 800, outline: "none", marginBottom: 10, boxSizing: "border-box", fontFamily: "'Space Grotesk', system-ui, sans-serif" }} />
                 <button onClick={handleEditSave} disabled={busy}
-                  style={{ width: "100%", padding: 11, borderRadius: 9, background: "rgba(245,158,11,.15)", border: "1px solid rgba(245,158,11,.4)", color: "#F59E0B", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
-                  {busy ? "Saving…" : "Save New Amount"}
+                  style={{ width: "100%", padding: 14, borderRadius: 10, background: "#C9A84C", border: "none", color: "#000", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer" }}>
+                  {busy ? "SAVING…" : "SAVE NEW AMOUNT"}
                 </button>
               </div>
             ) : (
               <button onClick={() => { setEditMode(true); setErr(""); }}
-                style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.25)", color: "#F59E0B", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
-                ✏️ Edit Cover Amount
+                style={{ width: "100%", padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid #C9A84C", color: "#C9A84C", fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: "pointer", marginBottom: 10 }}>
+                ✏️ EDIT COVER AMOUNT
               </button>
             )}
             <button onClick={() => sendWhatsApp(existing)}
-              style={{ width: "100%", padding: 11, borderRadius: 10, background: "rgba(37,211,102,0.12)", border: "1px solid rgba(37,211,102,0.4)", color: "#25D366", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
-              📲 Send WhatsApp Wallet Link
+              style={{ width: "100%", padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid #C9A84C", color: "#C9A84C", fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: "pointer", marginBottom: 10 }}>
+              📲 SEND WHATSAPP WALLET LINK
             </button>
             {/* 🔴 2026-05-21 (Khushi) — Void Cover button REMOVED per request.
                 Mistakes during check-in are now reverted via the existing
@@ -453,30 +453,30 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           </>
         ) : (
           <>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 6 }}>TONIGHT'S COVER (₹)</div>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 1499" min={0} max={5000}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1.5px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 18, fontWeight: 800, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 8 }}>TONIGHT'S COVER (₹)</div>
+            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 1499" min={0} max={5000}
+              style={{ width: "100%", padding: "16px 16px", borderRadius: 10, background: "#0A0A0A", border: "1.5px solid #C9A84C", color: "#fff", fontSize: 26, fontWeight: 900, outline: "none", marginBottom: 16, boxSizing: "border-box", fontFamily: "'Space Grotesk', system-ui, sans-serif" }} />
 
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 8 }}>PAYMENT METHOD</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 10 }}>PAYMENT METHOD</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
               {([
-                { id: "cash" as const, label: "💵 Cash", color: "#00C864" },
-                { id: "upi" as const, label: "📱 UPI", color: "#00C4FF" },
-                { id: "card" as const, label: FEATURES.edc ? "💳 Card (EDC)" : "💳 Card", color: "#A855F7" },
-                { id: "paid_online" as const, label: "✅ Paid Online", color: "#F59E0B" },
+                { id: "cash" as const, label: "💵 CASH" },
+                { id: "upi" as const, label: "📱 UPI" },
+                { id: "card" as const, label: FEATURES.edc ? "💳 CARD (EDC)" : "💳 CARD" },
+                { id: "paid_online" as const, label: "✅ PAID ONLINE" },
               ]).map((pm) => {
                 const sel = method === pm.id;
                 return (
                   <button key={pm.id} onClick={() => setMethod(pm.id)}
-                    style={{ padding: 10, borderRadius: 8, border: `${sel ? 2.5 : 1.5}px solid ${pm.color}55`, background: `${pm.color}${sel ? "26" : "0d"}`, color: pm.color, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    style={{ padding: "14px 10px", borderRadius: 10, border: `1.5px solid #C9A84C`, background: sel ? "#C9A84C" : "transparent", color: sel ? "#000" : "#C9A84C", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer" }}>
                     {pm.label}
                   </button>
                 );
               })}
             </div>
             <button onClick={() => setMethod("split")}
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: `${method === "split" ? 2.5 : 1.5}px solid #EC489955`, background: `#EC4899${method === "split" ? "26" : "0d"}`, color: "#EC4899", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>
-              ➗ Split Payment
+              style={{ width: "100%", padding: "14px 10px", borderRadius: 10, border: `1.5px solid #C9A84C`, background: method === "split" ? "#C9A84C" : "transparent", color: method === "split" ? "#000" : "#C9A84C", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer", marginBottom: 14 }}>
+              ➗ SPLIT PAYMENT
             </button>
 
             {method === "split" && (() => {
@@ -487,30 +487,26 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               const total = c + u + cd + paidOnline;
               const remain = amt - total;
               return (
-                <div style={{ background: "rgba(236,72,153,.06)", border: "1px solid rgba(236,72,153,.25)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                  <div style={{ fontSize: 10, color: "#EC4899", marginBottom: 8, fontWeight: 800, letterSpacing: ".5px" }}>SPLIT BREAKDOWN (must total ₹{amt})</div>
+                <div style={{ background: "#0A0A0A", border: "1px solid #C9A84C66", borderRadius: 12, padding: 14, marginBottom: 14 }}>
+                  <div style={{ fontSize: 12, color: "#C9A84C", marginBottom: 10, fontWeight: 800, letterSpacing: 1 }}>SPLIT BREAKDOWN (MUST TOTAL ₹{amt})</div>
                   {paidOnline > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 10px", borderRadius: 7, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.25)", fontSize: 12, color: "#F59E0B", marginBottom: 6 }}>
-                      <span>✅ Paid online (locked)</span><span style={{ fontWeight: 800 }}>₹{paidOnline}</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(201,168,76,.12)", border: "1px solid #C9A84C66", fontSize: 14, color: "#C9A84C", marginBottom: 8, fontWeight: 800 }}>
+                      <span>✅ PAID ONLINE (LOCKED)</span><span>₹{paidOnline}</span>
                     </div>
                   )}
-                  <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <span style={{ fontSize: 12, color: "#00C864", fontWeight: 700 }}>💵 Cash</span>
-                    <input type="number" inputMode="numeric" value={splitCash} onChange={(e) => setSplitCash(e.target.value)} placeholder="0"
-                      style={{ padding: "8px 10px", borderRadius: 7, background: "rgba(255,255,255,.05)", border: "1px solid rgba(0,200,100,.3)", color: "#fff", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" }} />
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <span style={{ fontSize: 12, color: "#00C4FF", fontWeight: 700 }}>📱 UPI&nbsp;&nbsp;</span>
-                    <input type="number" inputMode="numeric" value={splitUpi} onChange={(e) => setSplitUpi(e.target.value)} placeholder="0"
-                      style={{ padding: "8px 10px", borderRadius: 7, background: "rgba(255,255,255,.05)", border: "1px solid rgba(0,196,255,.3)", color: "#fff", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" }} />
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: "#A855F7", fontWeight: 700 }}>💳 Card</span>
-                    <input type="number" inputMode="numeric" value={splitCard} onChange={(e) => setSplitCard(e.target.value)} placeholder="0"
-                      style={{ padding: "8px 10px", borderRadius: 7, background: "rgba(255,255,255,.05)", border: "1px solid rgba(168,85,247,.3)", color: "#fff", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" }} />
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 10px", borderRadius: 8, background: remain === 0 ? "rgba(0,200,100,.1)" : "rgba(239,68,68,.08)", border: `1px solid ${remain === 0 ? "rgba(0,200,100,.4)" : "rgba(239,68,68,.3)"}`, fontSize: 12, fontWeight: 800, color: remain === 0 ? "#00C864" : "#EF4444" }}>
-                    <span>{remain === 0 ? "✓ Balanced" : remain > 0 ? "Remaining" : "Over by"}</span>
+                  {([
+                    { lbl: "💵 CASH", val: splitCash, set: setSplitCash },
+                    { lbl: "📱 UPI", val: splitUpi, set: setSplitUpi },
+                    { lbl: "💳 CARD", val: splitCard, set: setSplitCard },
+                  ]).map((row) => (
+                    <div key={row.lbl} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontSize: 14, color: "#fff", fontWeight: 800, minWidth: 90, letterSpacing: .5 }}>{row.lbl}</span>
+                      <input type="number" inputMode="numeric" value={row.val} onChange={(e) => row.set(e.target.value)} placeholder="0"
+                        style={{ padding: "12px 12px", borderRadius: 8, background: "#000", border: "1px solid #C9A84C66", color: "#fff", fontSize: 18, fontWeight: 800, outline: "none", textAlign: "right", fontFamily: "'Space Grotesk', system-ui, sans-serif" }} />
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 12px", borderRadius: 8, background: remain === 0 ? "rgba(201,168,76,.18)" : "rgba(255,255,255,.04)", border: `1.5px solid ${remain === 0 ? "#C9A84C" : "rgba(255,255,255,.2)"}`, fontSize: 15, fontWeight: 900, color: remain === 0 ? "#C9A84C" : "#fff", marginTop: 6, letterSpacing: .5 }}>
+                    <span>{remain === 0 ? "✓ BALANCED" : remain > 0 ? "REMAINING" : "OVER BY"}</span>
                     <span>₹{Math.abs(remain).toLocaleString("en-IN")}</span>
                   </div>
                 </div>
@@ -527,25 +523,20 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
                 flows are unaffected. PIN keeps the card machine from firing on
                 a phone someone else picked up off the door podium. */}
             {FEATURES.edc && method === "card" && (
-              <div style={{ background: "rgba(168,85,247,.06)", border: "1px solid rgba(168,85,247,.3)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                <div style={{ fontSize: 10, color: "#A855F7", letterSpacing: ".5px", fontWeight: 800, marginBottom: 6 }}>💳 EDC CLOUD — BOUNCER PIN</div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)", marginBottom: 8 }}>
+              <div style={{ background: "#0A0A0A", border: "1px solid #C9A84C66", borderRadius: 12, padding: 14, marginBottom: 14 }}>
+                <div style={{ fontSize: 12, color: "#C9A84C", letterSpacing: 1, fontWeight: 800, marginBottom: 8 }}>💳 EDC CLOUD — BOUNCER PIN</div>
+                <div style={{ fontSize: 13, color: "rgba(255,255,255,.7)", marginBottom: 10 }}>
                   We'll push ₹{Math.max(parseInt(amount || "0", 10) - paidOnline, parseInt(amount || "0", 10) || 0).toLocaleString("en-IN")} to the {edcVendorLabel(edcVendor)} machine. Enter your 4-digit PIN to authorise.
                 </div>
-                {/* Per-device vendor picker — saved to localStorage so a tablet
-                    paired to a specific machine remembers its choice across
-                    refreshes. Hidden when only one vendor is realistically
-                    available; we still render both so a venue running both
-                    can flip mid-shift if one terminal goes offline. */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
                   {(["razorpay", "pinelabs"] as const).map((v) => {
                     const sel = edcVendor === v;
                     const isVenueDefault = venueDefaultVendor === v;
                     return (
                       <button key={v} type="button"
                         onClick={() => { setEdcVendor(v); setActiveEdcVendor(v); }}
-                        style={{ padding: "7px 8px", borderRadius: 7, border: `${sel ? 2 : 1}px solid ${sel ? "#A855F7" : "rgba(168,85,247,.3)"}`, background: sel ? "rgba(168,85,247,.18)" : "rgba(255,255,255,.04)", color: sel ? "#fff" : "rgba(255,255,255,.65)", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                        {v === "razorpay" ? "Razorpay POS" : "Pine Labs"}{isVenueDefault ? " ★" : ""}
+                        style={{ padding: "10px 8px", borderRadius: 8, border: `1.5px solid #C9A84C`, background: sel ? "#C9A84C" : "transparent", color: sel ? "#000" : "#C9A84C", fontSize: 13, fontWeight: 800, letterSpacing: .5, cursor: "pointer" }}>
+                        {v === "razorpay" ? "RAZORPAY POS" : "PINE LABS"}{isVenueDefault ? " ★" : ""}
                       </button>
                     );
                   })}
@@ -555,23 +546,23 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
                   maxLength={6} value={edcPin}
                   onChange={(e) => setEdcPin(e.target.value.replace(/\D/g, ""))}
                   placeholder="• • • •"
-                  style={{ width: "100%", padding: 10, borderRadius: 8, background: "rgba(255,255,255,.05)", border: "1px solid rgba(168,85,247,.4)", color: "#fff", fontSize: 18, letterSpacing: 6, textAlign: "center", outline: "none", boxSizing: "border-box" }}
+                  style={{ width: "100%", padding: 14, borderRadius: 8, background: "#000", border: "1.5px solid #C9A84C", color: "#fff", fontSize: 24, letterSpacing: 8, textAlign: "center", outline: "none", boxSizing: "border-box", fontFamily: "'Space Grotesk', system-ui, sans-serif" }}
                 />
               </div>
             )}
 
             <button onClick={handleActivate} disabled={busy}
-              style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#C8A645,#A07830)", border: "none", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", marginBottom: 8 }}>
-              {busy ? "Activating…" : "⚡ Activate Cover Wallet"}
+              style={{ width: "100%", padding: 18, borderRadius: 12, background: "#C9A84C", border: "none", color: "#000", fontSize: 17, fontWeight: 900, letterSpacing: 1.2, cursor: "pointer", marginBottom: 10 }}>
+              {busy ? "ACTIVATING…" : "⚡ ACTIVATE COVER WALLET"}
             </button>
           </>
         )}
 
-        {err && <div style={{ color: "#EF4444", fontSize: 12, marginBottom: 8, textAlign: "center" }}>{err}</div>}
+        {err && <div style={{ color: "#EF4444", fontSize: 14, marginBottom: 10, textAlign: "center", fontWeight: 800 }}>{err}</div>}
 
         <button onClick={onClose}
-          style={{ width: "100%", padding: 11, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.55)", fontSize: 13, cursor: "pointer" }}>
-          Close
+          style={{ width: "100%", padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid rgba(255,255,255,.2)", color: "rgba(255,255,255,.7)", fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: "pointer" }}>
+          CLOSE
         </button>
       </div>
 
@@ -1042,45 +1033,45 @@ function CheckInPaymentModal({
         )}
 
         {paidOnline > 0 && !isEntryOnly && (
-          <div style={{ background: "rgba(0,200,100,.08)", border: "1px solid rgba(0,200,100,.3)", borderRadius: 10, padding: 10, marginBottom: 12, fontSize: 12, color: "#00C864", fontWeight: 700 }}>
+          <div style={{ background: "rgba(201,168,76,.12)", border: "1px solid #C9A84C66", borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 14, color: "#C9A84C", fontWeight: 800, letterSpacing: .5 }}>
             ✅ ₹{paidOnline.toLocaleString("en-IN")} ALREADY PAID ONLINE
           </div>
         )}
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 6 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 8 }}>
           {isEntryOnly ? "ENTRY FEE COLLECTED (₹)" : "WALLET AMOUNT (₹)"}
         </div>
         <input type="number" inputMode="numeric" value={amount}
           onChange={(e) => setAmount(e.target.value)}
           placeholder="0"
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "rgba(255,255,255,.06)", border: "1.5px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 20, fontWeight: 800, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
+          style={{ width: "100%", padding: "16px 16px", borderRadius: 10, background: "#0A0A0A", border: "1.5px solid #C9A84C", color: "#fff", fontSize: 26, fontWeight: 900, outline: "none", marginBottom: 16, boxSizing: "border-box", fontFamily: "'Space Grotesk', system-ui, sans-serif" }} />
 
         {isEntryOnly && amt > 0 && (
-          <div style={{ fontSize: 11, color: "#F59E0B", marginBottom: 10, marginTop: -8, fontStyle: "italic" }}>
+          <div style={{ fontSize: 13, color: "#C9A84C", marginBottom: 12, marginTop: -8, fontWeight: 700 }}>
             ↳ Wallet activates at ₹0 · entry fee ₹{amt} logged for audit only.
           </div>
         )}
 
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: 1, marginBottom: 8 }}>PAYMENT METHOD</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#C9A84C", letterSpacing: 1.5, marginBottom: 10 }}>PAYMENT METHOD</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
           {([
-            { id: "cash" as const, label: "💵 Cash", color: "#00C864" },
-            { id: "upi" as const, label: "📱 UPI", color: "#00C4FF" },
-            { id: "card" as const, label: "💳 Card", color: "#A855F7" },
-            { id: "paid_online" as const, label: "✅ Paid Online", color: "#F59E0B" },
+            { id: "cash" as const, label: "💵 CASH" },
+            { id: "upi" as const, label: "📱 UPI" },
+            { id: "card" as const, label: "💳 CARD" },
+            { id: "paid_online" as const, label: "✅ PAID ONLINE" },
           ]).map((pm) => {
             const sel = method === pm.id;
             return (
               <button key={pm.id} type="button" onClick={() => setMethod(pm.id)}
-                style={{ padding: 10, borderRadius: 8, border: `${sel ? 2.5 : 1.5}px solid ${pm.color}55`, background: `${pm.color}${sel ? "26" : "0d"}`, color: pm.color, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                style={{ padding: "14px 10px", borderRadius: 10, border: `1.5px solid #C9A84C`, background: sel ? "#C9A84C" : "transparent", color: sel ? "#000" : "#C9A84C", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer" }}>
                 {pm.label}
               </button>
             );
           })}
         </div>
         <button type="button" onClick={() => setMethod("split")}
-          style={{ width: "100%", padding: 10, borderRadius: 8, border: `${method === "split" ? 2.5 : 1.5}px solid #EC489955`, background: `#EC4899${method === "split" ? "26" : "0d"}`, color: "#EC4899", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>
-          ➗ Split Payment
+          style={{ width: "100%", padding: "14px 10px", borderRadius: 10, border: `1.5px solid #C9A84C`, background: method === "split" ? "#C9A84C" : "transparent", color: method === "split" ? "#000" : "#C9A84C", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer", marginBottom: 14 }}>
+          ➗ SPLIT PAYMENT
         </button>
 
         {method === "split" && (() => {
@@ -1091,41 +1082,41 @@ function CheckInPaymentModal({
           const target = isEntryOnly ? amt : walletAmt;
           const remain = target - total;
           return (
-            <div style={{ background: "rgba(236,72,153,.06)", border: "1px solid rgba(236,72,153,.25)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-              <div style={{ fontSize: 10, color: "#EC4899", marginBottom: 8, fontWeight: 800 }}>SPLIT (must total ₹{target})</div>
+            <div style={{ background: "#0A0A0A", border: "1px solid #C9A84C66", borderRadius: 12, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: "#C9A84C", marginBottom: 10, fontWeight: 800, letterSpacing: 1 }}>SPLIT (MUST TOTAL ₹{target})</div>
               {paidOnline > 0 && (
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 10px", borderRadius: 7, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.25)", fontSize: 12, color: "#F59E0B", marginBottom: 6 }}>
-                  <span>✅ Paid online (locked)</span><span style={{ fontWeight: 800 }}>₹{paidOnline}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(201,168,76,.12)", border: "1px solid #C9A84C66", fontSize: 14, color: "#C9A84C", marginBottom: 8, fontWeight: 800 }}>
+                  <span>✅ PAID ONLINE (LOCKED)</span><span>₹{paidOnline}</span>
                 </div>
               )}
               {([
-                { lbl: "💵 Cash", color: "#00C864", val: splitCash, set: setSplitCash },
-                { lbl: "📱 UPI", color: "#00C4FF", val: splitUpi, set: setSplitUpi },
-                { lbl: "💳 Card", color: "#A855F7", val: splitCard, set: setSplitCard },
+                { lbl: "💵 CASH", val: splitCash, set: setSplitCash },
+                { lbl: "📱 UPI", val: splitUpi, set: setSplitUpi },
+                { lbl: "💳 CARD", val: splitCard, set: setSplitCard },
               ]).map((row) => (
-                <div key={row.lbl} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                  <span style={{ fontSize: 12, color: row.color, fontWeight: 700, minWidth: 70 }}>{row.lbl}</span>
+                <div key={row.lbl} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 14, color: "#fff", fontWeight: 800, minWidth: 90, letterSpacing: .5 }}>{row.lbl}</span>
                   <input type="number" inputMode="numeric" value={row.val} onChange={(e) => row.set(e.target.value)} placeholder="0"
-                    style={{ padding: "8px 10px", borderRadius: 7, background: "rgba(255,255,255,.05)", border: `1px solid ${row.color}55`, color: "#fff", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" }} />
+                    style={{ padding: "12px 12px", borderRadius: 8, background: "#000", border: "1px solid #C9A84C66", color: "#fff", fontSize: 18, fontWeight: 800, outline: "none", textAlign: "right", fontFamily: "'Space Grotesk', system-ui, sans-serif" }} />
                 </div>
               ))}
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 10px", borderRadius: 8, background: remain === 0 ? "rgba(0,200,100,.1)" : "rgba(239,68,68,.08)", border: `1px solid ${remain === 0 ? "rgba(0,200,100,.4)" : "rgba(239,68,68,.3)"}`, fontSize: 12, fontWeight: 800, color: remain === 0 ? "#00C864" : "#EF4444", marginTop: 4 }}>
-                <span>{remain === 0 ? "✓ Balanced" : remain > 0 ? "Remaining" : "Over by"}</span>
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 12px", borderRadius: 8, background: remain === 0 ? "rgba(201,168,76,.18)" : "rgba(255,255,255,.04)", border: `1.5px solid ${remain === 0 ? "#C9A84C" : "rgba(255,255,255,.2)"}`, fontSize: 15, fontWeight: 900, color: remain === 0 ? "#C9A84C" : "#fff", marginTop: 6, letterSpacing: .5 }}>
+                <span>{remain === 0 ? "✓ BALANCED" : remain > 0 ? "REMAINING" : "OVER BY"}</span>
                 <span>₹{Math.abs(remain).toLocaleString("en-IN")}</span>
               </div>
             </div>
           );
         })()}
 
-        {err && <div style={{ color: "#EF4444", fontSize: 12, marginBottom: 10, textAlign: "center", fontWeight: 700 }}>⚠️ {err}</div>}
+        {err && <div style={{ color: "#EF4444", fontSize: 14, marginBottom: 12, textAlign: "center", fontWeight: 800 }}>⚠️ {err}</div>}
 
         <button onClick={handleConfirm} disabled={busy}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "linear-gradient(135deg,#00C864,#00A050)", border: "none", color: "#fff", fontSize: 15, fontWeight: 900, cursor: busy ? "wait" : "pointer", marginBottom: 8, letterSpacing: .5 }}>
-          {busy ? "Checking in…" : `✅ CONFIRM CHECK-IN${walletAmt > 0 ? ` · ₹${walletAmt} WALLET` : isEntryOnly ? " · ₹0 WALLET" : ""}`}
+          style={{ width: "100%", padding: 18, borderRadius: 12, background: "#C9A84C", border: "none", color: "#000", fontSize: 17, fontWeight: 900, cursor: busy ? "wait" : "pointer", marginBottom: 10, letterSpacing: 1.2 }}>
+          {busy ? "CHECKING IN…" : `✅ CONFIRM CHECK-IN${walletAmt > 0 ? ` · ₹${walletAmt} WALLET` : isEntryOnly ? " · ₹0 WALLET" : ""}`}
         </button>
         <button onClick={onClose} disabled={busy}
-          style={{ width: "100%", padding: 10, borderRadius: 10, background: "transparent", border: "1px solid rgba(255,255,255,.1)", color: "rgba(255,255,255,.55)", fontSize: 12, cursor: "pointer" }}>
-          ✗ Cancel
+          style={{ width: "100%", padding: 14, borderRadius: 10, background: "transparent", border: "1.5px solid rgba(255,255,255,.2)", color: "rgba(255,255,255,.7)", fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: "pointer" }}>
+          ✗ CANCEL
         </button>
       </div>
     </div>
