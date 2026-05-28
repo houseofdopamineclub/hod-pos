@@ -5317,3 +5317,107 @@ export async function recallKDSItem(id: string): Promise<void> {
     console.warn("[KDS] recall failed", e);
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🆕 2026-05-28 v3.138 — TABLE QR → CALL CAPTAIN (no-payment ordering)
+// ═══════════════════════════════════════════════════════════════════════════
+// Walk-in customers scan a per-table QR sticker → land on hodclub.in/table.html?id=FD5
+// → fill name/phone (email optional) → browse menu read-only → tap PLACE ORDER
+// → writes a doc here → captain's tablet shows a floating BANNER + chime.
+// 
+// Separate from `customerCallRequest` (which lives on cover docs) because
+// walk-ins have no cover. ONE collection, TWO event types so captain side has
+// a single subscription to manage.
+//
+// 🛟 FAIL-OPEN: create returns boolean; subscribe → [] on error; acknowledge
+// → swallows errors (worst case banner stays + captain re-taps).
+// ═══════════════════════════════════════════════════════════════════════════
+export const TABLE_CALL_REQUESTS_COL = "tableCallRequests";
+
+export interface HodTableCallRequest {
+  id: string;
+  tableId: string;                    // "FD5", "C2", "TVIP3"
+  type: "call_waiter" | "place_order";
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;             // optional
+  items: Array<{ name: string; qty: number; price?: number; category?: string }>;
+  status: "pending" | "acknowledged";
+  createdAt: string;                  // ISO
+  operationalNight: string;           // YYYY-MM-DD via getOperationalNightStr
+  acknowledgedBy?: string | null;
+  acknowledgedAt?: string | null;
+}
+
+/** Customer-side writer (used by hodclub.in/table.html). Returns true on success. */
+export async function createTableCallRequest(
+  tableId: string,
+  type: "call_waiter" | "place_order",
+  customerName: string,
+  customerPhone: string,
+  items: Array<{ name: string; qty: number; price?: number; category?: string }>,
+  customerEmail?: string,
+): Promise<boolean> {
+  try {
+    await authReady;
+    await addDoc(collection(db, TABLE_CALL_REQUESTS_COL), {
+      tableId: String(tableId || "").toUpperCase().trim(),
+      type,
+      customerName: String(customerName || "").trim().slice(0, 60),
+      customerPhone: String(customerPhone || "").trim().slice(0, 20),
+      customerEmail: String(customerEmail || "").trim().slice(0, 80),
+      items: (items || []).slice(0, 40).map((it) => ({
+        name: String(it.name || "").slice(0, 80),
+        qty: Math.max(1, Math.min(99, Number(it.qty) || 1)),
+        ...(typeof it.price === "number" ? { price: it.price } : {}),
+        ...(it.category ? { category: String(it.category).slice(0, 30) } : {}),
+      })),
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      operationalNight: getOperationalNightStr(),
+      acknowledgedBy: null,
+      acknowledgedAt: null,
+    });
+    return true;
+  } catch (e) {
+    console.warn("[createTableCallRequest] failed", e);
+    return false;
+  }
+}
+
+/** Captain-side live feed of PENDING table calls for tonight. Shared listener. */
+export function subscribeTableCallRequests(
+  cb: (rows: HodTableCallRequest[]) => void,
+): Unsubscribe {
+  const night = getOperationalNightStr();
+  return _shareSubscription<HodTableCallRequest[]>(
+    `tcr:${night}`,
+    (push) => onSnapshot(
+      query(
+        collection(db, TABLE_CALL_REQUESTS_COL),
+        where("operationalNight", "==", night),
+        where("status", "==", "pending"),
+      ),
+      (snap) => push(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<HodTableCallRequest, "id">) }))),
+      (err) => { console.warn("[subscribeTableCallRequests] error", err); push([]); },
+    ),
+    cb,
+  );
+}
+
+/** Captain taps ACKNOWLEDGE → flips status, banner row disappears. Fail-open. */
+export async function acknowledgeTableCallRequest(
+  id: string,
+  staffName: string,
+): Promise<void> {
+  if (!id) return;
+  try {
+    await updateDoc(doc(db, TABLE_CALL_REQUESTS_COL, id), {
+      status: "acknowledged",
+      acknowledgedBy: String(staffName || "").slice(0, 60),
+      acknowledgedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.warn("[acknowledgeTableCallRequest] failed (non-fatal)", e);
+  }
+}

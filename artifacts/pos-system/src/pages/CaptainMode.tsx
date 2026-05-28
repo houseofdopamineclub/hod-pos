@@ -26,6 +26,9 @@ import {
   getCoverByRef,
   // 2026-05-20 — Customer-calls-captain: clear ping after captain acknowledges
   clearCustomerCallRequest,
+  // 🆕 2026-05-28 v3.138 — Table-QR walk-in ordering (no payment). Customer
+  // scans QR on table → fills name/phone → places order → captain banner.
+  subscribeTableCallRequests, acknowledgeTableCallRequest, type HodTableCallRequest,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps to green-flash the table card, and let captain acknowledge.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -97,6 +100,49 @@ const CAPTAIN_DISCOUNT_MAX = 15;
 const WALKIN_DISCOUNT_MAX = 10;
 
 /** Clamp a captain-typed discount to the 15% cap; alert + return null if rejected. */
+// 🆕 2026-05-27 v3.76 (Khushi LIVE-NIGHT) — in-app styled alert. Khushi: "any
+// pop up u give, please give it on the screen, no browser pop up please".
+// Mirrors the DoorMode helper so captain alerts (table-assign gate, void cap
+// errors, etc.) feel native to the gold HOD palette. Auto-dismiss on backdrop,
+// OK, or Escape. Pure DOM so no React state plumbing required.
+function showAppAlert(message: string, title?: string) {
+  if (typeof document === "undefined") return;
+  const lines = message.split("\n").map((s) => s.trim()).filter(Boolean);
+  const head = title || lines.shift() || "NOTICE";
+  const body = lines.join("\n\n");
+  const overlay = document.createElement("div");
+  overlay.setAttribute("data-hod-alert", "1");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(6px);z-index:100000;display:flex;align-items:center;justify-content:center;padding:18px;font-family:'Manrope','Space Grotesk',sans-serif;animation:hodAlertFade .15s ease-out;";
+  const card = document.createElement("div");
+  card.style.cssText = "background:#0A0A0A;border:2px solid #E5A82A;border-radius:16px;max-width:420px;width:100%;box-shadow:0 24px 64px rgba(0,0,0,.7);color:#F2EBD3;overflow:hidden;";
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  card.innerHTML =
+    '<div style="padding:18px 20px 8px;border-bottom:1px solid rgba(229,168,42,.25);">' +
+      '<div style="font-size:17px;font-weight:900;color:#F2EBD3;letter-spacing:.4px;line-height:1.3;">' + esc(head) + '</div>' +
+    '</div>' +
+    '<div style="padding:16px 20px 20px;font-size:14px;line-height:1.55;color:rgba(242,235,211,.88);font-weight:500;white-space:pre-wrap;">' + esc(body) + '</div>' +
+    '<div style="padding:0 16px 16px;">' +
+      '<button id="hod-app-alert-ok" type="button" style="width:100%;padding:14px;border-radius:11px;background:linear-gradient(135deg,#E5A82A,#B8941F);border:none;color:#0A0A0A;font-size:14px;font-weight:900;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;font-family:inherit;">OK</button>' +
+    '</div>';
+  overlay.appendChild(card);
+  if (!document.getElementById("hod-app-alert-style")) {
+    const st = document.createElement("style");
+    st.id = "hod-app-alert-style";
+    st.textContent = "@keyframes hodAlertFade{from{opacity:0}to{opacity:1}}";
+    document.head.appendChild(st);
+  }
+  function close() {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e: KeyboardEvent) { if (e.key === "Escape" || e.key === "Enter") close(); }
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
+  const okBtn = document.getElementById("hod-app-alert-ok");
+  if (okBtn) okBtn.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+}
+
 function clampCaptainDiscount(raw: number): number | null {
   const n = Math.max(0, Math.floor(Number(raw) || 0));
   if (n > CAPTAIN_DISCOUNT_MAX) {
@@ -3347,9 +3393,43 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               inline on the BookingRow itself (one-tap arrival without opening the
               full booking detail). Modal kept clean for ordering / billing actions. */}
           {!paid && (
-            <button onClick={() => setShowAddOrder(true)}
+            <button onClick={() => {
+              // 🆕 2026-05-27 v3.68 (Khushi LIVE-NIGHT) — table-assigned gate.
+              // Bill-due rows sometimes land in the captain's modal with no
+              // table assigned (aggregator pre-arrival, walk-in waitlist) —
+              // ADD ORDER without a table id leaves KOTs unrouted and bills
+              // unprintable. Hard-block here with a popup so the captain
+              // (or door girl) assigns a table FIRST via the floor map.
+              if (!String(r.tableId || "").trim()) {
+                showAppAlert(
+                  "This guest has no table assigned yet. Tap REASSIGN TABLE below to pick a table from the floor map — KOTs need a table to route to the right printer.",
+                  "🪑 PLEASE ASSIGN THE TABLE FIRST"
+                );
+                return;
+              }
+              setShowAddOrder(true);
+            }}
               style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "rgba(229,168,42,.1)", border: "1px solid rgba(229,168,42,.3)", color: "#E5A82A", fontSize: 13, fontWeight: 700, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               📝 Add Order
+            </button>
+          )}
+          {/* 🆕 2026-05-27 v3.76 (Khushi LIVE-NIGHT) — REASSIGN TABLE button
+              always visible on captain modal so a tableless booking (HODTAB
+              with no table assigned at door) can be moved to a real table
+              from captain side too. Without this captain was stuck — couldn't
+              ADD ORDER (gated above), couldn't print KOTs, had to walk to
+              door girl. Reuses the existing ReassignTableModal which lists
+              available tables across all 3 floors with time-aware occupancy. */}
+          {!paid && (
+            <button onClick={() => setShowReassign(true)}
+              style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9,
+                background: !String(r.tableId || "").trim() ? "linear-gradient(135deg,#22c55e,#16a34a)" : "rgba(96,165,250,.12)",
+                border: !String(r.tableId || "").trim() ? "2px solid #4ade80" : "1px solid rgba(96,165,250,.4)",
+                color: !String(r.tableId || "").trim() ? "#FFFFFF" : "#60A5FA",
+                fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px",
+                fontFamily: "inherit", textTransform: "uppercase",
+                boxShadow: !String(r.tableId || "").trim() ? "0 0 12px rgba(34,197,94,.5)" : "none" }}>
+              🔄 {!String(r.tableId || "").trim() ? "Assign Table" : "Reassign Table"}
             </button>
           )}
           <button onClick={sendWhatsApp}
@@ -3724,7 +3804,7 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   return (
     <>
     <div onClick={onClick}
-      className={calling || billReq ? "pulse-red" : pending > 0 ? "pulse-gold" : ""}
+      className={(calling || billReq) && String(r.tableId || "").trim() ? "pulse-red" : pending > 0 ? "pulse-gold" : ""}
       style={{
         display: "flex", alignItems: "center", gap: 10,
         padding: "10px 12px", marginBottom: 6, borderRadius: 10,
@@ -4137,7 +4217,15 @@ function FloorPlanView({
     return reservations.filter(r => {
       if ((r as any).status === "cancelled") return false;
       const id = (r.tableId || "").toUpperCase();
-      if (!id) return false;
+      // 🆕 2026-05-27 v3.75 (Khushi LIVE-NIGHT) — include tableless rows here
+      // too. Pre-v3.75 we filtered them out (`if (!id) return false`) → a
+      // HODTAB customer who tapped GET BILL without a table assigned would
+      // be INVISIBLE to captain: not on the floor map (no tableId to match a
+      // tile), not in the off-map strip (filtered here), so the Bill Due
+      // KPI showed "2" but the screen below showed nothing. Now they
+      // surface in this strip with "(UNASSIGNED)" so captain can tap → see
+      // the booking → walk over to door girl to get a table assigned.
+      if (!id) return true;
       return !allMapTableIds.has(id);
     });
   }, [reservations, allMapTableIds]);
@@ -4447,7 +4535,7 @@ function FloorPlanView({
                     borderRadius: 8, padding: "6px 10px", color: "#F2EBD3", fontSize: 12, fontWeight: 800, cursor: "pointer",
                     boxShadow: state !== "green" ? `0 0 6px ${ringColor}` : undefined,
                   }}>
-                  {r.tableId} · {r.customerName || "Guest"}{tail}
+                  {r.tableId ? r.tableId : "⚠️ NO TABLE"} · {r.customerName || "Guest"}{tail}
                 </button>
               );
             })}
@@ -4612,9 +4700,17 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 5000);
           }
           if (curr.status === "bill_requested" && prev.status !== "bill_requested") {
-            playAlert(true);
-            setAlertBadge({ text: `🧾 BILL REQUESTED — ${r.tableId}`, color: "#EF4444", bg: "rgba(239,68,68,.3)" });
-            setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 5000);
+            // 🆕 2026-05-27 v3.69 (Khushi LIVE-NIGHT) — orphan rows (no
+            // tableId) are unactionable here — captain can't open ADD ORDER
+            // / PRINT BILL / RELEASE without a table, so the chime + flashing
+            // red row just gives him a sound he can't silence. Skip the
+            // alert for tableless rows; door girl assigns table first via
+            // the floor map, then the next snapshot fires the chime as today.
+            if (String(r.tableId || "").trim()) {
+              playAlert(true);
+              setAlertBadge({ text: `🧾 BILL REQUESTED — ${r.tableId}`, color: "#EF4444", bg: "rgba(239,68,68,.3)" });
+              setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 5000);
+            }
           }
           // 🔴 2026-05-20 (Khushi) — LOUD alert + 8-sec red top-bar flash when
           // a customer-at-table self-orders and pings captain. Fires only on
@@ -4629,7 +4725,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       });
 
       pendingCountRef.current = all.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
-      billCountRef.current = all.filter((r) => r.paymentStatus === "bill_requested").length;
+      // 🆕 v3.69 — exclude orphan rows (no tableId). They drive an unsilenceable
+      // 12s chime via the interval below and the captain has no way to clear
+      // them (modal ADD ORDER / PRINT BILL / RELEASE all need a table).
+      billCountRef.current = all.filter((r) => r.paymentStatus === "bill_requested" && String(r.tableId || "").trim()).length;
       callingCountRef.current = all.filter((r) => !!r.customerCallRequest).length;
 
       const filtered = floor ? all.filter((r) => r.floor === floor) : all;
@@ -4653,7 +4752,53 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     return () => { if (beepIntervalRef.current) clearInterval(beepIntervalRef.current); };
   }, [playAlert]);
 
+  // 🆕 2026-05-28 v3.138 — TABLE-QR walk-in call requests (see firestore-hod.ts).
+  // Pending list (scoped to tonight, status==pending). Chime on NEW row arrival
+  // via prev-id-set diff — same pattern as the customerCallRequest detector
+  // above but for the standalone tableCallRequests collection. Banner UI is
+  // rendered as a fixed-position overlay below — zero impact on floor plan.
+  // 🛟 FAIL-OPEN: subscribe → [] on error; chime guarded by try/catch.
+  const [tableCallRequests, setTableCallRequests] = useState<HodTableCallRequest[]>([]);
+  const prevTableCallIdsRef = useRef<Set<string>>(new Set());
+  // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
+  // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
+  // gate would silently swallow the FIRST real incoming request — captain
+  // never chimes for it. Use an explicit hydrated flag so the first new row
+  // after the initial snapshot ALWAYS chimes, regardless of prior size.
+  const hasHydratedTableCallsRef = useRef(false);
+  useEffect(() => {
+    const unsub = subscribeTableCallRequests((rows) => {
+      const nextIds = new Set(rows.map((r) => r.id));
+      const fresh = rows.filter((r) => !prevTableCallIdsRef.current.has(r.id));
+      if (hasHydratedTableCallsRef.current && fresh.length > 0) {
+        try { playAlert(true); } catch {}
+        const f = fresh[0];
+        const label = f.type === "place_order" ? `📋 NEW ORDER · ${f.tableId}` : `🛎 CALL WAITER · ${f.tableId}`;
+        setAlertBadge({ text: `${label} · ${f.customerName || "Guest"}`, color: "#EF4444", bg: "rgba(239,68,68,.35)" });
+        setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#E5A82A", bg: "rgba(229,168,42,.12)" }), 8000);
+      }
+      hasHydratedTableCallsRef.current = true;
+      prevTableCallIdsRef.current = nextIds;
+      // Sort: place_order first, then oldest-first so captain works the queue FIFO.
+      const sorted = [...rows].sort((a, b) => {
+        if (a.type !== b.type) return a.type === "place_order" ? -1 : 1;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+      setTableCallRequests(sorted);
+    });
+    return () => { unsub(); prevTableCallIdsRef.current = new Set(); hasHydratedTableCallsRef.current = false; };
+  }, [playAlert]);
+
   const pending = reservations.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
+  // 🆕 v3.74 — KEEP all bill_requested rows in the KPI counter (including
+  // those without a tableId — e.g. HODTAB customer just hit "GET BILL" but
+  // door hasn't assigned a physical table yet). Khushi 7:33am: v3.69's
+  // tableId filter was suppressing the count too aggressively → captain saw
+  // "Bill Due 0" while the customer's wallet-funded bill_requested write
+  // was waiting in Firestore. Captain still needs to SEE the number so he
+  // knows to walk over (or call door girl to assign the table). The chime
+  // + row pulse gates above stay filtered (no unsilenceable beep for
+  // tableless rows) — visual only on the KPI tile.
   const billDue = reservations.filter((r) => r.paymentStatus === "bill_requested").length;
   // 🔔 Combine both signals so the tile matches the banner. customerCallRequest
   // = "AT MY TABLE" pings (linked tables only). activeWaiterCalls = header
@@ -4705,6 +4850,70 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   return (
     <div className="captain-v2" style={{ minHeight: "100vh", background: "#050507", color: "#F2EBD3", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
       <WaiterCallBanner staffName={captainName} role="captain" />
+      {/* 🆕 2026-05-28 v3.138 — TABLE-QR walk-in call banner. Fixed-position
+          top-right overlay, gold border, pulses red when any pending row
+          exists. Each row = ACKNOWLEDGE button + tableId + customer + items
+          summary. Independent of floor-plan paint logic (zero coupling).
+          Hidden when empty. */}
+      {tableCallRequests.length > 0 && (
+        <div style={{
+          position: "fixed", top: 70, right: 12, zIndex: 999, maxWidth: 360, width: "calc(100vw - 24px)",
+          background: "linear-gradient(135deg,#0A0A0A,#1F1F1F)",
+          border: "2px solid #EF4444", borderRadius: 14,
+          boxShadow: "0 12px 36px rgba(239,68,68,.45)",
+          maxHeight: "70vh", overflowY: "auto",
+          animation: "hodCallPulse 1.2s ease-in-out infinite",
+        }}>
+          <div style={{
+            padding: "10px 14px", background: "linear-gradient(90deg,#7f1d1d,#dc2626,#7f1d1d)",
+            color: "#F2EBD3", fontSize: 13, fontWeight: 900, letterSpacing: 1,
+            textTransform: "uppercase", borderTopLeftRadius: 12, borderTopRightRadius: 12,
+            position: "sticky", top: 0,
+          }}>
+            🛎 TABLE QR · {tableCallRequests.length} PENDING
+          </div>
+          <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+            {tableCallRequests.map((r) => {
+              const mins = Math.max(0, Math.floor((Date.now() - new Date(r.createdAt).getTime()) / 60000));
+              const isOrder = r.type === "place_order";
+              const itemSummary = (r.items || []).map((i) => `${i.name}×${i.qty}`).join(" · ");
+              const total = (r.items || []).reduce((s, i) => s + (i.price || 0) * (i.qty || 0), 0);
+              return (
+                <div key={r.id} style={{
+                  background: "rgba(0,0,0,.5)", border: `1.5px solid ${isOrder ? "#F2C744" : "#EF4444"}`,
+                  borderRadius: 10, padding: "10px 12px",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: isOrder ? "#F2C744" : "#FCA5A5", letterSpacing: 0.6 }}>
+                      {isOrder ? "📋 NEW ORDER" : "🛎 CALL WAITER"} · {r.tableId}
+                    </div>
+                    <div style={{ fontSize: 10, color: "rgba(242,235,211,.6)", fontWeight: 700 }}>
+                      {mins === 0 ? "JUST NOW" : `${mins}m ago`}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#F2EBD3", marginBottom: 2 }}>
+                    {r.customerName || "Guest"} · {r.customerPhone || "—"}
+                  </div>
+                  {isOrder && itemSummary && (
+                    <div style={{ fontSize: 11, color: "rgba(242,235,211,.78)", lineHeight: 1.4, marginBottom: 6, wordBreak: "break-word" }}>
+                      {itemSummary}{total > 0 ? ` · ₹${total.toLocaleString("en-IN")}` : ""}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => acknowledgeTableCallRequest(r.id, captainName)}
+                    style={{
+                      width: "100%", padding: "8px 12px", marginTop: 4,
+                      background: "#F2C744", color: "#0A0A0A", border: "none", borderRadius: 8,
+                      fontSize: 12, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase",
+                      cursor: "pointer", fontFamily: "'Space Grotesk',sans-serif",
+                    }}
+                  >✓ ACKNOWLEDGE · ON IT</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div style={{ background: "rgba(10,10,10,.98)", borderBottom: "1px solid rgba(229,168,42,.25)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 10, gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <Link href="/"
