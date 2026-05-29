@@ -1,7 +1,7 @@
 import {
   collection, doc, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc,
   onSnapshot, query, where, orderBy, limit, increment, arrayUnion,
-  serverTimestamp, runTransaction, type Unsubscribe,
+  serverTimestamp, runTransaction, Timestamp, type Unsubscribe,
 } from "firebase/firestore";
 import { db, authReady } from "./firebase";
 import { getOperationalNightStr, getCoverExpiryFor } from "./utils-pos";
@@ -934,7 +934,16 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     topUpTotal: 0,
     groupSize: (booking as any).qty || 1,
     coverDocId: docId,
-    source: "walkin_door_cover",
+    // 🔴 2026-05-29 (Khushi) — was hardcoded "walkin_door_cover", which made
+    // Reports.classifyWallet() (startsWith("walkin")) tag EVERY door-activated
+    // cover as WALK-IN — including online "buy covers" bookings. By Khushi's
+    // definition, WALK-IN means ONLY a door-minted "+ NEW WALK-IN" (those use
+    // createWalkInTable / createBarWalkinCover, which keep their own walkin_*
+    // source). A cover activated against an EXISTING booking is an in-house
+    // COVER. Derive from origin so Reports buckets it correctly: guestlist →
+    // GUESTLIST, entry-only/group → their buckets (via entryType + isGuestList
+    // flag, both already on this doc), stag/couple/female → COVER (default).
+    source: booking._isGuestList ? "guestlist" : "inhouse_cover",
   };
   // merge:true → upserts cleanly OVER the notification-only stub if it exists.
   await setDoc(ref, cover, { merge: true });
@@ -5420,4 +5429,74 @@ export async function acknowledgeTableCallRequest(
   } catch (e) {
     console.warn("[acknowledgeTableCallRequest] failed (non-fatal)", e);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🆕 2026-05-28 v3.140 — DIGITORY (DigiPoS) item-code mapping.
+// ─────────────────────────────────────────────────────────────────────
+// Digitory's POS engine identifies items by numeric `item_number`. HOD
+// stores items by slug(name) (`menuOverrideKey`). To push closed bills
+// from HOD → Digitory via their internal /sale/* REST API, we need a
+// mapping table keyed by HOD slug → Digitory item_number (+ optional
+// modifier codes, tax class, category code — extensible).
+//
+// Collection: `digitoryItemMap/{hodSlug}` (slug from menuOverrideKey).
+// 🛟 FAIL-OPEN: subscribe returns {} on error; upsert errors surface to
+// the admin UI as a banner — never silently lost.
+// ═══════════════════════════════════════════════════════════════════════
+const DIGITORY_MAP_COL = "digitoryItemMap";
+
+export interface DigitoryItemMapping {
+  hodSlug: string;            // = menuOverrideKey(name) — primary key
+  hodName: string;            // human-readable copy for audit
+  digitoryItemNumber: string; // Digitory's numeric item_number (string-safe)
+  digitoryCategoryCode?: string;
+  digitoryTaxClass?: string;
+  notes?: string;
+  updatedBy?: string;
+  updatedAt?: Timestamp;
+}
+
+export function subscribeToDigitoryMappings(
+  cb: (byHodSlug: Record<string, DigitoryItemMapping>) => void,
+): Unsubscribe {
+  try {
+    return onSnapshot(
+      collection(db, DIGITORY_MAP_COL),
+      (snap) => {
+        const out: Record<string, DigitoryItemMapping> = {};
+        snap.forEach((d) => {
+          const data = d.data() as DigitoryItemMapping;
+          out[d.id] = { ...data, hodSlug: d.id };
+        });
+        cb(out);
+      },
+      (err) => {
+        console.warn("[digitoryItemMap] subscribe error (returning empty):", err.message);
+        cb({});
+      },
+    );
+  } catch (err) {
+    console.warn("[digitoryItemMap] subscribe threw (returning empty):", err);
+    cb({});
+    return () => {};
+  }
+}
+
+export async function upsertDigitoryMapping(
+  hodSlug: string,
+  patch: Partial<Omit<DigitoryItemMapping, "hodSlug" | "updatedAt">>,
+  updatedBy: string,
+): Promise<void> {
+  if (!hodSlug) throw new Error("hodSlug required");
+  await setDoc(
+    doc(db, DIGITORY_MAP_COL, hodSlug),
+    { ...patch, hodSlug, updatedBy, updatedAt: serverTimestamp() },
+    { merge: true },
+  );
+}
+
+export async function deleteDigitoryMapping(hodSlug: string): Promise<void> {
+  if (!hodSlug) return;
+  await deleteDoc(doc(db, DIGITORY_MAP_COL, hodSlug));
 }
