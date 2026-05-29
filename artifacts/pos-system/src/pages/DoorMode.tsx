@@ -3949,7 +3949,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
               <div style={{ display: "grid", gridTemplateColumns: arrived ? "1fr 1fr" : "1.2fr 1fr 1fr", gap: 6 }}>
                 {!arrived && (
                   <button onClick={() => handleArrived(r)} disabled={arrBusy === r._docId}
-                    style={{ padding: "13px 4px", borderRadius: 8, background: "linear-gradient(135deg,#B83227,#8B2520)", border: "none", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer" }}>
+                    style={{ padding: "15px 6px", borderRadius: 10, background: "linear-gradient(135deg,#E23B2E,#A81E14)", border: "2px solid #F2C744", color: "#fff", fontSize: 15, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15, cursor: "pointer", boxShadow: "0 2px 9px rgba(226,59,46,.4)" }}>
                     {arrBusy === r._docId ? "Marking…" : "🚶 Arrived"}
                   </button>
                 )}
@@ -3982,12 +3982,13 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                   }}
                   title={arrived ? "Charge a cover wallet (e.g. late arrival)" : "Mark Arrived first"}
                   style={{
-                    padding: "13px 4px", borderRadius: 8,
-                    background: arrived ? "#C8A645" : "rgba(200,166,69,0.25)",
-                    border: arrived ? "none" : "1px solid rgba(200,166,69,0.4)",
+                    padding: "15px 6px", borderRadius: 10,
+                    background: arrived ? "linear-gradient(135deg,#F2C744,#C9A84C)" : "rgba(200,166,69,0.18)",
+                    border: arrived ? "2px solid #000" : "2px solid rgba(200,166,69,0.45)",
                     color: arrived ? "#000" : "rgba(200,166,69,0.7)",
-                    fontSize: 12, fontWeight: 900, cursor: "pointer",
+                    fontSize: 15, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15, cursor: "pointer",
                     opacity: arrived ? 1 : 0.7,
+                    boxShadow: arrived ? "0 2px 9px rgba(242,199,68,.35)" : undefined,
                   }}>
                   💰 Activate Cover
                 </button>
@@ -4014,11 +4015,11 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                   disabled={arrived}
                   title={arrived ? "Guest already arrived — captain handles table moves" : "Move guest to a different table"}
                   style={{
-                    padding: "13px 4px", borderRadius: 8,
-                    background: arrived ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
-                    border: arrived ? "1px dashed rgba(255,255,255,0.12)" : "1px solid rgba(255,255,255,0.18)",
-                    color: arrived ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.85)",
-                    fontSize: 12, fontWeight: 800,
+                    padding: "15px 6px", borderRadius: 10,
+                    background: arrived ? "rgba(255,255,255,0.03)" : "#0A0A0A",
+                    border: arrived ? "2px dashed rgba(255,255,255,0.15)" : "2px solid #F2C744",
+                    color: arrived ? "rgba(255,255,255,0.35)" : "#F2C744",
+                    fontSize: 15, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15,
                     cursor: arrived ? "not-allowed" : "pointer",
                     opacity: arrived ? 0.6 : 1,
                   }}>
