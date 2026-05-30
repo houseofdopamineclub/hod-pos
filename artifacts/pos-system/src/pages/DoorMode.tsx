@@ -1532,6 +1532,16 @@ const TODAY_STR = () => getOperationalNightStr();
 // Bookings from hodclub.in use ev.date (calendar date), so we must match both.
 const CALENDAR_TODAY_STR = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+// 🆕 2026-05-30 v3.143 — RCB go-live: surface NEXT-DAY (e.g. 31 May final) TABLE
+// reservations in Door Mode + Boss views. Scoped DELIBERATELY to table rosters:
+// TABLE_WINDOW_DATES drives the tableReservations subscriptions only. TODAY_DATE_SET
+// (Tickets / Guestlist / booking counters) stays TONIGHT-only so tomorrow's
+// un-arrived pre-bookings never inflate live door counts (architect-flagged).
+// Table views iterate tableResByDate UNFILTERED, so widening only the table subs
+// is enough to show them. Reversible: drop CALENDAR_TOMORROW_STR() below.
+// (uses addDaysStr below — only invoked at runtime, so the forward ref is safe.)
+const CALENDAR_TOMORROW_STR = () => addDaysStr(CALENDAR_TODAY_STR(), 1);
+const TABLE_WINDOW_DATES = () => Array.from(new Set([TODAY_STR(), CALENDAR_TODAY_STR(), CALENDAR_TOMORROW_STR()]));
 const TODAY_DATE_SET = () => new Set([TODAY_STR(), CALENDAR_TODAY_STR()]);
 // 🔴 2026-05-23 (Khushi COST FIX r2) — Add N days to a YYYY-MM-DD string.
 // Used to build [from, to) windows for guestlist range queries that cover
@@ -3206,21 +3216,21 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
     // Before noon IST they differ: operational night = yesterday, calendar = today.
     // hodclub.in table reservations are written with the calendar date, so we
     // must merge both snapshots to avoid showing zero reservations before noon.
+    // v3.143 — RCB go-live: also include NEXT calendar day so tomorrow's table
+    // reservations (e.g. 31 May final) show in the Tables tab. Same per-date
+    // dedup-and-evict logic, generalised over the night window.
     const seen = new Map<string, HodTableReservation>();
     const merge = () => setReservations(Array.from(seen.values()));
-    const unsub1 = subscribeToHodReservations(today, (rows) => {
-      rows.forEach((r) => seen.set(r._docId || r.bookingRef || Math.random().toString(), r));
-      // Remove any that belong to today's date range and were removed from snapshot
-      for (const [k, v] of seen) { if ((v.date || "") === today && !rows.find((r) => (r._docId || r.bookingRef) === k)) seen.delete(k); }
-      merge();
-    });
-    if (calToday === today) return unsub1;
-    const unsub2 = subscribeToHodReservations(calToday, (rows) => {
-      rows.forEach((r) => seen.set(r._docId || r.bookingRef || Math.random().toString(), r));
-      for (const [k, v] of seen) { if ((v.date || "") === calToday && !rows.find((r) => (r._docId || r.bookingRef) === k)) seen.delete(k); }
-      merge();
-    });
-    return () => { unsub1(); unsub2(); };
+    const nights = Array.from(new Set([today, calToday, addDaysStr(calToday, 1)]));
+    const unsubs = nights.map((n) =>
+      subscribeToHodReservations(n, (rows) => {
+        rows.forEach((r) => seen.set(r._docId || r.bookingRef || Math.random().toString(), r));
+        // Evict rows that belonged to THIS night but vanished from its snapshot.
+        for (const [k, v] of seen) { if ((v.date || "") === n && !rows.find((r) => (r._docId || r.bookingRef) === k)) seen.delete(k); }
+        merge();
+      }),
+    );
+    return () => { unsubs.forEach((u) => u()); };
   }, [today, calToday]);
 
   // 🔴 Reset edit drafts ONLY when the modal opens for a different doc —
@@ -6169,8 +6179,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   // unfiltered subscriptions were burning ~entire-collection reads every
   // single time any door PC loaded, all night long. Now scoped to today.
   useEffect(() => {
-    const t = TODAY_STR(); const c = CALENDAR_TODAY_STR();
-    const u = subscribeToBookingsForNights([t, c], setAllBookings);
+    const u = subscribeToBookingsForNights([TODAY_STR(), CALENDAR_TODAY_STR()], setAllBookings);
     return () => u();
   }, []);
   useEffect(() => {
@@ -6179,10 +6188,12 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     return () => u();
   }, []);
   useEffect(() => {
-    const t = TODAY_STR(); const c = CALENDAR_TODAY_STR();
-    const u1 = subscribeToHodReservations(t, (rows) => setTableResByDate((m) => ({ ...m, [t]: rows })));
-    const u2 = (t === c) ? () => {} : subscribeToHodReservations(c, (rows) => setTableResByDate((m) => ({ ...m, [c]: rows })));
-    return () => { u1(); u2(); };
+    // v3.143 — subscribe to every night in the window (op-night, calendar today,
+    // tomorrow) so the dashboard table counters include next-day pre-bookings.
+    const unsubs = TABLE_WINDOW_DATES().map((n) =>
+      subscribeToHodReservations(n, (rows) => setTableResByDate((m) => ({ ...m, [n]: rows }))),
+    );
+    return () => { unsubs.forEach((u) => u()); };
   }, []);
 
   const tabCounts = (() => {

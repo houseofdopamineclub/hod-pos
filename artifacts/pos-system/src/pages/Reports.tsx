@@ -420,7 +420,9 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
   };
 }
 
-export default function Reports() {
+// 🆕 v3.105 — `embedded` hides the "← POS" link when Reports renders as a
+// tab inside AdminPage (Boss Mode). Standalone /reports route keeps it.
+export default function Reports({ embedded = false }: { embedded?: boolean } = {}) {
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
   const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [guestlist, setGuestlist] = useState<HodGuestlistEntry[]>([]);
@@ -479,6 +481,10 @@ export default function Reports() {
   };
   const last7Dates = useMemo(() => {
     const out: string[] = [];
+    // 🆕 2026-05-30 v3.143 — RCB go-live: prepend TOMORROW so the boss can view
+    // next-day (e.g. 31 May final) bookings, then today going back 6 nights.
+    const tmr = new Date(); tmr.setDate(tmr.getDate() + 1);
+    out.push(tmr.toISOString().split("T")[0]);
     for (let i = 0; i < 7; i++) {
       const d = new Date(); d.setDate(d.getDate() - i);
       out.push(d.toISOString().split("T")[0]);
@@ -1106,10 +1112,12 @@ export default function Reports() {
           {/* 2026-05-13 — Khushi spec: back-to-POS button so admins
               don't have to use the browser back arrow. Matches the
               ← POS link style used in CaptainMode. */}
-          <Link href="/"
-            style={{ padding: "8px 12px", borderRadius: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
-            ← POS
-          </Link>
+          {!embedded && (
+            <Link href="/"
+              style={{ padding: "8px 12px", borderRadius: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
+              ← POS
+            </Link>
+          )}
           <div>
             <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, fontFamily: "'Playfair Display', serif" }}>📋 Reports</div>
             <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
@@ -1122,7 +1130,7 @@ export default function Reports() {
             title="Pick a night (last 7 days kept; older nights live in Google Sheets archive)"
             style={{ padding: "8px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(201,168,76,.3)", color: "#fff", fontSize: 12, fontWeight: 700 }}>
             {last7Dates.map((d, i) => (
-              <option key={d} value={d}>{i === 0 ? `Tonight (${d})` : i === 1 ? `Last night (${d})` : d}</option>
+              <option key={d} value={d}>{i === 0 ? `Tomorrow (${d})` : i === 1 ? `Tonight (${d})` : i === 2 ? `Last night (${d})` : d}</option>
             ))}
           </select>
           <button onClick={() => setView("tables")} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
