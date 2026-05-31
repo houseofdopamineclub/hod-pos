@@ -5248,32 +5248,46 @@ export async function updateDoorPricingSettings(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 🆕 2026-05-31 v3.148 — TABLE COVER PRICING (Khushi-requested CRM)
-// Singleton doc at appSettings/tablePricing. Per-floor per-head weekend cover
-// charge read by the CUSTOMER SITE (Fri/Sat/Sun, arrival ≥9 PM, any floor).
-//   { ground:number, dining:number, rooftop:number, enabled:boolean,
+// 🆕 2026-05-31 v3.148 → v3.155 — TABLE COVER PRICING (Khushi-requested CRM)
+// Singleton doc at appSettings/tablePricing. Per-TIER per-head weekend cover
+// charge read by the CUSTOMER SITE (Fri/Sat/Sun, when enabled).
+// v3.155: Ground floor split into PREMIUM (C1–C4) + VVIP (VIP1/VIP2); EVERY tier
+// now carries its OWN per-head price AND its OWN cover start time (startMin =
+// minutes since midnight; 1260 = 9 PM, 1140 = 7 PM). Doc shape:
+//   { enabled:boolean,
+//     groundPremium:{price,startMin}, groundVvip:{price,startMin},
+//     dining:{price,startMin}, rooftop:{price,startMin},
 //     updatedAt: ts, updatedBy: string }
-// Replaces the old one-night RCB ₹2,500 hardcode. Manager edits this from
-// Admin → 🎟️ Table Cover Pricing. Defaults ₹2500/head everywhere, enabled.
+// Back-compat: an OLD doc with flat numeric ground/dining/rooftop still seeds the
+// per-tier prices on read (startMin falls back to the 9 PM default).
+// Manager edits this from Admin → 🎟️ Table Cover Pricing. Defaults ₹2500/head @
+// 9 PM everywhere, enabled.
 // 🛟 Dual-writes localStorage like doorPricing so the admin tablet works even
 // if prod rules block appSettings writes; fail-open everywhere.
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface TierPricing {
+  price: number;
+  startMin: number;
+}
 export interface TablePricingSettings {
-  ground: number;
-  dining: number;
-  rooftop: number;
   enabled: boolean;
+  groundPremium: TierPricing;
+  groundVvip: TierPricing;
+  dining: TierPricing;
+  rooftop: TierPricing;
   updatedAt?: any;
   updatedBy?: string;
 }
+export type TablePricingTierKey = "groundPremium" | "groundVvip" | "dining" | "rooftop";
 
 const TABLE_PRICING_DOC = "tablePricing";
 const TABLE_PRICING_DEFAULTS: TablePricingSettings = {
-  ground: 2500,
-  dining: 2500,
-  rooftop: 2500,
   enabled: true,
+  groundPremium: { price: 2500, startMin: 1260 },
+  groundVvip: { price: 2500, startMin: 1260 },
+  dining: { price: 2500, startMin: 1260 },
+  rooftop: { price: 2500, startMin: 1260 },
 };
 const TABLE_PRICING_LS_KEY = "hod.tablePricing.v1";
 
@@ -5289,15 +5303,38 @@ const tpLsGet = (): Partial<TablePricingSettings> | null => {
 const tpLsSet = (s: Partial<TablePricingSettings>) => {
   try { if (typeof window !== "undefined" && window.localStorage) window.localStorage.setItem(TABLE_PRICING_LS_KEY, JSON.stringify(s)); } catch {}
 };
-// Merge a partial over defaults, coercing only valid types (fail-open).
-function _tpMerge(...parts: Array<Partial<TablePricingSettings> | null | undefined>): TablePricingSettings {
-  const out: TablePricingSettings = { ...TABLE_PRICING_DEFAULTS };
+// Deep-clone defaults so per-tier objects are never shared by reference.
+function _tpCloneDefaults(): TablePricingSettings {
+  return {
+    enabled: TABLE_PRICING_DEFAULTS.enabled,
+    groundPremium: { ...TABLE_PRICING_DEFAULTS.groundPremium },
+    groundVvip: { ...TABLE_PRICING_DEFAULTS.groundVvip },
+    dining: { ...TABLE_PRICING_DEFAULTS.dining },
+    rooftop: { ...TABLE_PRICING_DEFAULTS.rooftop },
+  };
+}
+function _tpApplyTier(out: TablePricingSettings, key: TablePricingTierKey, src: any) {
+  const o = src && src[key];
+  if (o && typeof o === "object") {
+    if (typeof o.price === "number" && o.price >= 0) out[key].price = o.price;
+    if (typeof o.startMin === "number" && o.startMin >= 0) out[key].startMin = o.startMin;
+  }
+}
+// Merge partials over defaults, coercing only valid types (fail-open). Accepts both
+// the new structured shape and the legacy flat-number shape (ground/dining/rooftop).
+function _tpMerge(...parts: Array<any>): TablePricingSettings {
+  const out = _tpCloneDefaults();
   for (const p of parts) {
     if (!p) continue;
-    if (typeof p.ground === "number" && p.ground >= 0) out.ground = p.ground;
-    if (typeof p.dining === "number" && p.dining >= 0) out.dining = p.dining;
-    if (typeof p.rooftop === "number" && p.rooftop >= 0) out.rooftop = p.rooftop;
     if (typeof p.enabled === "boolean") out.enabled = p.enabled;
+    // Legacy flat numbers (old doc shape) seed prices; structured tiers below override.
+    if (typeof p.ground === "number" && p.ground >= 0) { out.groundPremium.price = p.ground; out.groundVvip.price = p.ground; }
+    if (typeof p.dining === "number" && p.dining >= 0) { out.dining.price = p.dining; }
+    if (typeof p.rooftop === "number" && p.rooftop >= 0) { out.rooftop.price = p.rooftop; }
+    _tpApplyTier(out, "groundPremium", p);
+    _tpApplyTier(out, "groundVvip", p);
+    _tpApplyTier(out, "dining", p);
+    _tpApplyTier(out, "rooftop", p);
   }
   return out;
 }

@@ -26,7 +26,7 @@ import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
   subscribeToDoorPricingSettings, updateDoorPricingSettings, type DoorPricingSettings,
-  subscribeToTablePricingSettings, updateTablePricingSettings, type TablePricingSettings,
+  subscribeToTablePricingSettings, updateTablePricingSettings, type TablePricingSettings, type TablePricingTierKey,
 } from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
@@ -57,6 +57,34 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
   return true;
 }
 
+// 🆕 v3.155 — per-tier cover-time helpers + tier list for the Table Cover Pricing tab.
+const _minToHHMM = (m: number): string => {
+  const mm = Math.max(0, Math.min(1439, Math.round(m || 0)));
+  const h = Math.floor(mm / 60), r = mm % 60;
+  return String(h).padStart(2, "0") + ":" + String(r).padStart(2, "0");
+};
+const _hhmmToMin = (s: string): number => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+  if (!m) return NaN;
+  const h = Number(m[1]), r = Number(m[2]);
+  if (h < 0 || h > 23 || r < 0 || r > 59) return NaN;
+  return h * 60 + r;
+};
+const _fmt12 = (s: string): string => {
+  const min = _hhmmToMin(s);
+  if (!Number.isFinite(min)) return s;
+  const h = Math.floor(min / 60), r = min % 60;
+  const ap = h >= 12 ? "PM" : "AM";
+  const h12 = ((h + 11) % 12) + 1;
+  return h12 + (r ? ":" + String(r).padStart(2, "0") : "") + " " + ap;
+};
+const TP_TIERS: { key: TablePricingTierKey; label: string; hint: string }[] = [
+  { key: "groundPremium", label: "🎧 Ground Premium", hint: "C1–C4" },
+  { key: "groundVvip", label: "👑 Ground VVIP", hint: "VIP1 / VIP2" },
+  { key: "dining", label: "🍽 Dining", hint: "" },
+  { key: "rooftop", label: "🌳 Rooftop", hint: "" },
+];
+
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
@@ -64,8 +92,19 @@ export default function AdminPage() {
   const [tab, setTab] = useState<"monitor" | "reports" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
-  const [tablePricing, setTablePricing] = useState<TablePricingSettings>({ ground: 2500, dining: 2500, rooftop: 2500, enabled: true });
-  const [tablePricingDraft, setTablePricingDraft] = useState<{ ground: string; dining: string; rooftop: string }>({ ground: "2500", dining: "2500", rooftop: "2500" });
+  const [tablePricing, setTablePricing] = useState<TablePricingSettings>({
+    enabled: true,
+    groundPremium: { price: 2500, startMin: 1260 },
+    groundVvip: { price: 2500, startMin: 1260 },
+    dining: { price: 2500, startMin: 1260 },
+    rooftop: { price: 2500, startMin: 1260 },
+  });
+  const [tablePricingDraft, setTablePricingDraft] = useState<Record<TablePricingTierKey, { price: string; start: string }>>({
+    groundPremium: { price: "2500", start: "21:00" },
+    groundVvip: { price: "2500", start: "21:00" },
+    dining: { price: "2500", start: "21:00" },
+    rooftop: { price: "2500", start: "21:00" },
+  });
   const [tablePricingSaving, setTablePricingSaving] = useState(false);
   const [tablePricingMsg, setTablePricingMsg] = useState("");
   // 🛟 Seed the editable price draft from the FIRST live snapshot only. After
@@ -94,7 +133,12 @@ export default function AdminPage() {
         // must NOT clobber a manager's unsaved edits.
         if (!tablePricingSeededRef.current) {
           tablePricingSeededRef.current = true;
-          setTablePricingDraft({ ground: String(s.ground), dining: String(s.dining), rooftop: String(s.rooftop) });
+          setTablePricingDraft({
+            groundPremium: { price: String(s.groundPremium.price), start: _minToHHMM(s.groundPremium.startMin) },
+            groundVvip: { price: String(s.groundVvip.price), start: _minToHHMM(s.groundVvip.startMin) },
+            dining: { price: String(s.dining.price), start: _minToHHMM(s.dining.startMin) },
+            rooftop: { price: String(s.rooftop.price), start: _minToHHMM(s.rooftop.startMin) },
+          });
         }
       }),
     ];
@@ -742,7 +786,7 @@ export default function AdminPage() {
             <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
               <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>🎟️ Table Cover Pricing</h3>
               <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
-                Sets the <b>per-head cover charge</b> for table bookings on the customer site (hodclub.in). When <b>ON</b>, guests booking a table for a <b>weekend night (Fri / Sat / Sun)</b> with an arrival time of <b>9 PM or later</b> pay this cover (100% redeemable on food &amp; drinks). Charged per head (price × party size). Weekdays and pre-9 PM slots stay free. Each floor can have its own price.
+                Sets the <b>per-head cover charge</b> and <b>start time</b> for each table tier on the customer site (hodclub.in). When <b>ON</b>, guests booking a table on a <b>weekend night (Fri / Sat / Sun)</b> with an arrival at or after that tier's start time pay its cover (100% redeemable on food &amp; drinks). Charged per head (price × party size). Earlier arrivals and weekdays stay free. <b>Ground Premium</b> = tables C1–C4; <b>Ground VVIP</b> = VIP1 / VIP2 — each tier has its own price and start time.
                 <br /><br />
                 When <b>OFF</b>, all table bookings are free (no cover) on every night.
               </p>
@@ -754,7 +798,7 @@ export default function AdminPage() {
                   </div>
                   <div className="text-xs mt-1" style={{ color: tablePricing.enabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
                     {tablePricing.enabled
-                      ? "✅ ON — weekend 9 PM+ tables carry the per-head cover below"
+                      ? "✅ ON — weekend tables carry the per-head cover below from each tier's start time"
                       : "🔒 OFF — all table bookings are free"}
                   </div>
                 </div>
@@ -810,27 +854,39 @@ export default function AdminPage() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 mb-4">
-                {([
-                  { key: "ground" as const, label: "🎧 Ground Floor" },
-                  { key: "dining" as const, label: "🍽 Dining" },
-                  { key: "rooftop" as const, label: "🌳 Rooftop" },
-                ]).map((f) => (
-                  <div key={f.key}>
-                    <label className="block text-xs font-semibold mb-1" style={{ color: "hsl(36 29% 70%)" }}>{f.label}</label>
-                    <div className="flex items-center rounded-lg px-2" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
-                      <span className="text-sm" style={{ color: "hsl(36 29% 55%)" }}>₹</span>
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        min={0}
-                        value={tablePricingDraft[f.key]}
-                        onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: e.target.value }))}
-                        className="w-full bg-transparent py-2 px-1 text-sm outline-none"
-                        style={{ color: "hsl(36 29% 93%)" }}
-                      />
+              <div className="space-y-3 mb-4">
+                {TP_TIERS.map((f) => (
+                  <div key={f.key} className="p-3 rounded-lg" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+                    <div className="text-xs font-semibold mb-2" style={{ color: "hsl(36 29% 80%)" }}>
+                      {f.label}{f.hint ? <span style={{ color: "hsl(36 29% 50%)", fontWeight: 400 }}> · {f.hint}</span> : null}
                     </div>
-                    <div className="text-[10px] mt-1" style={{ color: "hsl(36 29% 45%)" }}>per head</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-semibold mb-1" style={{ color: "hsl(36 29% 60%)" }}>PER-HEAD COVER</label>
+                        <div className="flex items-center rounded-lg px-2" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
+                          <span className="text-sm" style={{ color: "hsl(36 29% 55%)" }}>₹</span>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            min={0}
+                            value={tablePricingDraft[f.key].price}
+                            onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: { ...d[f.key], price: e.target.value } }))}
+                            className="w-full bg-transparent py-2 px-1 text-sm outline-none"
+                            style={{ color: "hsl(36 29% 93%)" }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold mb-1" style={{ color: "hsl(36 29% 60%)" }}>COVER STARTS</label>
+                        <input
+                          type="time"
+                          value={tablePricingDraft[f.key].start}
+                          onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: { ...d[f.key], start: e.target.value } }))}
+                          className="w-full rounded-lg py-2 px-2 text-sm outline-none"
+                          style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}
+                        />
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -838,26 +894,34 @@ export default function AdminPage() {
               <button
                 onClick={async () => {
                   if (tablePricingSaving) return;
-                  const g = Math.round(Number(tablePricingDraft.ground));
-                  const d = Math.round(Number(tablePricingDraft.dining));
-                  const r = Math.round(Number(tablePricingDraft.rooftop));
-                  if (![g, d, r].every((n) => Number.isFinite(n) && n >= 0)) {
-                    setTablePricingMsg("❌ Enter valid amounts (0 or more) for every floor.");
-                    return;
+                  const patch: Partial<TablePricingSettings> = {};
+                  for (const f of TP_TIERS) {
+                    const price = Math.round(Number(tablePricingDraft[f.key].price));
+                    const startMin = _hhmmToMin(tablePricingDraft[f.key].start);
+                    if (!Number.isFinite(price) || price < 0) {
+                      setTablePricingMsg(`❌ Enter a valid price for ${f.label}.`);
+                      return;
+                    }
+                    if (!Number.isFinite(startMin)) {
+                      setTablePricingMsg(`❌ Enter a valid start time for ${f.label}.`);
+                      return;
+                    }
+                    (patch as any)[f.key] = { price, startMin };
                   }
-                  const ok = await requireManagerPinAdmin("Save table cover prices? Ground ₹" + g + " / Dining ₹" + d + " / Rooftop ₹" + r + " per head.");
+                  const summary = TP_TIERS.map((f) => `${f.label}: ₹${(patch as any)[f.key].price} from ${_fmt12(tablePricingDraft[f.key].start)}`).join("\n");
+                  const ok = await requireManagerPinAdmin("Save table cover pricing?\n\n" + summary);
                   if (!ok) return;
                   setTablePricingSaving(true);
                   setTablePricingMsg("");
                   try {
-                    await updateTablePricingSettings({ ground: g, dining: d, rooftop: r }, currentStaff?.name || "admin");
-                    setTablePricing((p) => ({ ...p, ground: g, dining: d, rooftop: r }));
+                    await updateTablePricingSettings(patch, currentStaff?.name || "admin");
+                    setTablePricing((p) => ({ ...p, ...patch } as TablePricingSettings));
                     await logAudit({
                       action: "TABLE_PRICING_UPDATE",
                       staffId: currentStaff?.id || "admin",
                       staffName: currentStaff?.name || "admin",
                       staffRole: (currentStaff?.role || "admin") as StaffRole,
-                      details: { ground: g, dining: d, rooftop: r },
+                      details: patch as any,
                     }).catch(() => {});
                     setTablePricingMsg("✅ Saved.");
                   } catch (e: any) {
@@ -870,7 +934,7 @@ export default function AdminPage() {
                 className="px-4 py-2 rounded-lg text-sm font-semibold"
                 style={{ background: "#C9A84C", color: "#030305", cursor: tablePricingSaving ? "wait" : "pointer", opacity: tablePricingSaving ? 0.6 : 1 }}
               >
-                {tablePricingSaving ? "Saving…" : "Save Prices"}
+                {tablePricingSaving ? "Saving…" : "Save Prices & Times"}
               </button>
               {tablePricingMsg && (
                 <span className="ml-3 text-xs" style={{ color: tablePricingMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{tablePricingMsg}</span>
