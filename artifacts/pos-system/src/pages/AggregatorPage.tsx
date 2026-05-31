@@ -6,6 +6,10 @@ import {
   subscribeToAggregatorSettings, subscribeToAggregatorOrders,
   addAggregatorOrder, logAudit,
 } from "@/lib/firestore";
+import {
+  subscribeToUnparsedBookings, resolveUnparsedBooking, dismissUnparsedBooking,
+  type HodUnparsedBooking,
+} from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 
 export default function AggregatorPage() {
@@ -23,11 +27,13 @@ export default function AggregatorPage() {
     notes: "",
   });
   const [saving, setSaving] = useState(false);
+  const [unparsed, setUnparsed] = useState<HodUnparsedBooking[]>([]);
 
   useEffect(() => {
     const unsubs = [
       subscribeToAggregatorSettings(setSettings),
       subscribeToAggregatorOrders(setOrders),
+      subscribeToUnparsedBookings(setUnparsed),
     ];
     return () => unsubs.forEach(u => u());
   }, []);
@@ -72,6 +78,39 @@ export default function AggregatorPage() {
     }
   };
 
+  const handleResolve = async (
+    item: HodUnparsedBooking,
+    edits: { customerName: string; phone: string; partySize: number; date: string; arrivalTime: string },
+  ) => {
+    if (!currentStaff) return;
+    try {
+      const ref = await resolveUnparsedBooking(item, edits, currentStaff.name);
+      await logAudit({
+        action: "unparsed_booking_resolved",
+        staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+        details: { unparsedId: item.id, source: item.source || "unknown", tableReservationId: ref },
+      }).catch(() => {});
+      alert(`✓ ADDED TO TABLES\n\nRef: ${ref}\n${edits.customerName} · ${edits.partySize} pax · ${edits.date} ${edits.arrivalTime}`);
+    } catch (e: any) {
+      alert(`Could not add booking: ${e?.message || e}`);
+    }
+  };
+
+  const handleDismiss = async (item: HodUnparsedBooking) => {
+    if (!currentStaff) return;
+    if (!confirm(`Dismiss this? It will be removed from Needs Review (not added as a booking).`)) return;
+    try {
+      await dismissUnparsedBooking(item.id, currentStaff.name);
+      await logAudit({
+        action: "unparsed_booking_dismissed",
+        staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+        details: { unparsedId: item.id, source: item.source || "unknown" },
+      }).catch(() => {});
+    } catch (e: any) {
+      alert(`Could not dismiss: ${e?.message || e}`);
+    }
+  };
+
   const aggLabels: Record<AggregatorName, string> = {
     zomato: "Zomato",
     "swiggy-dineout": "Swiggy Dineout",
@@ -89,6 +128,20 @@ export default function AggregatorPage() {
       </header>
 
       <div className="p-4 max-w-lg mx-auto">
+        {unparsed.length > 0 && (
+          <div className="mb-4 rounded-lg overflow-hidden" style={{ border: "1px solid #ef4444" }}>
+            <div className="px-3 py-2 flex items-center justify-between" style={{ background: "rgba(239,68,68,0.14)" }}>
+              <span className="text-sm font-bold" style={{ color: "#ef4444" }}>⚠️ NEEDS REVIEW ({unparsed.length})</span>
+              <span className="text-[10px]" style={{ color: "hsl(36 29% 55%)" }}>AI couldn't fully read — check &amp; add</span>
+            </div>
+            <div className="p-2 space-y-2" style={{ background: "hsl(240 12% 5%)", maxHeight: "46vh", overflowY: "auto" }}>
+              {unparsed.map((item) => (
+                <UnparsedCard key={item.id} item={item} onResolve={handleResolve} onDismiss={handleDismiss} />
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2 mb-4">
           {(Object.keys(aggLabels) as AggregatorName[]).map((a) => (
             <button key={a} onClick={() => setSelectedAgg(a)}
@@ -155,6 +208,82 @@ export default function AggregatorPage() {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// One editable Needs-Review card. AI guesses pre-fill the fields; the staffer
+// corrects anything wrong, then taps ADD (writes a tableReservation) or DISMISS.
+function UnparsedCard({
+  item, onResolve, onDismiss,
+}: {
+  item: HodUnparsedBooking;
+  onResolve: (item: HodUnparsedBooking, edits: { customerName: string; phone: string; partySize: number; date: string; arrivalTime: string }) => Promise<void>;
+  onDismiss: (item: HodUnparsedBooking) => Promise<void>;
+}) {
+  const [customerName, setName] = useState(item.guessGuestName || "");
+  const [phone, setPhone] = useState(item.guessGuestPhone || "");
+  const [partySize, setPax] = useState<number>(item.guessPartySize || 2);
+  const [date, setDate] = useState(item.guessBookingDate || "");
+  const [arrivalTime, setTime] = useState(item.guessArrivalTime || "");
+  const [showRaw, setShowRaw] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const inputCls = "px-2 py-1.5 rounded text-xs w-full";
+  const inputStyle = { background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 22%)", color: "hsl(36 29% 93%)" } as const;
+  const conf = typeof item.aiConfidence === "number" ? Math.round(item.aiConfidence * 100) : null;
+  const srcLabel = (item.source || "unknown").toUpperCase();
+  const reasonLabel = item.reason === "ai_unavailable" ? "AI was offline" : item.reason === "low_confidence" ? "AI unsure" : (item.reason || "review");
+
+  const add = async () => {
+    setBusy(true);
+    try { await onResolve(item, { customerName, phone, partySize, date, arrivalTime }); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="rounded-lg p-2.5" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{ background: "rgba(201,168,76,0.15)", color: "#C9A84C" }}>
+          {srcLabel} · {item.channel === "sms" ? "SMS" : "EMAIL"}
+        </span>
+        <span className="text-[10px]" style={{ color: "hsl(36 29% 50%)" }}>
+          {reasonLabel}{conf !== null ? ` · ${conf}%` : ""}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <input value={customerName} onChange={(e) => setName(e.target.value)} placeholder="Name *" className={inputCls + " col-span-2"} style={inputStyle} />
+        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone" inputMode="numeric" className={inputCls} style={inputStyle} />
+        <input value={partySize} onChange={(e) => setPax(Number(e.target.value) || 0)} placeholder="Pax" type="number" className={inputCls} style={inputStyle} />
+        <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="Date YYYY-MM-DD *" type="date" className={inputCls} style={inputStyle} />
+        <input value={arrivalTime} onChange={(e) => setTime(e.target.value)} placeholder="Time *" className={inputCls} style={inputStyle} />
+      </div>
+
+      {item.rawSubject && <div className="text-[10px] mt-2" style={{ color: "hsl(36 29% 55%)" }}>✉️ {item.rawSubject}</div>}
+      {item.rawBody && (
+        <button onClick={() => setShowRaw((s) => !s)} className="text-[10px] mt-1" style={{ color: "#C9A84C" }}>
+          {showRaw ? "▲ Hide original message" : "▼ Show original message"}
+        </button>
+      )}
+      {showRaw && item.rawBody && (
+        <pre className="text-[10px] mt-1 p-2 rounded whitespace-pre-wrap" style={{ background: "hsl(240 12% 4%)", color: "hsl(36 29% 65%)", maxHeight: "30vh", overflowY: "auto" }}>
+          {item.rawBody}
+        </pre>
+      )}
+
+      <div className="flex gap-2 mt-2">
+        <button onClick={add} disabled={busy || !customerName.trim() || !date || !arrivalTime.trim()}
+          className="flex-1 py-1.5 rounded text-xs font-semibold disabled:opacity-40"
+          style={{ background: "#C9A84C", color: "#030305" }}>
+          {busy ? "Adding..." : "✓ ADD TO TABLES"}
+        </button>
+        <button onClick={() => onDismiss(item)} disabled={busy}
+          className="px-3 py-1.5 rounded text-xs font-medium disabled:opacity-40"
+          style={{ background: "transparent", border: "1px solid hsl(0 60% 40%)", color: "#ef4444" }}>
+          Dismiss
+        </button>
       </div>
     </div>
   );
