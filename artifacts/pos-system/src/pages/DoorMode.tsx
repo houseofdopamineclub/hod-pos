@@ -3655,7 +3655,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
           const ss = f.key === "all" ? null : SRC_STYLES[f.key];
           const c = countBySrc[f.key] ?? 0;
           return (
-            <button key={f.key} onClick={() => setAggFilter(f.key)}
+            <button key={f.key} onClick={() => { setAggFilter(f.key); setReviewOnly(false); }}
               style={{
                 padding: "9px 14px", borderRadius: 20, fontSize: 13, fontWeight: 900, letterSpacing: "0.5px", cursor: "pointer",
                 textTransform: "uppercase", fontFamily: "'Space Grotesk', sans-serif",
@@ -3680,7 +3680,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
           door so staff complete missing pax/time/phone before the guest arrives.
           Only shown when ≥1 row is flagged. Tap to filter to just those rows. */}
       {reviewCount > 0 && (
-        <button onClick={() => setReviewOnly((v) => !v)}
+        <button onClick={() => { const next = !reviewOnly; setReviewOnly(next); if (next) setAggFilter("all"); }}
           style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             padding: "12px 14px", marginBottom: 12, borderRadius: 10, cursor: "pointer",
             background: reviewOnly ? "rgba(224,138,44,.2)" : "rgba(224,138,44,.1)",
