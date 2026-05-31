@@ -3518,10 +3518,23 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
   };
 
   const handleCancel = async (r: HodTableReservation) => {
-    if (!confirm(`Cancel table booking for ${r.customerName || "guest"}?`)) return;
+    // 🆕 Khushi: Cancel must be MANAGER-PIN gated via the in-app centered modal
+    // (no browser confirm()/prompt()/alert() chrome on the door tablet).
+    const who = r.customerName || "guest";
+    const tbl = r.tableId ? ` (${r.tableId})` : "";
+    const pin = await centeredPinPrompt(`Cancel table booking for ${who}${tbl}? This removes it from tonight's list.`);
+    if (!pin) return; // CANCEL on the PIN modal = action stays blocked
+    let h = "";
+    try { h = await sha256(pin.trim()); } catch (_) { h = ""; }
+    if (h !== DOOR_MANAGER_HASH) { await centeredAlert("ACCESS DENIED", "Wrong Manager PIN. Booking was NOT cancelled.", "error"); return; }
     setCancelBusy(r._docId);
-    try { await cancelTableReservation(r._docId, agentName); }
-    catch (e: any) { alert("Failed: " + (e?.message || "")); }
+    try {
+      await cancelTableReservation(r._docId, agentName);
+      setExpandedDocId(null);
+      await centeredAlert("BOOKING CANCELLED", `${who}${tbl} has been removed from tonight's list.`, "success");
+    } catch (e: any) {
+      await centeredAlert("CANCEL FAILED", e?.message || "Please try again.", "error");
+    }
     setCancelBusy("");
   };
 
@@ -4075,6 +4088,15 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                   {arrived ? "🔒 Reassign" : "🔄 Reassign"}
                 </button>
               </div>
+
+              {/* 🆕 Khushi — CANCEL BOOKING. Manager-PIN gated via the in-app
+                  centered modal (no browser popups). Removes the reservation
+                  from tonight's list (e.g. test/dummy bookings). Full-width
+                  row of its own so it never gets mis-tapped with Arrived. */}
+              <button onClick={() => handleCancel(r)} disabled={cancelBusy === r._docId}
+                style={{ marginTop: 8, width: "100%", padding: "13px 6px", borderRadius: 10, background: "rgba(226,59,46,0.10)", border: "2px solid rgba(226,59,46,0.55)", color: "#FF6B5E", fontSize: 14, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15, cursor: cancelBusy === r._docId ? "wait" : "pointer", opacity: cancelBusy === r._docId ? 0.6 : 1 }}>
+                {cancelBusy === r._docId ? "Cancelling…" : "✕ Cancel Booking"}
+              </button>
             </div>
           </div>
         );
