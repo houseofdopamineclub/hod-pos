@@ -3507,6 +3507,144 @@ export async function createWalkInTableReservation(input: {
   return ref;
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// 🧠 2026-05-31 v3.146 — AI AGGREGATOR "NEEDS REVIEW" TRAY
+// Anything the email/SMS parser + AI brain could not confidently read is written
+// (server-side, by Cloud Functions) to `unparsedBookings`. The POS surfaces these
+// so staff can one-tap add them to tableReservations — nothing is ever lost.
+// All fns here are FAIL-OPEN (subscribe error → cb([])).
+// ════════════════════════════════════════════════════════════════════════
+const UNPARSED_BOOKINGS_COL = "unparsedBookings";
+
+export interface HodUnparsedBooking {
+  id: string;
+  channel?: "email" | "sms";
+  reason?: "ai_unavailable" | "low_confidence" | string;
+  status?: "pending" | "resolved" | "dismissed";
+  source?: string;            // detected aggregator or "unknown"
+  guessGuestName?: string;
+  guessGuestPhone?: string;
+  guessPartySize?: number;
+  guessBookingDate?: string;  // YYYY-MM-DD
+  guessArrivalTime?: string;
+  aiConfidence?: number | null;
+  rawFrom?: string;
+  rawSubject?: string;
+  rawBody?: string;
+  rawMessageId?: string;
+  createdAt?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  tableReservationId?: string;
+}
+
+// Live tray feed — only items still awaiting a human decision.
+export function subscribeToUnparsedBookings(
+  cb: (items: HodUnparsedBooking[]) => void,
+): Unsubscribe {
+  return _shareSubscription<HodUnparsedBooking[]>(
+    "unparsedBookings:pending",
+    (push) =>
+      onSnapshot(
+        query(collection(db, UNPARSED_BOOKINGS_COL), where("status", "==", "pending")),
+        (snap) => {
+          const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as HodUnparsedBooking));
+          // Newest first (createdAt is an ISO string).
+          rows.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+          push(rows);
+        },
+        () => push([]),
+      ),
+    cb,
+  );
+}
+
+// One-tap convert a flagged item into a real tableReservation, then mark the
+// unparsed doc resolved (it drops out of the pending tray). Mirrors the walk-in
+// write so the booking behaves identically to a manually-added one.
+export async function resolveUnparsedBooking(
+  item: HodUnparsedBooking,
+  edits: {
+    customerName: string;
+    phone: string;
+    partySize: number;
+    date: string;        // YYYY-MM-DD
+    arrivalTime: string;
+  },
+  staffName: string,
+): Promise<string> {
+  const customerName = (edits.customerName || "").trim();
+  const date = (edits.date || "").trim();
+  const arrivalTime = (edits.arrivalTime || "").trim();
+  if (!customerName) throw new Error("Enter customer name");
+  if (!date) throw new Error("Pick a date");
+  if (!arrivalTime) throw new Error("Enter arrival time");
+
+  const src = (item.source && item.source !== "unknown") ? item.source : "aggregator";
+  // Deterministic reservation id derived from the unparsed doc id, so a retry
+  // after a partial failure overwrites the SAME reservation instead of creating
+  // a duplicate. The whole thing runs in ONE transaction guarded on status ==
+  // 'pending', so a double-tap / race can never create two reservations.
+  const ref = `unp-${item.id}`;
+  const resvRef = doc(db, TABLE_RES_COL, ref);
+  const unpRef = doc(db, UNPARSED_BOOKINGS_COL, item.id);
+
+  const finalRef = await runTransaction(db, async (txn) => {
+    const unpSnap = await txn.get(unpRef);
+    if (!unpSnap.exists()) throw new Error("This item no longer exists.");
+    const st = (unpSnap.data() as any).status;
+    if (st && st !== "pending") {
+      // Already handled by someone else / an earlier tap — return the existing
+      // reservation id so the UI succeeds idempotently (no duplicate).
+      const existing = (unpSnap.data() as any).tableReservationId;
+      if (existing) return existing as string;
+      throw new Error("This item was already handled.");
+    }
+
+    txn.set(resvRef, {
+      tableId: "",
+      floor: "",
+      floorLabel: "",
+      date,
+      customerName,
+      phone: (edits.phone || "").replace(/\D/g, "").slice(-10),
+      partySize: edits.partySize || 2,
+      arrivalTime,
+      bookingRef: ref,
+      bookedAt: new Date().toISOString(),
+      source: src,
+      notes: `Added from Needs Review (${item.reason || "manual"})`,
+      email: "",
+      amenities: [],
+      amenitiesTotal: 0,
+      tabRounds: [],
+      tabTotal: 0,
+      status: "confirmed",
+      createdBy: staffName,
+      isWalkIn: false,
+      fromUnparsed: true,
+      unparsedRef: item.id,
+    });
+    txn.update(unpRef, {
+      status: "resolved",
+      resolvedAt: new Date().toISOString(),
+      resolvedBy: staffName,
+      tableReservationId: ref,
+    });
+    return ref;
+  });
+  return finalRef;
+}
+
+// Throw away a non-booking (promo/junk that slipped through) — leaves the tray.
+export async function dismissUnparsedBooking(id: string, staffName: string): Promise<void> {
+  await updateDoc(doc(db, UNPARSED_BOOKINGS_COL, id), {
+    status: "dismissed",
+    resolvedAt: new Date().toISOString(),
+    resolvedBy: staffName,
+  });
+}
+
 // 🔴 2026-05-20 (Khushi) — COVER+TABLE LINK. Patches both docs so:
 //   • table reservation knows its linked wallet ref + initial balance
 //   • cover doc knows which table it belongs to (so captain wallet redeem
