@@ -3193,6 +3193,10 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
   const [aggFilter, setAggFilter] = useState<string>("all");
   // Tri-state arrival filter: "" = all, "arrived" = only arrived, "pending" = not yet.
   const [arrivalFilter, setArrivalFilter] = useState<"" | "arrived" | "pending">("");
+  // 🆕 NEEDS REVIEW — when ON, narrow the list to aggregator bookings flagged
+  // needsManualReview (missing pax/time/phone), mirroring the admin "needs-review"
+  // flag at the door so staff can complete them before the guest arrives.
+  const [reviewOnly, setReviewOnly] = useState(false);
   const [reassignFor, setReassignFor] = useState<HodTableReservation | null>(null);
   const [arrBusy, setArrBusy] = useState("");
   const [cancelBusy, setCancelBusy] = useState("");
@@ -3258,6 +3262,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
     if (!focusDocId) return;
     setAggFilter("all");
     setArrivalFilter("");
+    setReviewOnly(false);
     setExpandedDocId(focusDocId);
     onFocusConsumed?.();
   }, [focusDocId, onFocusConsumed]);
@@ -3325,7 +3330,10 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
     arrivalFilter === "arrived" ? byAgg.filter((r) => r.actualArrivalTime) :
     arrivalFilter === "pending" ? byAgg.filter((r) => !r.actualArrivalTime) :
     byAgg;
-  const filtered = byArrival.filter((r) => matchQuery(query, r.customerName, r.phone, r.tableId, r.bookingRef));
+  // 🆕 NEEDS REVIEW filter — when toggled on, show only rows flagged for manual
+  // review. Fail-open: undefined flag → falsy → not in the review subset.
+  const byReview = reviewOnly ? byArrival.filter((r) => r.needsManualReview) : byArrival;
+  const filtered = byReview.filter((r) => matchQuery(query, r.customerName, r.phone, r.tableId, r.bookingRef));
   // 🔴 2026-05-21 (Khushi) — arrived tables drop to BOTTOM so new arrivals
   // sit at the top. Within each group: earliest arrivalTime (slot) first so
   // the captain sees the next expected guest at the top.
@@ -3341,6 +3349,15 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
 
   const arrivedCount = active.filter((r) => r.actualArrivalTime).length;
   const pendingCount = active.length - arrivedCount;
+  // 🆕 Count of rows still needing manual review (missing pax/time/phone etc).
+  const reviewCount = active.filter((r) => r.needsManualReview).length;
+  // 🛟 Anti-lockout: the NEEDS REVIEW banner only renders while reviewCount > 0.
+  // If the last flagged row gets resolved (here or on another device) while the
+  // review filter is ON, auto-clear it so the list never gets stuck empty with
+  // no visible toggle to switch back to ALL.
+  useEffect(() => {
+    if (reviewOnly && reviewCount === 0) setReviewOnly(false);
+  }, [reviewOnly, reviewCount]);
 
   // Per-aggregator booking counts for the chip badges + mini dashboard.
   const countBySrc: Record<string, number> = { all: active.length, inhouse: 0, swiggy: 0, eazydiner: 0, zomato: 0 };
@@ -3646,6 +3663,21 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         })}
       </div>
 
+      {/* 🆕 NEEDS REVIEW banner — surfaces the admin "needs-review" flag at the
+          door so staff complete missing pax/time/phone before the guest arrives.
+          Only shown when ≥1 row is flagged. Tap to filter to just those rows. */}
+      {reviewCount > 0 && (
+        <button onClick={() => setReviewOnly((v) => !v)}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            padding: "12px 14px", marginBottom: 12, borderRadius: 10, cursor: "pointer",
+            background: reviewOnly ? "rgba(224,138,44,.2)" : "rgba(224,138,44,.1)",
+            border: `2px solid ${reviewOnly ? "#E08A2C" : "rgba(224,138,44,.45)"}`,
+            color: "#F2C744", fontFamily: "'Space Grotesk', sans-serif",
+            fontSize: 13, fontWeight: 900, letterSpacing: .6, textTransform: "uppercase", lineHeight: 1.3 }}>
+          ⚠️ {reviewCount} NEED{reviewCount === 1 ? "S" : ""} REVIEW {reviewOnly ? "· SHOWING ONLY THESE — TAP FOR ALL" : "· TAP TO COMPLETE DETAILS"}
+        </button>
+      )}
+
       {/* 🔴 2026-05-16 (Khushi) — COMPACT ROWS mirroring captain mode:
           [table pill] [name + agg badge w/ discount + meta] [status pill] [📞 call]
           Tap the row → detail modal with full meta + Arrived/Reassign/WA/Cancel. */}
@@ -3659,6 +3691,7 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
         const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName.toUpperCase();
         const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
         const arrived = !!r.actualArrivalTime;
+        const needsReview = !!r.needsManualReview;
         const tableLabel = r.tableId || "—";
 
         // 🆕 v3.25 — bigger row fonts to match v3.22 modal pattern.
@@ -3669,8 +3702,8 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
           <div key={r._docId} onClick={() => setExpandedDocId(r._docId)}
             style={{ display: "flex", alignItems: "center", gap: 10,
               padding: "12px 12px", marginBottom: 6, borderRadius: 10,
-              background: arrived ? "rgba(0,200,100,.04)" : "rgba(255,255,255,.03)",
-              border: `1px solid ${arrived ? "rgba(0,200,100,.25)" : "rgba(255,255,255,.08)"}`,
+              background: needsReview && !arrived ? "rgba(224,138,44,.07)" : arrived ? "rgba(0,200,100,.04)" : "rgba(255,255,255,.03)",
+              border: `1px solid ${needsReview && !arrived ? "rgba(224,138,44,.55)" : arrived ? "rgba(0,200,100,.25)" : "rgba(255,255,255,.08)"}`,
               cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", transition: "background .15s" }}>
             {/* Table id pill */}
             <div style={{ flexShrink: 0, minWidth: 52, textAlign: "center",
@@ -3697,6 +3730,12 @@ function TablesTab({ query, agentName, eventId, onShowQr, onCover, focusDocId, o
                     background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.55)",
                     letterSpacing: .4, textTransform: "uppercase" }}>
                     In-House
+                  </span>
+                )}
+                {needsReview && (
+                  <span style={{ fontSize: 10, fontWeight: 900, padding: "3px 7px", borderRadius: 3,
+                    background: "#E08A2C", color: "#1A1A1A", letterSpacing: .4, textTransform: "uppercase" }}>
+                    ⚠ Review
                   </span>
                 )}
               </div>
