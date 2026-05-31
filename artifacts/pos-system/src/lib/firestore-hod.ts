@@ -5248,6 +5248,109 @@ export async function updateDoorPricingSettings(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 🆕 2026-05-31 v3.148 — TABLE COVER PRICING (Khushi-requested CRM)
+// Singleton doc at appSettings/tablePricing. Per-floor per-head weekend cover
+// charge read by the CUSTOMER SITE (Fri/Sat/Sun, arrival ≥9 PM, any floor).
+//   { ground:number, dining:number, rooftop:number, enabled:boolean,
+//     updatedAt: ts, updatedBy: string }
+// Replaces the old one-night RCB ₹2,500 hardcode. Manager edits this from
+// Admin → 🎟️ Table Cover Pricing. Defaults ₹2500/head everywhere, enabled.
+// 🛟 Dual-writes localStorage like doorPricing so the admin tablet works even
+// if prod rules block appSettings writes; fail-open everywhere.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface TablePricingSettings {
+  ground: number;
+  dining: number;
+  rooftop: number;
+  enabled: boolean;
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+const TABLE_PRICING_DOC = "tablePricing";
+const TABLE_PRICING_DEFAULTS: TablePricingSettings = {
+  ground: 2500,
+  dining: 2500,
+  rooftop: 2500,
+  enabled: true,
+};
+const TABLE_PRICING_LS_KEY = "hod.tablePricing.v1";
+
+const tpLsGet = (): Partial<TablePricingSettings> | null => {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    const v = window.localStorage.getItem(TABLE_PRICING_LS_KEY);
+    if (!v) return null;
+    const p = JSON.parse(v);
+    return p && typeof p === "object" ? p : null;
+  } catch { return null; }
+};
+const tpLsSet = (s: Partial<TablePricingSettings>) => {
+  try { if (typeof window !== "undefined" && window.localStorage) window.localStorage.setItem(TABLE_PRICING_LS_KEY, JSON.stringify(s)); } catch {}
+};
+// Merge a partial over defaults, coercing only valid types (fail-open).
+function _tpMerge(...parts: Array<Partial<TablePricingSettings> | null | undefined>): TablePricingSettings {
+  const out: TablePricingSettings = { ...TABLE_PRICING_DEFAULTS };
+  for (const p of parts) {
+    if (!p) continue;
+    if (typeof p.ground === "number" && p.ground >= 0) out.ground = p.ground;
+    if (typeof p.dining === "number" && p.dining >= 0) out.dining = p.dining;
+    if (typeof p.rooftop === "number" && p.rooftop >= 0) out.rooftop = p.rooftop;
+    if (typeof p.enabled === "boolean") out.enabled = p.enabled;
+  }
+  return out;
+}
+
+export function subscribeToTablePricingSettings(
+  cb: (s: TablePricingSettings) => void
+): () => void {
+  // Seed from localStorage immediately so the UI doesn't flash defaults.
+  const seeded = tpLsGet();
+  if (seeded) cb(_tpMerge(seeded));
+  try {
+    return onSnapshot(
+      doc(db, APP_SETTINGS_COL, TABLE_PRICING_DOC),
+      (snap) => {
+        const data = snap.exists() ? (snap.data() as Partial<TablePricingSettings>) : null;
+        // Firestore (cross-device truth) wins; fall back to localStorage, then defaults.
+        cb(_tpMerge(tpLsGet(), data));
+      },
+      (err: any) => {
+        console.warn("[tablePricing] subscribe failed, using localStorage:", err?.message);
+        cb(_tpMerge(tpLsGet()));
+      }
+    );
+  } catch (e: any) {
+    console.warn("[tablePricing] subscribe threw, using localStorage:", e?.message);
+    cb(_tpMerge(tpLsGet()));
+    return () => {};
+  }
+}
+
+export async function updateTablePricingSettings(
+  patch: Partial<TablePricingSettings>,
+  updatedBy?: string
+): Promise<void> {
+  // Persist locally first so this tablet reflects immediately even if rules block.
+  tpLsSet(_tpMerge(tpLsGet(), patch));
+  try {
+    await setDoc(
+      doc(db, APP_SETTINGS_COL, TABLE_PRICING_DOC),
+      { ...patch, updatedAt: serverTimestamp(), updatedBy: updatedBy || "" },
+      { merge: true }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || e || "");
+    if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
+      console.warn("[tablePricing] Firestore write blocked by rules (using local only):", msg);
+      return;
+    }
+    throw e;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 🍳 KDS — KITCHEN DISPLAY SYSTEM (2026-05-21, Khushi-requested)
 // Adds a real-time kitchen screen showing grouped pending food items with a
 // BUMP button. When chef bumps, captain/bar tablets get an instant green

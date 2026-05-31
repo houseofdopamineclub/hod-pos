@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { useStaff, DOOR_STAFF_SEED } from "@/lib/staff-context";
 // 🔴 2026-05-09 — switched FROM menu-data.ts (314 items, prefix `m`)
@@ -26,6 +26,7 @@ import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
   subscribeToDoorPricingSettings, updateDoorPricingSettings, type DoorPricingSettings,
+  subscribeToTablePricingSettings, updateTablePricingSettings, type TablePricingSettings,
 } from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
@@ -34,6 +35,11 @@ import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
 import MenuCRM from "./MenuCRM";
 import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
+// 🆕 2026-05-28 v3.140 — Digitory item-code mapping admin tab. Built ahead
+// of Cloud Function (still blocked on Digitory prod URL + auth). Khushi
+// populates the mapping during downtime so when the push function ships,
+// every item has a code ready to go.
+import DigitorySync from "./DigitorySync";
 // 🆕 2026-05-27 v3.105 (Khushi LIVE) — Audit folded INTO Boss Mode as a tab
 // (was a separate /audit page). Khushi wants Reports + Audit + Admin all
 // reachable from one Boss Mode landing, not scattered across the killed
@@ -55,9 +61,17 @@ export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
   // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
-  const [tab, setTab] = useState<"monitor" | "reports" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
+  const [tablePricing, setTablePricing] = useState<TablePricingSettings>({ ground: 2500, dining: 2500, rooftop: 2500, enabled: true });
+  const [tablePricingDraft, setTablePricingDraft] = useState<{ ground: string; dining: string; rooftop: string }>({ ground: "2500", dining: "2500", rooftop: "2500" });
+  const [tablePricingSaving, setTablePricingSaving] = useState(false);
+  const [tablePricingMsg, setTablePricingMsg] = useState("");
+  // 🛟 Seed the editable price draft from the FIRST live snapshot only. After
+  // that, never let an incoming snapshot overwrite a manager's in-progress
+  // edits (architect-flagged clobber). They save explicitly via the button.
+  const tablePricingSeededRef = useRef(false);
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
   const [menuSearch, setMenuSearch] = useState("");
@@ -74,6 +88,15 @@ export default function AdminPage() {
       subscribeToMenuOverrides(setMenuOverridesState),
       subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
       subscribeToDoorPricingSettings(setDoorPricing),
+      subscribeToTablePricingSettings((s) => {
+        setTablePricing(s);
+        // Seed the editable draft ONCE (first snapshot). Subsequent snapshots
+        // must NOT clobber a manager's unsaved edits.
+        if (!tablePricingSeededRef.current) {
+          tablePricingSeededRef.current = true;
+          setTablePricingDraft({ ground: String(s.ground), dining: String(s.dining), rooftop: String(s.rooftop) });
+        }
+      }),
     ];
     return () => unsubs.forEach(u => u());
   }, []);
@@ -320,8 +343,13 @@ export default function AdminPage() {
             // Settings — venue + device level.
             [
               { id: "door-pricing", label: "💰 Door Pricing" },
+              { id: "table-pricing", label: "🎟️ Table Cover Pricing" },
               { id: "tablet",       label: "🖨 This Tablet" },
               { id: "settings",     label: "⚙️ Settings" },
+            ],
+            // Integrations.
+            [
+              { id: "digitory-sync", label: "🔗 Digitory Sync" },
             ],
           ];
           return groups.flatMap((grp, gi) => [
@@ -355,6 +383,8 @@ export default function AdminPage() {
         {tab === "menu-crm" && <MenuCRM />}
 
         {tab === "bot-knowledge" && <KnowledgeBaseAdmin />}
+
+        {tab === "digitory-sync" && <DigitorySync currentStaff={currentStaff} />}
 
         {tab === "menu" && (
           <div>
@@ -702,6 +732,152 @@ export default function AdminPage() {
 
               <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
                 <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If this setting can't load, the door modal defaults to <b>OFF</b> (locked prices) so revenue is never accidentally discounted. Audit every override in <b>📋 Reports</b> — look for "PRICE OVERRIDE" in the booking notes column.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === "table-pricing" && (
+          <div className="space-y-4 max-w-xl">
+            <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>🎟️ Table Cover Pricing</h3>
+              <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
+                Sets the <b>per-head cover charge</b> for table bookings on the customer site (hodclub.in). When <b>ON</b>, guests booking a table for a <b>weekend night (Fri / Sat / Sun)</b> with an arrival time of <b>9 PM or later</b> pay this cover (100% redeemable on food &amp; drinks). Charged per head (price × party size). Weekdays and pre-9 PM slots stay free. Each floor can have its own price.
+                <br /><br />
+                When <b>OFF</b>, all table bookings are free (no cover) on every night.
+              </p>
+
+              <div className="flex items-center justify-between p-4 rounded-lg mb-4" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+                <div>
+                  <div className="text-sm font-semibold" style={{ color: "hsl(36 29% 93%)" }}>
+                    Weekend table cover charges
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: tablePricing.enabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
+                    {tablePricing.enabled
+                      ? "✅ ON — weekend 9 PM+ tables carry the per-head cover below"
+                      : "🔒 OFF — all table bookings are free"}
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (tablePricingSaving) return;
+                    const next = !tablePricing.enabled;
+                    const ok = await requireManagerPinAdmin(
+                      next
+                        ? "Turn ON weekend table cover charges?"
+                        : "Turn OFF table cover charges (all tables free)?"
+                    );
+                    if (!ok) return;
+                    setTablePricingSaving(true);
+                    setTablePricingMsg("");
+                    try {
+                      await updateTablePricingSettings({ enabled: next }, currentStaff?.name || "admin");
+                      setTablePricing((p) => ({ ...p, enabled: next }));
+                      await logAudit({
+                        action: "TABLE_PRICING_ENABLE_TOGGLE",
+                        staffId: currentStaff?.id || "admin",
+                        staffName: currentStaff?.name || "admin",
+                        staffRole: (currentStaff?.role || "admin") as StaffRole,
+                        details: { enabled: next },
+                      }).catch(() => {});
+                    } catch (e: any) {
+                      alert(`❌ Could not update setting: ${e?.message || e}`);
+                    } finally {
+                      setTablePricingSaving(false);
+                    }
+                  }}
+                  disabled={tablePricingSaving}
+                  className="relative inline-flex items-center"
+                  style={{
+                    width: 64, height: 34, borderRadius: 999,
+                    background: tablePricing.enabled ? "#22c55e" : "hsl(240 8% 20%)",
+                    border: "1px solid hsl(240 8% 25%)",
+                    cursor: tablePricingSaving ? "wait" : "pointer",
+                    opacity: tablePricingSaving ? 0.6 : 1,
+                    transition: "background .2s",
+                  }}
+                  aria-label="Toggle table cover charges"
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      left: tablePricing.enabled ? 32 : 4,
+                      top: 3, width: 26, height: 26, borderRadius: "50%",
+                      background: "#fff", transition: "left .2s",
+                      boxShadow: "0 2px 6px rgba(0,0,0,.35)",
+                    }}
+                  />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                {([
+                  { key: "ground" as const, label: "🎧 Ground Floor" },
+                  { key: "dining" as const, label: "🍽 Dining" },
+                  { key: "rooftop" as const, label: "🌳 Rooftop" },
+                ]).map((f) => (
+                  <div key={f.key}>
+                    <label className="block text-xs font-semibold mb-1" style={{ color: "hsl(36 29% 70%)" }}>{f.label}</label>
+                    <div className="flex items-center rounded-lg px-2" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+                      <span className="text-sm" style={{ color: "hsl(36 29% 55%)" }}>₹</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        value={tablePricingDraft[f.key]}
+                        onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                        className="w-full bg-transparent py-2 px-1 text-sm outline-none"
+                        style={{ color: "hsl(36 29% 93%)" }}
+                      />
+                    </div>
+                    <div className="text-[10px] mt-1" style={{ color: "hsl(36 29% 45%)" }}>per head</div>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                onClick={async () => {
+                  if (tablePricingSaving) return;
+                  const g = Math.round(Number(tablePricingDraft.ground));
+                  const d = Math.round(Number(tablePricingDraft.dining));
+                  const r = Math.round(Number(tablePricingDraft.rooftop));
+                  if (![g, d, r].every((n) => Number.isFinite(n) && n >= 0)) {
+                    setTablePricingMsg("❌ Enter valid amounts (0 or more) for every floor.");
+                    return;
+                  }
+                  const ok = await requireManagerPinAdmin("Save table cover prices? Ground ₹" + g + " / Dining ₹" + d + " / Rooftop ₹" + r + " per head.");
+                  if (!ok) return;
+                  setTablePricingSaving(true);
+                  setTablePricingMsg("");
+                  try {
+                    await updateTablePricingSettings({ ground: g, dining: d, rooftop: r }, currentStaff?.name || "admin");
+                    setTablePricing((p) => ({ ...p, ground: g, dining: d, rooftop: r }));
+                    await logAudit({
+                      action: "TABLE_PRICING_UPDATE",
+                      staffId: currentStaff?.id || "admin",
+                      staffName: currentStaff?.name || "admin",
+                      staffRole: (currentStaff?.role || "admin") as StaffRole,
+                      details: { ground: g, dining: d, rooftop: r },
+                    }).catch(() => {});
+                    setTablePricingMsg("✅ Saved.");
+                  } catch (e: any) {
+                    setTablePricingMsg(`❌ Could not save: ${e?.message || e}`);
+                  } finally {
+                    setTablePricingSaving(false);
+                  }
+                }}
+                disabled={tablePricingSaving}
+                className="px-4 py-2 rounded-lg text-sm font-semibold"
+                style={{ background: "#C9A84C", color: "#030305", cursor: tablePricingSaving ? "wait" : "pointer", opacity: tablePricingSaving ? 0.6 : 1 }}
+              >
+                {tablePricingSaving ? "Saving…" : "Save Prices"}
+              </button>
+              {tablePricingMsg && (
+                <span className="ml-3 text-xs" style={{ color: tablePricingMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{tablePricingMsg}</span>
+              )}
+
+              <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
+                <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If the customer site can't load this setting, it defaults to <b>₹2,500/head, ON</b>. Saving here updates <code>appSettings/tablePricing</code>; the customer site reads it on each table-booking sheet open.
               </div>
             </div>
           </div>
