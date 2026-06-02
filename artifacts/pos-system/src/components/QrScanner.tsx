@@ -1,5 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import jsQR from "jsqr";
+import { BarcodeDetector as WasmBarcodeDetector, setZXingModuleOverrides } from "barcode-detector/ponyfill";
+
+// ── Fast, device-independent QR decoding ────────────────────────────────────
+// 2026-06 (Khushi — 21-tablet scanner perf fix). The old path used the native
+// BarcodeDetector when present (instant) and fell back to jsQR otherwise. jsQR
+// is a pure-JS decoder that runs on the main thread every frame and is SLOW on
+// cheaper Android tablets + iPads (no native BarcodeDetector), which is exactly
+// where staff reported slow / non-loading scans. We now use a WASM (zxing)
+// decoder as the universal fast fallback so EVERY device decodes fast,
+// regardless of camera/browser. jsQR is kept only as a last-resort safety net
+// if the WASM module can't load (never lose the door).
+//
+// The WASM binary is SELF-HOSTED from /public (copied at build) so it works on
+// venue wifi without any CDN dependency and loads once (browser-cached).
+type _DetectFn = (src: CanvasImageSource) => Promise<Array<{ rawValue: string }>>;
+let _zxingConfigured = false;
+function _ensureZxingConfigured() {
+  if (_zxingConfigured) return;
+  _zxingConfigured = true;
+  try {
+    setZXingModuleOverrides({
+      locateFile: (path: string, prefix: string) =>
+        path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}zxing_reader.wasm` : prefix + path,
+    });
+  } catch { /* fall through — defaults to CDN if override fails */ }
+}
 
 /**
  * Cross-browser QR scanner.
@@ -107,60 +133,104 @@ export function QrScanner({ onResult, onClose }: { onResult: (data: string) => v
       }
       setStatus("Point camera at QR code");
 
-      // Native BarcodeDetector — Chrome/Edge on Android + desktop.
-      const hasNative = typeof (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector === "function";
-      if (hasNative) {
-        try {
-          const Detector = (window as unknown as { BarcodeDetector: new (opts: { formats: string[] }) => { detect: (s: HTMLVideoElement) => Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
-          const detector = new Detector({ formats: ["qr_code"] });
-          const tick = async () => {
-            if (!scanRef.current || !videoRef.current) return;
+      // jsQR LAST-RESORT decoder, extracted into a function so we can drop to
+      // it BOTH when no fast detector can be built AND if a built detector
+      // (native or WASM) starts throwing at runtime — e.g. the WASM binary
+      // 404s / is CSP-blocked on a tablet. Never lose the door.
+      const startJsqr = () => {
+        if (canvasRef.current) return; // already running
+        const canvas = document.createElement("canvas");
+        canvasRef.current = canvas;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) { setErr("Unable to initialise canvas for QR fallback."); return; }
+        const jtick = () => {
+          if (!scanRef.current || !videoRef.current) return;
+          const vv = videoRef.current;
+          if (vv.readyState === vv.HAVE_ENOUGH_DATA && vv.videoWidth > 0) {
+            const scale = Math.min(1, 640 / vv.videoWidth);
+            const w = Math.floor(vv.videoWidth * scale);
+            const h = Math.floor(vv.videoHeight * scale);
+            if (canvas.width !== w) canvas.width = w;
+            if (canvas.height !== h) canvas.height = h;
+            ctx.drawImage(vv, 0, 0, w, h);
             try {
-              const codes = await detector.detect(videoRef.current);
+              const img = ctx.getImageData(0, 0, w, h);
+              const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+              if (code?.data) {
+                scanRef.current = false;
+                onResultRef.current(code.data);
+                return;
+              }
+            } catch {}
+          }
+          rafRef.current = requestAnimationFrame(jtick);
+        };
+        jtick();
+      };
+
+      // Build the FASTEST available decoder for this device:
+      //   1. Native BarcodeDetector  — instant, zero download (Chrome/Android,
+      //      newer Edge). When present we use it directly.
+      //   2. WASM (zxing) ponyfill   — universal fast fallback for the tablets
+      //      that have NO native detector (cheap Androids, iPads, Firefox).
+      //      This is the key fix: these devices used to fall back to the slow
+      //      jsQR path. Now they get near-native WASM speed too.
+      // Only if BOTH can't be built do we drop straight to jsQR.
+      let detector: { detect: _DetectFn } | null = null;
+      const Native = (window as unknown as { BarcodeDetector?: new (o: { formats: string[] }) => { detect: _DetectFn } }).BarcodeDetector;
+      if (typeof Native === "function") {
+        try { detector = new Native({ formats: ["qr_code"] }); } catch { detector = null; }
+      }
+      if (!detector) {
+        try {
+          _ensureZxingConfigured();
+          detector = new WasmBarcodeDetector({ formats: ["qr_code"] }) as unknown as { detect: _DetectFn };
+          // Warm up the WASM module on a tiny canvas so the FIRST real scan
+          // isn't delayed by module compilation.
+          try {
+            const warm = document.createElement("canvas");
+            warm.width = 2; warm.height = 2;
+            detector.detect(warm).catch(() => {});
+          } catch {}
+        } catch { detector = null; }
+      }
+
+      if (detector) {
+        const det = detector;
+        // Throttle to ~10fps. Decoding every animation frame is wasteful and
+        // (on the WASM path) keeps the CPU pegged — 10fps decodes instantly to
+        // the human eye while leaving the UI smooth.
+        let last = 0;
+        let fails = 0; // consecutive runtime decode failures
+        const tick = async (ts: number) => {
+          if (!scanRef.current || !videoRef.current) return;
+          if (ts - last >= 100) {
+            last = ts;
+            try {
+              const codes = await det.detect(videoRef.current);
+              fails = 0;
               if (codes.length > 0 && codes[0].rawValue) {
                 scanRef.current = false;
                 onResultRef.current(codes[0].rawValue);
                 return;
               }
-            } catch {}
-            rafRef.current = requestAnimationFrame(tick);
-          };
-          tick();
-          return;
-        } catch {
-          // Detector instantiation failed — drop to jsQR.
-        }
+            } catch {
+              // A built detector throwing repeatedly means the WASM binary
+              // failed to load (404 / CSP / network). Demote to the jsQR
+              // safety net after a short burst so the door is never stuck on
+              // a scanner that opens but never decodes.
+              fails += 1;
+              if (fails >= 8) { startJsqr(); return; }
+            }
+          }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+        return;
       }
 
-      // jsQR fallback — iOS Safari, desktop Firefox, anything without BarcodeDetector.
-      const canvas = document.createElement("canvas");
-      canvasRef.current = canvas;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) { setErr("Unable to initialise canvas for QR fallback."); return; }
-
-      const tick = () => {
-        if (!scanRef.current || !videoRef.current) return;
-        const vv = videoRef.current;
-        if (vv.readyState === vv.HAVE_ENOUGH_DATA && vv.videoWidth > 0) {
-          const scale = Math.min(1, 640 / vv.videoWidth);
-          const w = Math.floor(vv.videoWidth * scale);
-          const h = Math.floor(vv.videoHeight * scale);
-          if (canvas.width !== w) canvas.width = w;
-          if (canvas.height !== h) canvas.height = h;
-          ctx.drawImage(vv, 0, 0, w, h);
-          try {
-            const img = ctx.getImageData(0, 0, w, h);
-            const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
-            if (code?.data) {
-              scanRef.current = false;
-              onResultRef.current(code.data);
-              return;
-            }
-          } catch {}
-        }
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      tick();
+      // No fast detector could be built at all — go straight to jsQR.
+      startJsqr();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/permission|denied|notallowed/i.test(msg)) {
