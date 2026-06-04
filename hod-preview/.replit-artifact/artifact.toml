@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/hod-preview/"
+title = "HOD Customer Site Preview"
+version = "1.0.0"
+id = "artifacts/hod-preview"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/hod-preview/" ]
+localPort = 21902
+
+[services.development]
+run = "pnpm --filter @workspace/hod-preview run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hod-preview", "run", "build" ]
+publicDir = "artifacts/hod-preview/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21902"
+BASE_PATH = "/hod-preview/"
