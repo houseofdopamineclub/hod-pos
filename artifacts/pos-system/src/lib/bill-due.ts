@@ -156,6 +156,24 @@ export async function appendBillDue(
   }
 }
 
+/** 🆕 2026-06-05 — ONE-SHOT fetch of a SPECIFIC operational night's bill-due
+ *  rows. subscribeBillDue() is hard-scoped to TONIGHT, so back-dated Live
+ *  Reports need this to show historical NC. Same single-field `where` (no
+ *  composite index) + client-side sort. FAIL-OPEN → [] on any error. */
+export async function fetchBillDueForNight(night: string): Promise<BillDueDoc[]> {
+  try {
+    const q = query(collection(db, COL), where("operationalNight", "==", night));
+    const snap = await getDocs(q);
+    const out: BillDueDoc[] = [];
+    snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Omit<BillDueDoc, "id">) }));
+    out.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    return out;
+  } catch (e) {
+    console.warn("[billDue.fetchForNight] failed", e);
+    return [];
+  }
+}
+
 export function subscribeBillDue(cb: (rows: BillDueDoc[]) => void) {
   // Scoped to TONIGHT only so the badge count doesn't accumulate over time.
   // 🔴 v3.116 BUGFIX — REMOVED the `orderBy("createdAt","desc")` from the

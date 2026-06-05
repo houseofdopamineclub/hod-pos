@@ -127,6 +127,10 @@ export interface HodCover {
   walletBillPrintLog?: Array<{
     at: string; by: string; total: number; itemCount: number;
     isDuplicate: boolean; billNumber: string;
+    // 🆕 2026-06-05 — money breakdown persisted at print time so Bar Mode's
+    // LIVE REPORTS can total discount / service-charge / tax accurately.
+    // Optional for back-compat with pre-v3.224 bill rows (treated as 0).
+    subtotal?: number; discount?: number; serviceCharge?: number; tax?: number;
   }>;
 }
 
@@ -3053,6 +3057,8 @@ export async function recordWalletBillPrint(
      *  recorded as a fresh bill, NOT a duplicate. Default false → legacy
      *  behavior (any 2nd+ print = duplicate). */
     hasNewRoundSinceLastBill?: boolean;
+    /** 🆕 2026-06-05 — money breakdown for LIVE REPORTS (optional). */
+    subtotal?: number; discount?: number; serviceCharge?: number; tax?: number;
   }
 ): Promise<{ count: number; isDuplicate: boolean; billNumber: string }> {
   const ref = doc(db, COVERS_COL, coverId);
@@ -3068,7 +3074,9 @@ export async function recordWalletBillPrint(
     const now = new Date().toISOString();
     const log = Array.isArray(data.walletBillPrintLog) ? [...data.walletBillPrintLog] : [];
     log.push({ at: now, by: entry.by, total: entry.total,
-      itemCount: entry.itemCount, isDuplicate, billNumber });
+      itemCount: entry.itemCount, isDuplicate, billNumber,
+      subtotal: entry.subtotal ?? 0, discount: entry.discount ?? 0,
+      serviceCharge: entry.serviceCharge ?? 0, tax: entry.tax ?? 0 });
     const upd: Record<string, unknown> = {
       walletBillPrintCount: next,
       lastWalletBillPrintedAt: now,

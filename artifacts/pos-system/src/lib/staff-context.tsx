@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import type { StaffMember, StaffRole } from "./types";
-import { subscribeToStaff } from "./firestore";
+import { subscribeToStaff, logAudit } from "./firestore";
 
 // 🆕 2026-05-25 (Khushi) — Per-staff login v2:
 //   • 10-hour absolute session (was 9hr) — auto-logout 10h after first login.
@@ -14,7 +14,11 @@ import { subscribeToStaff } from "./firestore";
 //     login in-memory.
 const SESSION_KEY = "hod_staff_session";
 const SESSION_TTL_MS = 10 * 60 * 60 * 1000;          // 🆕 10 hours absolute (Khushi 2026-05-25)
-const IDLE_LOCK_MS = 25 * 60 * 1000;                  // 🆕 25 min inactivity → re-PIN (Khushi 2026-05-25)
+// 🆕 2026-06-05 v3.227 (Khushi) — SECURITY: 15-min inactivity OR tab-away →
+// FULL LOGOUT (was a 25-min re-PIN "lock"). Staff must log back in with
+// Employee ID + PIN. Both the idle timer and a visibilitychange check enforce
+// this so a tablet left unattended or backgrounded can't be picked up later.
+const IDLE_LOGOUT_MS = 15 * 60 * 1000;               // 🆕 15 min idle/away → logout
 
 type PersistedSession = {
   staffId: string;
@@ -138,6 +142,15 @@ export function StaffProvider({ children }: { children: ReactNode }) {
   const [isIdleLocked, setIsIdleLocked] = useState(false);
   const fallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 🆕 v3.227 — latest staff in a ref so logout()/idle timers can read WHO is
+  // logged in without re-creating their identity on every staff change.
+  const currentStaffRef = useRef<StaffMember | null>(null);
+  const logoutRef = useRef<() => void>(() => {});
+  useEffect(() => { currentStaffRef.current = currentStaff; }, [currentStaff]);
+  const auditAuth = useCallback((action: string, s: StaffMember | null, extra?: Record<string, unknown>) => {
+    if (!s) return;
+    logAudit({ action, staffId: s.id || "", staffName: s.name, staffRole: s.role, details: { ...(extra || {}) } }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let receivedData = false;
@@ -202,20 +215,30 @@ export function StaffProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(t);
   }, [sessionExpiresAt]);
 
-  // 🆕 2026-05-25 — Idle lock: 25 min of NO user activity → re-PIN required.
-  // Activity = pointer/keyboard/touch on the window. Does NOT clear the
-  // absolute session; user just unlocks fast.
+  // 🆕 2026-06-05 v3.227 — Idle/away FULL LOGOUT after 15 min (was a re-PIN
+  // lock). Activity = pointer/keyboard/touch. A visibilitychange guard also
+  // logs out if the tab was hidden/backgrounded past the window (covers
+  // background-throttled timers — when the tablet returns we re-check elapsed).
   useEffect(() => {
     if (!currentStaff) return;
+    let lastActive = Date.now();
     const resetIdle = () => {
+      lastActive = Date.now();
       if (idleTimer.current) clearTimeout(idleTimer.current);
-      idleTimer.current = setTimeout(() => setIsIdleLocked(true), IDLE_LOCK_MS);
+      idleTimer.current = setTimeout(() => logoutRef.current(), IDLE_LOGOUT_MS);
     };
     resetIdle();
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastActive >= IDLE_LOGOUT_MS) logoutRef.current();
+      else resetIdle();
+    };
     const events: Array<keyof WindowEventMap> = ["mousedown", "keydown", "touchstart", "pointerdown"];
     events.forEach((ev) => window.addEventListener(ev, resetIdle, { passive: true }));
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       events.forEach((ev) => window.removeEventListener(ev, resetIdle));
+      document.removeEventListener("visibilitychange", onVisibility);
       if (idleTimer.current) clearTimeout(idleTimer.current);
     };
   }, [currentStaff]);
@@ -230,10 +253,11 @@ export function StaffProvider({ children }: { children: ReactNode }) {
         setSessionExpiresAt(exp);
         setActiveModeState(null);
       }
+      auditAuth("login", found, { via: "pin" });
       return true;
     }
     return false;
-  }, [allStaff]);
+  }, [allStaff, auditAuth]);
 
   const loginByStaffId = useCallback((staffId: string, pin: string): StaffMember | null => {
     const found = allStaff.find((s) => s.id === staffId && s.pin === pin && s.active);
@@ -247,10 +271,11 @@ export function StaffProvider({ children }: { children: ReactNode }) {
       setSessionExpiresAt(exp);
       setActiveModeState(auto);
       setIsIdleLocked(false);
+      auditAuth("login", found, { via: "id-pin" });
       return found;
     }
     return null;
-  }, [allStaff]);
+  }, [allStaff, auditAuth]);
 
   const setActiveMode = useCallback((mode: StaffRole | null) => {
     setActiveModeState(mode);
@@ -260,6 +285,7 @@ export function StaffProvider({ children }: { children: ReactNode }) {
   }, [currentStaff, sessionExpiresAt]);
 
   const logout = useCallback(() => {
+    auditAuth("logout", currentStaffRef.current);
     setCurrentStaff(null);
     setSessionExpiresAt(null);
     setActiveModeState(null);
@@ -278,7 +304,8 @@ export function StaffProvider({ children }: { children: ReactNode }) {
       ];
       for (const k of keys) sessionStorage.removeItem(k);
     } catch {}
-  }, []);
+  }, [auditAuth]);
+  logoutRef.current = logout;
 
   const hasRole = useCallback((...roles: StaffRole[]): boolean => {
     if (!currentStaff) return false;

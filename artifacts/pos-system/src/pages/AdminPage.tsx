@@ -17,7 +17,7 @@ import type { StaffMember, MenuOverride, StaffRole } from "@/lib/types";
 // (`subscribeToHappyHour`, etc.) kept in firestore.ts for code archeology.
 import {
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
-  addStaffMember, upsertStaffMember, updateStaffMember, deleteStaffMember,
+  upsertStaffMember, updateStaffMember, deleteStaffMember,
   logAudit,
   subscribeToEdcDefaultVendor, setEdcDefaultVendor, type EdcDefaultVendor,
 } from "@/lib/firestore";
@@ -114,7 +114,9 @@ export default function AdminPage() {
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
   const [menuSearch, setMenuSearch] = useState("");
-  const [newStaff, setNewStaff] = useState({ name: "", pin: "", role: "steward" as StaffRole });
+  const [newStaff, setNewStaff] = useState<{ name: string; phone: string; empId: string; pin: string; role: StaffRole; access: StaffRole[] }>({ name: "", phone: "", empId: "", pin: "", role: "captain", access: [] });
+  const [editStaff, setEditStaff] = useState<StaffMember | null>(null);
+  const [staffMsg, setStaffMsg] = useState("");
   const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
   const [edcSaving, setEdcSaving] = useState(false);
   const [edcSaveMsg, setEdcSaveMsg] = useState("");
@@ -336,14 +338,148 @@ export default function AdminPage() {
     );
   };
 
-  const handleAddStaff = async () => {
-    // 🆕 2026-05-23 — Accept 4-6 digit PIN (was hard 4). Matches StaffLogin policy.
-    if (!newStaff.name || !newStaff.pin || newStaff.pin.length < 4 || newStaff.pin.length > 6) return;
-    await addStaffMember({ ...newStaff, active: true });
-    setNewStaff({ name: "", pin: "", role: "steward" });
+  // 🆕 2026-06-05 v3.227 (Khushi) — Staff CRM. Role dropdown uses HER labels,
+  // mapped to internal StaffRole. "Owners" = admin (universal). Access modes
+  // (stored in roles[]) grant EXTRA mode entry beyond the primary role — e.g. a
+  // Captain also trusted on Bar/Cashier.
+  const ROLE_CHOICES: { value: StaffRole; label: string }[] = [
+    { value: "captain",   label: "CAPTAIN" },
+    { value: "hostess",   label: "HOSTESS / DOOR" },
+    { value: "bartender", label: "BAR / CASHIER" },
+    { value: "manager",   label: "MANAGER" },
+    { value: "chef",      label: "KITCHEN / KDS" },
+    { value: "admin",     label: "OWNERS" },
+  ];
+  const ACCESS_MODES: { role: StaffRole; label: string; ownerOnly?: boolean }[] = [
+    { role: "bartender", label: "Bar / Cashier" },
+    { role: "captain",   label: "Captain" },
+    { role: "hostess",   label: "Door" },
+    { role: "chef",      label: "KDS" },
+    { role: "manager",   label: "Manager", ownerOnly: true },
+    { role: "admin",     label: "Boss / Owner", ownerOnly: true },
+  ];
+  const roleLabel = (r: StaffRole): string => ROLE_CHOICES.find((c) => c.value === r)?.label || r;
+  // 🔒 v3.227 — Only OWNERS (admin) may assign/grant the elevated tiers
+  // (MANAGER, OWNERS). A manager has Boss-tab access but must NOT be able to
+  // promote anyone (incl. themselves) or edit an existing owner. The role
+  // dropdown is filtered + handlers re-check (defence-in-depth; matches the
+  // existing Delete-button gating). NOTE: true tamper-proofing needs Firestore
+  // rules on the staff collection — tracked as a fast-follow with PIN hashing.
+  const isElevatedRole = (r: StaffRole): boolean => r === "admin" || r === "manager";
+  // A staffer is "effectively elevated" if EITHER the primary role OR any entry
+  // in roles[] is admin/manager — non-admins must not edit/deactivate them.
+  const isEffectivelyElevated = (s: StaffMember): boolean =>
+    isElevatedRole(s.role) || (s.roles || []).some(isElevatedRole);
+  const roleChoices = hasRole("admin") ? ROLE_CHOICES : ROLE_CHOICES.filter((c) => !isElevatedRole(c.value));
+  // roles[] = unique access set, ALWAYS including the primary role.
+  const buildRoles = (role: StaffRole, access: StaffRole[]): StaffRole[] =>
+    Array.from(new Set<StaffRole>([role, ...access]));
+  const inpStyle = { background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" };
+
+  // Access-level selector (mode chips + ALL ACCESS). Primary role is always on
+  // and locked. ownerOnly modes (Manager/Boss) only show to a logged-in admin.
+  const renderAccess = (
+    primary: StaffRole,
+    access: StaffRole[],
+    onToggle: (r: StaffRole) => void,
+    onAll: (on: boolean) => void,
+  ) => {
+    const ownerAllowed = hasRole("admin");
+    const modes = ACCESS_MODES.filter((m) => !m.ownerOnly || ownerAllowed);
+    const allOn = modes.every((m) => m.role === primary || access.includes(m.role));
+    return (
+      <div className="mt-3">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[11px] tracking-wide" style={{ color: "hsl(36 29% 60%)" }}>ACCESS LEVEL — modes this person can enter</span>
+          <button type="button" onClick={() => onAll(!allOn)} className="text-[11px] px-2 py-0.5 rounded"
+            style={{ background: allOn ? "#C9A84C" : "hsl(240 12% 10%)", color: allOn ? "#030305" : "#C9A84C", border: "1px solid #C9A84C" }}>
+            {allOn ? "ALL ACCESS ✓" : "ALL ACCESS"}
+          </button>
+        </div>
+        <div className="flex gap-1.5 flex-wrap">
+          {modes.map((m) => {
+            const isPrimary = m.role === primary;
+            const on = isPrimary || access.includes(m.role);
+            return (
+              <button type="button" key={m.role} disabled={isPrimary} onClick={() => !isPrimary && onToggle(m.role)}
+                className="text-[11px] px-2.5 py-1 rounded"
+                style={{
+                  background: on ? "#22c55e22" : "hsl(240 12% 8%)",
+                  color: on ? "#22c55e" : "hsl(36 29% 60%)",
+                  border: `1px solid ${on ? "#22c55e" : "hsl(240 8% 18%)"}`,
+                  cursor: isPrimary ? "default" : "pointer",
+                }}>
+                {on ? "✓ " : ""}{m.label}{isPrimary ? " (role)" : ""}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
-  const roleOptions: StaffRole[] = ["admin", "manager", "cashier", "captain", "steward", "bartender", "hostess", "chef"];
+  const handleAddStaff = async () => {
+    setStaffMsg("");
+    const name = newStaff.name.trim();
+    const empId = newStaff.empId.trim().toUpperCase();
+    const phone = newStaff.phone.trim();
+    if (!name) { setStaffMsg("❌ ENTER NAME"); return; }
+    if (!empId) { setStaffMsg("❌ ENTER EMPLOYEE ID"); return; }
+    if (newStaff.pin.length !== 5) { setStaffMsg("❌ PIN MUST BE 5 DIGITS"); return; }
+    const roles = buildRoles(newStaff.role, newStaff.access);
+    if (!hasRole("admin") && (isElevatedRole(newStaff.role) || roles.some(isElevatedRole))) {
+      setStaffMsg("❌ ONLY OWNERS CAN ASSIGN MANAGER / OWNER ACCESS"); return;
+    }
+    try {
+      const res = await upsertStaffMember(empId, { name, phone, pin: newStaff.pin, role: newStaff.role, roles, active: true });
+      if (res === "existed") { setStaffMsg(`❌ EMPLOYEE ID ${empId} ALREADY EXISTS — USE EDIT`); return; }
+      if (currentStaff) {
+        try {
+          await logAudit({
+            action: "staff_added",
+            staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+            details: { newId: empId, newName: name, role: newStaff.role, roles },
+          });
+        } catch (e) { console.warn("audit log failed (non-fatal)", e); }
+      }
+      setNewStaff({ name: "", phone: "", empId: "", pin: "", role: "captain", access: [] });
+      setStaffMsg(`✅ ADDED ${name} (${empId})`);
+    } catch (e: any) {
+      setStaffMsg(`❌ FAILED: ${e?.message || e}`);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editStaff || !editStaff.id) return;
+    setStaffMsg("");
+    const name = editStaff.name.trim();
+    if (!name) { setStaffMsg("❌ ENTER NAME"); return; }
+    const newPin = (editStaff.pin || "").trim();
+    if (newPin && newPin.length !== 5) { setStaffMsg("❌ PIN MUST BE 5 DIGITS (OR LEAVE BLANK TO KEEP)"); return; }
+    const role = editStaff.role;
+    const roles = buildRoles(role, editStaff.roles || []);
+    if (!hasRole("admin") && (isElevatedRole(role) || roles.some(isElevatedRole))) {
+      setStaffMsg("❌ ONLY OWNERS CAN ASSIGN MANAGER / OWNER ACCESS"); return;
+    }
+    const patch: Partial<StaffMember> = { name, phone: editStaff.phone || "", role, roles };
+    if (newPin) patch.pin = newPin;
+    try {
+      await updateStaffMember(editStaff.id, patch);
+      if (currentStaff) {
+        try {
+          await logAudit({
+            action: "staff_updated",
+            staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+            details: { editedId: editStaff.id, editedName: name, role, roles, pinChanged: !!newPin },
+          });
+        } catch (e) { console.warn("audit log failed (non-fatal)", e); }
+      }
+      setStaffMsg(`✅ UPDATED ${name}`);
+      setEditStaff(null);
+    } catch (e: any) {
+      setStaffMsg(`❌ FAILED: ${e?.message || e}`);
+    }
+  };
 
   return (
     <div className="min-h-screen" style={{ background: "#030305", color: "hsl(36 29% 93%)" }}>
@@ -530,6 +666,7 @@ export default function AdminPage() {
                 IDEMPOTENT: uses Emp ID (e.g. "hod-001") as the Firestore doc id, so
                 re-clicking is safe (existing docs are skipped, never overwritten —
                 that way manager-rotated PINs are preserved). */}
+            {hasRole("admin") && (
             <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px dashed #C9A84C" }}>
               <h3 className="text-sm font-semibold mb-2" style={{ color: "#C9A84C" }}>🚪 Door-Access Staff (8 people)</h3>
               <div className="text-xs mb-2" style={{ color: "hsl(36 29% 70%)" }}>
@@ -577,41 +714,108 @@ export default function AdminPage() {
                 🚪 SEED 8 DOOR STAFF NOW
               </button>
             </div>
+            )}
             <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
               <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Add Staff</h3>
               <div className="flex gap-2 flex-wrap">
                 <input placeholder="Name" value={newStaff.name} onChange={(e) => setNewStaff(s => ({...s, name: e.target.value}))}
-                  className="px-3 py-2 rounded text-sm flex-1 min-w-[150px]" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                <input placeholder="4-6 digit PIN" value={newStaff.pin}
-                  onChange={(e) => setNewStaff(s => ({...s, pin: e.target.value.replace(/\D/g, "").slice(0,6)}))} maxLength={6}
-                  className="px-3 py-2 rounded text-sm w-28" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }} />
-                <select value={newStaff.role} onChange={(e) => setNewStaff(s => ({...s, role: e.target.value as StaffRole}))}
-                  className="px-3 py-2 rounded text-sm" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}>
-                  {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                  className="px-3 py-2 rounded text-sm flex-1 min-w-[140px]" style={inpStyle} />
+                <input placeholder="Phone" value={newStaff.phone} inputMode="tel"
+                  onChange={(e) => setNewStaff(s => ({...s, phone: e.target.value.replace(/[^\d+]/g, "").slice(0,15)}))}
+                  className="px-3 py-2 rounded text-sm w-36" style={inpStyle} />
+                <input placeholder="Employee ID (HOD001)" value={newStaff.empId}
+                  onChange={(e) => setNewStaff(s => ({...s, empId: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0,12)}))}
+                  className="px-3 py-2 rounded text-sm w-44 font-mono" style={inpStyle} />
+                <input placeholder="5-digit PIN" value={newStaff.pin} inputMode="numeric"
+                  onChange={(e) => setNewStaff(s => ({...s, pin: e.target.value.replace(/\D/g, "").slice(0,5)}))} maxLength={5}
+                  className="px-3 py-2 rounded text-sm w-28 font-mono" style={inpStyle} />
+                <select value={newStaff.role} onChange={(e) => setNewStaff(s => ({...s, role: e.target.value as StaffRole, access: s.access.filter(r => r !== (e.target.value as StaffRole))}))}
+                  className="px-3 py-2 rounded text-sm" style={inpStyle}>
+                  {roleChoices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
-                <button onClick={handleAddStaff} className="px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Add</button>
+              </div>
+              {renderAccess(
+                newStaff.role,
+                newStaff.access,
+                (r) => setNewStaff(s => ({...s, access: s.access.includes(r) ? s.access.filter(x => x !== r) : [...s.access, r]})),
+                (on) => {
+                  const ownerAllowed = hasRole("admin");
+                  const all = ACCESS_MODES.filter(m => (!m.ownerOnly || ownerAllowed) && m.role !== newStaff.role).map(m => m.role);
+                  setNewStaff(s => ({...s, access: on ? all : []}));
+                }
+              )}
+              <div className="flex items-center gap-3 mt-3">
+                <button onClick={handleAddStaff} className="px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Add Staff</button>
+                {staffMsg && !editStaff && <span className="text-xs" style={{ color: staffMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{staffMsg}</span>}
               </div>
             </div>
             <div className="space-y-1">
-              {allStaff.map((s) => (
-                <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: "hsl(240 12% 5%)" }}>
-                  <div>
-                    <span className="text-sm">{s.name}</span>
-                    <span className="text-xs ml-2 px-2 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "#C9A84C" }}>{s.role}</span>
+              {allStaff.map((s) => {
+                const access = (s.roles && s.roles.length > 0 ? s.roles : [s.role]).filter(r => r !== s.role);
+                return (
+                <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-lg gap-2" style={{ background: "hsl(240 12% 5%)" }}>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{s.name}</span>
+                      <span className="text-[11px] font-mono px-1.5 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)" }}>{s.id}</span>
+                      <span className="text-[11px] px-2 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "#C9A84C" }}>{roleLabel(s.role)}</span>
+                      {access.map(r => (
+                        <span key={r} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#22c55e1a", color: "#22c55e", border: "1px solid #22c55e55" }}>+ {roleLabel(r)}</span>
+                      ))}
+                    </div>
+                    {s.phone && <div className="text-[11px] mt-0.5" style={{ color: "hsl(36 29% 55%)" }}>📞 {s.phone}</div>}
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
-                      className="text-xs px-2 py-1 rounded" style={{ background: s.active ? "#22c55e33" : "#ef444433", color: s.active ? "#22c55e" : "#ef4444" }}>
-                      {s.active ? "Active" : "Inactive"}
-                    </button>
+                  <div className="flex gap-2 shrink-0">
+                    {(hasRole("admin") || !isEffectivelyElevated(s)) && (
+                      <button onClick={() => setEditStaff({ ...s, pin: "", roles: s.roles && s.roles.length > 0 ? s.roles : [s.role] })}
+                        className="text-xs px-2 py-1 rounded" style={{ background: "#C9A84C33", color: "#C9A84C" }}>Edit</button>
+                    )}
+                    {(hasRole("admin") || !isEffectivelyElevated(s)) && (
+                      <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
+                        className="text-xs px-2 py-1 rounded" style={{ background: s.active ? "#22c55e33" : "#ef444433", color: s.active ? "#22c55e" : "#ef4444" }}>
+                        {s.active ? "Active" : "Inactive"}
+                      </button>
+                    )}
                     {hasRole("admin") && s.role !== "admin" && (
-                      <button onClick={() => s.id && deleteStaffMember(s.id)}
+                      <button onClick={() => { if (s.id && confirm(`Delete ${s.name}? This cannot be undone.`)) deleteStaffMember(s.id); }}
                         className="text-xs px-2 py-1 rounded" style={{ background: "#ef444433", color: "#ef4444" }}>Delete</button>
                     )}
                   </div>
                 </div>
-              ))}
+              );})}
             </div>
+            {editStaff && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.7)" }} onClick={() => { setEditStaff(null); setStaffMsg(""); }}>
+                <div className="w-full max-w-md rounded-xl p-5" style={{ background: "hsl(240 12% 7%)", border: "1px solid #C9A84C" }} onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Edit {editStaff.name} <span className="font-mono text-xs" style={{ color: "hsl(36 29% 60%)" }}>({editStaff.id})</span></h3>
+                  <div className="space-y-2">
+                    <input placeholder="Name" value={editStaff.name} onChange={(e) => setEditStaff(p => p && ({...p, name: e.target.value}))}
+                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle} />
+                    <input placeholder="Phone" value={editStaff.phone || ""} inputMode="tel"
+                      onChange={(e) => setEditStaff(p => p && ({...p, phone: e.target.value.replace(/[^\d+]/g, "").slice(0,15)}))}
+                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle} />
+                    <input placeholder="New 5-digit PIN (leave blank to keep)" value={editStaff.pin} inputMode="numeric"
+                      onChange={(e) => setEditStaff(p => p && ({...p, pin: e.target.value.replace(/\D/g, "").slice(0,5)}))} maxLength={5}
+                      className="w-full px-3 py-2 rounded text-sm font-mono" style={inpStyle} />
+                    <select value={editStaff.role} onChange={(e) => setEditStaff(p => p && ({...p, role: e.target.value as StaffRole, roles: (p.roles || []).filter(r => r !== (e.target.value as StaffRole))}))}
+                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle}>
+                      {roleChoices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                    </select>
+                    {renderAccess(
+                      editStaff.role,
+                      (editStaff.roles || []).filter(r => r !== editStaff.role),
+                      (r) => setEditStaff(p => { if (!p) return p; const cur = (p.roles || []).filter(x => x !== p.role); const next = cur.includes(r) ? cur.filter(x => x !== r) : [...cur, r]; return {...p, roles: next}; }),
+                      (on) => setEditStaff(p => { if (!p) return p; const ownerAllowed = hasRole("admin"); const all = ACCESS_MODES.filter(m => (!m.ownerOnly || ownerAllowed) && m.role !== p.role).map(m => m.role); return {...p, roles: on ? all : []}; })
+                    )}
+                  </div>
+                  {staffMsg && <div className="text-xs mt-2" style={{ color: staffMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{staffMsg}</div>}
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={handleSaveEdit} className="flex-1 px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Save</button>
+                    <button onClick={() => { setEditStaff(null); setStaffMsg(""); }} className="px-4 py-2 rounded text-sm" style={{ background: "hsl(240 12% 12%)", color: "hsl(36 29% 80%)" }}>Cancel</button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

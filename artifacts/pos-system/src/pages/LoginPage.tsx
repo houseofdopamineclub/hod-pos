@@ -173,6 +173,49 @@ export default function LoginPage() {
   const [pendingMode, setPendingMode] = useState<PendingMode | null>(null);
   const idInputRef = useRef<HTMLInputElement>(null);
 
+  // 🆕 2026-06-05 v3.227 (Khushi) — WRONG-PIN LOCKOUT. 5 wrong attempts (across
+  // Boss + any staff mode, this device/session) → 60s lockout before the LOGIN
+  // button works again. Counters live in sessionStorage so they survive the
+  // tile-picker ↔ PIN-view remounts but clear on app close. Fail-open: any
+  // storage error just means no lockout (never strands a real staffer).
+  const MAX_FAILS = 5;
+  const LOCK_MS = 60 * 1000;
+  const readLock = (): number => {
+    try { const v = Number(sessionStorage.getItem("hod_login_lock") || 0); return v > Date.now() ? v : 0; } catch { return 0; }
+  };
+  const [lockUntil, setLockUntil] = useState<number>(readLock);
+  const [, setNowTick] = useState(0);
+  const lockedNow = lockUntil > Date.now();
+  const lockSecs = lockedNow ? Math.ceil((lockUntil - Date.now()) / 1000) : 0;
+
+  const registerFail = () => {
+    try {
+      const fails = Number(sessionStorage.getItem("hod_login_fails") || 0) + 1;
+      if (fails >= MAX_FAILS) {
+        const until = Date.now() + LOCK_MS;
+        sessionStorage.setItem("hod_login_lock", String(until));
+        sessionStorage.setItem("hod_login_fails", "0");
+        setLockUntil(until);
+      } else {
+        sessionStorage.setItem("hod_login_fails", String(fails));
+      }
+    } catch { /* fail-open: no lockout */ }
+  };
+  const clearFails = () => {
+    try { sessionStorage.removeItem("hod_login_fails"); sessionStorage.removeItem("hod_login_lock"); } catch {}
+    setLockUntil(0);
+  };
+
+  // Tick once a second while locked so the countdown + button re-enable live.
+  useEffect(() => {
+    if (!lockUntil) return;
+    const t = setInterval(() => {
+      if (Date.now() >= lockUntil) { setLockUntil(0); }
+      setNowTick((n) => n + 1);
+    }, 500);
+    return () => clearInterval(t);
+  }, [lockUntil]);
+
   // ── Build visible tiles, respecting feature flags + Boss role gating.
   const tiles = TILES.filter((t) => {
     if (t.key === "bar")     return FEATURES.barMode;
@@ -234,11 +277,17 @@ export default function LoginPage() {
 
   const tryLogin = (fullPin: string) => {
     if (!pendingMode) return;
+    // 🆕 v3.227 — hard stop while locked out after too many wrong PINs.
+    if (lockUntil > Date.now()) {
+      flashError(`LOCKED — WAIT ${Math.ceil((lockUntil - Date.now()) / 1000)}S`);
+      return;
+    }
     if (pendingMode.authMode === "pin") {
       // Boss Mode: PIN-only against admin/manager-tier staff.
       const target = pendingMode.href;
       const ok = login(fullPin);
-      if (!ok) { flashError("WRONG PIN"); return; }
+      if (!ok) { registerFail(); flashError("WRONG PIN"); return; }
+      clearFails();
       navigateAndClear(target);
       return;
     }
@@ -249,14 +298,16 @@ export default function LoginPage() {
     const modeLabel = pendingMode.label;
     const modeRoles = pendingMode.roles;
     const found = loginByStaffId(id, fullPin);
-    if (!found) { flashError("WRONG ID OR PIN"); return; }
+    if (!found) { registerFail(); flashError("WRONG ID OR PIN"); return; }
     // Role-gate: ensure this staff can actually enter the chosen mode.
     const allowed = hasRoleOnStaff(found.role, found.roles, ["admin", ...modeRoles]);
     if (!allowed) {
+      registerFail();
       flashError(`NOT AUTHORISED FOR ${modeLabel.toUpperCase()}`);
       logout();
       return;
     }
+    clearFails();
     navigateAndClear(target);
   };
 
@@ -366,7 +417,7 @@ export default function LoginPage() {
 
           <div className="w-full mb-3">
             <label className="block text-[11px] mb-1 tracking-widest font-bold" style={{ color: "#000" }}>
-              {pendingMode.authMode === "pin" ? "BOSS PIN (0000)" : "PIN"}
+              {pendingMode.authMode === "pin" ? "BOSS PIN" : "PIN"}
             </label>
             <input
               type="text"
@@ -400,9 +451,15 @@ export default function LoginPage() {
             </p>
           )}
 
+          {lockedNow && (
+            <p className="text-center text-xs mb-2 font-bold tracking-wide" style={{ color: "#FF5733" }}>
+              🔒 TOO MANY WRONG ATTEMPTS — WAIT {lockSecs}S
+            </p>
+          )}
+
           <button
             type="submit"
-            disabled={pin.length < 4}
+            disabled={pin.length < 4 || lockedNow}
             className="w-full py-3 rounded-lg text-sm font-bold tracking-widest transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
               background: "#FF90E8",
@@ -410,7 +467,7 @@ export default function LoginPage() {
               border: "2px solid #000",
             }}
           >
-            LOGIN →
+            {lockedNow ? `LOCKED ${lockSecs}S` : "LOGIN →"}
           </button>
           </form>
         </div>
