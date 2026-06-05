@@ -8,7 +8,7 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
-  coverDocIdFor,
+  coverDocIdFor, subscribeToCoversForNight,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -20,7 +20,7 @@ import { doc as fsDoc, getDoc as fsGetDoc, collection as fsCollection, query as 
 import { getOperationalNightStr } from "@/lib/utils-pos";
 import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 import {
-  getNextToken, createBillDue, appendBillDue, subscribeBillDue, clearBillDue, sendBillDueWhatsApp,
+  getNextToken, createBillDue, appendBillDue, subscribeBillDue, fetchBillDueForNight, clearBillDue, sendBillDueWhatsApp,
   type BillDueDoc, type BillDueItem, type NcRole, type NcPaymentMethod,
 } from "@/lib/bill-due";
 // 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed from BarMode. Bartender
@@ -787,6 +787,13 @@ function WalletOverlay({ cover, staffName, onClose }: {
       const rec = await recordWalletBillPrint(cover.id, {
         by: staffName, total: finalAmount, itemCount: allItems.length,
         billNumberBase: (cv.ref || cv.id.slice(-6)).toUpperCase(),
+        // 🆕 v3.224 — CASH & CARRY: a new round since the last bill makes this
+        // a FRESH cumulative bill, not a duplicate. Without this the latest
+        // running-tab bill is flagged duplicate and LIVE REPORTS (which reads
+        // the latest NON-duplicate bill per wallet) would undercount it.
+        hasNewRoundSinceLastBill,
+        subtotal: amts.subtotal, discount: amts.discount,
+        serviceCharge: amts.serviceCharge, tax: amts.cgst + amts.sgst,
       });
       const ok = await printBill({
         tableId: cv.tableId || cv.ref || "WALLET",
@@ -944,6 +951,8 @@ function WalletOverlay({ cover, staffName, onClose }: {
             by: staffName, total: finalB, itemCount: billItems.length,
             billNumberBase: (cv.ref || cv.id.slice(-6)).toUpperCase(),
             hasNewRoundSinceLastBill: true,
+            subtotal: amtsB.subtotal, discount: amtsB.discount,
+            serviceCharge: amtsB.serviceCharge, tax: amtsB.cgst + amtsB.sgst,
           });
           const okB = await printBill({
             tableId: cv.tableId || cv.ref || "WALLET",
@@ -2508,6 +2517,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // 🆕 v3.114 (Khushi LIVE): in-app modal for no-wallet-found scans (replaces tiny top toast).
   const [noWalletQr, setNoWalletQr] = useState<string | null>(null);
   const [billDueOpen, setBillDueOpen] = useState(false);
+  // 🆕 2026-06-05 v3.224 (Khushi) — LIVE REPORTS for Bar/Cashier mode.
+  const [reportsOpen, setReportsOpen] = useState(false);
   const [billDueRows, setBillDueRows] = useState<BillDueDoc[]>([]);
   useEffect(() => subscribeBillDue(setBillDueRows), []);
   const openBillDueCount = billDueRows.filter((r) => r.status === "open").length;
@@ -2680,8 +2691,17 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             </button>
           )}
           <span style={{ fontSize: 11, color: "#6B6B6B" }}>👤 {staffName}</span>
+          {/* 🆕 2026-06-05 v3.225 (Khushi) — LIVE REPORTS button moved to the TOP
+              header, sits LEFT of LOGOUT, EXACTLY like Door Mode. (The old big
+              blue button below the NC/BILL-DUE row is removed.) */}
+          <button onClick={() => setReportsOpen(true)}
+            title="Live Reports — whole-night bar / cashier numbers"
+            style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .3, display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#000", display: "inline-block" }} />
+            LIVE REPORTS
+          </button>
           <button onClick={onLogout}
-            style={{ padding: "6px 10px", borderRadius: 8, background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
             Logout
           </button>
         </div>
@@ -2816,6 +2836,10 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             💸 BILL DUE ({openBillDueCount})
           </button>
         </div>
+
+        {/* 🆕 2026-06-05 v3.225 (Khushi) — LIVE REPORTS button MOVED to the top
+            header (next to Logout), exactly like Door Mode. The big blue button
+            that used to sit here is removed. */}
 
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="Search by name or phone"
@@ -2990,6 +3014,341 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         </div>
       )}
       {billDueOpen && <BillDueModal rows={billDueRows} staffName={staffName} onClose={() => setBillDueOpen(false)} />}
+      {reportsOpen && <BarReportsModal onClose={() => setReportsOpen(false)} />}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🆕 2026-06-05 v3.224 (Khushi) — BAR / CASHIER LIVE REPORTS.
+// Whole operational-night dashboard SCOPED to bar/cashier activity ONLY
+// (table covers go to Captain → excluded; NC tracked separately via the
+// billDue ledger). Styled like Door Mode's Live Reports (white cards,
+// 2px #000, Gumroad palette). Subscriptions run ONLY while the modal is
+// open so Firestore reads cost nothing when it's closed.
+//
+// SCOPE      = coversForNight where !isTableBooking && tableId !== "NC".
+// WALK-IN    = source / paymentId starts with "walkin_bar".
+// SCANNED    = every other activated bar cover (online/door covers that
+//              get redeemed at the bar).
+// SALES/TOP  = each bar cover's tabRounds (activated|served), menu-price
+//              line totals. "OTHERS" = smoke/hookah/tobacco, auto-detected
+//              by item category/name keyword → reads ₹0 until such items
+//              exist in the menu (none do today).
+// DISCOUNT/SC/TAX = summed from walletBillPrintLog (persisted at print
+//              time as of v3.224; pre-v3.224 bills count as 0).
+// NC         = billDue ledger (comp given + amount still due).
+// NET  = base item sales − discount (food + drink value BEFORE SC & tax).
+// GROSS = printed-bill totals (which already include service charge + GST)
+//         + NC comp. v3.225: switched off "base + SC + tax" so GROSS no
+//         longer collapses onto NET when SC/tax weren't persisted on old bills.
+// ─────────────────────────────────────────────────────────────────────
+function BarReportsModal({ onClose }: { onClose: () => void }) {
+  const [nightDate, setNightDate] = useState<string>(() => getOperationalNightStr());
+  const [covers, setCovers] = useState<HodCover[]>([]);
+  const [ncRows, setNcRows] = useState<BillDueDoc[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Covers for the picked night — subscribe ONLY while open.
+  useEffect(() => {
+    setLoading(true);
+    let unsub: (() => void) | undefined;
+    try {
+      unsub = subscribeToCoversForNight(nightDate, (cs) => { setCovers(cs || []); setLoading(false); });
+    } catch { setCovers([]); setLoading(false); } // 🛟 fail-open
+    return () => { try { unsub && unsub(); } catch {} };
+  }, [nightDate]);
+
+  // NC ledger. subscribeBillDue is hard-scoped to TONIGHT, so:
+  //  • current night  → LIVE subscribe (real-time NC during the shift)
+  //  • back-dated view → one-shot fetchBillDueForNight(nightDate)
+  // Either way we still client-filter by operationalNight below.
+  useEffect(() => {
+    const today = getOperationalNightStr();
+    if (nightDate === today) {
+      let unsub: (() => void) | undefined;
+      try { unsub = subscribeBillDue(setNcRows); } catch { setNcRows([]); }
+      return () => { try { unsub && unsub(); } catch {} };
+    }
+    let alive = true;
+    fetchBillDueForNight(nightDate).then((rows) => { if (alive) setNcRows(rows); }).catch(() => { if (alive) setNcRows([]); });
+    return () => { alive = false; };
+  }, [nightDate]);
+
+  const fmtRs = (n: number) => "₹" + Math.round(n || 0).toLocaleString("en-IN");
+
+  // ── SCOPE: bar/cashier covers only ────────────────────────────────
+  const bar = covers.filter((c) => !c.isTableBooking && (c.tableId || "").toUpperCase() !== "NC");
+  const isWalkin = (c: HodCover) =>
+    String((c as any).source || "").toLowerCase().startsWith("walkin_bar") ||
+    String((c as any).paymentId || "").toLowerCase().startsWith("walkin_bar");
+  const activated = bar.filter((c) => (c.coverActivated || 0) > 0);
+  const walkins = activated.filter(isWalkin);
+  const scanned = activated.filter((c) => !isWalkin(c));
+  const sumCollected = (l: HodCover[]) => l.reduce((s, c) => s + (c.coverActivated || 0), 0);
+  const sumRedeemed = (l: HodCover[]) =>
+    l.reduce((s, c) => s + Math.max(0, (c.coverActivated || 0) - (c.coverBalance || 0)), 0);
+
+  // ── SALES + TOP ITEMS from tabRounds ──────────────────────────────
+  // 🆕 2026-06-05 v3.225 (Khushi) — FOOD/DRINK CLASSIFICATION FIX.
+  // The old code keyed only on `it.t` and DEFAULTED a missing tag to "drink"
+  // → any food item stored WITHOUT a t flag (e.g. SOUP) landed in TOP-5 DRINKS.
+  // Fix: build a food-name Set straight from the canonical menu (group==="food")
+  // and treat an item as food when it.t==="food" OR its name is a known food
+  // OR its cat begins with "food". This puts soup & all real food in TOP-5 FOOD.
+  const SMOKE_RE = /smoke|hookah|hooka|tobacco|sheesha|shisha|cigar|cigarette|\bpaan\b|vape/i;
+  const normName = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const FOOD_NAMES = new Set(
+    (MENU_ITEMS as any[]).filter((m) => m.group === "food").map((m) => normName(String(m.name || "")))
+  );
+  let drinkSales = 0, foodSales = 0, otherSales = 0;
+  const drinkQty: Record<string, number> = {};
+  const foodQty: Record<string, number> = {};
+  for (const c of bar) {
+    for (const r of (c.tabRounds || [])) {
+      if (!r || (r.status !== "activated" && r.status !== "served")) continue;
+      for (const it of (r.items || [])) {
+        const line = (it.p || 0) * (it.qty || 0);
+        const name = it.n || "—";
+        const cat = String((it as any).cat || "");
+        const isSmoke = SMOKE_RE.test(cat) || SMOKE_RE.test(name);
+        const isFood = it.t === "food" || FOOD_NAMES.has(normName(name)) || /^food/i.test(cat);
+        if (isSmoke) {
+          otherSales += line;
+        } else if (isFood) {
+          foodSales += line;
+          foodQty[name] = (foodQty[name] || 0) + (it.qty || 0);
+        } else {
+          drinkSales += line;
+          drinkQty[name] = (drinkQty[name] || 0) + (it.qty || 0);
+        }
+      }
+    }
+  }
+  const top5 = (m: Record<string, number>): [string, number][] =>
+    Object.entries(m).filter(([, q]) => q > 0).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const topDrinks = top5(drinkQty);
+  const topFood = top5(foodQty);
+  const baseSales = drinkSales + foodSales + otherSales;
+
+  // ── BILLS + DISCOUNT / SC / TAX from walletBillPrintLog ────────────
+  // ⚠️ CRITICAL (architect): both bill paths (handleThermalBill + combined
+  // KOT+BILL) re-print the FULL running tab every round, logging a NEW
+  // non-duplicate entry each time (CASH & CARRY). So per wallet the LATEST
+  // non-duplicate entry IS the final cumulative bill — summing every entry
+  // would double/triple-count discount/SC/tax and inflate NET/GROSS. We
+  // therefore take ONE final bill per wallet (the newest non-dup log row).
+  let billCount = 0, billTotal = 0, discountCount = 0, discountTotal = 0, scTotal = 0, taxTotal = 0;
+  const atMs = (b: any) => { const t = new Date(b?.at || 0).getTime(); return isNaN(t) ? 0 : t; };
+  for (const c of bar) {
+    const log = (c.walletBillPrintLog || []).filter((b) => !b.isDuplicate);
+    if (log.length === 0) continue;
+    const last = log.reduce((a, b) => (atMs(b) >= atMs(a) ? b : a));
+    billCount++; // one final bill per wallet
+    billTotal += last.total || 0;
+    const d = last.discount || 0;
+    if (d > 0) discountCount++;
+    discountTotal += d;
+    scTotal += last.serviceCharge || 0;
+    taxTotal += last.tax || 0;
+  }
+
+  // ── NC from billDue ledger ────────────────────────────────────────
+  const nc = ncRows.filter((r) => r.operationalNight === nightDate);
+  const ncCompOf = (r: BillDueDoc) =>
+    typeof r.compApplied === "number"
+      ? r.compApplied
+      : (r.items || [])
+          .filter((it: any) => it.free)
+          .reduce((s: number, it: any) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+  const ncCount = nc.length;
+  const ncComp = nc.reduce((s, r) => s + ncCompOf(r), 0);
+  const ncOpenRows = nc.filter((r) => r.status === "open");
+  const ncDueCount = ncOpenRows.length;
+  const ncDue = ncOpenRows.reduce(
+    (s, r) => s + (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)), 0);
+
+  // ── NET / GROSS ───────────────────────────────────────────────────
+  // 🆕 2026-06-05 v3.225 (Khushi confirmed): NET vs GROSS must DIFFER.
+  //  • NET   = item (food+drink) value BEFORE service charge & tax, minus
+  //            discount → the venue's pure F&B revenue.
+  //  • GROSS = what guests ACTUALLY PAID = the real billed amount (which always
+  //            includes service charge + GST, persisted as b.total on EVERY
+  //            bill — even pre-v3.224 ones) + NC comp value.
+  // Previously GROSS was baseSales + ncComp + scTotal + taxTotal; but scTotal/
+  // taxTotal are ₹0 for bills printed before v3.224, so GROSS collapsed onto NET
+  // (the infamous "NET 3554 == GROSS 3554"). billTotal already carries SC+tax,
+  // so it reflects the true cash figure retroactively.
+  const netSales = Math.max(0, baseSales - discountTotal);
+  const grossSales = billTotal + ncComp;
+
+  // ── CSV export (mirrors Door Mode) ────────────────────────────────
+  const downloadCsv = () => {
+    const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const rows: [string, string | number][] = [
+      ["Operational Night", nightDate],
+      ["Wallets scanned (count)", scanned.length],
+      ["Wallets scanned — collected", Math.round(sumCollected(scanned))],
+      ["Wallets scanned — redeemed", Math.round(sumRedeemed(scanned))],
+      ["Walk-ins (count)", walkins.length],
+      ["Walk-ins — collected", Math.round(sumCollected(walkins))],
+      ["Walk-ins — redeemed", Math.round(sumRedeemed(walkins))],
+      ["Total collected (wallet + walk-in)", Math.round(sumCollected(activated))],
+      ["Liquor / drinks sales", Math.round(drinkSales)],
+      ["Food sales", Math.round(foodSales)],
+      ["Others (smoke / hookah)", Math.round(otherSales)],
+      ["Bills generated (count)", billCount],
+      ["Bills generated (amount)", Math.round(billTotal)],
+      ["NC total (count)", ncCount],
+      ["NC total — comp given", Math.round(ncComp)],
+      ["NC due (count)", ncDueCount],
+      ["NC due (amount)", Math.round(ncDue)],
+      ["Discount applied (count)", discountCount],
+      ["Discount applied (amount)", Math.round(discountTotal)],
+      ["Service charge", Math.round(scTotal)],
+      ["Taxes", Math.round(taxTotal)],
+      ["NET sales", Math.round(netSales)],
+      ["GROSS sales", Math.round(grossSales)],
+    ];
+    topDrinks.forEach(([n, q], i) => rows.push([`Top drink #${i + 1}`, `${n} x${q}`]));
+    topFood.forEach(([n, q], i) => rows.push([`Top food #${i + 1}`, `${n} x${q}`]));
+    const lines = ["Metric,Value", ...rows.map(([a, b]) => [a, b].map(esc).join(","))];
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `HOD-BAR-Reports-${nightDate}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // ── Presentational atoms (Gumroad: white card / 2px #000) ──────────
+  const NUM_FONT = "'Space Grotesk', ui-sans-serif, system-ui, sans-serif";
+  const Tile = ({ label, value, sub, tone = "#000" }: { label: string; value: string | number; sub?: string; tone?: string }) => (
+    <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", minWidth: 0 }}>
+      <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 900, color: tone, marginTop: 6, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1, wordBreak: "break-word" }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "#6B6B6B", marginTop: 5, fontWeight: 700, lineHeight: 1.35 }}>{sub}</div>}
+    </div>
+  );
+  const TopList = ({ label, rows }: { label: string; rows: [string, number][] }) => (
+    <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px" }}>
+      <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase", marginBottom: 8 }}>{label}</div>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 600, padding: "6px 0" }}>No items yet tonight.</div>
+      ) : rows.map(([n, q], i) => (
+        <div key={n} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: i < rows.length - 1 ? "1px solid rgba(0,0,0,.1)" : "none" }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: "#000", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            <span style={{ color: "#000", fontWeight: 900, marginRight: 8 }}>{i + 1}</span>{n}
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 900, color: "#000", fontFamily: NUM_FONT, whiteSpace: "nowrap" }}>×{q}</div>
+        </div>
+      ))}
+    </div>
+  );
+
+  // 🆕 2026-06-05 v3.225 (Khushi) — STAT TABLE inside the box. The headline
+  // count sits at the top; the MONEY rows (the data she actually reads) render
+  // as a BOLD, larger, DARK table — no more light-grey sub text.
+  const StatTable = ({ label, count, rows }: {
+    label: string; count: number | string; rows: [string, string][];
+  }) => (
+    <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>{label}</div>
+        <div style={{ fontSize: 24, fontWeight: 900, color: "#000", fontFamily: NUM_FONT, lineHeight: 1 }}>{count}</div>
+      </div>
+      <div style={{ marginTop: 10, border: "2px solid #000", borderRadius: 8, overflow: "hidden" }}>
+        {rows.map(([k, v], i) => (
+          <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 11px", background: i % 2 ? "#F4F4F0" : "#fff", borderTop: i > 0 ? "1px solid #000" : "none" }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: "#000", letterSpacing: 0.3, textTransform: "uppercase" }}>{k}</span>
+            <span style={{ fontSize: 18, fontWeight: 900, color: "#000", fontFamily: NUM_FONT, whiteSpace: "nowrap" }}>{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 100010, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "32px 14px", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 980, background: "#F4F4F0", border: "2px solid #000", borderRadius: 16, padding: 20, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "none" }}>
+        {/* HEADER */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 6 }}>
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#000", letterSpacing: 0.4 }}>📊 BAR / CASHIER — LIVE REPORTS</div>
+          <button onClick={onClose}
+            style={{ width: 38, height: 38, borderRadius: 10, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 20, fontWeight: 900, cursor: "pointer", flexShrink: 0 }}>×</button>
+        </div>
+        <div style={{ fontSize: 12, color: "#6B6B6B", fontWeight: 700, marginBottom: 14 }}>
+          Whole operational night · bar &amp; cashier only (table covers are in Captain Mode).
+        </div>
+
+        {/* CONTROLS: date picker + CSV */}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
+          <label style={{ fontSize: 12, fontWeight: 800, color: "#000", letterSpacing: 0.5 }}>NIGHT</label>
+          <input type="date" value={nightDate} onChange={(e) => setNightDate(e.target.value || getOperationalNightStr())}
+            style={{ padding: "9px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 700, outline: "none" }} />
+          <div style={{ flex: 1 }} />
+          <button onClick={downloadCsv}
+            style={{ padding: "10px 18px", borderRadius: 8, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer", whiteSpace: "nowrap" }}>
+            ⬇ DOWNLOAD CSV
+          </button>
+        </div>
+
+        {loading ? (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "#6B6B6B", fontSize: 16, fontWeight: 700 }}>Loading tonight's numbers…</div>
+        ) : (
+          <>
+            {/* 🆕 v3.226 (Khushi) — POSITION SWAP: BILLS GENERATED to 3rd (top-line),
+                TOTAL COLLECTED to 6th (end of wallets row). */}
+            {/* TOP-LINE: NET / GROSS / BILLS GENERATED */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+              <Tile label="NET SALES" value={fmtRs(netSales)} sub="Food + drink value (before SC & tax), minus discount" />
+              <Tile label="GROSS SALES" value={fmtRs(grossSales)} sub="What guests actually paid (incl. service charge + tax)" />
+              <StatTable label="BILLS GENERATED" count={billCount}
+                rows={[["Total Collected", fmtRs(billTotal)]]} />
+            </div>
+
+            {/* WALLETS / WALK-INS / TOTAL COLLECTED — bold tables inside the box */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+              <StatTable label="WALLETS SCANNED" count={scanned.length}
+                rows={[["Total Collected", fmtRs(sumCollected(scanned))], ["Total Redeemed", fmtRs(sumRedeemed(scanned))]]} />
+              <StatTable label="WALK-INS" count={walkins.length}
+                rows={[["Total Collected", fmtRs(sumCollected(walkins))], ["Total Redeemed", fmtRs(sumRedeemed(walkins))]]} />
+              <StatTable label="TOTAL COLLECTED" count={activated.length}
+                rows={[["Wallet + Walk-in", fmtRs(sumCollected(activated))]]} />
+            </div>
+
+            {/* SALES */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
+              <Tile label="LIQUOR / DRINKS SALES" value={fmtRs(drinkSales)} />
+              <Tile label="FOOD SALES" value={fmtRs(foodSales)} />
+              <Tile label="OTHERS (SMOKE / HOOKAH)" value={fmtRs(otherSales)}
+                sub={otherSales === 0 ? "₹0 until smoke items are added to the menu" : undefined} />
+            </div>
+
+            {/* TOP 5 LISTS */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12, marginBottom: 12 }}>
+              <TopList label="TOP 5 DRINKS (BY QTY)" rows={topDrinks} />
+              <TopList label="TOP 5 FOOD (BY QTY)" rows={topFood} />
+            </div>
+
+            {/* NC + DEDUCTIONS — 🆕 v3.226 (Khushi): NC TOTAL / NC DUE / DISCOUNT
+                APPLIED now render as bold tables inside the box (count + money row). */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 4 }}>
+              <StatTable label="NC TOTAL" count={ncCount} rows={[["Comp Given", fmtRs(ncComp)]]} />
+              <StatTable label="NC DUE" count={ncDueCount} rows={[["Still Owed", fmtRs(ncDue)]]} />
+              <StatTable label="DISCOUNT APPLIED" count={discountCount} rows={[["Total", fmtRs(discountTotal)]]} />
+              <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} />
+              <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} />
+            </div>
+
+            <div style={{ marginTop: 16, padding: 12, background: "#fff", border: "2px solid #000", borderRadius: 8, fontSize: 11.5, color: "#6B6B6B", lineHeight: 1.6, fontWeight: 600 }}>
+              🛟 Sales &amp; top items count everything SERVED tonight at the bar. NET = food + drink value (before service charge &amp; tax) minus discount. GROSS = what guests actually paid = printed-bill totals (which include service charge + GST) + NC comp. Discount, service charge &amp; tax tiles are saved from v3.224 onward — bills printed before this update count as ₹0 in those three tiles only (GROSS still uses the real bill total).
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
