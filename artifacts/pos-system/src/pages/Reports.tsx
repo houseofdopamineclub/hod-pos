@@ -141,6 +141,16 @@ interface WalletRow {
   tableId: string;
   walletBillPrints: number;
   lastBillAt: string;
+  // 🆕 v3.226 (Khushi) — final-bill money breakdown surfaced from the cover's
+  // walletBillPrintLog so the Admin Wallets tab (esp. bar walk-ins WALKIN-1/2…)
+  // carries the actual BILL with all details and downloads it. Uses the LATEST
+  // non-duplicate bill per cover (true cumulative total; same rule as Live Reports).
+  billTotal: number;
+  billSubtotal: number;
+  billDiscount: number;
+  billServiceCharge: number;
+  billTax: number;
+  billNumber: string;
 }
 
 function fmtTime(iso?: string): string {
@@ -348,6 +358,23 @@ function classifyWallet(args: {
 }
 
 function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodBooking>, guestlistByName: Map<string, HodGuestlistEntry>): WalletRow {
+  // 🆕 v3.226 (Khushi) — surface the final BILL (with full breakdown) from the
+  // cover's walletBillPrintLog. Bar bills re-print the FULL running tab each
+  // round, so the TRUE final total is the LATEST non-duplicate entry — never the
+  // sum (same rule Live Reports uses). Pre-v3.224 rows lack breakdown → treated 0.
+  const latestBill = (() => {
+    const log = Array.isArray(c.walletBillPrintLog) ? c.walletBillPrintLog : [];
+    const real = log.filter((b) => b && !b.isDuplicate);
+    const last = real.length ? real[real.length - 1] : undefined;
+    return {
+      billTotal: Number(last?.total || 0),
+      billSubtotal: Number(last?.subtotal || 0),
+      billDiscount: Number(last?.discount || 0),
+      billServiceCharge: Number(last?.serviceCharge || 0),
+      billTax: Number(last?.tax || 0),
+      billNumber: String(last?.billNumber || ""),
+    };
+  })();
   const linkedBooking = c.bookingId ? bookings.get(c.bookingId) : undefined;
   const guest = guestlistByName.get((c.name || "").toLowerCase().trim());
   const recharged = Number(c.topUpTotal || 0);
@@ -417,6 +444,7 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     tableId: c.tableId || "",
     walletBillPrints: c.walletBillPrintCount || 0,
     lastBillAt: c.lastWalletBillPrintedAt || "",
+    ...latestBill,
   };
 }
 
@@ -749,6 +777,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
         paymentMethod: (b as any).paymentMethod || (b.paymentId ? "online" : ""),
         tableId: "", walletBillPrints: 0, lastBillAt: "",
+        billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
       });
       if (refKey) seenRefs.add(refKey);
     }
@@ -763,6 +792,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         activatedAt: "", checkedIn: !!g.checkedIn, arrival: "",
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
         paymentMethod: "", tableId: "", walletBillPrints: 0, lastBillAt: "",
+        billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
       });
       if (g.id) seenRefs.add(g.id);
     }
@@ -981,6 +1011,13 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
       "Payment Method": w.paymentMethod,
       "Wallet Bill Prints": w.walletBillPrints,
       "Last Wallet Bill At": fmtTime(w.lastBillAt),
+      // 🆕 v3.226 (Khushi) — final bill with all details (esp. bar walk-ins).
+      "Bill No": w.billNumber,
+      "Bill Subtotal ₹": w.billSubtotal,
+      "Bill Discount ₹": w.billDiscount,
+      "Bill Service Charge ₹": w.billServiceCharge,
+      "Bill Tax ₹": w.billTax,
+      "Bill Total ₹": w.billTotal,
     }));
     downloadCSV(`HOD_Wallets_${today}.csv`, rows);
   };
@@ -1430,7 +1467,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
             <thead>
               <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                {["Source", "Pay Channel", "Name", "Phone", "Email", "Event", "Agent", "Activated", "✓In", "Cover ₹", "Recharged ₹", "Redeemed ₹", "Balance ₹", "Pay", "Bill ×"].map((h) => (
+                {["Source", "Pay Channel", "Name", "Phone", "Email", "Event", "Agent", "Activated", "✓In", "Cover ₹", "Recharged ₹", "Redeemed ₹", "Balance ₹", "Pay", "Bill ×", "Bill ₹"].map((h) => (
                   <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
                 ))}
               </tr>
@@ -1502,6 +1539,10 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   <td style={{ padding: "6px 6px", fontSize: 10, textTransform: "uppercase" }}>{w.paymentMethod || "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "center", color: w.walletBillPrints > 1 ? RED : "rgba(255,255,255,.6)", fontWeight: w.walletBillPrints > 1 ? 900 : 400 }}>
                     {w.walletBillPrints || 0}{w.walletBillPrints > 1 ? " ⚠" : ""}
+                  </td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.billTotal > 0 ? GOLD : "rgba(255,255,255,.4)", fontWeight: 800 }}
+                      title={w.billTotal > 0 ? `Subtotal ₹${w.billSubtotal.toLocaleString()} · Disc ₹${w.billDiscount.toLocaleString()} · SC ₹${w.billServiceCharge.toLocaleString()} · Tax ₹${w.billTax.toLocaleString()}${w.billNumber ? ` · ${w.billNumber}` : ""}` : "No bill printed"}>
+                    {w.billTotal > 0 ? `₹${w.billTotal.toLocaleString()}` : "—"}
                   </td>
                 </tr>
                 );
