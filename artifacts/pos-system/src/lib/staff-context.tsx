@@ -96,12 +96,12 @@ interface StaffContextValue {
   currentStaff: StaffMember | null;
   allStaff: StaffMember[];
   /** Legacy: log in by PIN only (used by AdminPage). Kept for back-compat. */
-  login: (pin: string) => boolean;
+  login: (pin: string, preferMode?: StaffRole | null) => boolean;
   /**
    * Preferred: log in by exact staffId + PIN. Returns the matched staff on
    * success so the caller can decide if a mode-picker is needed.
    */
-  loginByStaffId: (staffId: string, pin: string) => StaffMember | null;
+  loginByStaffId: (staffId: string, pin: string, preferMode?: StaffRole | null) => StaffMember | null;
   logout: () => void;
   isLoggedIn: boolean;
   /**
@@ -132,6 +132,26 @@ const StaffContext = createContext<StaffContextValue | null>(null);
 
 /** Only door/captain/bar count as "modes" for picker purposes. Admin is full-access. */
 const MODE_ROLES: StaffRole[] = ["hostess", "captain", "bartender"];
+
+// 🆕 2026-06-05 v3.229 (Khushi) — When a staffer logs in via LoginPage they have
+// ALREADY tapped a specific mode tile, so we honour that choice as the session's
+// activeMode → the app-level ModePickerOverlay ("PICK YOUR MODE") never fires a
+// redundant second pick. We only honour a preferred mode the staffer is actually
+// allowed (their role, an admin's universal access, or the admin/boss tile for a
+// manager). Otherwise we fall back to the legacy auto: single-mode users get
+// their one mode; true multi-mode users (no explicit pick) still see the picker.
+function resolveActiveMode(found: StaffMember, preferMode: StaffRole | null): StaffRole | null {
+  const mine = rolesOf(found);
+  const canBe = (m: StaffRole | null): m is StaffRole =>
+    !!m && (
+      mine.has(m) ||
+      mine.has("admin") ||
+      ((m === "admin" || m === "manager") && mine.has("manager"))
+    );
+  if (canBe(preferMode)) return preferMode;
+  const modeRoles = Array.from(mine).filter((r) => MODE_ROLES.includes(r));
+  return modeRoles.length === 1 ? modeRoles[0] : null;
+}
 
 export function StaffProvider({ children }: { children: ReactNode }) {
   const [currentStaff, setCurrentStaff] = useState<StaffMember | null>(null);
@@ -181,7 +201,16 @@ export function StaffProvider({ children }: { children: ReactNode }) {
     if (firestoreStaff.length === 0 && !firestoreFailed) return [];  // still loading
     const byId = new Map<string, StaffMember>();
     for (const s of FALLBACK_STAFF) if (s.id) byId.set(s.id, s);
-    for (const s of firestoreStaff) if (s.id) byId.set(s.id, s);  // Firestore overrides
+    // 🆕 2026-06-05 v3.228 — FIELD-merge Firestore over the seed roster (was a
+    // full replace). Editing a seed staffer (e.g. an active-toggle or a role
+    // change) writes only the changed keys to posStaff; a full replace would
+    // drop the unwritten name/pin/active and break that staffer's login. Merging
+    // keeps the fallback fields and overrides only what Firestore actually wrote.
+    for (const s of firestoreStaff) {
+      if (!s.id) continue;
+      const base = byId.get(s.id);
+      byId.set(s.id, base ? { ...base, ...s } : s);
+    }
     return Array.from(byId.values());
   })();
 
@@ -243,15 +272,16 @@ export function StaffProvider({ children }: { children: ReactNode }) {
     };
   }, [currentStaff]);
 
-  const login = useCallback((pin: string): boolean => {
+  const login = useCallback((pin: string, preferMode: StaffRole | null = null): boolean => {
     const found = allStaff.find((s) => s.pin === pin && s.active);
     if (found) {
       setCurrentStaff(found);
       if (found.id) {
         const exp = Date.now() + SESSION_TTL_MS;
-        writeSession(found.id, exp, null);
+        const chosen = resolveActiveMode(found, preferMode);
+        writeSession(found.id, exp, chosen);
         setSessionExpiresAt(exp);
-        setActiveModeState(null);
+        setActiveModeState(chosen);
       }
       auditAuth("login", found, { via: "pin" });
       return true;
@@ -259,17 +289,15 @@ export function StaffProvider({ children }: { children: ReactNode }) {
     return false;
   }, [allStaff, auditAuth]);
 
-  const loginByStaffId = useCallback((staffId: string, pin: string): StaffMember | null => {
+  const loginByStaffId = useCallback((staffId: string, pin: string, preferMode: StaffRole | null = null): StaffMember | null => {
     const found = allStaff.find((s) => s.id === staffId && s.pin === pin && s.active);
     if (found) {
       setCurrentStaff(found);
       const exp = Date.now() + SESSION_TTL_MS;
-      // Single-mode users → auto-set activeMode so picker doesn't show.
-      const modeRoles = Array.from(rolesOf(found)).filter((r) => MODE_ROLES.includes(r));
-      const auto = modeRoles.length === 1 ? modeRoles[0] : null;
-      writeSession(staffId, exp, auto);
+      const chosen = resolveActiveMode(found, preferMode);
+      writeSession(staffId, exp, chosen);
       setSessionExpiresAt(exp);
-      setActiveModeState(auto);
+      setActiveModeState(chosen);
       setIsIdleLocked(false);
       auditAuth("login", found, { via: "id-pin" });
       return found;

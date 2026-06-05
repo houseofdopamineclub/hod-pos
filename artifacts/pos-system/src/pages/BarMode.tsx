@@ -3168,6 +3168,20 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   const ncDue = ncOpenRows.reduce(
     (s, r) => s + (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)), 0);
 
+  // 🆕 2026-06-05 (Khushi LEAK FIX) — a discount given on an NC tab in Bar Mode
+  // is stored on the billDue ledger (clearBillDue writes discountPct + the
+  // post-discount finalAmount), NOT in walletBillPrintLog — so it was missing
+  // from DISCOUNT APPLIED entirely. The discount ₹ on a cleared NC row =
+  // amountDue (after comp) − finalAmount (what was actually collected). We
+  // surface it as its own line and roll it into the discount total/count.
+  const ncDiscountRows = nc.filter(
+    (r) => typeof r.finalAmount === "number" && (r.amountDue || 0) - (r.finalAmount as number) > 0);
+  const ncDiscountCount = ncDiscountRows.length;
+  const ncDiscount = ncDiscountRows.reduce(
+    (s, r) => s + ((r.amountDue || 0) - (r.finalAmount as number)), 0);
+  const discountCountAll = discountCount + ncDiscountCount;
+  const discountTotalAll = discountTotal + ncDiscount;
+
   // ── NET / GROSS ───────────────────────────────────────────────────
   // 🆕 2026-06-05 v3.225 (Khushi confirmed): NET vs GROSS must DIFFER.
   //  • NET   = item (food+drink) value BEFORE service charge & tax, minus
@@ -3203,8 +3217,12 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["NC total — comp given", Math.round(ncComp)],
       ["NC due (count)", ncDueCount],
       ["NC due (amount)", Math.round(ncDue)],
-      ["Discount applied (count)", discountCount],
-      ["Discount applied (amount)", Math.round(discountTotal)],
+      ["Discount applied — wallet bills (count)", discountCount],
+      ["Discount applied — wallet bills (amount)", Math.round(discountTotal)],
+      ["Discount applied — NC tabs (count)", ncDiscountCount],
+      ["Discount applied — NC tabs (amount)", Math.round(ncDiscount)],
+      ["Discount applied — TOTAL (count)", discountCountAll],
+      ["Discount applied — TOTAL (amount)", Math.round(discountTotalAll)],
       ["Service charge", Math.round(scTotal)],
       ["Taxes", Math.round(taxTotal)],
       ["NET sales", Math.round(netSales)],
@@ -3338,7 +3356,8 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 4 }}>
               <StatTable label="NC TOTAL" count={ncCount} rows={[["Comp Given", fmtRs(ncComp)]]} />
               <StatTable label="NC DUE" count={ncDueCount} rows={[["Still Owed", fmtRs(ncDue)]]} />
-              <StatTable label="DISCOUNT APPLIED" count={discountCount} rows={[["Total", fmtRs(discountTotal)]]} />
+              <StatTable label="DISCOUNT APPLIED" count={discountCountAll}
+                rows={[["Wallet Bills", fmtRs(discountTotal)], ["NC Tabs", fmtRs(ncDiscount)], ["Total", fmtRs(discountTotalAll)]]} />
               <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} />
               <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} />
             </div>
@@ -4415,7 +4434,7 @@ function NcReportsTab({
 }
 
 export default function BarMode() {
-  const { isLoggedIn, currentStaff, hasRole, activeMode } = useStaff();
+  const { isLoggedIn, currentStaff, hasRole, activeMode, logout } = useStaff();
   const [staffName, setStaffName] = useState<string | null>(() => sessionStorage.getItem("hod_bar_staff") || null);
 
   // 🔴 2026-05-25 (code review fix) — Force local logout when global session
@@ -4430,5 +4449,5 @@ export default function BarMode() {
   }, [isLoggedIn, currentStaff, hasRole, activeMode, staffName]);
 
   if (!staffName) return <BarLogin onLogin={setStaffName} />;
-  return <BarMain staffName={staffName} onLogout={() => { sessionStorage.removeItem("hod_bar_staff"); setStaffName(null); }} />;
+  return <BarMain staffName={staffName} onLogout={() => { logout(); sessionStorage.removeItem("hod_bar_staff"); setStaffName(null); }} />;
 }

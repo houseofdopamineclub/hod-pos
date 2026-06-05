@@ -31,6 +31,7 @@ import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
+import AgentsReport from "./AgentsReport";
 import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
 import MenuCRM from "./MenuCRM";
@@ -89,7 +90,7 @@ export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
   // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
-  const [tab, setTab] = useState<"monitor" | "reports" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "agents" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tablePricing, setTablePricing] = useState<TablePricingSettings>({
@@ -505,6 +506,7 @@ export default function AdminPage() {
             [
               { id: "monitor",     label: "🔴 Live Monitor" },
               { id: "reports",     label: "📋 Reports" },
+              { id: "agents",      label: "👥 Agents" },
               { id: "audit",       label: "🛡 Audit" },
             ],
             // Content — events + menu management.
@@ -547,6 +549,7 @@ export default function AdminPage() {
       <div className="p-4">
         {tab === "monitor" && <LiveMonitor />}
         {tab === "reports" && <Reports embedded />}
+        {tab === "agents" && <AgentsReport />}
 
         {/* 🆕 v3.105 — Audit embedded directly. AuditPage is self-contained
             (own data fetch, own filters), so it drops in clean as a tab. */}

@@ -30,7 +30,11 @@ interface Props {
 
 const LOCK_KEY_PREFIX = "hod_stafflogin_lock_";
 const FAIL_KEY_PREFIX = "hod_stafflogin_fails_";
-const PIN_LEN = 4;
+// 🆕 2026-06-05 v3.228 — PINs are now VARIABLE length. Legacy seed staff have
+// 4-digit PINs; the v3.227 Staff CRM issues 5-digit PINs. Accept 4–6 and let the
+// exact-match (loginByStaffId) decide correctness — never hard-cap at one length.
+const MIN_PIN = 4;
+const MAX_PIN = 6;
 
 /** Match staff if their role OR roles[] includes any allowed role. Admin = always. */
 function staffAllowed(s: StaffMember, allowed: Set<StaffRole>): boolean {
@@ -93,7 +97,7 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
       return;
     }
     if (!normalizedId) { setError("Enter your Employee ID (e.g. HOD001)."); return; }
-    if (pin.length !== PIN_LEN) { setError(`Enter your ${PIN_LEN}-digit PIN.`); return; }
+    if (pin.length < MIN_PIN) { setError("Enter your PIN (4–6 digits)."); return; }
 
     // 🔐 2026-05-25 (Khushi) — security: do NOT leak whether the ID exists.
     // Treat unknown ID + wrong-role-for-this-mode the same as wrong PIN, and
@@ -228,15 +232,15 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
               type="text"
               inputMode="numeric"
               pattern="[0-9]*"
-              maxLength={PIN_LEN}
+              maxLength={MAX_PIN}
               name="hodpin"
               autoComplete="off"
               data-form-type="other"
               value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_LEN))}
+              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, MAX_PIN))}
               onKeyDown={(e) => e.key === "Enter" && tryLogin()}
               disabled={isLocked && !isOverrideStaff(selectedStaff)}
-              placeholder={`Enter ${PIN_LEN}-digit PIN`}
+              placeholder="Enter your PIN"
               style={{
                 width: "100%", padding: "14px 16px", borderRadius: t.inputRadius,
                 background: t.inputBg, border: t.inputBorder,
@@ -258,7 +262,7 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
             </button>
 
             <div style={{ fontSize: 10, color: t.footColor, marginTop: 16 }}>
-              Session lasts 10 hours. Re-PIN after 25 min idle.
+              Session lasts 10 hours. Auto-logout after 15 min idle.
             </div>
           </>
         )}

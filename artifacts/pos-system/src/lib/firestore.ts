@@ -328,8 +328,17 @@ export async function upsertStaffMember(
   return "created";
 }
 
+// 🆕 2026-06-05 v3.228 — UPSERT, not update. Seed/fallback staff (e.g. HOD129)
+// live only in the in-app FALLBACK_STAFF roster — they have NO posStaff doc until
+// someone edits them. `updateDoc` throws "No document to update" on those rows, so
+// editing a never-saved staffer's PIN/role/access failed. `setDoc(..., {merge:true})`
+// creates the doc on first edit and merges on subsequent edits.
 export async function updateStaffMember(id: string, data: Partial<StaffMember>): Promise<void> {
-  await updateDoc(doc(db, STAFF_COL, id), stripUndefined(data as Record<string, unknown>));
+  await setDoc(
+    doc(db, STAFF_COL, id),
+    { ...stripUndefined(data as Record<string, unknown>), updatedAt: serverTimestamp() },
+    { merge: true },
+  );
 }
 
 export async function deleteStaffMember(id: string): Promise<void> {

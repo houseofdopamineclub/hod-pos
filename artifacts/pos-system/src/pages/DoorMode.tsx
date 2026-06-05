@@ -7968,7 +7968,7 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
 export default function DoorMode() {
   // 🔄 2026-05-25 (Khushi) — Per-staff HOD-ID + 4-digit PIN login (StaffLogin)
   // bridges into `agentName` via the DoorLogin wrapper above.
-  const { isLoggedIn, currentStaff, hasRole, activeMode } = useStaff();
+  const { isLoggedIn, currentStaff, hasRole, activeMode, logout } = useStaff();
   const [agentName, setAgentName] = useState<string | null>(() =>
     sessionStorage.getItem("hod_door_auth") === "1" ? sessionStorage.getItem("hod_door_name") : null
   );
@@ -7986,10 +7986,14 @@ export default function DoorMode() {
   }, [isLoggedIn, currentStaff, hasRole, activeMode, agentName]);
 
   if (!agentName) return <DoorLogin onLogin={setAgentName} />;
-  const logout = () => {
+  // 🆕 2026-06-05 v3.228 — logout must clear the CONTEXT session (not just the
+  // local door keys), otherwise DoorLogin's auto-login effect re-logs in instantly
+  // (= "logout button does nothing"). Context logout() also nukes the door keys.
+  const doLogout = () => {
+    logout();
     sessionStorage.removeItem("hod_door_auth");
     sessionStorage.removeItem("hod_door_name");
     setAgentName(null);
   };
-  return <DoorDashboard agentName={agentName} onLogout={logout} />;
+  return <DoorDashboard agentName={agentName} onLogout={doLogout} />;
 }

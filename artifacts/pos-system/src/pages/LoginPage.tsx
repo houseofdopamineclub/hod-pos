@@ -37,6 +37,19 @@ type PendingMode = {
   authMode: "pin" | "id-pin";
 };
 
+// 🆕 2026-06-05 v3.229 (Khushi) — the mode each tile commits the staffer to.
+// Passed into login()/loginByStaffId() as the session's activeMode so the
+// app-level "PICK YOUR MODE" overlay never asks again after they already
+// chose a tile + entered their PIN. Boss → "admin" (suppresses picker; the
+// admin dashboard has no floor-mode gate).
+const TILE_MODE: Record<ModeKey, StaffRole> = {
+  bar: "bartender",
+  captain: "captain",
+  boss: "admin",
+  door: "hostess",
+  kds: "chef",
+};
+
 const TILES: PendingMode[] = [
   { key: "bar",     href: "/bar",     label: "Bar/Cashier Mode", roles: ["bartender"],      authMode: "id-pin" },
   { key: "captain", href: "/captain", label: "Captain Mode", roles: ["captain"],            authMode: "id-pin" },
@@ -164,7 +177,7 @@ const ORB_CSS = `
 `;
 
 export default function LoginPage() {
-  const { login, loginByStaffId, allStaff, currentStaff, hasRole, isLoggedIn, logout } = useStaff();
+  const { login, loginByStaffId, allStaff, currentStaff, hasRole, isLoggedIn, logout, setActiveMode } = useStaff();
   const [, setLocation] = useLocation();
   const [pin, setPin] = useState("");
   const [staffId, setStaffId] = useState("");
@@ -250,6 +263,9 @@ export default function LoginPage() {
     // If currently logged in AND the active staff can enter this mode, skip
     // PIN entirely (same convenience as v3.106).
     if (isLoggedIn && (hasRole("admin") || hasRole(...m.roles))) {
+      // Commit to the chosen mode so the picker stays suppressed AND the
+      // target mode page auto-logs in (mode pages gate on activeMode).
+      setActiveMode(TILE_MODE[m.key]);
       setLocation(m.href);
       return;
     }
@@ -285,7 +301,7 @@ export default function LoginPage() {
     if (pendingMode.authMode === "pin") {
       // Boss Mode: PIN-only against admin/manager-tier staff.
       const target = pendingMode.href;
-      const ok = login(fullPin);
+      const ok = login(fullPin, TILE_MODE[pendingMode.key]);
       if (!ok) { registerFail(); flashError("WRONG PIN"); return; }
       clearFails();
       navigateAndClear(target);
@@ -297,7 +313,7 @@ export default function LoginPage() {
     const target = pendingMode.href;
     const modeLabel = pendingMode.label;
     const modeRoles = pendingMode.roles;
-    const found = loginByStaffId(id, fullPin);
+    const found = loginByStaffId(id, fullPin, TILE_MODE[pendingMode.key]);
     if (!found) { registerFail(); flashError("WRONG ID OR PIN"); return; }
     // Role-gate: ensure this staff can actually enter the chosen mode.
     const allowed = hasRoleOnStaff(found.role, found.roles, ["admin", ...modeRoles]);
