@@ -15,7 +15,7 @@ import { getFloorFromTableId, type FloorKey } from "./floor-plan";
 // ANY reservation for the table that night (no time-window, no paid filter),
 // while the picker is time-windowed + skips paid → a GREEN table got rejected as
 // "already occupied". Import is runtime-safe: door-tables only TYPE-imports back.
-import { doorTableOccupantAt, doorNowMinutesIST } from "./door-tables";
+import { doorTableOccupantAt, doorNowMinutesIST, isTableReservationSettled } from "./door-tables";
 
 // 🆕 2026-05-27 v3.94 — SHARED SUBSCRIPTION CACHE (Khushi LIVE-NIGHT: 13M
 // reads / 305 listeners observed 2026-05-27 ~2PM). DoorMode alone mounts
@@ -1810,13 +1810,32 @@ export async function markRoundActivated(
   }
 }
 
+/**
+ * 🆕 2026-06-07 (Khushi) — TRUE bill-settled gate.
+ * A table-cover booking PREPAID online carries `paymentStatus:"paid"` from the
+ * COVER deposit (written by the customer site `_finalizeReserve` and the
+ * `razorpayBookingWebhook`) even while its FOOD TAB is still OPEN and the guest
+ * keeps self-ordering. `markTablePaid` is the SOLE writer of `paymentMode` /
+ * `paidAt`, so a table is genuinely SETTLED (and must lock ordering/editing/
+ * reassign/source) ONLY once one of those settlement stamps is present. Without
+ * this distinction, prepaid-cover tables looked "paid" and the captain could
+ * neither ADD ORDER nor SETTLE the real food bill.
+ */
+export function isTableBillSettled(
+  data: { paymentStatus?: string; paymentMode?: string; paidAt?: string } | null | undefined
+): boolean {
+  // Delegate to the canonical rule in door-tables.ts (single source of truth —
+  // door-tables is a lower-level lib, so this import is not circular).
+  return isTableReservationSettled(data);
+}
+
 export async function updateRoundItems(
   docId: string, roundIndex: number, items: HodOrderItem[], roundTotal: number, editedBy?: string
 ): Promise<void> {
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
   const data = snap.data();
-  if (data.paymentStatus === "paid") throw new Error("Cannot edit orders on a paid table");
+  if (isTableBillSettled(data)) throw new Error("Cannot edit orders on a settled table");
   const rounds = [...(data.tabRounds || [])];
   if (rounds[roundIndex]) {
     const prevItems = [...(rounds[roundIndex].items || [])];
@@ -2094,7 +2113,7 @@ export async function redeemFromWalletAtTable(
     if (!coverSnap.exists()) throw new Error("Wallet not found");
     const resv = resvSnap.data();
     const cover = coverSnap.data();
-    if (resv.paymentStatus === "paid") throw new Error("Bill already marked paid — cannot redeem more");
+    if (isTableBillSettled(resv)) throw new Error("Bill already settled — cannot redeem more");
     if (resv.status === "voided") throw new Error("Bill is voided — cannot redeem");
     // Loophole #5 — wallet expired
     if (cover.expiresAt) {
@@ -2214,8 +2233,8 @@ export async function undoWalletRedemption(
     const resvSnap = await tx.get(resvRef);
     if (!resvSnap.exists()) throw new Error("Reservation not found");
     const resv = resvSnap.data();
-    if (resv.paymentStatus === "paid") {
-      throw new Error("Bill already paid — use Void Bill + cash refund, not wallet undo");
+    if (isTableBillSettled(resv)) {
+      throw new Error("Bill already settled — use Void Bill + cash refund, not wallet undo");
     }
     const list: WalletRedemption[] = Array.isArray(resv.walletRedemptions) ? resv.walletRedemptions : [];
     const idx = list.findIndex((r) => r.txId === txId);
@@ -2893,7 +2912,7 @@ export async function setReservationAggregator(
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
   const data = snap.data();
-  if (data.paymentStatus === "paid") throw new Error("Cannot change source on a paid table");
+  if (isTableBillSettled(data)) throw new Error("Cannot change source on a settled table");
   // L1/L7: once a bill has been printed the source/discount is locked. Caller must
   // pass `managerOverride: true` (UI requires Manager PIN) to change it.
   if ((data.billPrintCount || 0) > 0 && !opts?.managerOverride) {
@@ -3424,7 +3443,7 @@ async function findTableSlotConflict(
   const target = parseClock(arrivalTime);
   for (const d of snap.docs) {
     const r = d.data() as any;
-    if (r.paymentStatus === "paid") continue;
+    if (isTableBillSettled(r)) continue;
     const start = parseClock(r.arrivalTime);
     if (start == null || target == null) {
       // Unknown time on either side → fall back to old date-only blocking.
@@ -4030,7 +4049,7 @@ export async function reassignTable(
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
   const data = snap.data();
-  if (data.paymentStatus === "paid") throw new Error("Cannot reassign a paid table");
+  if (isTableBillSettled(data)) throw new Error("Cannot reassign a settled table");
   const date = data.date || getOperationalNightStr();
   const oldTableId = data.tableId;
   // 🆕 2026-06-02 (Khushi BUG) — align the conflict check with the GRID PICKER.
@@ -4095,7 +4114,7 @@ export async function addRoundToTable(
     const snap = await txn.get(ref);
     if (!snap.exists()) throw new Error("Reservation not found");
     const data = snap.data();
-    if (data.paymentStatus === "paid") throw new Error("Cannot add orders to a paid table");
+    if (isTableBillSettled(data)) throw new Error("Cannot add orders to a settled table");
     const rounds: HodTabRound[] = Array.isArray(data.tabRounds) ? [...data.tabRounds] : [];
     const normItems = items.map((it) => ({
       n: it.n, p: it.p, qty: it.qty, cat: it.cat || "",

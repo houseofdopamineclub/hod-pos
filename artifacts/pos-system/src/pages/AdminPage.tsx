@@ -32,6 +32,7 @@ import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
 import AgentsReport from "./AgentsReport";
+import LiveReports from "./LiveReports";
 import EventsAdmin from "./EventsAdmin";
 import MenuEditor from "./MenuEditor";
 import MenuCRM from "./MenuCRM";
@@ -90,7 +91,7 @@ export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
   // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
-  const [tab, setTab] = useState<"monitor" | "reports" | "agents" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "live-reports" | "agents" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tablePricing, setTablePricing] = useState<TablePricingSettings>({
@@ -506,6 +507,7 @@ export default function AdminPage() {
             [
               { id: "monitor",     label: "🔴 Live Monitor" },
               { id: "reports",     label: "📋 Reports" },
+              { id: "live-reports", label: "📊 Live Reports" },
               { id: "agents",      label: "👥 Agents" },
               { id: "audit",       label: "🛡 Audit" },
             ],
@@ -549,6 +551,7 @@ export default function AdminPage() {
       <div className="p-4">
         {tab === "monitor" && <LiveMonitor />}
         {tab === "reports" && <Reports embedded />}
+        {tab === "live-reports" && <LiveReports />}
         {tab === "agents" && <AgentsReport />}
 
         {/* 🆕 v3.105 — Audit embedded directly. AuditPage is self-contained

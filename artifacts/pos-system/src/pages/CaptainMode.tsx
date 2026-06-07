@@ -12,7 +12,7 @@ import {
   recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
   voidBill, printBillVoid, assertCaptainCanVoid, recordCaptainVoidUsage,
   recordSilentPrePrintEdit,
-  computeHodBreakdown, lookupOrphanZomatoPaymentByName, type TabletFloor,
+  computeHodBreakdown, lookupOrphanZomatoPaymentByName, isTableBillSettled, type TabletFloor,
   type HodTableReservation, type HodTabRound, type HodOrderItem,
   type OrphanZomatoPayment,
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
@@ -54,6 +54,13 @@ import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 // includes the venue location. Plain Google Maps URL — never a Firebase
 // Dynamic Link (those were shut down 2025-08-25).
 import { HOD_LOCATION_URL } from "@/pages/DoorMode";
+// 🆕 2026-06-07 (Khushi) — Captain Mode now has its own LIVE REPORTS (parity
+// with Bar / Door). Reuses the Boss-mode LiveReports component verbatim (it is
+// already table/floor-centric = the captain's domain, and its table accounting
+// is architect-passed) rendered inside a fullscreen modal — identical numbers
+// to Boss Mode, no duplicated/divergent accounting. Subscriptions only run
+// while the modal is open (component mounts on open, unmounts on close).
+import LiveReports from "./LiveReports";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
@@ -431,7 +438,11 @@ function tableOccupantAt(
 ): HodTableReservation | null {
   for (const r of reservations) {
     if (r.tableId !== tableId) continue;
-    if (r.paymentStatus === "paid") continue;
+    // 🆕 2026-06-07 (Khushi) — a prepaid-cover table carries paymentStatus:"paid"
+    // from the deposit while the guest is STILL SEATED (food tab open). Only a
+    // truly SETTLED bill (markTablePaid → paymentMode/paidAt) means the table is
+    // free; otherwise it stays occupied so we never double-book a seated guest.
+    if (isTableBillSettled(r)) continue;
     const start = parseClockToMinutes(r.arrivalTime);
     if (start == null) {
       // Unknown arrival time — treat as currently occupying so we don't
@@ -2441,6 +2452,14 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     return () => { cancelled = true; clearInterval(id); };
   }, [r.paymentStatus, aggForFallback, r.customerName]);
   const paid = r.paymentStatus === "paid" || !!orphanPay;
+  // 🆕 2026-06-07 (Khushi) — a table booked online with a PREPAID COVER carries
+  // paymentStatus:"paid" from the cover deposit while its FOOD TAB is still OPEN
+  // (the guest keeps self-ordering). `paid` above stays true so the cover-PAID
+  // badge/display is unchanged, but ordering/settlement ACTIONS must key off the
+  // TRUE settlement stamp (markTablePaid writes paymentMode/paidAt) — otherwise
+  // the captain can't ADD ORDER or SETTLE the real food bill. orphanPay (zomato
+  // pre-claim) is still treated as locked, exactly as before.
+  const billSettled = isTableBillSettled(r) || !!orphanPay;
   // V3 2026-05-10 — `voided` reflects a Manager-PIN-gated bill void (customer
   // refused/walked out/etc). When true: hide payment + edit actions, show a
   // loud red badge, and only allow Release Table (which archives + clears).
@@ -2681,7 +2700,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     if (preparingRounds > 0) {
       if (!confirm(`⚠️ ${preparingRounds} round(s) still PREPARING in kitchen!\n\nRelease anyway? Kitchen orders will be lost.`)) return;
     }
-    const hasUnpaid = !paid && tabTotal > 0;
+    const hasUnpaid = !billSettled && tabTotal > 0;
     const msg = hasUnpaid
       ? `⚠️ UNPAID TAB: ₹${tabTotal}\n\nRelease without payment?`
       : `Release ${r.tableId} for new guests?`;
@@ -3429,7 +3448,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "#6B6B6B" }}>No orders yet</div>
         )}
 
-        {r.billStale && !paid && (
+        {r.billStale && !billSettled && (
           <div style={{ margin: "6px 16px 8px", padding: "10px 12px", borderRadius: 10,
             background: "linear-gradient(135deg, #FFF0EC, #FFF0EC)",
             border: "1px solid #FF5733",
@@ -3441,7 +3460,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             <span>ITEMS CHANGED SINCE LAST BILL · REPRINT REQUIRED before Settle Bill</span>
           </div>
         )}
-        {(r.billPrintCount || 0) > 0 && !r.billStale && !paid && (
+        {(r.billPrintCount || 0) > 0 && !r.billStale && !billSettled && (
           <div style={{ margin: "6px 16px 8px", padding: "6px 10px", borderRadius: 8,
             background: "#FBF3D6", border: "1px solid #000",
             color: "#000", fontSize: 12, fontWeight: 700, letterSpacing: ".4px" }}>
@@ -3462,7 +3481,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           {/* 🔴 2026-05-13 — Guest Arrived button removed from modal; it now lives
               inline on the BookingRow itself (one-tap arrival without opening the
               full booking detail). Modal kept clean for ordering / billing actions. */}
-          {!paid && (
+          {!billSettled && (
             <button onClick={() => {
               // 🆕 2026-05-27 v3.68 (Khushi LIVE-NIGHT) — table-assigned gate.
               // Bill-due rows sometimes land in the captain's modal with no
@@ -3490,7 +3509,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               ADD ORDER (gated above), couldn't print KOTs, had to walk to
               door girl. Reuses the existing ReassignTableModal which lists
               available tables across all 3 floors with time-aware occupancy. */}
-          {!paid && (
+          {!billSettled && (
             <button onClick={() => setShowReassign(true)}
               style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9,
                 background: !String(r.tableId || "").trim() ? "#23A094" : "#60A5FA",
@@ -3531,13 +3550,13 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               </button>
             );
           })()}
-          {!paid && !voided && (tabTotal > 0 || billReq) && (
+          {!billSettled && !voided && (tabTotal > 0 || billReq) && (
             <button onClick={handleOpenMarkPaid}
               style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               💰 Settle Bill
             </button>
           )}
-          {!paid && !voided && (r.billPrintCount || 0) > 0 && (
+          {!billSettled && !voided && (r.billPrintCount || 0) > 0 && (
             <button onClick={async () => {
               // V3 anti-fraud #A2 — pre-flight cap check; abort early w/ clear msg.
               try { await assertCaptainCanVoid(captainName); }
@@ -3855,9 +3874,14 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
   const billReq = r.paymentStatus === "bill_requested";
   const paid = r.paymentStatus === "paid";
+  // 🆕 2026-06-07 (Khushi) — prepaid-cover tables carry paymentStatus:"paid" from
+  // the cover deposit while the food tab is still OPEN. `paid` stays for the PAID
+  // badge, but reassign/overlap/occupancy must key off the TRUE settlement stamp
+  // so a still-seated prepaid-cover table isn't treated as free/done.
+  const billSettled = isTableBillSettled(r);
   const voided = (r as any).status === "voided";
   const arrived = !!r.actualArrivalTime;
-  const canReassign = !paid && !voided;
+  const canReassign = !billSettled && !voided;
   // 🔴 2026-05-20 (Khushi) — customer-calling outranks bill_due AND pending
   // for visual priority. Captain must see this from the LIST, not just after
   // opening the card.
@@ -3870,10 +3894,10 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   const activeOnSameTable = (allReservations || []).filter((x) =>
     x.tableId === r.tableId && x._docId !== r._docId &&
     !!x.actualArrivalTime &&
-    x.paymentStatus !== "paid" &&
+    !isTableBillSettled(x) &&
     (x as any).status !== "voided"
   ).length;
-  const hasOverlap = arrived && !paid && !voided && activeOnSameTable > 0;
+  const hasOverlap = arrived && !billSettled && !voided && activeOnSameTable > 0;
 
   const borderColor = calling ? "#FF5733"
     : hasOverlap ? "#FF5733"
@@ -4679,7 +4703,14 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     } catch { return false; }
   });
   const tabletFloor = getTabletFloor();
-  const focusFloorKey: FloorKey | null = (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null;
+  // 🚫 2026-06-06 (Khushi) — FOCUS MODE DISABLED. It was locking/blurring the
+  // first-floor + Dining tables until a refresh. Forcing focusFloorKey to null
+  // neutralises ALL focus-mode behaviour (the table lock at the floor map, the
+  // auto-floor-snap, and the initial-floor pick) in one place while leaving the
+  // toggle/state plumbing intact so it can be reintroduced cleanly later.
+  const focusFloorKey: FloorKey | null = null;
+  // (was: (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null)
+  void tabletFloor;
   // 🆕 2026-05-26 v3.10 (Khushi req) — Manager PIN gate on turning Focus OFF.
   // Reason: without it, a captain who finds focus mode "annoying" can quietly
   // toggle it off all night and we lose the perf win without anyone knowing.
@@ -4856,6 +4887,8 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // dedicated TAB above the floor selector. Tab pulses red when pending > 0.
   // Click → fullscreen modal with the same row + ACKNOWLEDGE UI we already had.
   const [showTableQrModal, setShowTableQrModal] = useState(false);
+  // 🆕 2026-06-07 (Khushi) — LIVE REPORTS modal toggle (Captain parity).
+  const [reportsOpen, setReportsOpen] = useState(false);
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
   // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
   // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
@@ -4952,6 +4985,23 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           design as the previous floating banner — just bigger and accessed
           on-demand via the tab pill so it doesn't permanently eat real estate.
           Captain still gets the chime + 8s alert badge on new rows. */}
+      {/* 🆕 2026-06-07 (Khushi) — CAPTAIN LIVE REPORTS (fullscreen modal).
+          Renders the same Boss-mode LiveReports component (table activity by
+          floor) so the captain sees identical, architect-passed numbers. The
+          component mounts here only while open → its Firestore subscriptions
+          run only while the modal is open (cost-safe). */}
+      {reportsOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "#F4F4F0", zIndex: 100010, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", background: "#fff", borderBottom: "2px solid #000" }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 0.4, fontFamily: "'Space Grotesk',sans-serif" }}>🪩 CAPTAIN · LIVE REPORTS</div>
+            <button onClick={() => setReportsOpen(false)}
+              style={{ flexShrink: 0, width: 40, height: 40, borderRadius: 10, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 22, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>×</button>
+          </div>
+          <div style={{ padding: 16 }}>
+            <LiveReports />
+          </div>
+        </div>
+      )}
       {showTableQrModal && (
         <div onClick={() => setShowTableQrModal(false)} style={{
           position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.55)",
@@ -5043,9 +5093,15 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       </div>
 
-      <div style={{ padding: "10px 16px", background: "#fff", borderBottom: "2px solid #000" }}>
+      <div style={{ padding: "10px 16px", background: "#fff", borderBottom: "2px solid #000", display: "flex", gap: 8, alignItems: "center" }}>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
-          style={{ width: "100%", boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
+          style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
+        {/* 🆕 2026-06-07 (Khushi) — LIVE REPORTS button (parity with Bar / Door). */}
+        <button onClick={() => setReportsOpen(true)}
+          title="Live Reports — tonight's table numbers by floor"
+          style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 8, background: "#000", border: "1px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
+          📊 LIVE REPORTS
+        </button>
       </div>
 
       {/* 🍳 2026-05-21 (Khushi) — KPI tiles bumped from 4 → 5 to add FOOD READY

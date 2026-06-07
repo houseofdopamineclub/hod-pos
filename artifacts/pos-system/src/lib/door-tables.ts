@@ -69,12 +69,33 @@ export function doorNowMinutesIST(): number {
   return d.getHours() * 60 + d.getMinutes();
 }
 
+/**
+ * 🆕 2026-06-07 (Khushi) — CANONICAL "is the bill truly settled?" gate.
+ * A table-cover booking PREPAID online carries `paymentStatus:"paid"` from the
+ * COVER deposit while its FOOD TAB is still OPEN and the guest keeps ordering.
+ * `markTablePaid` is the SOLE writer of `paymentMode` / `paidAt`, so a table is
+ * genuinely SETTLED (free / lock ordering/editing/reassign/occupancy) ONLY once
+ * one of those stamps is present.
+ *
+ * This lives in `door-tables.ts` — a LOW-LEVEL, dependency-safe lib (it only
+ * TYPE-imports `firestore-hod`) — so `firestore-hod.ts` (`isTableBillSettled`)
+ * and `kot-bill-tally.ts` can both reuse ONE rule with no circular import and no
+ * drift between copies.
+ */
+export function isTableReservationSettled(
+  data: { paymentStatus?: string; paymentMode?: string; paidAt?: string } | null | undefined
+): boolean {
+  return !!data && data.paymentStatus === "paid" && (!!data.paymentMode || !!data.paidAt);
+}
+
 export function doorTableOccupantAt(
   tableId: string, targetMin: number, reservations: HodTableReservation[]
 ): HodTableReservation | null {
   for (const r of reservations) {
     if (r.tableId !== tableId) continue;
-    if ((r as any).paymentStatus === "paid") continue;
+    // Settled-only release: a prepaid-cover table whose tab is still open stays
+    // OCCUPIED so reassign/occupancy never treats a seated guest as free.
+    if (isTableReservationSettled(r as any)) continue;
     const start = doorParseClockToMinutes(r.arrivalTime);
     if (start == null) return r;
     const winStart = start - DOOR_SLOT_LEAD_IN_MIN;

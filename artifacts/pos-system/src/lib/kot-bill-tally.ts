@@ -45,6 +45,7 @@
 //  • Bill-voided tables → tagged separately (the void itself is the loss event).
 
 import type { HodTableReservation, HodOrderItem, HodTabRound } from "./firestore-hod";
+import { isTableReservationSettled } from "./door-tables";
 
 export const TALLY_MINOR_THRESHOLD = 500;   // <₹500 leakage → 🟠 MINOR
 export const TALLY_LEAK_THRESHOLD = 500;    // ≥₹500 leakage → 🔴 LEAKAGE
@@ -391,7 +392,10 @@ export function buildAllTallyRows(
   const out: TallyRow[] = [];
   for (const r of reservations) {
     if (closedOnly) {
-      const isPaid = r.paymentStatus === "paid";
+      // 🆕 2026-06-07 (Khushi) — settled-semantics. A prepaid-cover table is
+      // paymentStatus:"paid" from the deposit while its tab is still OPEN; it is
+      // NOT closed, so reconciling its live KOTs here would false-flag leakage.
+      const isPaid = isTableReservationSettled(r as any);
       const isVoided = (r as any).status === "voided";
       if (!isPaid && !isVoided) continue;
     }
