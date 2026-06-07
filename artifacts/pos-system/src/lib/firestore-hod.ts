@@ -190,6 +190,52 @@ export function computeHodBreakdown(items: HodOrderItem[]): HodCartBreakdown {
            serviceCharge: sc, gst, cgst, sgst, roundOff, grandTotal };
 }
 
+export interface HodCartBreakdownAdjusted extends HodCartBreakdown {
+  discount: number;     // ₹ taken off the subtotal by the discount %
+  discountPct: number;  // the clamped discount % actually applied
+}
+/** Discount + Service-Charge-toggle aware variant of computeHodBreakdown.
+ *  Used by BarMode so the RECHARGE-required amount, the on-screen tax
+ *  breakdown, the wallet debit and the printed bill all agree to the rupee
+ *  AND match the customer wallet.
+ *
+ *  CRITICAL: with discPct=0 and scOn=true this is IDENTICAL to
+ *  computeHodBreakdown (same alcohol-GST-exemption, same 2-decimal SC/GST,
+ *  same final whole-rupee round) — so the customer total === bar total.
+ *
+ *  The discount is applied PROPORTIONALLY across food/alcohol/non-alc so the
+ *  alcohol GST-exemption is preserved after the discount. */
+export function computeHodBreakdownAdjusted(
+  items: HodOrderItem[], discPct: number = 0, scOn: boolean = true,
+): HodCartBreakdownAdjusted {
+  let foodSub = 0, alcSub = 0, nonAlcSub = 0;
+  for (const it of items || []) {
+    const line = (it.p || 0) * (it.qty || 0);
+    const t = it.t || "drink";
+    if (t === "food") foodSub += line;
+    else if (it.alc === false) nonAlcSub += line;
+    else alcSub += line;
+  }
+  const subtotal = foodSub + alcSub + nonAlcSub;
+  const pct = Math.min(100, Math.max(0, discPct || 0));
+  const factor = (100 - pct) / 100;
+  const dFood = foodSub * factor, dAlc = alcSub * factor, dNonAlc = nonAlcSub * factor;
+  const discountedSub = dFood + dAlc + dNonAlc;
+  const discount = Math.round((subtotal - discountedSub) * 100) / 100;
+  const sc = scOn ? Math.round(discountedSub * HOD_SC_RATE * 100) / 100 : 0;
+  const gstBase = dFood + dNonAlc + sc; // alcohol is GST-exempt
+  const gst = Math.round(gstBase * HOD_GST_RATE * 100) / 100;
+  const cgst = Math.round(gst * 50) / 100;
+  const sgst = Math.round((gst - cgst) * 100) / 100;
+  const raw = discountedSub + sc + gst;
+  const grandTotal = Math.round(raw);
+  const roundOff = Math.round((grandTotal - raw) * 100) / 100;
+  return { foodSubtotal: foodSub, alcSubtotal: alcSub, nonAlcSubtotal: nonAlcSub,
+           drinkSubtotal: alcSub + nonAlcSub, subtotal,
+           serviceCharge: sc, gst, cgst, sgst, roundOff, grandTotal,
+           discount, discountPct: pct };
+}
+
 export interface HodTabRound {
   roundNum: number;
   items: HodOrderItem[];

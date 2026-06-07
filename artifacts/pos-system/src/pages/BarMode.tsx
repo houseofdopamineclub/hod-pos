@@ -7,7 +7,7 @@ import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
-  getCoverByRef, computeHodBreakdown, updatePreparingRoundItems, createBarWalkinCover,
+  getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, updatePreparingRoundItems, createBarWalkinCover,
   coverDocIdFor, subscribeToCoversForNight,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
@@ -371,16 +371,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
 
   /** Single source of truth for the printed-bill math. Honors barDiscPct +
    *  scOn toggles. Pure function — does NOT touch wallet balance. */
+  // 🆕 2026-06-07 — delegate to computeHodBreakdownAdjusted so the printed
+  // bill + wallet debit use the EXACT same math as the customer wallet
+  // (alcohol GST-exempt, 2-decimal SC/GST, final whole-rupee round). At
+  // 0% discount + SC on this equals the customer's computeHodBreakdown to
+  // the rupee — fixing the ₹535 (customer) vs ₹534 (bar) off-by-one.
   const computePrintAmounts = useCallback((items: HodOrderItem[]) => {
-    const sub = items.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-    const disc = Math.round(sub * (Math.min(100, Math.max(0, barDiscPct)) / 100));
-    const taxBase = Math.max(0, sub - disc);
-    const sc = scOn ? Math.round(taxBase * 0.10) : 0;
-    const taxAmt = Math.round((taxBase + sc) * 0.05);
-    const cgst = Math.round((taxAmt / 2) * 100) / 100;
-    const sgst = Math.round((taxAmt / 2) * 100) / 100;
-    const total = taxBase + sc + taxAmt;
-    return { subtotal: sub, discount: disc, serviceCharge: sc, cgst, sgst, taxAmt, total };
+    const b = computeHodBreakdownAdjusted(items, barDiscPct, scOn);
+    return {
+      subtotal: b.subtotal, discount: b.discount, serviceCharge: b.serviceCharge,
+      cgst: b.cgst, sgst: b.sgst, taxAmt: b.gst, roundOff: b.roundOff, total: b.grandTotal,
+    };
   }, [barDiscPct, scOn]);
 
   // 🆕 2026-06-02 v3.195 (Khushi) — RECHARGE honors the DISCOUNT dropdown.
@@ -428,7 +429,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const preOrderTotal = computeHodBreakdown(preOrderItems).grandTotal;
 
   const cartItemsForTax: HodOrderItem[] = Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }));
-  const cartBreakdown = computeHodBreakdown(cartItemsForTax);
+  const cartBreakdown = computeHodBreakdownAdjusted(cartItemsForTax, barDiscPct, scOn);
   const cartTotal = cartBreakdown.grandTotal;
   // v3.114 — activeTotal now honors barDiscPct + scOn so the "RECHARGE
   // REQUIRED" amount Khushi sees matches EXACTLY what the bill will charge.
@@ -436,12 +437,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // suggestion, ADD ROUND button, and printed bill all agree to the rupee.
   const activeTotal = (() => {
     const allItems: HodOrderItem[] = [...preOrderItems, ...Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }))];
-    const sub = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-    const disc = Math.round(sub * (Math.min(100, Math.max(0, barDiscPct)) / 100));
-    const taxBase = Math.max(0, sub - disc);
-    const sc = scOn ? Math.round(taxBase * 0.10) : 0;
-    const taxAmt = Math.round((taxBase + sc) * 0.05);
-    return taxBase + sc + taxAmt;
+    // 🆕 2026-06-07 — same single-source math as the printed bill + customer
+    // wallet (computeHodBreakdownAdjusted) so RECHARGE-required === customer
+    // ORDER TOTAL to the rupee (fixes ₹535 vs ₹534).
+    return computeHodBreakdownAdjusted(allItems, barDiscPct, scOn).grandTotal;
   })();
   const hasItems = preOrderItems.length > 0 || Object.keys(cart).length > 0;
 
@@ -801,7 +800,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
         customerName: cv.name,
         staff: staffName,
         items: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
-        amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: 0, total: finalAmount },
+        amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: amts.roundOff, total: finalAmount },
         billNumber: rec.billNumber,
         isDuplicate: rec.isDuplicate,
         tabletFloor: floor,
@@ -960,7 +959,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
             customerName: cv.name,
             staff: staffName,
             items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty })),
-            amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: 0, total: finalB },
+            amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB },
             billNumber: recB.billNumber,
             isDuplicate: recB.isDuplicate,
             tabletFloor: floorB,
@@ -1317,7 +1316,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
             {(() => {
               const allItems = rounds.flatMap(r => r.items || []);
               if (allItems.length === 0) return null;
-              const b = computeHodBreakdown(allItems);
+              const b = computeHodBreakdownAdjusted(allItems, barDiscPct, scOn);
               const fmt = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
               return (
                 <details style={{ borderTop: "2px solid #000", paddingTop: 8, marginTop: 6 }}>
@@ -1334,6 +1333,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   </summary>
                   <div style={{ fontSize: 12, lineHeight: 1.8, paddingTop: 6, marginTop: 6, borderTop: "2px solid #000", color: "#6B6B6B", fontFamily: "'Space Grotesk',sans-serif", fontVariantNumeric: "tabular-nums" }}>
                     <div style={{ display: "flex", justifyContent: "space-between" }}><span>SUB TOTAL</span><span>{fmt(b.subtotal)}</span></div>
+                    {b.discount > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>DISCOUNT ({b.discountPct}%)</span><span>−{fmt(b.discount)}</span></div>
+                    )}
                     <div style={{ display: "flex", justifyContent: "space-between" }}><span>SERVICE CHARGE (10%)</span><span>{fmt(b.serviceCharge)}</span></div>
                     {b.cgst > 0 && (
                       <>
@@ -1408,6 +1410,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 </summary>
                 <div style={{ fontSize: 11, lineHeight: 1.7, paddingTop: 6, marginTop: 5, borderTop: "2px solid #000", color: "#6B6B6B" }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}><span>Sub Total</span><span>{fmt(cartBreakdown.subtotal)}</span></div>
+                  {cartBreakdown.discount > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>Discount ({cartBreakdown.discountPct}%)</span><span>−{fmt(cartBreakdown.discount)}</span></div>
+                  )}
                   <div style={{ display: "flex", justifyContent: "space-between" }}><span>Service Charge (10%)</span><span>{fmt(cartBreakdown.serviceCharge)}</span></div>
                   {cartBreakdown.cgst > 0 && (
                     <>
@@ -2056,10 +2061,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
           <div style={{
             marginBottom: 10, padding: "8px 12px", borderRadius: 10,
             background: "#23A094", border: "2px solid #000",
-            color: "#23A094", fontSize: 12, fontWeight: 800, textAlign: "center", lineHeight: 1.5,
+            color: "#fff", fontSize: 13, fontWeight: 900, textAlign: "center", lineHeight: 1.5,
           }}>
-            ✅ RAZORPAY VERIFIED — ₹{(lastVerifiedOnlineTick.amount || 0).toLocaleString("en-IN")} online recharge confirmed
-            <div style={{ fontSize: 10, fontWeight: 600, marginTop: 2, opacity: .8 }}>
+            ✅ LAST RECHARGE OF ₹{(lastVerifiedOnlineTick.amount || 0).toLocaleString("en-IN")} VERIFIED BY CUSTOMER
+            <div style={{ fontSize: 10, fontWeight: 700, marginTop: 2, opacity: .9, color: "#fff" }}>
               pay …{(lastVerifiedOnlineTick.paymentId || "").slice(-8)} · safe to print KOT
             </div>
           </div>
