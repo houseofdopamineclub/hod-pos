@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
 import { StaffLogin } from "@/components/StaffLogin";
@@ -1040,11 +1041,18 @@ function CheckInPaymentModal({
     }
   };
 
-  return (
+  // 🆕 2026-06-08 (Khushi) — PORTAL to <body>. This modal is rendered inside
+  // BookingDetailModal, whose overlay uses `backdrop-filter`; a CSS-fixed child
+  // of a backdrop-filter/transform ancestor is positioned relative to THAT
+  // ancestor, not the viewport — so the overlay couldn't cover the whole screen
+  // and appeared as a black box overlapping the ticket modal underneath.
+  // Portaling to document.body lets `position:fixed` cover the full viewport,
+  // dim the ticket modal cleanly, and centre the white check-in card.
+  return createPortal(
     <div onClick={() => { if (!busy) onClose(); }}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, backdropFilter: "blur(4px)" }}>
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, backdropFilter: "blur(4px)" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "100%", maxWidth: 440, background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, maxHeight: "92vh", overflowY: "auto" }}>
+        style={{ width: "100%", maxWidth: 440, background: "#FFFFFF", border: "2px solid #000", borderRadius: 14, padding: 22, maxHeight: "92vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,.45)" }}>
         <BackBtn onClick={onClose} disabled={busy} />
         <div style={{ fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", fontSize: 20, fontWeight: 900, color: "#000", marginBottom: 4 }}>
           ✅ CHECK IN
@@ -1151,7 +1159,8 @@ function CheckInPaymentModal({
           ✗ CANCEL
         </button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

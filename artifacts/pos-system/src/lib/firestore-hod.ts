@@ -245,6 +245,13 @@ export interface HodTabRound {
   activatedBy?: string;
   activatedAt?: string;
   placedBy?: string;
+  /** Origin of the round. Customer self-orders set
+   *  `customer_self_order` (table) / `customer_self_order_bar` (bar);
+   *  recharge-at-bar sets `recharge_at_bar`; a bartender-created manual
+   *  round sets `bartender_bar`. Any value containing the substring "bar"
+   *  marks a COVER-ONLY (instant-redeemed-at-bar) round that must never be
+   *  dropped by the table→cover mirror. */
+  source?: string;
 }
 
 export interface HodTransaction {
@@ -1659,6 +1666,13 @@ export async function activateCoverOrder(
           items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "" })),
           roundTotal: total, status: "activated" as const,
           placedAt: now, activatedBy: staffName, activatedAt: now, placedBy: staffName,
+          // 🆕 2026-06-08 v3.253 (Khushi) — TAG bartender-created bar rounds with a
+          // bar source. These live ONLY on the cover (never the table doc); without
+          // a "bar" source _mergeCoverRoundsPreserveBarOnly would DROP them the
+          // moment a captain action mirrors the table rounds back (silent loss —
+          // Khushi's "missing Round 2 that the bartender added" bug). The substring
+          // "bar" is what _isBarRoundSource matches, so this round now survives.
+          source: "bartender_bar",
         },
       ];
     }
@@ -1731,6 +1745,34 @@ export function subscribeToHodReservations(
         const all: HodTableReservation[] = [];
         snap.forEach((d) => all.push({ _docId: d.id, ...d.data() } as HodTableReservation));
         all.sort((a, b) => (a.arrivalTime || "").localeCompare(b.arrivalTime || ""));
+        push(all);
+      }, () => push([]));
+    },
+    cb,
+  );
+}
+
+// 🆕 2026-06-08 (Khushi) — RELEASED-TABLE history listener. releaseTable()
+// archives the full reservation to `tableHistory` (every field copied, incl.
+// tabRounds/amountPaid/walletRedemptions/discount/SC/tax) and then DELETES the
+// live `tableReservations` + `covers` docs. Any report that reads ONLY the live
+// collections therefore LOSES a table's sales the instant the captain taps
+// RELEASE — billed / discount / SC / net+gross / cover-wallet redeemed all drop.
+// This listener replays tonight's released tables so the live report can add
+// them back. Same `date == night` scoping as subscribeToHodReservations and the
+// same shape (HodTableReservation), so callers feed it through the identical
+// aggregation. Fail-open (error → []) and shared via _shareSubscription. The
+// `_docId` is prefixed `hist:` so it can never collide with a live res _docId.
+export function subscribeToTableHistory(
+  date: string, cb: (reservations: HodTableReservation[]) => void
+): Unsubscribe {
+  return _shareSubscription<HodTableReservation[]>(
+    `hist:${date || "_blank"}`,
+    (push) => {
+      const q = query(collection(db, TABLE_HISTORY_COL), where("date", "==", date));
+      return onSnapshot(q, (snap) => {
+        const all: HodTableReservation[] = [];
+        snap.forEach((d) => all.push({ ...(d.data() as HodTableReservation), _docId: `hist:${d.id}` }));
         push(all);
       }, () => push([]));
     },
@@ -1861,6 +1903,56 @@ export async function unmarkGuestArrived(
 // mark-activated were simply missed. This helper applies that same dual mirror
 // (full rounds array → covers/{bookingRef} AND covers/{linkedCoverDocId}).
 // Best-effort: the tableReservations write above is the source of truth.
+// 🔴 2026-06-08 v3.252 (Khushi LIVE BUG — round-loss) — BAR rounds vanished
+// from the customer wallet the moment the captain touched the table (PRINT KOT
+// / MARK SERVED / ADD ORDER / edit). ROOT CAUSE: a guest's "I'M AT THE BAR"
+// rounds are written ONLY to the cover (source 'customer_self_order_bar' /
+// 'recharge_at_bar') — they are NEVER copied to the tableReservations doc. But
+// every cover mirror below used to REPLACE covers.tabRounds with the table
+// doc's rounds, which contain only the table/captain rounds → the bar rounds
+// were silently overwritten and lost. The customer-site v3.220 read-time merge
+// can't resurrect them once the cover itself has been clobbered. FIX: when
+// mirroring the table doc's rounds onto a cover, UNION them with the cover's
+// own BAR-only rounds (never drop a cover-only bar round). Table rounds stay
+// authoritative (they exist on the table doc with the SAME placedAt, so the
+// placedAt|roundNum|roundTotal dedupe — identical to the customer-site key —
+// collapses the overlap and the table-doc copy/status wins). No round is ever
+// dropped or duplicated.
+function _isBarRoundSource(s?: unknown): boolean {
+  return typeof s === "string" && s.toLowerCase().indexOf("bar") !== -1;
+}
+function _mergeCoverRoundsPreserveBarOnly(coverRounds: any[], tableRounds: any[]): any[] {
+  const tbl = Array.isArray(tableRounds) ? tableRounds : [];
+  const cov = Array.isArray(coverRounds) ? coverRounds : [];
+  // Preserve the cover's BAR rounds — these live ONLY on the cover and would
+  // otherwise be overwritten by the table-doc rounds.
+  const barOnly = cov.filter((r) => r && _isBarRoundSource(r.source));
+  const keyOf = (r: any) =>
+    `${(r && r.placedAt) || ""}|${(r && r.roundNum) || ""}|${(r && r.roundTotal) || ""}`;
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  // Table-doc rounds are authoritative (carry the latest status); add first so a
+  // bar round that ALSO reached the table doc (overlap) keeps the table version.
+  for (const r of [...tbl, ...barOnly]) {
+    if (!r) continue;
+    const k = keyOf(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    merged.push(r);
+  }
+  // 🆕 2026-06-08 v3.253 (Khushi) — sort CHRONOLOGICALLY by placedAt, NOT by
+  // roundNum. Every writer (customer bar/table, bartender, captain) computes
+  // roundNum as <its own array>.length+1 from a DIFFERENT array, so the numbers
+  // COLLIDE (two "Round 3") and GAP (missing "Round 2"). placedAt is the only
+  // reliable ordering signal; the customer wallet + captain renumber the DISPLAY
+  // 1..N from this order so the bill always reads R1 bar → R2 bar → R3 table → …
+  merged.sort((a, b) => {
+    const at = String((a && a.placedAt) || ""), bt = String((b && b.placedAt) || "");
+    if (at !== bt) return at.localeCompare(bt);
+    return Number((a && a.roundNum) || 0) - Number((b && b.roundNum) || 0);
+  });
+  return merged;
+}
 async function _mirrorRoundsToCovers(
   rounds: any[], bookingRef?: string, linkedCoverDocId?: string
 ): Promise<void> {
@@ -1871,7 +1963,11 @@ async function _mirrorRoundsToCovers(
     try {
       const cRef = doc(db, COVERS_COL, ref);
       const cs = await getDoc(cRef);
-      if (cs.exists()) await updateDoc(cRef, { tabRounds: rounds });
+      if (!cs.exists()) continue;
+      const coverRounds: any[] = Array.isArray(cs.data()?.tabRounds) ? cs.data()!.tabRounds : [];
+      const merged = _mergeCoverRoundsPreserveBarOnly(coverRounds, rounds);
+      const tabTotal = merged.reduce((s, r) => s + (Number(r?.roundTotal) || 0), 0);
+      await updateDoc(cRef, { tabRounds: merged, tabTotal });
     } catch (e) {
       console.warn("[HOD] round-status cover mirror failed for", ref, e);
     }
@@ -1959,35 +2055,12 @@ export async function updateRoundItems(
   await updateDoc(doc(db, TABLE_RES_COL, docId), upd);
   // 🔴 2026-05-13 — Khushi: edits done by the captain weren't reaching the
   // customer wallet (wallet subscribes to covers/{ref}.tabRounds for
-  // in-house bookings). Mirror the full rounds array to covers — match the
-  // pattern used by markRoundServed / markRoundActivated. Best-effort; safe
-  // to skip when no cover doc exists (walk-in / table-only flows).
-  try {
-    const bRef = data.bookingRef;
-    if (bRef) {
-      const cRef = doc(db, COVERS_COL, bRef);
-      const cs = await getDoc(cRef);
-      if (cs.exists()) {
-        await updateDoc(cRef, { tabRounds: rounds, tabTotal });
-      }
-    }
-    // 🔴 2026-05-20 (Khushi Bug 2 fix) — COVER+TABLE flow stores the linked
-    // wallet under `linkedCoverDocId` (NOT `bookingRef`). The legacy mirror
-    // above only handles in-house HOD- bookings → captain edits on linked
-    // wallets weren't reaching the customer phone. Mirror to that doc too so
-    // the customer wallet's tabRounds reflect the captain's edit live.
-    // 🛟 FALLBACK: try/catch keeps the captain edit alive even if the cover
-    // doc was deleted / wallet expired — captain's local bill is the source
-    // of truth, this is best-effort sync only.
-    const linkedRef = (data as { linkedCoverDocId?: string }).linkedCoverDocId;
-    if (linkedRef && linkedRef !== data.bookingRef) {
-      const cRef = doc(db, COVERS_COL, linkedRef);
-      const cs = await getDoc(cRef);
-      if (cs.exists()) {
-        await updateDoc(cRef, { tabRounds: rounds, tabTotal });
-      }
-    }
-  } catch {}
+  // in-house bookings). Mirror the full rounds array to covers (dual: bookingRef
+  // AND linkedCoverDocId). 🔴 2026-06-08 v3.252 — routed through the shared
+  // _mirrorRoundsToCovers so the cover's BAR-only rounds are PRESERVED (union,
+  // not replace) — a captain edit no longer wipes a guest's "I'M AT THE BAR"
+  // rounds. Best-effort; safe to skip when no cover doc exists.
+  await _mirrorRoundsToCovers(rounds, data.bookingRef, (data as { linkedCoverDocId?: string }).linkedCoverDocId);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -4294,43 +4367,21 @@ export async function addRoundToTable(
     // serialize unrelated wallet writes).
     (upd as any).__mirror = { bookingRef: data.bookingRef, rounds, tabTotal };
   });
-  // Best-effort mirror to covers/{ref} — never fail the captain-side write
-  // if the cover doc doesn't exist (table-only flows e.g. walk-ins).
+  // Best-effort mirror to covers (dual: bookingRef AND linkedCoverDocId) — never
+  // fail the captain-side write if the cover doc doesn't exist (table-only flows
+  // e.g. walk-ins). 🔴 2026-06-08 v3.252 — routed through the shared
+  // _mirrorRoundsToCovers so the cover's BAR-only rounds are PRESERVED (union,
+  // not replace): a captain "ADD ORDER" / merge-into-pending no longer wipes a
+  // guest's "I'M AT THE BAR" rounds off the wallet.
   try {
     const freshSnap = await getDoc(ref);
     const fd = freshSnap.exists() ? freshSnap.data() : null;
-    const bRef = fd?.bookingRef;
-    if (bRef) {
-      const cRef = doc(db, COVERS_COL, bRef);
-      const cs = await getDoc(cRef);
-      if (cs.exists()) {
-        await updateDoc(cRef, {
-          tabRounds: fd!.tabRounds || [],
-          tabTotal: fd!.tabTotal || 0,
-        });
-      }
-    }
-    // 🔴 2026-05-20 (Khushi LIVE BUG — customer wallet showed ₹0 after captain
-    // edited a customer-self-ordered round and re-added a different item) —
-    // mirror to covers/{linkedCoverDocId} too. Same pattern as
-    // updateRoundItems Bug 2 fix: COVER+TABLE flow stores the customer wallet
-    // under `linkedCoverDocId`, NOT `bookingRef`, so the legacy bookingRef
-    // mirror above never reached the customer's phone. Without this, every
-    // captain "ADD ORDER" tap on a linked-wallet table left the cover stale
-    // (showed ₹0 / old items) on the customer wallet screen.
-    // 🛟 FALLBACK: try/catch — captain's tableReservations write already
-    // succeeded inside the transaction above, so the captain's bill is the
-    // source of truth even if this mirror fails.
-    const linkedRef = (fd as { linkedCoverDocId?: string } | null)?.linkedCoverDocId;
-    if (linkedRef && linkedRef !== fd?.bookingRef) {
-      const cRef = doc(db, COVERS_COL, linkedRef);
-      const cs = await getDoc(cRef);
-      if (cs.exists()) {
-        await updateDoc(cRef, {
-          tabRounds: fd!.tabRounds || [],
-          tabTotal: fd!.tabTotal || 0,
-        });
-      }
+    if (fd) {
+      await _mirrorRoundsToCovers(
+        Array.isArray(fd.tabRounds) ? fd.tabRounds : [],
+        fd.bookingRef,
+        (fd as { linkedCoverDocId?: string }).linkedCoverDocId
+      );
     }
   } catch {}
 }

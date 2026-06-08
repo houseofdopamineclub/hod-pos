@@ -18,6 +18,12 @@
 //     aggregator. Item food/drink split via HodOrderItem.t.
 //   • covers (subscribeToCoversForNight) — coverUsed = ₹ redeemed from
 //     the cover wallet; non-table covers feed the bar side of top-5 items.
+//   • tableHistory (subscribeToTableHistory) — RELEASED tables. When the
+//     captain taps RELEASE the reservation is archived here and the live
+//     tableReservations + covers docs are DELETED, so without this source the
+//     money totals (billed/discount/SC/net+gross/cover-wallet) would drop the
+//     instant a table is released. Released tables count toward sales but NOT
+//     occupancy/LIVE (the table is free again).
 //   • Tax math reuses computeHodBreakdown (the app's single source of
 //     truth) when a reservation hasn't persisted tax/SC (pre-v3.224).
 //
@@ -37,7 +43,8 @@
 // ─────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useState } from "react";
 import {
-  subscribeToCoversForNight, subscribeToHodReservations, computeHodBreakdown,
+  subscribeToCoversForNight, subscribeToHodReservations, subscribeToTableHistory,
+  computeHodBreakdown,
   type HodCover, type HodTableReservation, type HodOrderItem,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
@@ -125,6 +132,13 @@ export default function LiveReports() {
   const [night, setNight] = useState<string>(() => getOperationalNightStr());
   const [covers, setCovers] = useState<HodCover[]>([]);
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
+  // 🆕 2026-06-08 (Khushi) — RELEASED tables, archived to `tableHistory` when the
+  // captain taps RELEASE (the live reservation + cover docs are then deleted).
+  // Without these the report's money totals (billed / discount / SC / net+gross /
+  // cover-wallet redeemed) DROP the moment a table is released — the leakage
+  // Khushi reported. Folded into the SAME aggregation as live reservations, but
+  // they DON'T count toward occupancy/LIVE (a released table is genuinely free).
+  const [history, setHistory] = useState<HodTableReservation[]>([]);
   const [loading, setLoading] = useState(true);
 
   const nextDay = useMemo(() => nextDayStr(night), [night]);
@@ -151,6 +165,18 @@ export default function LiveReports() {
       u1 = subscribeToHodReservations(night, (r) => { a = r || []; apply(); });
       u2 = subscribeToHodReservations(nextDay, (r) => { b = r || []; apply(); });
     } catch { setReservations([]); }
+    return () => { try { u1 && u1(); } catch {} try { u2 && u2(); } catch {} };
+  }, [night, nextDay]);
+
+  // Released-table history (night + nextDay) — see `history` state note above.
+  useEffect(() => {
+    let a: HodTableReservation[] = [], b: HodTableReservation[] = [];
+    const apply = () => setHistory(mergeById(a, b));
+    let u1: (() => void) | undefined, u2: (() => void) | undefined;
+    try {
+      u1 = subscribeToTableHistory(night, (r) => { a = r || []; apply(); });
+      u2 = subscribeToTableHistory(nextDay, (r) => { b = r || []; apply(); });
+    } catch { setHistory([]); }
     return () => { try { u1 && u1(); } catch {} try { u2 && u2(); } catch {} };
   }, [night, nextDay]);
 
@@ -185,8 +211,26 @@ export default function LiveReports() {
       e.qty += qty; e.amt += amt; bucket.set(name, e);
     };
 
-    for (const r of reservations) {
-      if ((r.status || "").toLowerCase() === "cancelled") continue;
+    // 🆕 2026-06-08 (Khushi) — process LIVE reservations AND released-table
+    // history through the SAME money aggregation. A released table is settled
+    // sales that must NOT vanish from the report (the leakage Khushi reported).
+    // `countOccupancy` is true ONLY for live reservations: a released table is
+    // genuinely free, so it must not inflate LIVE/occupied (and thus must not
+    // shrink AVAILABLE). Dedupe by bookingRef so a doc that somehow appears in
+    // both lists (shouldn't — release deletes the live doc) is counted once.
+    const seenRefs = new Set<string>();
+    const processRes = (r: HodTableReservation, countOccupancy: boolean) => {
+      if ((r.status || "").toLowerCase() === "cancelled") return;
+      // Dedupe across live + history. Prefer bookingRef (stable across the
+      // archive copy). Fallback to a composite of identity fields so a row
+      // WITHOUT a bookingRef still can't double-count between the two lists
+      // (the live _docId and the `hist:`-prefixed archive _docId differ, so
+      // _docId alone is unsafe for cross-list dedupe).
+      const dedupeKey = r.bookingRef
+        ? `ref:${r.bookingRef}`
+        : `cmp:${(r.tableId || "").toUpperCase()}|${r.bookedAt || ""}|${r.amountPaid || 0}|${r.arrivalTime || ""}`;
+      if (seenRefs.has(dedupeKey)) return;
+      seenRefs.add(dedupeKey);
       const fkey = r.floor || doorFloorForTable(r.tableId || "")?.floor;
       const F = toFloor3(fkey);
       const A = floor[F];
@@ -225,7 +269,7 @@ export default function LiveReports() {
       // not — exactly what the Captain floor map shows. Dedupe by table id so a
       // tile booked twice in one night counts once. Bucket by the table's own
       // floor (REAL_TABLE_FLOOR) so it lands in the same floor as its capacity.
-      const realFloor = REAL_TABLE_FLOOR.get((r.tableId || "").toUpperCase());
+      const realFloor = countOccupancy ? REAL_TABLE_FLOOR.get((r.tableId || "").toUpperCase()) : undefined;
       if (realFloor) {
         const tid = (r.tableId || "").toUpperCase();
         occupied[realFloor].add(tid);
@@ -266,7 +310,12 @@ export default function LiveReports() {
 
       // top items (table sales)
       for (const it of items) addItem(it);
-    }
+    };
+
+    // LIVE reservations count toward occupancy; RELEASED history does NOT
+    // (the table is free again) but its settled sales still count.
+    for (const r of reservations) processRes(r, true);
+    for (const r of history) processRes(r, false);
 
     // 🆕 2026-06-08 (Khushi) — the cover-wallet REDEEMED figure is now
     // captain-mode-only (summed above from reservation.walletRedemptions), so we
@@ -289,7 +338,7 @@ export default function LiveReports() {
     const topCaptain = Array.from(cap.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.amt - a.amt).slice(0, 5);
 
     return { floor, channel, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount };
-  }, [reservations, covers]);
+  }, [reservations, history, covers]);
 
   const sumFloors = (pick: (a: FloorAgg) => number) => FLOORS3.reduce((s, f) => s + pick(agg.floor[f]), 0);
 
@@ -447,7 +496,7 @@ export default function LiveReports() {
               <AvailTable />
             </Box>
             {/* 🆕 merge: BILLED + UNBILLED in ONE box (3 cols: Floor · Billed · Unbilled). */}
-            <Box title="💰 BILLED & UNBILLED" hint="Billed = ₹ collected from settled (paid) tables. Unbilled = ₹ still open on live tables (bill generated but not settled yet).">
+            <Box title="💰 BILLED & UNBILLED" hint="Billed = ₹ collected from settled (paid) tables, INCLUDING tables already released this night. Unbilled = ₹ still open on live tables (bill generated but not settled yet).">
               <FloorTable cols={[
                 { label: "Billed", pick: (a) => a.billed, money: true },
                 { label: "Unbilled", pick: (a) => a.unfilled, money: true },
@@ -505,7 +554,7 @@ export default function LiveReports() {
           </Box>
 
           {/* COVER WALLET REDEEMED */}
-          <Box title="👛 AMOUNT REDEEMED FROM COVER WALLET" hint="Cover wallet ₹ the captain redeemed against tables this night. Bar-mode redemptions are NOT counted here.">
+          <Box title="👛 AMOUNT REDEEMED FROM COVER WALLET" hint="Cover wallet ₹ the captain redeemed against tables this night, INCLUDING tables already released. Bar-mode redemptions are NOT counted here.">
             <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
               <div style={{ fontSize: 34, fontWeight: 900, color: C.accent, fontFamily: NUM_FONT }}>{fmtRs(agg.walletRedeemed)}</div>
               <div style={{ fontSize: 13, fontWeight: 700, color: C.grey }}>across {fmtN(agg.walletRedeemedCount)} cover wallet{agg.walletRedeemedCount === 1 ? "" : "s"}</div>

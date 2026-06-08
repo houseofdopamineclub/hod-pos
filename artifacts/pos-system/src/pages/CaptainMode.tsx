@@ -3381,20 +3381,52 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           );
         })()}
 
-        {r.tabRounds && r.tabRounds.length > 0 ? (
+        {(() => {
+          /* 🔴 2026-06-08 v3.253 (Khushi) — UNIFIED ROUND SEQUENCE.
+             The captain list used to show ONLY the table-doc rounds, numbered by
+             the stored roundNum — which (a) renders out of order / DUPLICATED
+             ("ROUND 3 twice") because every writer computes roundNum off a
+             DIFFERENT array (collisions + gaps), and (b) hides the guest's BAR
+             rounds entirely, so the captain's bill didn't match the customer
+             wallet. We now build ONE chronological list:
+               • TABLE rounds — from r.tabRounds, keep their ORIGINAL array index
+                 (`idx`) so every handler (handleServe / handleMarkServed /
+                 setEditRound) still acts on the correct live round.
+               • BAR rounds — the cover-only rounds (source contains "bar":
+                 customer_self_order_bar / recharge_at_bar / bartender_bar) pulled
+                 from linkedCover.tabRounds. These are already redeemed at the bar,
+                 so they render READ-ONLY (no Print KOT / Edit) with a 🍸 badge.
+             Sort by placedAt (the only reliable order), then RENUMBER the DISPLAY
+             1..N — identical to the customer wallet — so it always reads
+             R1 bar → R2 bar → R3 table → R4 table … with no dup, no gap. */
+          const tableEntries = (r.tabRounds || []).map((rd, idx) => ({ rd, idx, coverOnly: false }));
+          const barEntries = ((linkedCover && Array.isArray(linkedCover.tabRounds)) ? linkedCover.tabRounds : [])
+            .filter((rd: HodTabRound) => rd && typeof rd.source === "string" && rd.source.toLowerCase().indexOf("bar") !== -1)
+            .map((rd: HodTabRound) => ({ rd, idx: -1, coverOnly: true }));
+          const allEntries = [...tableEntries, ...barEntries].sort((a, b) =>
+            String(a.rd.placedAt || "").localeCompare(String(b.rd.placedAt || "")));
+          if (!allEntries.length) {
+            return <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "#6B6B6B" }}>No orders yet</div>;
+          }
+          return (
           <div style={{ padding: "0 16px 10px" }}>
-            {r.tabRounds.map((rd, idx) => {
+            {allEntries.map(({ rd, idx, coverOnly }, dispIdx) => {
               const isPending = rd.status === "preparing";
               const isActivated = rd.status === "activated";
               const isServed = rd.status === "served";
-              const needsAction = isPending || isActivated;
+              const needsAction = !coverOnly && (isPending || isActivated);
               return (
-                <div key={idx} style={{ border: "2px solid #000", borderRadius: 12, padding: 14, marginTop: idx === 0 ? 0 : 10, background: needsAction ? "#FBF3D6" : "#fff", ...(isServed ? { opacity: 0.92 } : {}) }}>
+                <div key={coverOnly ? `bar-${dispIdx}` : `tbl-${idx}`} style={{ border: "2px solid #000", borderRadius: 12, padding: 14, marginTop: dispIdx === 0 ? 0 : 10, background: needsAction ? "#FBF3D6" : "#fff", ...((isServed || coverOnly) ? { opacity: 0.92 } : {}) }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
-                    <span style={{ fontSize: 17, fontWeight: 900, color: "#000", letterSpacing: .6, textTransform: "uppercase" }}>● ROUND {rd.roundNum}</span>
+                    <span style={{ fontSize: 17, fontWeight: 900, color: "#000", letterSpacing: .6, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      ● ROUND {dispIdx + 1}
+                      {coverOnly && (
+                        <span style={{ fontSize: 10, fontWeight: 900, padding: "2px 7px", borderRadius: 6, background: "#A855F7", color: "#fff", letterSpacing: .3, textTransform: "uppercase" }}>🍸 AT BAR</span>
+                      )}
+                    </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 14, fontWeight: 800, color: isPending ? "#000" : isActivated ? "#60A5FA" : "#23A094", letterSpacing: .3 }}>
-                        {isPending ? "🔴 PREPARING" : isActivated ? "🔵 READY TO SERVE" : "✅ SERVED"}
+                      <span style={{ fontSize: 14, fontWeight: 800, color: coverOnly ? "#23A094" : isPending ? "#000" : isActivated ? "#60A5FA" : "#23A094", letterSpacing: .3 }}>
+                        {coverOnly ? "✅ REDEEMED" : isPending ? "🔴 PREPARING" : isActivated ? "🔵 READY TO SERVE" : "✅ SERVED"}
                       </span>
                       {needsAction && (
                         // 🔴 2026-05-13 — Khushi: pencil icon was too cryptic;
@@ -3438,8 +3470,9 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                         - Print KOT (preparing → activated/Ready to Serve)
                         - Mark Served (activated → served, only when food has
                           actually reached the table)
-                      The wallet now matches reality. */}
-                  {isPending && (
+                      The wallet now matches reality. Bar rounds are already
+                      redeemed at the bar → no action buttons. */}
+                  {!coverOnly && isPending && (
                     <div style={{ marginTop: 10 }}>
                       {/* 🆕 2026-05-20 (Khushi) — blinking GREEN Print KOT.
                           As soon as a round exists in preparing state (customer
@@ -3457,7 +3490,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                       </button>
                     </div>
                   )}
-                  {isActivated && (
+                  {!coverOnly && isActivated && (
                     <div style={{ marginTop: 8 }}>
                       <button onClick={() => handleMarkServed(idx)} disabled={busy === `served-${idx}`}
                         style={{ width: "100%", padding: 9, borderRadius: 8, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
@@ -3469,9 +3502,8 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               );
             })}
           </div>
-        ) : (
-          <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "#6B6B6B" }}>No orders yet</div>
-        )}
+          );
+        })()}
 
         {r.billStale && !billSettled && (
           <div style={{ margin: "6px 16px 8px", padding: "10px 12px", borderRadius: 10,
