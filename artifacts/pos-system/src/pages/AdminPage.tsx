@@ -34,8 +34,6 @@ import Reports from "./Reports";
 import AgentsReport from "./AgentsReport";
 import LiveReports from "./LiveReports";
 import EventsAdmin from "./EventsAdmin";
-import MenuEditor from "./MenuEditor";
-import MenuCRM from "./MenuCRM";
 import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
 // 🆕 2026-05-28 v3.140 — Digitory item-code mapping admin tab. Built ahead
 // of Cloud Function (still blocked on Digitory prod URL + auth). Khushi
@@ -91,7 +89,7 @@ export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
   // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
-  const [tab, setTab] = useState<"monitor" | "reports" | "live-reports" | "agents" | "audit" | "events" | "menu" | "menu-editor" | "menu-crm" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "live-reports" | "agents" | "audit" | "events" | "menu" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tablePricing, setTablePricing] = useState<TablePricingSettings>({
@@ -515,9 +513,9 @@ export default function AdminPage() {
             [
               { id: "events",      label: "🎟 Events" },
               { id: "menu",        label: "OOS / Discount" },
-              { id: "menu-editor", label: "📋 Menu Editor" },
-              { id: "menu-crm",    label: "📋 Menu CRM" },
               { id: "bot-knowledge", label: "🧠 Bot Knowledge" },
+              // 🆕 v3.239 — "📋 Menu Editor" + "📋 Menu CRM" MOVED to the new
+              // standalone MENU mode (its own home-screen icon). See MenuMode.tsx.
             ],
             // Staff & security.
             [
@@ -563,10 +561,7 @@ export default function AdminPage() {
         {tab === "locks" && <CaptainLocksTab adminName={currentStaff?.name || "admin"} />}
 
         {/* 🆕 v3.106 — Legacy Dashboard tab REMOVED (hodclub.in admin iframe). */}
-
-        {tab === "menu-editor" && <MenuEditor currentStaff={currentStaff} />}
-
-        {tab === "menu-crm" && <MenuCRM />}
+        {/* 🆕 v3.239 — Menu Editor + Menu CRM MOVED to the standalone MENU mode. */}
 
         {tab === "bot-knowledge" && <KnowledgeBaseAdmin />}
 

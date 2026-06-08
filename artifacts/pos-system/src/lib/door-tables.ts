@@ -46,7 +46,8 @@ export function doorFloorForTable(id: string): { floor: string; label: string } 
 
 // Time-aware occupancy — mirrors CaptainMode.tsx so a table booked for an
 // unrelated slot (e.g. 7pm dinner) doesn't block a fresh 11pm booking on the
-// same table. Paid bookings are released immediately.
+// same table. A table frees ONLY when RELEASED (the reservation doc is deleted),
+// not when the bill is merely paid/settled — a settled guest can still be seated.
 export const DOOR_SLOT_MINUTES = 120;
 export const DOOR_SLOT_LEAD_IN_MIN = 30;
 
@@ -93,9 +94,26 @@ export function doorTableOccupantAt(
 ): HodTableReservation | null {
   for (const r of reservations) {
     if (r.tableId !== tableId) continue;
-    // Settled-only release: a prepaid-cover table whose tab is still open stays
-    // OCCUPIED so reassign/occupancy never treats a seated guest as free.
-    if (isTableReservationSettled(r as any)) continue;
+    // 🔴 2026-06-08 (Khushi) — OCCUPANCY = "is the table RELEASED?", NOT "is the
+    // bill settled?". `releaseTable` DELETES the tableReservations doc, so a doc
+    // that is still PRESENT (today's date-scoped list) means the table has NOT
+    // been released and the guest is still physically seated — settling the bill
+    // (markTablePaid sets paidAt/paymentMode) does NOT free the table; only the
+    // captain tapping RELEASE TABLE does. The old `if (isTableReservationSettled
+    // (r)) continue;` skip wrongly freed a paid-but-not-released seated guest, so
+    // Door's "new table booking" picker showed an occupied table (e.g. FD5) as
+    // AVAILABLE. The time-window below already stops an unrelated earlier/later
+    // slot from blocking a fresh booking.
+    // 🔴 2026-06-08 (Khushi) — ACTIVE occupancy ignores the scheduled-time window.
+    // A guest who has physically ARRIVED (actualArrivalTime set) or already has a
+    // running tab (tabRounds) is seated NOW and holds the table until RELEASE,
+    // regardless of what their booked arrivalTime says. Bug seen live: FD2 was
+    // booked for 20:30 but the guest arrived early at 17:53 with a ₹477 open tab;
+    // a fresh 17:55 booking fell BEFORE the 20:30 window, so the picker wrongly
+    // showed the occupied FD2 as free. The window below is ONLY for not-yet-
+    // arrived future/earlier reservations that don't actually conflict.
+    const seatedNow = !!r.actualArrivalTime || (r.tabRounds?.length ?? 0) > 0;
+    if (seatedNow) return r;
     const start = doorParseClockToMinutes(r.arrivalTime);
     if (start == null) return r;
     const winStart = start - DOOR_SLOT_LEAD_IN_MIN;

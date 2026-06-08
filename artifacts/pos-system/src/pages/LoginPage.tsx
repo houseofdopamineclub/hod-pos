@@ -26,7 +26,15 @@ import type { StaffRole } from "@/lib/types";
 //     loginByStaffId (avoids leaking which IDs exist via timing).
 //   • Escape / ← BACK always returns to the tile grid.
 
-type ModeKey = "bar" | "captain" | "boss" | "door" | "kds";
+// 🆕 2026-06-08 v3.239 (Khushi) — two extra tiles: "menu" (the Menu Editor +
+// Menu CRM screens moved out of Boss Mode into their own mode) and "hodApp"
+// (an EXTERNAL shortcut that opens the customer site hodclub.in — it is NOT a
+// POS route, so handleTileTap short-circuits it). 🆕 v3.240 — both now render
+// full-size inside the pentagon 2-3-2 grid (Menu + HOD App flank BOSS in row 2).
+type ModeKey = "bar" | "captain" | "boss" | "door" | "kds" | "menu" | "hodApp";
+
+// External customer site opened by the HOD APP tile.
+const HOD_APP_URL = "https://hodclub.in";
 type PendingMode = {
   key: ModeKey;
   href: string;
@@ -48,6 +56,8 @@ const TILE_MODE: Record<ModeKey, StaffRole> = {
   boss: "admin",
   door: "hostess",
   kds: "chef",
+  menu: "admin",
+  hodApp: "admin", // unused — hodApp never logs in (handleTileTap short-circuits).
 };
 
 const TILES: PendingMode[] = [
@@ -56,6 +66,10 @@ const TILES: PendingMode[] = [
   { key: "boss",    href: "/admin",   label: "Boss Mode",    roles: ["admin", "manager"],   authMode: "pin"    },
   { key: "door",    href: "/door",    label: "Door Mode",    roles: ["hostess"],            authMode: "id-pin" },
   { key: "kds",     href: "/kitchen", label: "KDS",          roles: ["chef", "captain"],    authMode: "id-pin" },
+  // 🆕 v3.239 — MENU mode: gated behind the Boss PIN (admin/manager), same as
+  // the Menu tabs were under Boss Mode. HOD APP: external link, no login.
+  { key: "menu",    href: "/menu",    label: "Menu",         roles: ["admin", "manager"],   authMode: "pin"    },
+  { key: "hodApp",  href: HOD_APP_URL, label: "HOD App",     roles: [],                     authMode: "pin"    },
 ];
 
 // Per-tile abstract orb palette — three-stop conic gradient + glow color.
@@ -66,6 +80,8 @@ const ORB_PALETTE: Record<ModeKey, { a: string; b: string; c: string; glow: stri
   boss:    { a: "#F2C744", b: "#FFE08A", c: "#FF90E8", glow: "rgba(242,199,68,.55)",  emoji: "👑" },
   door:    { a: "#60A5FA", b: "#23A094", c: "#90E0C8", glow: "rgba(96,165,250,.45)",  emoji: "🚪" },
   kds:     { a: "#FF5733", b: "#F2C744", c: "#FF90E8", glow: "rgba(255,87,51,.45)",   emoji: "🍳" },
+  menu:    { a: "#90E0C8", b: "#F2C744", c: "#60A5FA", glow: "rgba(144,224,200,.45)", emoji: "📖" },
+  hodApp:  { a: "#FF90E8", b: "#60A5FA", c: "#23A094", glow: "rgba(255,144,232,.45)", emoji: "📱" },
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -157,6 +173,8 @@ const ORB_CSS = `
 .orb-spin-boss    { animation-duration: 12s; }
 .orb-spin-door    { animation-duration: 10s; animation-direction: reverse; }
 .orb-spin-kds     { animation-duration: 6s; }
+.orb-spin-menu    { animation-duration: 11s; animation-direction: reverse; }
+.orb-spin-hodApp  { animation-duration: 8s; }
 .orb-morph-boss   { animation: orb-morph-b 9s ease-in-out infinite, orb-pulse 5s ease-in-out infinite; }
 .orb-morph-captain { animation: orb-morph-b 7s ease-in-out infinite, orb-pulse 3.5s ease-in-out infinite; }
 .tile-card { transition: transform .12s ease, box-shadow .12s ease; box-shadow: 0 0 0 #000; }
@@ -236,6 +254,8 @@ export default function LoginPage() {
     if (t.key === "boss")    return FEATURES.admin && (!currentStaff || hasRole("admin", "manager"));
     if (t.key === "door")    return FEATURES.doorMode;
     if (t.key === "kds")     return FEATURES.kitchenMode;
+    if (t.key === "menu")    return FEATURES.admin && (!currentStaff || hasRole("admin", "manager"));
+    if (t.key === "hodApp")  return true; // external customer-site shortcut, always shown
     return false;
   });
 
@@ -260,6 +280,12 @@ export default function LoginPage() {
   const cancel = () => { setPendingMode(null); setPin(""); setStaffId(""); setError(""); };
 
   const handleTileTap = (m: PendingMode) => {
+    // 🆕 v3.239 — HOD APP is an EXTERNAL shortcut, not a POS route. Open the
+    // customer site in a new tab and bail before any login/navigation logic.
+    if (m.key === "hodApp") {
+      window.open(HOD_APP_URL, "_blank", "noopener,noreferrer");
+      return;
+    }
     // If currently logged in AND the active staff can enter this mode, skip
     // PIN entirely (same convenience as v3.106).
     if (isLoggedIn && (hasRole("admin") || hasRole(...m.roles))) {
@@ -489,26 +515,31 @@ export default function LoginPage() {
         </div>
       ) : (
         // ────────── TILE GRID (default landing) ──────────
-        // 2-1-2 layout: top row [Bar · Captain], middle row [Boss centered],
-        // bottom row [Door · KDS]. Boss is the regal centrepiece.
+        // 🆕 v3.240 — PENTAGON 2-3-2 layout: top [Door · Bar/Cashier], middle
+        // [Menu · Boss · HOD App], bottom [Captain · KDS]. Boss stays the
+        // larger gold centrepiece; the other six are equal full-size tiles.
         (() => {
           const byKey = Object.fromEntries(tiles.map((t) => [t.key, t])) as Record<ModeKey, PendingMode | undefined>;
+          // 🆕 v3.240 — every tile renders full-size; BOSS is the larger gold
+          // centrepiece (option B). No more compact `small` row — MENU + HOD APP
+          // now sit equal-sized inside the pentagon's middle row.
           const renderTile = (m?: PendingMode) => {
             if (!m) return null;
+            const isBoss = m.key === "boss";
             return (
               <button
                 key={m.key}
                 onClick={() => handleTileTap(m)}
-                className={`tile-card flex flex-col items-center justify-center gap-3 rounded-2xl ${m.key === "boss" ? "tile-card-boss" : ""}`}
+                className={`tile-card flex flex-col items-center justify-center gap-3 rounded-2xl ${isBoss ? "tile-card-boss" : ""}`}
                 style={{
-                  width: 160,
-                  height: 178,
+                  width: isBoss ? 176 : 156,
+                  height: isBoss ? 196 : 176,
                   background: "#fff",
-                  border: `${m.key === "boss" ? "3px" : "2px"} solid #000`,
+                  border: `${isBoss ? "3px" : "2px"} solid #000`,
                   cursor: "pointer",
                 }}
               >
-                <AnimatedOrb mode={m.key} size={80} highlight={m.key === "boss"} />
+                <AnimatedOrb mode={m.key} size={isBoss ? 86 : 76} highlight={isBoss} />
                 <span
                   className="text-[11px] font-bold tracking-[0.18em] uppercase"
                   style={{ color: "#000" }}
@@ -520,15 +551,20 @@ export default function LoginPage() {
           };
           return (
             <div className="flex flex-col items-center gap-5">
-              <div className="flex gap-6">
-                {renderTile(byKey.bar)}
-                {renderTile(byKey.captain)}
-              </div>
-              <div className="flex gap-6">
-                {renderTile(byKey.boss)}
-              </div>
-              <div className="flex gap-6">
+              {/* Row 1 — Door · Bar/Cashier */}
+              <div className="flex gap-6 items-center">
                 {renderTile(byKey.door)}
+                {renderTile(byKey.bar)}
+              </div>
+              {/* Row 2 — Menu · BOSS (centrepiece) · HOD App */}
+              <div className="flex gap-6 items-center">
+                {renderTile(byKey.menu)}
+                {renderTile(byKey.boss)}
+                {renderTile(byKey.hodApp)}
+              </div>
+              {/* Row 3 — Captain · KDS */}
+              <div className="flex gap-6 items-center">
+                {renderTile(byKey.captain)}
                 {renderTile(byKey.kds)}
               </div>
             </div>

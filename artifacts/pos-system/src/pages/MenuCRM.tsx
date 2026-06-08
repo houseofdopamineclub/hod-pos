@@ -18,6 +18,16 @@ async function requireManagerPin(reason: string): Promise<boolean> {
   return true;
 }
 
+// 🆕 2026-06-08 v3.240 — FULL Gumroad light restyle (cream/white, bold 2px black
+// borders, pink/orange/teal accents, bold uppercase) so MENU mode matches Door &
+// Captain. ALL logic/handlers are unchanged — only the inline styles changed.
+const INK = "#000";
+const PINK = "#FF90E8";
+const ORANGE = "#FF5733";
+const TEAL = "#23A094";
+const RED = "#E11900";
+const BLUE = "#2563EB";
+
 export default function MenuCRM() {
   const [categories, setCategories] = useState<MenuCategory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,7 +38,6 @@ export default function MenuCRM() {
   const [selectedItems, setSelectedItems] = useState<MenuCategoryItem[]>([]);
   const [itemSearch, setItemSearch] = useState("");
   const [saving, setSaving] = useState(false);
-  const gold = "#C9A84C";
 
   useEffect(() => {
     const unsub = subscribeToMenuCategories((cats) => {
@@ -126,69 +135,69 @@ export default function MenuCRM() {
   };
 
   return (
-    <div style={{ padding: 16, color: "#fff", maxWidth: 900, margin: "0 auto" }}>
+    <div style={{ padding: 16, color: INK, maxWidth: 900, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: gold }}>📋 MENU CRM</h2>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 900, letterSpacing: 0.5, color: INK, textTransform: "uppercase" }}>📋 MENU CRM</h2>
         {!showCreate && (
           <button onClick={() => setShowCreate(true)} style={{
-            padding: "10px 20px", borderRadius: 10, border: "none", background: gold, color: "#030305",
-            fontWeight: 800, cursor: "pointer", fontSize: 14,
+            padding: "10px 20px", borderRadius: 10, border: `2px solid ${INK}`, background: PINK, color: INK,
+            fontWeight: 900, cursor: "pointer", fontSize: 14, letterSpacing: 0.4, textTransform: "uppercase",
           }}>➕ NEW CATEGORY</button>
         )}
       </div>
 
       {/* Create / Edit Form */}
       {showCreate && (
-        <div style={{ background: "hsl(240 12% 8%)", border: `1px solid ${gold}40`, borderRadius: 14, padding: 20, marginBottom: 24 }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 16, color: gold }}>
+        <div style={{ background: "#fff", border: `2px solid ${INK}`, borderRadius: 14, padding: 20, marginBottom: 24 }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 16, color: INK, fontWeight: 900, letterSpacing: 0.4, textTransform: "uppercase" }}>
             {editingId ? "✏️ EDIT CATEGORY" : "➕ CREATE CATEGORY"}
           </h3>
 
           <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>CATEGORY NAME</label>
+            <label style={{ fontSize: 12, color: "#3D3D3D", display: "block", marginBottom: 6, fontWeight: 800, letterSpacing: 0.4 }}>CATEGORY NAME</label>
             <input value={name} onChange={(e) => setName(e.target.value)}
               placeholder="e.g. FRIDAY NIGHT SPECIAL"
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box" }} />
+              style={{ width: "100%", padding: 10, borderRadius: 8, border: `2px solid ${INK}`, background: "#fff", color: INK, fontSize: 14, fontWeight: 600, boxSizing: "border-box" }} />
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>
-              DISCOUNT: <strong style={{ color: gold }}>{discount}%</strong>
+            <label style={{ fontSize: 12, color: "#3D3D3D", display: "block", marginBottom: 6, fontWeight: 800, letterSpacing: 0.4 }}>
+              DISCOUNT: <strong style={{ color: TEAL }}>{discount}%</strong>
             </label>
             <input type="range" min={0} max={50} value={discount}
               onChange={(e) => setDiscount(Number(e.target.value))}
-              style={{ width: "100%" }} />
+              style={{ width: "100%", accentColor: INK }} />
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>
+            <label style={{ fontSize: 12, color: "#3D3D3D", display: "block", marginBottom: 6, fontWeight: 800, letterSpacing: 0.4 }}>
               ITEMS ({selectedItems.length} selected)
             </label>
             <input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)}
               placeholder="Search menu items..."
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box", marginBottom: 10 }} />
-            <div style={{ maxHeight: 240, overflow: "auto", border: "1px solid rgba(255,255,255,.08)", borderRadius: 8, padding: 8 }}>
+              style={{ width: "100%", padding: 10, borderRadius: 8, border: `2px solid ${INK}`, background: "#fff", color: INK, fontSize: 14, fontWeight: 600, boxSizing: "border-box", marginBottom: 10 }} />
+            <div style={{ maxHeight: 240, overflow: "auto", border: `2px solid ${INK}`, borderRadius: 8, padding: 8, background: "#fff" }}>
               {filteredItems.slice(0, 200).map((it) => (
                 <label key={it.id} style={{
                   display: "flex", alignItems: "center", gap: 8, padding: "6px 8px",
                   borderRadius: 6, cursor: "pointer",
-                  background: isItemSelected(it.id) ? `${gold}15` : "transparent",
+                  background: isItemSelected(it.id) ? "#FFE9FB" : "transparent",
                 }}>
                   <input type="checkbox" checked={isItemSelected(it.id)}
-                    onChange={() => toggleItem(it)} style={{ cursor: "pointer" }} />
-                  <span style={{ flex: 1, fontSize: 13 }}>{it.name}</span>
-                  <span style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>₹{it.price}</span>
+                    onChange={() => toggleItem(it)} style={{ cursor: "pointer", accentColor: INK }} />
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: INK }}>{it.name}</span>
+                  <span style={{ fontSize: 11, color: "#6B6B63", fontWeight: 700 }}>₹{it.price}</span>
                   <span style={{
-                    fontSize: 10, padding: "2px 6px", borderRadius: 4,
-                    background: it.group === "food" ? "rgba(34,197,94,.15)" : "rgba(59,130,246,.15)",
-                    color: it.group === "food" ? "#22C55E" : "#3B82F6",
+                    fontSize: 10, padding: "2px 6px", borderRadius: 4, fontWeight: 800,
+                    background: it.group === "food" ? TEAL : BLUE,
+                    color: "#fff",
                   }}>
                     {it.group === "food" ? "food" : "drink"}
                   </span>
                 </label>
               ))}
               {filteredItems.length > 200 && (
-                <div style={{ padding: 8, fontSize: 11, color: "rgba(255,255,255,.4)", textAlign: "center" }}>
+                <div style={{ padding: 8, fontSize: 11, color: "#6B6B63", textAlign: "center", fontWeight: 600 }}>
                   Showing first 200 of {filteredItems.length} — refine search to see more.
                 </div>
               )}
@@ -198,18 +207,18 @@ export default function MenuCRM() {
           <div style={{ display: "flex", gap: 10 }}>
             {editingId ? (
               <button onClick={handleUpdate} disabled={saving} style={{
-                flex: 1, padding: 12, borderRadius: 10, border: "none", background: gold, color: "#030305",
-                fontWeight: 800, cursor: saving ? "wait" : "pointer", fontSize: 14,
+                flex: 1, padding: 12, borderRadius: 10, border: `2px solid ${INK}`, background: INK, color: "#fff",
+                fontWeight: 900, cursor: saving ? "wait" : "pointer", fontSize: 14, letterSpacing: 0.4, textTransform: "uppercase",
               }}>{saving ? "SAVING..." : "💾 UPDATE CATEGORY"}</button>
             ) : (
               <button onClick={handleCreate} disabled={saving} style={{
-                flex: 1, padding: 12, borderRadius: 10, border: "none", background: gold, color: "#030305",
-                fontWeight: 800, cursor: saving ? "wait" : "pointer", fontSize: 14,
+                flex: 1, padding: 12, borderRadius: 10, border: `2px solid ${INK}`, background: INK, color: "#fff",
+                fontWeight: 900, cursor: saving ? "wait" : "pointer", fontSize: 14, letterSpacing: 0.4, textTransform: "uppercase",
               }}>{saving ? "SAVING..." : "➕ CREATE CATEGORY"}</button>
             )}
             <button onClick={resetForm} style={{
-              padding: "12px 20px", borderRadius: 10, border: "1px solid rgba(255,255,255,.2)",
-              background: "transparent", color: "#fff", fontWeight: 700, cursor: "pointer",
+              padding: "12px 20px", borderRadius: 10, border: `2px solid ${INK}`,
+              background: "#fff", color: INK, fontWeight: 900, cursor: "pointer", letterSpacing: 0.4, textTransform: "uppercase",
             }}>CANCEL</button>
           </div>
         </div>
@@ -217,49 +226,49 @@ export default function MenuCRM() {
 
       {/* Category List */}
       {loading ? (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.4)" }}>Loading...</div>
+        <div style={{ textAlign: "center", padding: 40, color: "#6B6B63", fontWeight: 700 }}>Loading...</div>
       ) : categories.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.4)" }}>
+        <div style={{ textAlign: "center", padding: 40, color: "#6B6B63", fontWeight: 700, background: "#fff", border: `2px solid ${INK}`, borderRadius: 12 }}>
           No categories yet. Click "➕ NEW CATEGORY" to create one.
         </div>
       ) : (
         <div>
           {categories.map((cat) => (
             <div key={cat.id} style={{
-              background: "hsl(240 12% 8%)",
-              border: `1px solid ${cat.isLive ? "rgba(34,197,94,.3)" : "rgba(255,255,255,.08)"}`,
+              background: "#fff",
+              border: `2px solid ${cat.isLive ? TEAL : INK}`,
               borderRadius: 12, padding: "14px 18px", marginBottom: 12,
             }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <button onClick={() => handleToggleLive(cat.id, cat.isLive)} style={{
-                    width: 44, height: 24, borderRadius: 12, border: "none", cursor: "pointer",
-                    background: cat.isLive ? "#22C55E" : "rgba(255,255,255,.15)",
+                    width: 46, height: 26, borderRadius: 13, border: `2px solid ${INK}`, cursor: "pointer",
+                    background: cat.isLive ? TEAL : "#E8E8E2",
                     display: "flex", alignItems: "center",
                     justifyContent: cat.isLive ? "flex-end" : "flex-start",
                     padding: 2, transition: "all .2s",
                   }}>
-                    <div style={{ width: 20, height: 20, borderRadius: 10, background: "#fff" }} />
+                    <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", border: `1px solid ${INK}` }} />
                   </button>
                   <div>
-                    <div style={{ fontSize: 15, fontWeight: 800, color: cat.isLive ? gold : "#fff" }}>
-                      {cat.name} {cat.isLive && <span style={{ color: "#22C55E", fontSize: 11 }}>● LIVE</span>}
+                    <div style={{ fontSize: 15, fontWeight: 900, color: INK, letterSpacing: 0.3 }}>
+                      {cat.name} {cat.isLive && <span style={{ color: TEAL, fontSize: 11, fontWeight: 900 }}>● LIVE</span>}
                     </div>
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.4)", marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: "#6B6B63", marginTop: 2, fontWeight: 700 }}>
                       {(cat.items || []).length} items · {(cat.discountPercent || 0)}% discount
                     </div>
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button onClick={() => startEdit(cat)} style={{
-                    padding: "6px 12px", borderRadius: 8, border: `1px solid ${gold}40`,
-                    background: `${gold}10`, color: gold,
-                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    padding: "6px 12px", borderRadius: 8, border: `2px solid ${INK}`,
+                    background: "#fff", color: INK,
+                    fontSize: 12, fontWeight: 900, cursor: "pointer", textTransform: "uppercase",
                   }}>✏️ EDIT</button>
                   <button onClick={() => handleDelete(cat.id, cat.name)} style={{
-                    padding: "6px 12px", borderRadius: 8, border: "1px solid rgba(239,68,68,.3)",
-                    background: "rgba(239,68,68,.08)", color: "#EF4444",
-                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    padding: "6px 12px", borderRadius: 8, border: `2px solid ${INK}`,
+                    background: ORANGE, color: INK,
+                    fontSize: 12, fontWeight: 900, cursor: "pointer",
                   }}>🗑️</button>
                 </div>
               </div>
@@ -269,16 +278,16 @@ export default function MenuCRM() {
                   {cat.items.slice(0, 8).map((it) => (
                     <span key={it.id} style={{
                       fontSize: 11, padding: "3px 8px", borderRadius: 6,
-                      background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.6)",
+                      background: "#F4F4F0", color: INK, border: `1px solid ${INK}`, fontWeight: 700,
                     }}>
                       {it.name} ₹{it.price}
                       {(cat.discountPercent || 0) > 0 && (
-                        <span style={{ color: "#22C55E", marginLeft: 4 }}>-{cat.discountPercent}%</span>
+                        <span style={{ color: TEAL, marginLeft: 4, fontWeight: 900 }}>-{cat.discountPercent}%</span>
                       )}
                     </span>
                   ))}
                   {cat.items.length > 8 && (
-                    <span style={{ fontSize: 11, color: "rgba(255,255,255,.3)" }}>+{cat.items.length - 8} more</span>
+                    <span style={{ fontSize: 11, color: "#6B6B63", fontWeight: 700 }}>+{cat.items.length - 8} more</span>
                   )}
                 </div>
               )}
@@ -287,8 +296,8 @@ export default function MenuCRM() {
         </div>
       )}
 
-      <div style={{ marginTop: 24, padding: 12, borderRadius: 10, background: "rgba(255,255,255,.03)", fontSize: 12, color: "rgba(255,255,255,.4)", lineHeight: 1.6 }}>
-        <strong style={{ color: gold }}>How it works:</strong><br/>
+      <div style={{ marginTop: 24, padding: 14, borderRadius: 10, background: "#fff", border: `2px solid ${INK}`, fontSize: 12, color: "#3D3D3D", lineHeight: 1.6, fontWeight: 600 }}>
+        <strong style={{ color: INK, fontWeight: 900, letterSpacing: 0.3 }}>How it works:</strong><br/>
         🟢 Toggle a category LIVE — items appear on Captain/Bar/Wallet menus instantly<br/>
         ⚪ Toggle OFF — items disappear<br/>
         💰 Discount applies to ALL items in the category automatically<br/>

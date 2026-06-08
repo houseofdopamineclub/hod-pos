@@ -32,6 +32,16 @@ interface Props {
   currentStaff: StaffMember | null;
 }
 
+// 🆕 2026-06-08 v3.240 — FULL Gumroad light restyle (cream/white, bold 2px black
+// borders, pink #FF90E8 / orange #FF5733 / teal #23A094 accents, bold uppercase)
+// so MENU mode matches Door & Captain. ALL logic/handlers are unchanged — only
+// the inline styles changed.
+const INK = "#000";
+const PINK = "#FF90E8";
+const ORANGE = "#FF5733";
+const TEAL = "#23A094";
+const RED = "#E11900";
+
 export default function MenuEditor({ currentStaff }: Props) {
   const [tabId, setTabId] = useState<VenueMenuTabId>("food");
   const [remote, setRemote] = useState<VenueMenuTab | null>(null);
@@ -169,7 +179,7 @@ export default function MenuEditor({ currentStaff }: Props) {
   const role = currentStaff?.role;
   if (role && role !== "admin" && role !== "manager") {
     return (
-      <div className="p-6 text-center rounded-lg" style={{ background: "hsl(240 12% 5%)", color: "#ef4444" }}>
+      <div className="p-6 text-center rounded-lg" style={{ background: "#fff", border: `2px solid ${INK}`, color: RED, fontWeight: 800 }}>
         🔒 Menu Editor is restricted to admin / manager roles.
       </div>
     );
@@ -178,7 +188,7 @@ export default function MenuEditor({ currentStaff }: Props) {
   return (
     <div>
       {/* Tab selector */}
-      <div className="flex gap-1 mb-3 flex-wrap">
+      <div className="flex gap-2 mb-3 flex-wrap">
         {VENUE_MENU_TAB_ORDER.map((t) => (
           <button
             key={t}
@@ -186,10 +196,14 @@ export default function MenuEditor({ currentStaff }: Props) {
               if (dirty && !window.confirm("You have unsaved changes. Discard them and switch tabs?")) return;
               setTabId(t);
             }}
-            className="px-4 py-2 rounded-lg text-sm font-medium"
+            className="px-4 py-2 rounded-lg text-sm"
             style={{
-              background: tabId === t ? "#C9A84C" : "hsl(240 12% 8%)",
-              color: tabId === t ? "#030305" : "hsl(36 29% 70%)",
+              background: tabId === t ? INK : "#fff",
+              color: tabId === t ? "#fff" : INK,
+              border: `2px solid ${INK}`,
+              fontWeight: 900,
+              letterSpacing: 0.4,
+              textTransform: "uppercase",
             }}>
             {VENUE_MENU_TAB_LABELS[t]}
           </button>
@@ -204,48 +218,52 @@ export default function MenuEditor({ currentStaff }: Props) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="px-3 py-2 rounded text-sm flex-1 min-w-[200px]"
-          style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}
+          style={{ background: "#fff", border: `2px solid ${INK}`, color: INK, fontWeight: 600 }}
         />
         <button
           onClick={addCategory}
-          className="px-3 py-2 rounded text-xs font-bold"
-          style={{ background: "rgba(201,168,76,.15)", border: "1px solid rgba(201,168,76,.45)", color: "#C9A84C" }}>
+          className="px-3 py-2 rounded text-xs"
+          style={{ background: PINK, border: `2px solid ${INK}`, color: INK, fontWeight: 900, letterSpacing: 0.3, textTransform: "uppercase" }}>
           + Add Category
         </button>
         <button
           onClick={restoreDefaults}
-          className="px-3 py-2 rounded text-xs font-medium"
-          style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)", border: "1px solid hsl(240 8% 18%)" }}>
+          className="px-3 py-2 rounded text-xs"
+          style={{ background: "#fff", color: INK, border: `2px solid ${INK}`, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase" }}>
           ↺ Restore Defaults
         </button>
         <button
           onClick={publish}
           disabled={!dirty || saving}
-          className="px-4 py-2 rounded text-sm font-bold"
+          className="px-4 py-2 rounded text-sm"
           style={{
-            background: dirty && !saving ? "#22c55e" : "hsl(240 12% 10%)",
-            color: dirty && !saving ? "#030305" : "hsl(36 29% 50%)",
+            background: dirty && !saving ? TEAL : "#E8E8E2",
+            color: dirty && !saving ? "#fff" : "#9A9A93",
+            border: `2px solid ${dirty && !saving ? INK : "#CFCFC8"}`,
+            fontWeight: 900,
+            letterSpacing: 0.4,
+            textTransform: "uppercase",
             cursor: dirty && !saving ? "pointer" : "not-allowed",
           }}>
           {saving ? "Publishing..." : dirty ? "💾 PUBLISH" : "✓ Saved"}
         </button>
       </div>
 
-      <div className="text-xs mb-3" style={{ color: "hsl(36 29% 50%)" }}>
+      <div className="text-xs mb-3" style={{ color: "#3D3D3D", fontWeight: 600 }}>
         💡 Edits stay local until you tap PUBLISH. Manager PIN required.
         Live on hodclub.in within seconds of publish (Firestore listener).
         {remote?.updatedBy && (
-          <span> · Last published by <b>{remote.updatedBy}</b>.</span>
+          <span> · Last published by <b style={{ color: INK }}>{remote.updatedBy}</b>.</span>
         )}
         {!remote && loaded && (
-          <span style={{ color: "#C9A84C" }}> · This tab has never been published — current view is the seeded default.</span>
+          <span style={{ color: ORANGE, fontWeight: 800 }}> · This tab has never been published — current view is the seeded default.</span>
         )}
       </div>
 
       {/* Categories + items */}
-      {!loaded && <div style={{ color: "hsl(36 29% 50%)" }}>Loading…</div>}
+      {!loaded && <div style={{ color: "#3D3D3D", fontWeight: 700 }}>Loading…</div>}
       {loaded && visible.length === 0 && (
-        <div className="p-6 text-center rounded-lg" style={{ background: "hsl(240 12% 5%)", color: "hsl(36 29% 50%)" }}>
+        <div className="p-6 text-center rounded-lg" style={{ background: "#fff", border: `2px solid ${INK}`, color: "#3D3D3D", fontWeight: 700 }}>
           {q ? "No items match your search." : "No categories yet — tap + Add Category."}
         </div>
       )}
@@ -255,16 +273,16 @@ export default function MenuEditor({ currentStaff }: Props) {
           // mutators target the correct row even when search hides others.
           const realCi = draft.findIndex((c) => c.cat === cat.cat);
           return (
-            <div key={cat.cat + realCi} className="rounded-lg p-3" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 15%)" }}>
+            <div key={cat.cat + realCi} className="rounded-lg p-3" style={{ background: "#fff", border: `2px solid ${INK}` }}>
               <div className="flex items-center gap-2 mb-2">
-                <h3 className="text-sm font-bold flex-1" style={{ color: "#C9A84C" }}>{cat.cat}</h3>
-                <span className="text-xs" style={{ color: "hsl(36 29% 50%)" }}>{cat.items.length} items</span>
+                <h3 className="text-sm flex-1" style={{ color: INK, fontWeight: 900, letterSpacing: 0.3, textTransform: "uppercase" }}>{cat.cat}</h3>
+                <span className="text-xs" style={{ color: "#6B6B63", fontWeight: 700 }}>{cat.items.length} items</span>
                 <button onClick={() => renameCategory(realCi)} className="text-xs px-2 py-1 rounded"
-                  style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)" }}>Rename</button>
+                  style={{ background: "#fff", color: INK, border: `2px solid ${INK}`, fontWeight: 800 }}>Rename</button>
                 <button onClick={() => deleteCategory(realCi)} className="text-xs px-2 py-1 rounded"
-                  style={{ background: "rgba(239,68,68,.15)", color: "#ef4444" }}>Delete</button>
-                <button onClick={() => addItem(realCi)} className="text-xs px-2 py-1 rounded font-bold"
-                  style={{ background: "rgba(34,197,94,.15)", color: "#22c55e" }}>+ Item</button>
+                  style={{ background: ORANGE, color: INK, border: `2px solid ${INK}`, fontWeight: 800 }}>Delete</button>
+                <button onClick={() => addItem(realCi)} className="text-xs px-2 py-1 rounded"
+                  style={{ background: TEAL, color: "#fff", border: `2px solid ${INK}`, fontWeight: 800 }}>+ Item</button>
               </div>
               <div className="space-y-1">
                 {cat.items.map((item) => {
@@ -274,12 +292,12 @@ export default function MenuEditor({ currentStaff }: Props) {
                   const ii = draft[realCi]?.items.indexOf(item) ?? realIi;
                   return (
                     <div key={ii + item.n} className="flex items-center gap-2 px-2 py-1 rounded"
-                      style={{ background: "hsl(240 12% 8%)", opacity: item.oos ? 0.5 : 1 }}>
+                      style={{ background: "#FBFBF9", border: `1px solid ${INK}`, opacity: item.oos ? 0.5 : 1 }}>
                       <input
                         value={item.n}
                         onChange={(e) => updateItem(realCi, ii, { n: e.target.value })}
                         className="flex-1 px-2 py-1 rounded text-sm"
-                        style={{ background: "hsl(240 12% 4%)", border: "1px solid hsl(240 8% 15%)", color: "hsl(36 29% 93%)" }}
+                        style={{ background: "#fff", border: `1px solid ${INK}`, color: INK, fontWeight: 600 }}
                       />
                       <input
                         type="text"
@@ -287,7 +305,7 @@ export default function MenuEditor({ currentStaff }: Props) {
                         placeholder="sub-cat (e.g. 30ml)"
                         onChange={(e) => updateItem(realCi, ii, { sub: e.target.value || undefined })}
                         className="w-32 px-2 py-1 rounded text-xs"
-                        style={{ background: "hsl(240 12% 4%)", border: "1px solid hsl(240 8% 15%)", color: "hsl(36 29% 75%)" }}
+                        style={{ background: "#fff", border: `1px solid ${INK}`, color: "#3D3D3D", fontWeight: 600 }}
                         title="Optional sub-category label (serving size, variant, etc.)"
                       />
                       <input
@@ -296,16 +314,18 @@ export default function MenuEditor({ currentStaff }: Props) {
                         value={item.p}
                         onChange={(e) => updateItem(realCi, ii, { p: Number(e.target.value) })}
                         className="w-24 px-2 py-1 rounded text-sm text-right"
-                        style={{ background: "hsl(240 12% 4%)", border: "1px solid hsl(240 8% 15%)", color: "hsl(36 29% 93%)" }}
+                        style={{ background: "#fff", border: `1px solid ${INK}`, color: INK, fontWeight: 700 }}
                       />
-                      <span className="text-xs" style={{ color: "hsl(36 29% 50%)" }}>₹</span>
+                      <span className="text-xs" style={{ color: INK, fontWeight: 800 }}>₹</span>
                       {tabId === "food" && (
                         <button
                           onClick={() => updateItem(realCi, ii, { v: !item.v })}
-                          className="text-xs px-2 py-1 rounded font-bold"
+                          className="text-xs px-2 py-1 rounded"
                           style={{
-                            background: item.v ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.15)",
-                            color: item.v ? "#22c55e" : "#ef4444",
+                            background: item.v ? TEAL : ORANGE,
+                            color: item.v ? "#fff" : INK,
+                            border: `2px solid ${INK}`,
+                            fontWeight: 900,
                             minWidth: 50,
                           }}
                           title="Veg / Non-veg flag">
@@ -352,8 +372,10 @@ export default function MenuEditor({ currentStaff }: Props) {
                         }}
                         className="text-xs px-2 py-1 rounded"
                         style={{
-                          background: item.oos ? "#ef4444" : "rgba(34,197,94,.15)",
-                          color: item.oos ? "#fff" : "#22c55e",
+                          background: item.oos ? RED : "#fff",
+                          color: item.oos ? "#fff" : INK,
+                          border: `2px solid ${INK}`,
+                          fontWeight: 900,
                           minWidth: 90,
                         }}>
                         {item.oos ? "OUT" : "IN STOCK"}
@@ -361,12 +383,12 @@ export default function MenuEditor({ currentStaff }: Props) {
                       <button
                         onClick={() => deleteItem(realCi, ii)}
                         className="text-xs px-2 py-1 rounded"
-                        style={{ background: "rgba(239,68,68,.15)", color: "#ef4444" }}>✕</button>
+                        style={{ background: ORANGE, color: INK, border: `2px solid ${INK}`, fontWeight: 900 }}>✕</button>
                     </div>
                   );
                 })}
                 {cat.items.length === 0 && (
-                  <div className="text-xs italic px-2 py-2" style={{ color: "hsl(36 29% 40%)" }}>
+                  <div className="text-xs italic px-2 py-2" style={{ color: "#6B6B63", fontWeight: 600 }}>
                     Empty category — add items or delete it.
                   </div>
                 )}
@@ -379,8 +401,10 @@ export default function MenuEditor({ currentStaff }: Props) {
       {message && (
         <div className="mt-3 px-3 py-2 rounded text-sm"
           style={{
-            background: message.startsWith("✅") ? "rgba(34,197,94,.1)" : "rgba(239,68,68,.1)",
-            color: message.startsWith("✅") ? "#22c55e" : "#ef4444",
+            background: message.startsWith("✅") ? TEAL : RED,
+            color: "#fff",
+            border: `2px solid ${INK}`,
+            fontWeight: 800,
           }}>
           {message}
         </div>

@@ -23,12 +23,14 @@
 //
 // METRIC DEFINITIONS (shown as the hint under each box so Khushi can see
 // exactly what each number means and ask for a tweak):
-//   Live tables       — occupied tables with an OPEN bill (arrived, not paid).
+//   Live tables       — tables with a RUNNING order (≥1 ordered item); a table
+//                       that is only booked/assigned with no order is NOT live.
 //   Billed amount     — ₹ already collected (paymentStatus = paid).
-//   Unfilled amount   — ₹ still open on live tables (bill not settled yet).
+//   Unbilled amount   — ₹ still open on tables with an OPEN bill (not paid).
 //   Discount          — aggregator vs in-house ₹ knocked off the bill.
 //   Service tax       — Service Charge ₹ + Tax (GST) ₹.
-//   Tables available  — floor capacity − live tables.
+//   Tables available  — floor capacity − occupied (assigned/seated) tables.
+//   Cover redeemed    — ₹ the CAPTAIN redeemed at tables (excludes bar mode).
 //   Food / Drink sales— item subtotal split by t = food | drink.
 //   NET sales         — item subtotal − discount (EXCLUDES SC + tax + disc).
 //   Gross sales       — item subtotal + SC + tax.
@@ -79,6 +81,20 @@ const TOTAL_TABLES: Record<Floor3, number> = (() => {
   }
   return o;
 })();
+// 🆕 2026-06-08 (Khushi) — uppercase REAL table id → its 3-floor bucket, from
+// the SAME shared door config as TOTAL_TABLES (proxies excluded). Used to count
+// LIVE TABLES the way the Captain floor map does: a real table is "occupied"
+// the instant a non-cancelled reservation maps to it (released = doc deleted),
+// regardless of arrival/paid state. Keeps capacity + live in one universe so
+// available = capacity − live can never go negative.
+const REAL_TABLE_FLOOR: Map<string, Floor3> = (() => {
+  const m = new Map<string, Floor3>();
+  for (const g of DOOR_TABLE_OPTIONS) {
+    const f = toFloor3(g.floor);
+    for (const id of g.tables) if (!isProxyId(id)) m.set(id.toUpperCase(), f);
+  }
+  return m;
+})();
 
 // ── channels (aggregators + in-house) ─────────────────────────────────
 type Channel = "Swiggy" | "Zomato" | "EazyDiner" | "In-house" | "Others";
@@ -94,7 +110,8 @@ const channelOf = (r: HodTableReservation): Channel => {
 
 // ── per-floor accumulator ─────────────────────────────────────────────
 interface FloorAgg {
-  liveTables: number;
+  liveTables: number;     // tables with a RUNNING order (≥1 ordered item)
+  occupiedTables: number; // tables assigned/seated (for available = capacity − occupied)
   billed: number;     // ₹ collected (paid)
   unfilled: number;   // ₹ open on live tables
   aggDisc: number; inhDisc: number;
@@ -102,7 +119,7 @@ interface FloorAgg {
   food: number; drink: number;
   net: number; gross: number;
 }
-const zeroFloor = (): FloorAgg => ({ liveTables: 0, billed: 0, unfilled: 0, aggDisc: 0, inhDisc: 0, sc: 0, tax: 0, food: 0, drink: 0, net: 0, gross: 0 });
+const zeroFloor = (): FloorAgg => ({ liveTables: 0, occupiedTables: 0, billed: 0, unfilled: 0, aggDisc: 0, inhDisc: 0, sc: 0, tax: 0, food: 0, drink: 0, net: 0, gross: 0 });
 
 export default function LiveReports() {
   const [night, setNight] = useState<string>(() => getOperationalNightStr());
@@ -145,6 +162,18 @@ export default function LiveReports() {
     const cap = new Map<string, { tables: number; amt: number }>();
     const foodItems = new Map<string, { qty: number; amt: number }>();
     const drinkItems = new Map<string, { qty: number; amt: number }>();
+    // 🆕 2026-06-08 (Khushi) — LIVE TABLES = occupied REAL tiles (deduped by
+    // table id), matching the Captain floor map's occupancy. Captain-mode cover
+    // redemption is tracked here from each reservation's walletRedemptions[]
+    // (written ONLY by redeemFromWalletAtTable — i.e. the captain settling a
+    // table against a wallet), so bar-mode redemptions are excluded.
+    const occupied: Record<Floor3, Set<string>> = { Ground: new Set(), First: new Set(), Rooftop: new Set() };
+    // 🆕 2026-06-08 (Khushi) — LIVE = only tables with a RUNNING order (≥1 ordered
+    // item). An assigned/booked table with no order placed yet is occupied (counts
+    // against availability) but NOT "live". Deduped by table id, real tiles only.
+    const liveOrdered: Record<Floor3, Set<string>> = { Ground: new Set(), First: new Set(), Rooftop: new Set() };
+    const walletRefs = new Set<string>();
+    let walletRedeemed = 0;
 
     const addItem = (it: HodOrderItem) => {
       const name = (it.n || "").trim();
@@ -189,11 +218,33 @@ export default function LiveReports() {
       const realized = isPaid ? (r.amountPaid || billFinal) : 0;
       const value = isPaid ? realized : billFinal;          // bill value this table represents
       const arrived = !!r.actualArrivalTime || items.length > 0;
-      const isLive = !isPaid && arrived;
+      const openBill = !isPaid && arrived;
 
-      // live / billed / unfilled
-      if (isLive) { A.liveTables += 1; A.unfilled += billFinal; }
+      // 🆕 LIVE TABLES (floor-map parity): a REAL table is occupied the moment a
+      // non-cancelled reservation maps to it (released = doc deleted), settled or
+      // not — exactly what the Captain floor map shows. Dedupe by table id so a
+      // tile booked twice in one night counts once. Bucket by the table's own
+      // floor (REAL_TABLE_FLOOR) so it lands in the same floor as its capacity.
+      const realFloor = REAL_TABLE_FLOOR.get((r.tableId || "").toUpperCase());
+      if (realFloor) {
+        const tid = (r.tableId || "").toUpperCase();
+        occupied[realFloor].add(tid);
+        // LIVE = this table has a running order (≥1 ordered item).
+        if (items.length > 0) liveOrdered[realFloor].add(tid);
+      }
+
+      // billed / unfilled (unbilled = ₹ still open on tables with an OPEN bill)
+      if (openBill) { A.unfilled += billFinal; }
       if (isPaid) { A.billed += realized; }
+
+      // 🆕 CAPTAIN-MODE cover redemption only: walletRedemptions[] is written
+      // solely by redeemFromWalletAtTable (captain settling a table against a
+      // wallet). Bar-mode redemptions bump cover.coverUsed directly and never
+      // appear here, so they are correctly excluded.
+      for (const wr of r.walletRedemptions || []) {
+        const amt = wr.amount || 0;
+        if (amt > 0) { walletRedeemed += amt; if (wr.walletRef) walletRefs.add(wr.walletRef); }
+      }
 
       // money (open + paid both count toward sales of the night)
       const ch = channelOf(r);
@@ -217,16 +268,21 @@ export default function LiveReports() {
       for (const it of items) addItem(it);
     }
 
-    // Bar / entry covers feed the venue-wide top-5 (table covers' sales are
-    // already counted on the reservation, so skip isTableBooking to avoid
-    // double-counting).
-    let walletRedeemed = 0, walletRedeemedCount = 0;
+    // 🆕 2026-06-08 (Khushi) — the cover-wallet REDEEMED figure is now
+    // captain-mode-only (summed above from reservation.walletRedemptions), so we
+    // NO LONGER add cover.coverUsed here (that pooled bar-mode + table redemptions
+    // together). This loop now only feeds the venue-wide top-5 from bar / entry
+    // covers (table covers' sales are already on the reservation — skip
+    // isTableBooking to avoid double-counting).
     for (const c of covers) {
-      if ((c.coverUsed || 0) > 0) { walletRedeemed += c.coverUsed || 0; walletRedeemedCount += 1; }
       if (!c.isTableBooking) {
         for (const rd of c.tabRounds || []) for (const it of rd.items || []) addItem(it);
       }
     }
+    // LIVE = tables with a running order (≥1 item); OCCUPIED = assigned/seated
+    // tiles (feeds available = capacity − occupied). Both deduped per floor.
+    for (const f of FLOORS3) { floor[f].liveTables = liveOrdered[f].size; floor[f].occupiedTables = occupied[f].size; }
+    const walletRedeemedCount = walletRefs.size;
 
     const topN = (m: Map<string, { qty: number; amt: number }>) =>
       Array.from(m.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 5);
@@ -254,11 +310,11 @@ export default function LiveReports() {
     // TABLES AVAILABLE uses the static per-floor capacity (not a FloorAgg pick).
     L.push("TABLES AVAILABLE");
     L.push(["Floor", "Capacity", "Live", "Available"].join(","));
-    for (const f of FLOORS3) { const a = agg.floor[f]; L.push([f, TOTAL_TABLES[f], a.liveTables, Math.max(0, TOTAL_TABLES[f] - a.liveTables)].map(esc).join(",")); }
-    L.push(["TOTAL", FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0), sumFloors((a) => a.liveTables), FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].liveTables), 0)].map(esc).join(","));
+    for (const f of FLOORS3) { const a = agg.floor[f]; L.push([f, TOTAL_TABLES[f], a.liveTables, Math.max(0, TOTAL_TABLES[f] - a.occupiedTables)].map(esc).join(",")); }
+    L.push(["TOTAL", FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0), sumFloors((a) => a.liveTables), FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0)].map(esc).join(","));
     L.push("");
     floorBlock("BILLED AMOUNT (collected)", [{ label: "Billed Rs", pick: (a) => a.billed }]);
-    floorBlock("UNFILLED AMOUNT (open on live tables)", [{ label: "Unfilled Rs", pick: (a) => a.unfilled }]);
+    floorBlock("UNBILLED AMOUNT (open on live tables)", [{ label: "Unbilled Rs", pick: (a) => a.unfilled }]);
     floorBlock("DISCOUNT", [{ label: "Aggregator Rs", pick: (a) => a.aggDisc }, { label: "In-house Rs", pick: (a) => a.inhDisc }, { label: "Total Rs", pick: (a) => a.aggDisc + a.inhDisc }]);
     floorBlock("SERVICE CHARGE & TAX", [{ label: "Service Charge Rs", pick: (a) => a.sc }, { label: "Tax (GST) Rs", pick: (a) => a.tax }, { label: "Total Rs", pick: (a) => a.sc + a.tax }]);
     floorBlock("FOOD SALES", [{ label: "Food Rs", pick: (a) => a.food }]);
@@ -270,7 +326,7 @@ export default function LiveReports() {
     L.push(["Channel", "Tables", "Amount Rs"].join(","));
     for (const ch of CHANNELS) L.push([ch, agg.channel[ch].count, Math.round(agg.channel[ch].amt)].map(esc).join(","));
     L.push("");
-    L.push("COVER WALLET REDEEMED");
+    L.push("COVER WALLET REDEEMED (CAPTAIN MODE — excludes bar)");
     L.push(["Covers", "Amount Rs"].join(","));
     L.push([agg.walletRedeemedCount, Math.round(agg.walletRedeemed)].map(esc).join(","));
     L.push("");
@@ -339,7 +395,7 @@ export default function LiveReports() {
       </tr></thead>
       <tbody>
         {FLOORS3.map((f) => {
-          const a = agg.floor[f]; const avail = Math.max(0, TOTAL_TABLES[f] - a.liveTables);
+          const a = agg.floor[f]; const avail = Math.max(0, TOTAL_TABLES[f] - a.occupiedTables);
           return (
             <tr key={f}>
               <Cell bold>{f}</Cell>
@@ -353,7 +409,7 @@ export default function LiveReports() {
           <Cell bold>TOTAL</Cell>
           <Cell num bold right>{fmtN(FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0))}</Cell>
           <Cell num bold right>{fmtN(sumFloors((a) => a.liveTables))}</Cell>
-          <Cell num bold right>{fmtN(FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].liveTables), 0))}</Cell>
+          <Cell num bold right>{fmtN(FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0))}</Cell>
         </tr>
       </tbody>
     </table>
@@ -385,17 +441,17 @@ export default function LiveReports() {
         <>
           {/* two-column responsive grid of floor boxes */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 0, columnGap: 16 }}>
-            <Box title="🪑 TOTAL LIVE TABLES" hint="Occupied tables with an open bill (arrived, not yet paid).">
-              <FloorTable cols={[{ label: "Live Tables", pick: (a) => a.liveTables }]} />
-            </Box>
-            <Box title="✅ TABLES AVAILABLE" hint="Floor capacity − live tables (real tables only, excludes proxy).">
+            {/* 🆕 2026-06-08 — Khushi merge: LIVE TABLES = capacity + live + available
+                in ONE box (4 cols: Floor · Capacity · Live · Available). */}
+            <Box title="🪑 LIVE TABLES" hint="Floor capacity, LIVE tables (a running order placed — at least 1 item; a table that's only booked/assigned with no order is NOT live), and available (capacity − occupied/assigned; real tables only, excludes proxy).">
               <AvailTable />
             </Box>
-            <Box title="💰 BILLED AMOUNT FROM TABLES" hint="₹ already collected from settled (paid) tables.">
-              <FloorTable cols={[{ label: "Billed", pick: (a) => a.billed, money: true }]} />
-            </Box>
-            <Box title="⏳ UNFILLED AMOUNT" hint="₹ still open on live tables — bill generated but not settled yet.">
-              <FloorTable cols={[{ label: "Unfilled", pick: (a) => a.unfilled, money: true }]} />
+            {/* 🆕 merge: BILLED + UNBILLED in ONE box (3 cols: Floor · Billed · Unbilled). */}
+            <Box title="💰 BILLED & UNBILLED" hint="Billed = ₹ collected from settled (paid) tables. Unbilled = ₹ still open on live tables (bill generated but not settled yet).">
+              <FloorTable cols={[
+                { label: "Billed", pick: (a) => a.billed, money: true },
+                { label: "Unbilled", pick: (a) => a.unfilled, money: true },
+              ]} />
             </Box>
             <Box title="🏷 DISCOUNT (aggregators + in-house)" hint="₹ knocked off the bill, split by aggregator vs in-house.">
               <FloorTable cols={[
@@ -411,17 +467,19 @@ export default function LiveReports() {
                 { label: "Total", pick: (a) => a.sc + a.tax, money: true },
               ]} />
             </Box>
-            <Box title="🍽 FOOD SALES" hint="Item subtotal of food lines (before SC / tax / discount).">
-              <FloorTable cols={[{ label: "Food", pick: (a) => a.food, money: true }]} />
+            {/* 🆕 merge: FOOD + DRINK in ONE box (3 cols: Floor · Food · Drinks). */}
+            <Box title="🍽 FOOD & DRINK SALES" hint="Item subtotal of food and drink lines (before SC / tax / discount).">
+              <FloorTable cols={[
+                { label: "Food", pick: (a) => a.food, money: true },
+                { label: "Drinks", pick: (a) => a.drink, money: true },
+              ]} />
             </Box>
-            <Box title="🍸 DRINK SALES" hint="Item subtotal of drink lines (before SC / tax / discount).">
-              <FloorTable cols={[{ label: "Drinks", pick: (a) => a.drink, money: true }]} />
-            </Box>
-            <Box title="📈 NET SALES" hint="Item subtotal − discount. EXCLUDES service charge, tax & discount.">
-              <FloorTable cols={[{ label: "Net", pick: (a) => a.net, money: true }]} />
-            </Box>
-            <Box title="📊 GROSS SALES" hint="Item subtotal + service charge + tax.">
-              <FloorTable cols={[{ label: "Gross", pick: (a) => a.gross, money: true }]} />
+            {/* 🆕 merge: NET + GROSS in ONE box (3 cols: Floor · Net · Gross). */}
+            <Box title="📈 NET & GROSS SALES" hint="Net = item subtotal − discount (excludes service charge & tax). Gross = item subtotal + service charge + tax.">
+              <FloorTable cols={[
+                { label: "Net", pick: (a) => a.net, money: true },
+                { label: "Gross", pick: (a) => a.gross, money: true },
+              ]} />
             </Box>
           </div>
 
@@ -447,7 +505,7 @@ export default function LiveReports() {
           </Box>
 
           {/* COVER WALLET REDEEMED */}
-          <Box title="👛 AMOUNT REDEEMED FROM COVER WALLET" hint="Total ₹ guests spent from their cover wallets this night.">
+          <Box title="👛 AMOUNT REDEEMED FROM COVER WALLET" hint="Cover wallet ₹ the captain redeemed against tables this night. Bar-mode redemptions are NOT counted here.">
             <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
               <div style={{ fontSize: 34, fontWeight: 900, color: C.accent, fontFamily: NUM_FONT }}>{fmtRs(agg.walletRedeemed)}</div>
               <div style={{ fontSize: 13, fontWeight: 700, color: C.grey }}>across {fmtN(agg.walletRedeemedCount)} cover wallet{agg.walletRedeemedCount === 1 ? "" : "s"}</div>

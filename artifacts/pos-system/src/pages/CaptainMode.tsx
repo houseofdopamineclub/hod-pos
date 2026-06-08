@@ -12,7 +12,7 @@ import {
   recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
   voidBill, printBillVoid, assertCaptainCanVoid, recordCaptainVoidUsage,
   recordSilentPrePrintEdit,
-  computeHodBreakdown, lookupOrphanZomatoPaymentByName, isTableBillSettled, type TabletFloor,
+  computeHodBreakdown, computeHodBreakdownAdjusted, lookupOrphanZomatoPaymentByName, isTableBillSettled, type TabletFloor,
   type HodTableReservation, type HodTabRound, type HodOrderItem,
   type OrphanZomatoPayment,
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
@@ -39,6 +39,10 @@ import {
 // HOD_TABLES const is ported from hodclub-patched/index.html so what captain
 // taps == what the customer booked. Floor keys: dance/dining/rooftop.
 import { HOD_TABLES, TABLET_FLOOR_TO_FLOORKEY, type FloorKey, type FloorTable } from "@/lib/floor-plan";
+// 🆕 2026-06-08 (Khushi) — Reassign/Assign-Table picker now uses the SAME shared
+// door config + pax (capacity) grouping + live occupancy as Door Mode's "New
+// Table Booking", so the captain sees tables grouped "4 PAX / 6 PAX / 8 PAX …".
+import { DOOR_TABLE_OPTIONS, doorTableCapacity, doorTableOccupantAt, doorProxyLabel, doorFloorForTable } from "@/lib/door-tables";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
 import { QrScanner } from "@/components/QrScanner";
 // 🔴 2026-05-09 — switched from menu-data.ts (314 legacy items) to canonical
@@ -78,7 +82,6 @@ const MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6
 // silently strip the customer's pre-paid discount). Default Admin PIN is
 // 9999; rotate by computing sha256(newPin) and replacing this hash.
 const ADMIN_HASH = "888df25ae35772424a560c7152a1de794440e0ea5cfee62828333a456a506e05";
-const GST_RATE = 0.05;
 const SERVICE_CHARGE_RATE = 0.10;
 // L6 — minimum gap between two thermal-bill prints for the same table; below
 // this we ask the captain to confirm so they can't waste paper hammering the button.
@@ -691,7 +694,7 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
     if (newTable === reservation.tableId) { setError("Same table selected"); return; }
     setSaving(true);
     try {
-      const opt = TABLE_OPTIONS.find((g) => g.tables.includes(newTable));
+      const opt = doorFloorForTable(newTable);
       await reassignTable(reservation._docId, newTable, opt?.floor || "", opt?.label || "", captainName);
       onClose();
     } catch (e: any) { setError(e.message); }
@@ -707,51 +710,75 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
         </div>
         <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 16 }}>All orders move with the booking</div>
 
-        <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>Select New Table *</div>
+        <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>Select New Table · LIVE *</div>
+        {/* 🆕 2026-06-08 (Khushi) — SAME layout as Door Mode "New Table Booking":
+            per floor, tables grouped by seating capacity ("4 PAX / 6 PAX / 8 PAX
+            …"), available (green) first then taken (red, disabled). Uses the
+            shared DOOR_TABLE_OPTIONS + doorTableOccupantAt single source so the
+            picker matches the door picker AND the backend reassign gate. */}
         <div style={{ marginBottom: 16 }}>
-          {TABLE_OPTIONS.map((group) => (
-            <div key={group.floor} style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: "#6B6B6B", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {group.tables.map((t) => {
-                  // Time-aware: a table booked for an unrelated slot should
-                  // NOT block reassignment to it for THIS reservation's slot.
-                  const targetMin = parseClockToMinutes(reservation.arrivalTime) ?? nowMinutesIST();
-                  const occupant = tableOccupantAt(t, targetMin, allReservations);
-                  const occupied = !!occupant && occupant._docId !== reservation._docId;
-                  const isCurrent = t === reservation.tableId;
-                  const isSelected = newTable === t;
-                  // Filled green = available for this slot; filled red = taken
-                  // for this slot. Yellow ring = your current pick. Orange =
-                  // the reservation's existing table.
-                  const bg = isSelected ? "#FF90E8"
-                    : isCurrent ? "#FBF3D6"
-                    : occupied ? "#FF5733" : "#1B7A70";
-                  const border = isSelected ? "#000"
-                    : isCurrent ? "#000"
-                    : occupied ? "#FF5733" : "#1B7A70";
-                  const color = isSelected ? "#000"
-                    : isCurrent ? "#000"
-                    : "#fff";
+          {DOOR_TABLE_OPTIONS.map((group) => {
+            // Time-aware: a table booked for an unrelated slot should NOT block
+            // reassignment to it for THIS reservation's slot.
+            const targetMin = parseClockToMinutes(reservation.arrivalTime) ?? nowMinutesIST();
+            const rows = group.tables.map((t) => {
+              const occupant = doorTableOccupantAt(t, targetMin, allReservations);
+              const occupied = !!occupant && occupant._docId !== reservation._docId;
+              return { t, occupant, occupied };
+            });
+            // capacity groups ascending; proxies (cap 0 = flexible) sort LAST.
+            const caps = Array.from(new Set(rows.map((r) => doorTableCapacity(r.t))))
+              .sort((a, b) => (a === 0 ? 1 : b === 0 ? -1 : a - b));
+            return (
+              <div key={group.floor} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: "#000", marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+                {caps.map((cap) => {
+                  const grp = rows
+                    .filter((r) => doorTableCapacity(r.t) === cap)
+                    .sort((a, b) => Number(a.occupied) - Number(b.occupied));
+                  const freeCount = grp.filter((r) => !r.occupied).length;
                   return (
-                    <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(t)} disabled={occupied || isCurrent}
-                      title={occupied && occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : ""}
-                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800,
-                        cursor: occupied || isCurrent ? "not-allowed" : "pointer",
-                        background: bg, border: `1px solid ${border}`, color,
-                        opacity: occupied && !isCurrent ? 0.85 : 1 }}>
-                      {t}{isCurrent ? " ●" : ""}
-                    </button>
+                    <div key={cap} style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 10, fontWeight: 800, color: "#000", letterSpacing: "0.5px" }}>
+                        {cap > 0 ? `${cap} PAX` : "PROXY · CAPTAIN ASSIGNS SEATS"}
+                        <span style={{ color: "#23A094", marginLeft: 6 }}>· {freeCount} FREE</span>
+                      </div>
+                      <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 5 }}>
+                        {grp.map(({ t, occupant, occupied }) => {
+                          const isCurrent = t === reservation.tableId;
+                          const isSelected = newTable === t;
+                          // green = available · red = taken · pink = your pick ·
+                          // cream = the booking's current table.
+                          const bg = isSelected ? "#FF90E8"
+                            : isCurrent ? "#FBF3D6"
+                            : occupied ? "#FF5733" : "#23A094";
+                          const color = isSelected || isCurrent ? "#000" : "#fff";
+                          const title = occupied && occupant
+                            ? `Taken — ${occupant.customerName || ""}${occupant.arrivalTime ? " @ " + occupant.arrivalTime : ""}`.trim()
+                            : isCurrent ? "Current table" : "Available — tap to assign";
+                          return (
+                            <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(isSelected ? "" : t)} disabled={occupied || isCurrent}
+                              title={title}
+                              style={{ padding: "10px 12px", borderRadius: 8, fontSize: 13, fontWeight: 900,
+                                cursor: occupied || isCurrent ? "not-allowed" : "pointer",
+                                background: bg, border: "2px solid #000", color,
+                                opacity: occupied && !isCurrent ? 0.9 : 1, minWidth: 56 }}>
+                              {doorProxyLabel(t) || t}{isCurrent ? " ●" : occupied ? " 🔒" : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {newTable && (
           <div style={{ background: "#FBF3D6", border: "1px solid #000", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 14, color: "#000" }}>
-            {reservation.tableId} → {newTable} ({TABLE_OPTIONS.find(g => g.tables.includes(newTable))?.label})
+            {reservation.tableId || "NO TABLE"} → {doorProxyLabel(newTable) || newTable} ({doorFloorForTable(newTable)?.label})
           </div>
         )}
 
@@ -1008,21 +1035,18 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // payment so admin reports can compute "amount actually received from
   // aggregator" alongside the gross.
   const discountPct = payMethod === "aggregator" ? 0 : manualDiscount;
-  const discountAmt = Math.round(subtotal * discountPct / 100);
-  const afterDiscount = subtotal - discountAmt;
-  // Scale all item prices by (1 - discount) and re-run computeHodBreakdown so
-  // SC + GST are computed with the correct rules (GST excludes alcohol, SC
-  // base is subtotal, GST base is food + non-alc + SC). This matches the
-  // bill print engine exactly so the on-screen amount = printed bill amount.
-  const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
-  const scaledItems = allItems.map(it => ({ ...it, p: (it.p || 0) * scaleFactor }));
-  const discBreakdown = computeHodBreakdown(scaledItems);
-  const scAmt = serviceCharge ? Math.round(discBreakdown.serviceCharge) : 0;
-  // GST base must exclude SC if SC is waived → recompute against waived base.
-  const taxAmt = serviceCharge
-    ? Math.round(discBreakdown.gst)
-    : Math.round((discBreakdown.foodSubtotal + discBreakdown.nonAlcSubtotal) * GST_RATE);
-  const finalAmount = afterDiscount + scAmt + taxAmt;
+  // 🆕 2026-06-08 — route the ENTIRE settle bill through computeHodBreakdownAdjusted
+  // (discount + SC-toggle aware, 2-decimal SC/GST, ONE final whole-rupee round) so the
+  // captain's FINAL AMOUNT === the customer wallet's YOUR TAB === the printed bill, to
+  // the rupee. The OLD path rounded SC and GST to whole rupees SEPARATELY and then
+  // summed them, which drifted ₹1 BELOW the canonical grand (e.g. ₹910 vs the wallet's
+  // ₹911). computeHodBreakdownAdjusted with scOn=false already excludes SC from the GST
+  // base, so the waived-Service-Charge case is handled too.
+  const discBreakdown = computeHodBreakdownAdjusted(allItems, discountPct, serviceCharge);
+  const discountAmt = Math.round(discBreakdown.discount);
+  const scAmt = discBreakdown.serviceCharge;
+  const taxAmt = discBreakdown.gst;
+  const finalAmount = discBreakdown.grandTotal;
   // 🔴 2026-05-12 — Aggregator-net (what the venue actually nets after the
   // platform's commission/discount) — used for reports only, NOT for the
   // customer bill. MUST be computed off `finalAmount` (subtotal + SC + GST),
@@ -2739,16 +2763,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     const subtotal = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
     const aggName = (r as any).aggregator || (r as any).source || "inhouse";
     const discountPct: number = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName) ?? 0;
-    const discountAmt = Math.round(subtotal * discountPct / 100);
-    const afterDiscount = subtotal - discountAmt;
-    const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
-    const scaledItems = allItems.map((it) => ({ ...it, p: (it.p || 0) * scaleFactor }));
-    const bd = computeHodBreakdown(scaledItems);
-    const scAmt = Math.round(bd.serviceCharge);
-    const taxAmt = Math.round(bd.gst);
-    const cgst = Math.round((taxAmt / 2) * 100) / 100;
-    const sgst = Math.round((taxAmt / 2) * 100) / 100;
-    const finalAmount = afterDiscount + scAmt + taxAmt;
+    // 🆕 2026-06-08 — canonical single-final-round grand (see Mark-Paid note) so the
+    // PRINTED bill total === the customer wallet === Mark Paid, to the rupee. Print
+    // always applies SC (there is no waiver toggle on the print path).
+    const bd = computeHodBreakdownAdjusted(allItems, discountPct, true);
+    const discountAmt = Math.round(bd.discount);
+    const afterDiscount = subtotal - bd.discount;
+    const scAmt = bd.serviceCharge;
+    const taxAmt = bd.gst;
+    const cgst = bd.cgst;
+    const sgst = bd.sgst;
+    const finalAmount = bd.grandTotal;
     const prevCount = r.billPrintCount || 0;
     return {
       items: allItems, subtotal, discountPct, discountAmt, afterDiscount,
@@ -3604,12 +3629,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
         const subtotal = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
         const aggForVoid = (r as any).aggregator || (r as any).source || "inhouse";
         const discountPct: number = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggForVoid) ?? 0;
-        const discountAmt = Math.round(subtotal * discountPct / 100);
-        const afterDiscount = subtotal - discountAmt;
-        const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
-        const scaledItems = allItems.map((it) => ({ ...it, p: (it.p || 0) * scaleFactor }));
-        const bd = computeHodBreakdown(scaledItems);
-        const billTotal = afterDiscount + Math.round(bd.serviceCharge) + Math.round(bd.gst);
+        // 🆕 2026-06-08 — canonical grand so the VOID slip / leakage figure matches the
+        // paper bill the customer was handed (and the wallet), to the rupee.
+        const bd = computeHodBreakdownAdjusted(allItems, discountPct, true);
+        const billTotal = bd.grandTotal;
         // Derive floor for void slip (matches handleThermalBill).
         const tid = (r.tableId || "").toUpperCase();
         let voidFloor: TabletFloor = "first";
@@ -4616,43 +4639,77 @@ function FloorPlanView({
           Without this, taking a phone call for "Karthik on FD13" would leave
           captain wondering where the table went. */}
       {offMapReservations.length > 0 && (
-        <div style={{ marginTop: 10, background: "#FBF3D6", border: "1px dashed #000", borderRadius: 10, padding: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 900, color: "#000", letterSpacing: 0.6, marginBottom: 6 }}>
-            🪑 {offMapReservations.length} TABLE{offMapReservations.length === 1 ? "" : "S"} NOT ON MAP — TAP TO OPEN
+        <div style={{ marginTop: 12, background: "#F4F4F0", border: "2px solid #000", borderRadius: 12, padding: 12, boxShadow: "3px 3px 0 rgba(0,0,0,0.1)" }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: "#000", letterSpacing: 0.8, marginBottom: 10, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ background: "#FF90E8", border: "2px solid #000", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 900 }}>{offMapReservations.length}</span>
+            Tables Not On Map — Tap To Open
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {/* 🆕 2026-06-08 (Khushi) — off-map list re-laid as full-width Gumroad
+              rows (one table per row, white card + 2px black border + colored
+              left edge) instead of cramped wrap-pills, so the captain can read
+              and locate each table fast. The 3-color priority logic is unchanged:
+                RED    = customer calling, bill requested, OR KOT pending
+                ORANGE = KOT printed, kitchen cooking (activated rounds)
+                GREEN  = served / assigned / no action needed */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {offMapReservations.map(r => {
-              // 🆕 2026-05-20 (Khushi) — proxy / off-map tables now use the
-              // SAME 3-color logic as on-map tables so captain reads the strip
-              // like a priority queue:
-              //   RED    = customer calling, bill requested, OR KOT pending
-              //   ORANGE = KOT printed, kitchen cooking (activated rounds)
-              //   GREEN  = served / assigned / no action needed
               const callOrBill = !!r.customerCallRequest || r.paymentStatus === "bill_requested";
               const preparing = (r.tabRounds || []).some(rd => rd.status === "preparing");
               const activated = (r.tabRounds || []).some(rd => rd.status === "activated");
               let state: "red" | "orange" | "green" = "green";
               if (callOrBill || preparing) state = "red";
               else if (activated) state = "orange";
-              const ringColor = state === "red" ? "#FF5733" : state === "orange" ? "#F59E0B" : "#23A094";
-              const fillBg = state === "red" ? "#FFF0EC" : state === "orange" ? "#FBF3D6" : "#E6F5F2";
+              const accent = state === "red" ? "#E11900" : state === "orange" ? "#FF5733" : "#23A094";
               const allItems = (r.tabRounds || []).flatMap(rd => rd.items || []);
               const tab = allItems.length ? computeHodBreakdown(allItems).grandTotal : 0;
-              let tail = "";
-              if (state === "red" && callOrBill) tail = r.paymentStatus === "bill_requested" ? " · BILL" : " · CALLING";
-              else if (state === "red") tail = " · KOT PENDING";
-              else if (state === "orange" && tab > 0) tail = ` · ₹${tab}`;
-              else if (state === "green" && tab > 0) tail = ` · ₹${tab}`;
-              else if (state === "green") tail = " · A";
+              let statusLabel = "";
+              if (state === "red" && callOrBill) statusLabel = r.paymentStatus === "bill_requested" ? "BILL REQUESTED" : "CALLING";
+              else if (state === "red") statusLabel = "KOT PENDING";
+              else if (state === "orange") statusLabel = "PREPARING";
+              // 🆕 2026-06-08 (Khushi) — row re-laid: customer NAME is the bold
+              // primary; a clean "NO TABLE" badge (no ⚠️) sits under it (or the
+              // table id when one IS set); the right side is an explicit CTA —
+              // "ASSIGN TABLE" when no table yet, else "OPEN". The urgent status
+              // chip (CALLING / BILL REQUESTED / KOT PENDING / PREPARING) only
+              // shows when there's something to act on (green/idle hides it so it
+              // never contradicts the NO TABLE badge). Priority dot + left edge +
+              // flash are unchanged.
+              const ctaLabel = r.tableId ? "OPEN ›" : "ASSIGN TABLE ›";
               return (
                 <button key={r._docId} onClick={() => onSelectReservation(r._docId)}
                   className={state !== "green" ? "hod-flash" : undefined}
                   style={{
-                    background: fillBg, border: `1.5px solid ${ringColor}`,
-                    borderRadius: 8, padding: "6px 10px", color: "#000", fontSize: 12, fontWeight: 800, cursor: "pointer",
-                    boxShadow: "none",
+                    display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+                    background: "#fff", border: "2px solid #000", borderLeft: `6px solid ${accent}`,
+                    borderRadius: 8, padding: "10px 12px", color: "#000", cursor: "pointer",
+                    boxShadow: "2px 2px 0 rgba(0,0,0,0.1)",
                   }}>
-                  {r.tableId ? r.tableId : "⚠️ NO TABLE"} · {r.customerName || "Guest"}{tail}
+                  <span style={{ width: 11, height: 11, borderRadius: "50%", background: accent, border: "1.5px solid #000", flexShrink: 0 }} />
+                  <span style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, flex: 1 }}>
+                    <span style={{ fontSize: 14, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {r.customerName || "Guest"}
+                    </span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      {r.tableId ? (
+                        <span style={{ fontSize: 10, fontWeight: 900, color: "#0B6B5E", background: "#D7F2EC", border: "1.5px solid #23A094", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                          {r.tableId}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 10, fontWeight: 900, color: "#B91C1C", background: "#FFF1F0", border: "1.5px solid #E11900", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                          No Table
+                        </span>
+                      )}
+                      {state !== "green" && (
+                        <span style={{ fontSize: 9.5, fontWeight: 900, color: "#fff", background: accent, border: "1.5px solid #000", borderRadius: 5, padding: "2px 6px", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                          {statusLabel}
+                        </span>
+                      )}
+                      {tab > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: "#000" }}>₹{tab}</span>}
+                    </span>
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 900, color: "#000", background: "#FF90E8", border: "2px solid #000", borderRadius: 7, padding: "8px 12px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap", flexShrink: 0, boxShadow: "2px 2px 0 rgba(0,0,0,0.18)" }}>
+                    {ctaLabel}
+                  </span>
                 </button>
               );
             })}

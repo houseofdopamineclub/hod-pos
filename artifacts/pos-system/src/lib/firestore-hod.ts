@@ -1366,6 +1366,51 @@ export async function createBarWalkinCover(staffName: string): Promise<HodCover>
   return { id: docId, ...cover } as HodCover;
 }
 
+/** 🆕 2026-06-07 — Persist the bartender's bill-level DISCOUNT % + SC toggle
+ *  onto the cover (and, for table refs, mirror onto the tableReservations doc
+ *  the customer wallet reads) so the customer's "VIEW BILL" preview shows the
+ *  EXACT same discounted grand total the bar charges — no more ₹2,000 (bar) vs
+ *  ₹2,105 (phone) mismatch. Read by the customer site's hodComputeBreakdown.
+ *  Fail-open: a write error never blocks the bartender — the bill still prints. */
+export async function setCoverBillDiscount(
+  coverId: string, ref: string, discPct: number, scOn: boolean,
+): Promise<boolean> {
+  // NOTE: store the RAW float pct (no integer rounding) — BarMode's billing math
+  // (computeHodBreakdownAdjusted) and the customer site both use the unrounded
+  // value, so a fractional bartender discount (e.g. 12.5%) stays bit-for-bit in
+  // parity. Rounding here would have made the bar charge 12.5% but the phone 13%.
+  const pct = Math.min(100, Math.max(0, discPct || 0));
+  const sc = !!scOn;
+  // Fail-open: never THROW (the bill must always print), but RETURN whether every
+  // required write landed so the caller can clear its dedupe key and retry on a
+  // transient failure (a stale persisted discount silently breaks bill parity).
+  let coverOk = false;
+  try {
+    await updateDoc(doc(db, COVERS_COL, coverId), { billDiscountPct: pct, billScOn: sc });
+    coverOk = true;
+  } catch (e) {
+    console.warn("[setCoverBillDiscount] cover write failed (non-fatal)", e);
+  }
+  // Table bookings: the customer wallet reads tableReservations, not covers
+  // (see editCoverAmount). Mirror the discount there too so those guests match.
+  const looksLikeTableRef = !!ref && (ref.startsWith("HODTAB") || ref.startsWith("TBL-") || ref.startsWith("AGG-"));
+  if (!looksLikeTableRef) return coverOk;
+  let mirrorOk = false;
+  try {
+    const q = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", ref), limit(1));
+    const snap = await getDocs(q);
+    if (snap.empty) {
+      mirrorOk = true; // no table doc to mirror to — nothing more required
+    } else {
+      await updateDoc(snap.docs[0].ref, { billDiscountPct: pct, billScOn: sc });
+      mirrorOk = true;
+    }
+  } catch (mErr) {
+    console.warn("[setCoverBillDiscount] table mirror failed (non-fatal)", mErr);
+  }
+  return coverOk && mirrorOk;
+}
+
 export async function editCoverAmount(coverId: string, newAmount: number, staffName: string): Promise<void> {
   if (newAmount > 5000) throw new Error("Cover amount cannot exceed ₹5,000");
   const ref = doc(db, COVERS_COL, coverId);
@@ -1805,20 +1850,42 @@ export async function unmarkGuestArrived(
   return reversed;
 }
 
+// 🆕 2026-06-08 (Khushi LIVE BUG) — captain "MARK SERVED" / "Ready to Serve"
+// didn't reach the customer wallet on COVER+TABLE bookings (Door "Activate
+// Table + Cover", guest "I am at table") — the round stayed "Ordered" on the
+// phone even after the captain marked it served. ROOT CAUSE: that flow stores
+// the customer wallet under `linkedCoverDocId`, NOT `bookingRef`, so the
+// legacy single bookingRef mirror below never touched the cover the wallet
+// actually reads. `updateRoundItems` + the captain ADD-ORDER path were already
+// fixed (2026-05-20) to ALSO mirror to `linkedCoverDocId` — mark-served /
+// mark-activated were simply missed. This helper applies that same dual mirror
+// (full rounds array → covers/{bookingRef} AND covers/{linkedCoverDocId}).
+// Best-effort: the tableReservations write above is the source of truth.
+async function _mirrorRoundsToCovers(
+  rounds: any[], bookingRef?: string, linkedCoverDocId?: string
+): Promise<void> {
+  const refs: string[] = [];
+  if (bookingRef) refs.push(bookingRef);
+  if (linkedCoverDocId && linkedCoverDocId !== bookingRef) refs.push(linkedCoverDocId);
+  for (const ref of refs) {
+    try {
+      const cRef = doc(db, COVERS_COL, ref);
+      const cs = await getDoc(cRef);
+      if (cs.exists()) await updateDoc(cRef, { tabRounds: rounds });
+    } catch (e) {
+      console.warn("[HOD] round-status cover mirror failed for", ref, e);
+    }
+  }
+}
+
 export async function markRoundServed(docId: string, roundIndex: number, bookingRef?: string): Promise<void> {
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
-  const rounds = [...(snap.data().tabRounds || [])];
+  const data = snap.data();
+  const rounds = [...(data.tabRounds || [])];
   if (rounds[roundIndex]) rounds[roundIndex].status = "served";
   await updateDoc(doc(db, TABLE_RES_COL, docId), { tabRounds: rounds });
-  if (bookingRef) {
-    const cs = await getDoc(doc(db, COVERS_COL, bookingRef));
-    if (cs.exists()) {
-      const cr = [...(cs.data().tabRounds || [])];
-      if (cr[roundIndex]) cr[roundIndex].status = "served";
-      await updateDoc(doc(db, COVERS_COL, bookingRef), { tabRounds: cr });
-    }
-  }
+  await _mirrorRoundsToCovers(rounds, bookingRef, (data as { linkedCoverDocId?: string }).linkedCoverDocId);
 }
 
 // 🔴 2026-05-13 — Khushi: Print KOT used to call markRoundServed which
@@ -1844,16 +1911,10 @@ export async function markRoundActivated(
     };
   }
   await updateDoc(doc(db, TABLE_RES_COL, docId), { tabRounds: rounds });
-  if (bookingRef) {
-    const cs = await getDoc(doc(db, COVERS_COL, bookingRef));
-    if (cs.exists()) {
-      const cr = [...(cs.data().tabRounds || [])];
-      if (cr[roundIndex]) {
-        cr[roundIndex] = { ...cr[roundIndex], status: "activated", activatedBy: staffName, activatedAt: now };
-      }
-      await updateDoc(doc(db, COVERS_COL, bookingRef), { tabRounds: cr });
-    }
-  }
+  // 🆕 2026-06-08 — dual mirror (covers/{bookingRef} AND covers/{linkedCoverDocId})
+  // so the "Ready to Serve" status reaches the customer wallet on COVER+TABLE
+  // bookings too. See _mirrorRoundsToCovers comment above.
+  await _mirrorRoundsToCovers(rounds, bookingRef, (snap.data() as { linkedCoverDocId?: string }).linkedCoverDocId);
 }
 
 /**
@@ -3462,7 +3523,8 @@ function sumAmenities(items?: BookingAmenity[]): number {
 // 🔴 2026-05-19 — shared time-window conflict check used by all 3 creators.
 // Matches the UI's `doorTableOccupantAt` logic in DoorMode.tsx so the green/red
 // picker can't disagree with the write-time gate. Returns the conflicting
-// reservation if the slot collides, else null. Paid bookings are released.
+// reservation if the slot collides, else null. A table frees ONLY when RELEASED
+// (its reservation doc is deleted), not when the bill is paid/settled.
 // Reservations with no parseable arrivalTime are conservatively treated as
 // blocking (matches old date-only behaviour).
 const SLOT_MIN_DEFAULT = 120;
@@ -3489,7 +3551,18 @@ async function findTableSlotConflict(
   const target = parseClock(arrivalTime);
   for (const d of snap.docs) {
     const r = d.data() as any;
-    if (isTableBillSettled(r)) continue;
+    // A table frees ONLY when RELEASED (its doc is deleted), not when the bill is
+    // paid/settled — so a settled-but-seated guest must still block a new booking
+    // here, exactly as the door picker now shows it occupied. (No settled-skip.)
+    // 🔴 2026-06-08 (Khushi) — ACTIVE occupancy ignores the scheduled-time window
+    // (parity with doorTableOccupantAt): a guest who has ARRIVED or has a running
+    // tab is seated NOW and holds the table until RELEASE regardless of the booked
+    // arrivalTime (e.g. FD2 booked 20:30 but arrived early at 17:53 with an open
+    // tab must still block a 17:55 booking).
+    const seatedNow = !!r.actualArrivalTime || (Array.isArray(r.tabRounds) && r.tabRounds.length > 0);
+    if (seatedNow) {
+      return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+    }
     const start = parseClock(r.arrivalTime);
     if (start == null || target == null) {
       // Unknown time on either side → fall back to old date-only blocking.

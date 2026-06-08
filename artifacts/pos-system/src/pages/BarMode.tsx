@@ -7,7 +7,7 @@ import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
-  getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, updatePreparingRoundItems, createBarWalkinCover,
+  getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, setCoverBillDiscount, updatePreparingRoundItems, createBarWalkinCover,
   coverDocIdFor, subscribeToCoversForNight,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
@@ -383,6 +383,39 @@ function WalletOverlay({ cover, staffName, onClose }: {
       cgst: b.cgst, sgst: b.sgst, taxAmt: b.gst, roundOff: b.roundOff, total: b.grandTotal,
     };
   }, [barDiscPct, scOn]);
+
+  // 🆕 2026-06-07 — PERSIST the bartender's discount % + SC toggle onto the
+  // cover so the CUSTOMER WALLET "VIEW BILL" preview shows the SAME discounted
+  // grand total the bar charges (was ₹2,000 on the bar vs ₹2,105 on the phone
+  // because the discount lived only in this transient BarMode state). The
+  // overlay remounts per cover (key={cover.id}) so barDiscPct/scOn start at the
+  // defaults each open; this effect syncs every deliberate change AND clears any
+  // stale value left on the cover from a previous session. _lastDiscWrite avoids
+  // redundant writes (incl. the no-op default mount). Fail-open inside the helper.
+  const _lastDiscWrite = useRef<string | null>(null);
+  useEffect(() => {
+    if (!cover?.id) return;
+    const key = `${barDiscPct}|${scOn ? 1 : 0}`;
+    if (_lastDiscWrite.current === null) {
+      // First fire (mount): only skip the write if the cover's stored value
+      // EXACTLY equals the fresh defaults. Compare as raw floats (NO rounding) —
+      // a stale fractional discount like 0.4% must NOT be treated as 0 or it
+      // survives on the doc and the customer wallet reads it while the bar uses 0.
+      const storedPct = Number((cover as any).billDiscountPct || 0);
+      const storedSc = (cover as any).billScOn !== false;
+      if (storedPct === barDiscPct && storedSc === scOn) { _lastDiscWrite.current = key; return; }
+    }
+    if (_lastDiscWrite.current === key) return;
+    // Optimistically claim the key to prevent a write loop, but only COMMIT it on
+    // a confirmed success; setCoverBillDiscount is fail-open (never throws) and
+    // RETURNS whether every required write landed, so on a failed/partial write
+    // we reset the key → the next render/dependency change retries (a stale
+    // persisted discount would otherwise silently break bill parity).
+    _lastDiscWrite.current = key;
+    setCoverBillDiscount(cover.id, cover.ref || "", barDiscPct, scOn)
+      .then((ok) => { if (!ok && _lastDiscWrite.current === key) _lastDiscWrite.current = null; })
+      .catch(() => { if (_lastDiscWrite.current === key) _lastDiscWrite.current = null; });
+  }, [cover?.id, cover?.ref, barDiscPct, scOn]);
 
   // 🆕 2026-06-02 v3.195 (Khushi) — RECHARGE honors the DISCOUNT dropdown.
   // She picked "discount lowers both" (pay ₹240 / credit ₹240 on a ₹300 + 20%).

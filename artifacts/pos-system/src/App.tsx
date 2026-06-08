@@ -15,6 +15,7 @@ import Reports from "@/pages/Reports";
 import KOTView from "@/pages/KOTView";
 import ShiftView from "@/pages/ShiftView";
 import AdminPage from "@/pages/AdminPage";
+import MenuMode from "@/pages/MenuMode";
 import AuditPage from "@/pages/AuditPage";
 // 🆕 2026-05-27 v3.106 (Khushi LIVE) — AggregatorPage RETIRED. Tab removed
 // from Boss Mode + /aggregator route dropped. File kept on disk for code
@@ -65,6 +66,9 @@ function POSRouter() {
       {FEATURES.kot && <Route path="/kot" component={KOTView} />}
       {FEATURES.shift && <Route path="/shift" component={ShiftView} />}
       {FEATURES.admin && <Route path="/admin" component={AdminPage} />}
+      {/* 🆕 v3.239 — MENU mode (Menu Editor + Menu CRM moved out of Boss Mode).
+          Gated behind the admin feature flag, same as the Boss tabs were. */}
+      {FEATURES.admin && <Route path="/menu" component={MenuMode} />}
       {FEATURES.audit && <Route path="/audit"><AuditPage /></Route>}
       <Route component={NotFound} />
     </Switch>
