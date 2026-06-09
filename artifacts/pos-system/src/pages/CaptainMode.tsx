@@ -51,7 +51,7 @@ import { QrScanner } from "@/components/QrScanner";
 // the captain sees (or vice versa). Same shape — drop-in compatible.
 import { HOD_MENU_ITEMS as MENU_ITEMS } from "@/lib/hod-menu";
 import type { MenuItem, MenuOverride } from "@/lib/types";
-import { formatINR } from "@/lib/utils-pos";
+import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
@@ -4753,7 +4753,12 @@ function FloorPlanView({
 }
 
 function CaptainDashboard({ captainName }: { captainName: string }) {
-  const [date, setDate] = useState(() => new Date().toISOString().split("T")[0]);
+  // 🆕 2026-06-08 — default to the OPERATIONAL NIGHT (rolls 7AM IST), NOT the
+  // UTC/calendar date. Just after midnight the calendar date is already the next
+  // day while the night is still the previous date; defaulting to UTC made the
+  // captain miss tables seated after midnight (they file under the operational
+  // night, same as the cover/wallet). getOperationalNightStr keeps all three in sync.
+  const [date, setDate] = useState(() => getOperationalNightStr());
   // 🆕 2026-05-20 (Khushi) — floor filter retired; the new FloorPlanView has
   // 3 floor tabs of its own. Kept as "" so existing filter logic below is a no-op.
   const floor = "";

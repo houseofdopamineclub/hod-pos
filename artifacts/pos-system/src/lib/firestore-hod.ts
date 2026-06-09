@@ -3341,7 +3341,11 @@ export async function createWalkInTable(
   email = "", arrivalTimeOverride = ""
 ): Promise<string> {
   const now = new Date();
-  const date = now.toISOString().split("T")[0];
+  // 🆕 2026-06-08 (Khushi MIDNIGHT BUG) — operational night (rolls 7AM IST), NOT
+  // the UTC calendar date. A live walk-in is always for the current night; UTC
+  // disagrees with the operational night in the 5:30–7AM IST window and would
+  // file the table under a different date than its cover + the captain view.
+  const date = getOperationalNightStr();
   const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = mintHodRef("table");
 
@@ -3780,9 +3784,25 @@ export async function createWalkInTableReservation(input: {
   if (!date) throw new Error("Pick a date");
   if (!arrivalTime?.trim()) throw new Error("Enter arrival time");
 
+  // 🆕 2026-06-08 (Khushi MIDNIGHT BUG) — a guest seated just after midnight got
+  // a TABLE dated with the IST CALENDAR date (e.g. June 9) while the cover/wallet
+  // (line below) + the captain's view both use getOperationalNightStr() (the
+  // operational night that rolls at 7AM = still June 8). Result: the captain saw
+  // 0 pending and never served the order. FIX: for a LIVE SEATING happening NOW
+  // whose passed date is TODAY's IST calendar date, normalize to the operational
+  // night so table.date === cover.date === captain view.
+  //   A live seating is identified by one of markArrived / unlockMenu /
+  //   hasLinkedCover (guest is arriving / menu opening / a cover is paired now).
+  // We do NOT normalize a pure ADVANCE reservation: it carries none of those
+  // flags, so a booking made between 00:00–06:59 IST FOR that same calendar
+  // evening keeps its real date instead of being pushed onto the prior night.
+  const _calTodayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const _isLiveSeating = !!(markArrived || unlockMenu || hasLinkedCover);
+  const effDate = _isLiveSeating && date === _calTodayIST ? getOperationalNightStr() : date;
+
   if (tableId) {
-    const conflict = await findTableSlotConflict(tableId, date, arrivalTime);
-    if (conflict) throw new Error(`Table ${tableId} is already booked on ${date}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
+    const conflict = await findTableSlotConflict(tableId, effDate, arrivalTime);
+    if (conflict) throw new Error(`Table ${tableId} is already booked on ${effDate}${conflict.arrivalTime ? " @ " + conflict.arrivalTime : ""}${conflict.customerName ? " (" + conflict.customerName + ")" : ""}`);
   }
 
   const ref = mintHodRef("table");
@@ -3818,7 +3838,7 @@ export async function createWalkInTableReservation(input: {
     tableId: tableId || "",
     floor: floor || "",
     floorLabel: floorLabel || "",
-    date,
+    date: effDate,
     customerName: customerName.trim(),
     phone: phone10,
     partySize: partySize || 2,
@@ -4273,7 +4293,11 @@ export async function createProxyTable(
   email = "", arrivalTimeOverride = ""
 ): Promise<string> {
   const now = new Date();
-  const date = now.toISOString().split("T")[0];
+  // 🆕 2026-06-08 (Khushi MIDNIGHT BUG) — operational night (rolls 7AM IST), NOT
+  // the UTC calendar date. A live walk-in is always for the current night; UTC
+  // disagrees with the operational night in the 5:30–7AM IST window and would
+  // file the table under a different date than its cover + the captain view.
+  const date = getOperationalNightStr();
   const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = `PROXY-${proxyName.replace(/\s+/g, "-")}-${Date.now().toString(36).toUpperCase()}`;
   // Write covers doc FIRST (see createWalkInTable for rationale).
