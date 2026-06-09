@@ -12,7 +12,7 @@ import {
   recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
   voidBill, printBillVoid, assertCaptainCanVoid, recordCaptainVoidUsage,
   recordSilentPrePrintEdit,
-  computeHodBreakdown, computeHodBreakdownAdjusted, lookupOrphanZomatoPaymentByName, isTableBillSettled, type TabletFloor,
+  computeHodBreakdown, lookupOrphanZomatoPaymentByName, type TabletFloor,
   type HodTableReservation, type HodTabRound, type HodOrderItem,
   type OrphanZomatoPayment,
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
@@ -39,10 +39,6 @@ import {
 // HOD_TABLES const is ported from hodclub-patched/index.html so what captain
 // taps == what the customer booked. Floor keys: dance/dining/rooftop.
 import { HOD_TABLES, TABLET_FLOOR_TO_FLOORKEY, type FloorKey, type FloorTable } from "@/lib/floor-plan";
-// 🆕 2026-06-08 (Khushi) — Reassign/Assign-Table picker now uses the SAME shared
-// door config + pax (capacity) grouping + live occupancy as Door Mode's "New
-// Table Booking", so the captain sees tables grouped "4 PAX / 6 PAX / 8 PAX …".
-import { DOOR_TABLE_OPTIONS, doorTableCapacity, doorTableOccupantAt, doorProxyLabel, doorFloorForTable } from "@/lib/door-tables";
 import { subscribeToMenuOverrides } from "@/lib/firestore";
 import { QrScanner } from "@/components/QrScanner";
 // 🔴 2026-05-09 — switched from menu-data.ts (314 legacy items) to canonical
@@ -51,20 +47,13 @@ import { QrScanner } from "@/components/QrScanner";
 // the captain sees (or vice versa). Same shape — drop-in compatible.
 import { HOD_MENU_ITEMS as MENU_ITEMS } from "@/lib/hod-menu";
 import type { MenuItem, MenuOverride } from "@/lib/types";
-import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
+import { formatINR } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
 // Dynamic Link (those were shut down 2025-08-25).
 import { HOD_LOCATION_URL } from "@/pages/DoorMode";
-// 🆕 2026-06-07 (Khushi) — Captain Mode now has its own LIVE REPORTS (parity
-// with Bar / Door). Reuses the Boss-mode LiveReports component verbatim (it is
-// already table/floor-centric = the captain's domain, and its table accounting
-// is architect-passed) rendered inside a fullscreen modal — identical numbers
-// to Boss Mode, no duplicated/divergent accounting. Subscriptions only run
-// while the modal is open (component mounts on open, unmounts on close).
-import LiveReports from "./LiveReports";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
@@ -82,6 +71,7 @@ const MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6
 // silently strip the customer's pre-paid discount). Default Admin PIN is
 // 9999; rotate by computing sha256(newPin) and replacing this hash.
 const ADMIN_HASH = "888df25ae35772424a560c7152a1de794440e0ea5cfee62828333a456a506e05";
+const GST_RATE = 0.05;
 const SERVICE_CHARGE_RATE = 0.10;
 // L6 — minimum gap between two thermal-bill prints for the same table; below
 // this we ask the captain to confirm so they can't waste paper hammering the button.
@@ -441,11 +431,7 @@ function tableOccupantAt(
 ): HodTableReservation | null {
   for (const r of reservations) {
     if (r.tableId !== tableId) continue;
-    // 🆕 2026-06-07 (Khushi) — a prepaid-cover table carries paymentStatus:"paid"
-    // from the deposit while the guest is STILL SEATED (food tab open). Only a
-    // truly SETTLED bill (markTablePaid → paymentMode/paidAt) means the table is
-    // free; otherwise it stays occupied so we never double-book a seated guest.
-    if (isTableBillSettled(r)) continue;
+    if (r.paymentStatus === "paid") continue;
     const start = parseClockToMinutes(r.arrivalTime);
     if (start == null) {
       // Unknown arrival time — treat as currently occupying so we don't
@@ -694,7 +680,7 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
     if (newTable === reservation.tableId) { setError("Same table selected"); return; }
     setSaving(true);
     try {
-      const opt = doorFloorForTable(newTable);
+      const opt = TABLE_OPTIONS.find((g) => g.tables.includes(newTable));
       await reassignTable(reservation._docId, newTable, opt?.floor || "", opt?.label || "", captainName);
       onClose();
     } catch (e: any) { setError(e.message); }
@@ -710,75 +696,51 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
         </div>
         <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 16 }}>All orders move with the booking</div>
 
-        <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>Select New Table · LIVE *</div>
-        {/* 🆕 2026-06-08 (Khushi) — SAME layout as Door Mode "New Table Booking":
-            per floor, tables grouped by seating capacity ("4 PAX / 6 PAX / 8 PAX
-            …"), available (green) first then taken (red, disabled). Uses the
-            shared DOOR_TABLE_OPTIONS + doorTableOccupantAt single source so the
-            picker matches the door picker AND the backend reassign gate. */}
+        <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6 }}>Select New Table *</div>
         <div style={{ marginBottom: 16 }}>
-          {DOOR_TABLE_OPTIONS.map((group) => {
-            // Time-aware: a table booked for an unrelated slot should NOT block
-            // reassignment to it for THIS reservation's slot.
-            const targetMin = parseClockToMinutes(reservation.arrivalTime) ?? nowMinutesIST();
-            const rows = group.tables.map((t) => {
-              const occupant = doorTableOccupantAt(t, targetMin, allReservations);
-              const occupied = !!occupant && occupant._docId !== reservation._docId;
-              return { t, occupant, occupied };
-            });
-            // capacity groups ascending; proxies (cap 0 = flexible) sort LAST.
-            const caps = Array.from(new Set(rows.map((r) => doorTableCapacity(r.t))))
-              .sort((a, b) => (a === 0 ? 1 : b === 0 ? -1 : a - b));
-            return (
-              <div key={group.floor} style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#000", marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
-                {caps.map((cap) => {
-                  const grp = rows
-                    .filter((r) => doorTableCapacity(r.t) === cap)
-                    .sort((a, b) => Number(a.occupied) - Number(b.occupied));
-                  const freeCount = grp.filter((r) => !r.occupied).length;
+          {TABLE_OPTIONS.map((group) => (
+            <div key={group.floor} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: "#6B6B6B", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {group.tables.map((t) => {
+                  // Time-aware: a table booked for an unrelated slot should
+                  // NOT block reassignment to it for THIS reservation's slot.
+                  const targetMin = parseClockToMinutes(reservation.arrivalTime) ?? nowMinutesIST();
+                  const occupant = tableOccupantAt(t, targetMin, allReservations);
+                  const occupied = !!occupant && occupant._docId !== reservation._docId;
+                  const isCurrent = t === reservation.tableId;
+                  const isSelected = newTable === t;
+                  // Filled green = available for this slot; filled red = taken
+                  // for this slot. Yellow ring = your current pick. Orange =
+                  // the reservation's existing table.
+                  const bg = isSelected ? "#FF90E8"
+                    : isCurrent ? "#FBF3D6"
+                    : occupied ? "#FF5733" : "#1B7A70";
+                  const border = isSelected ? "#000"
+                    : isCurrent ? "#000"
+                    : occupied ? "#FF5733" : "#1B7A70";
+                  const color = isSelected ? "#000"
+                    : isCurrent ? "#000"
+                    : "#fff";
                   return (
-                    <div key={cap} style={{ marginTop: 8 }}>
-                      <div style={{ fontSize: 10, fontWeight: 800, color: "#000", letterSpacing: "0.5px" }}>
-                        {cap > 0 ? `${cap} PAX` : "PROXY · CAPTAIN ASSIGNS SEATS"}
-                        <span style={{ color: "#23A094", marginLeft: 6 }}>· {freeCount} FREE</span>
-                      </div>
-                      <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 5 }}>
-                        {grp.map(({ t, occupant, occupied }) => {
-                          const isCurrent = t === reservation.tableId;
-                          const isSelected = newTable === t;
-                          // green = available · red = taken · pink = your pick ·
-                          // cream = the booking's current table.
-                          const bg = isSelected ? "#FF90E8"
-                            : isCurrent ? "#FBF3D6"
-                            : occupied ? "#FF5733" : "#23A094";
-                          const color = isSelected || isCurrent ? "#000" : "#fff";
-                          const title = occupied && occupant
-                            ? `Taken — ${occupant.customerName || ""}${occupant.arrivalTime ? " @ " + occupant.arrivalTime : ""}`.trim()
-                            : isCurrent ? "Current table" : "Available — tap to assign";
-                          return (
-                            <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(isSelected ? "" : t)} disabled={occupied || isCurrent}
-                              title={title}
-                              style={{ padding: "10px 12px", borderRadius: 8, fontSize: 13, fontWeight: 900,
-                                cursor: occupied || isCurrent ? "not-allowed" : "pointer",
-                                background: bg, border: "2px solid #000", color,
-                                opacity: occupied && !isCurrent ? 0.9 : 1, minWidth: 56 }}>
-                              {doorProxyLabel(t) || t}{isCurrent ? " ●" : occupied ? " 🔒" : ""}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <button key={t} onClick={() => !occupied && !isCurrent && setNewTable(t)} disabled={occupied || isCurrent}
+                      title={occupied && occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : ""}
+                      style={{ padding: "6px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800,
+                        cursor: occupied || isCurrent ? "not-allowed" : "pointer",
+                        background: bg, border: `1px solid ${border}`, color,
+                        opacity: occupied && !isCurrent ? 0.85 : 1 }}>
+                      {t}{isCurrent ? " ●" : ""}
+                    </button>
                   );
                 })}
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
 
         {newTable && (
           <div style={{ background: "#FBF3D6", border: "1px solid #000", borderRadius: 10, padding: 10, marginBottom: 16, fontSize: 14, color: "#000" }}>
-            {reservation.tableId || "NO TABLE"} → {doorProxyLabel(newTable) || newTable} ({doorFloorForTable(newTable)?.label})
+            {reservation.tableId} → {newTable} ({TABLE_OPTIONS.find(g => g.tables.includes(newTable))?.label})
           </div>
         )}
 
@@ -787,7 +749,7 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
           style={{ width: "100%", padding: 14, borderRadius: 12, background: newTable ? "#FF5733" : "#fff", border: newTable ? "2px solid #000" : "2px solid #6B6B6B", color: newTable ? "#fff" : "#6B6B6B", fontSize: 18, fontWeight: 900, cursor: newTable ? "pointer" : "not-allowed", marginBottom: 10 }}>
           {saving ? "Reassigning..." : "Confirm Reassignment"}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "#6B6B6B", fontSize: 16, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onClose} style={{ width: "100%", padding: 10, borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", boxShadow: "2px 2px 0 #000" }}>✕ Cancel</button>
       </div>
     </div>
   );
@@ -971,7 +933,7 @@ function WalletScanModal({ reservation, remaining, captainName, onClose }: {
 
             {found && (
               <button onClick={confirmRedeem} disabled={busy}
-                style={{ width: "100%", padding: 14, borderRadius: 12, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
+                style={{ width: "100%", padding: 18, borderRadius: 10, background: saving ? "#6B6B6B" : "#23A094", border: "3px solid #000", color: "#fff", fontSize: 20, fontWeight: 900, cursor: saving ? "not-allowed" : "pointer", marginBottom: 12, boxShadow: saving ? "none" : "5px 5px 0 #000", letterSpacing: 0.5, transition: "all .1s" }}>
                 {busy ? "Redeeming…" : `✅ REDEEM ${formatINR(Math.min(remaining, found.coverBalance || 0))}`}
               </button>
             )}
@@ -1035,18 +997,21 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // payment so admin reports can compute "amount actually received from
   // aggregator" alongside the gross.
   const discountPct = payMethod === "aggregator" ? 0 : manualDiscount;
-  // 🆕 2026-06-08 — route the ENTIRE settle bill through computeHodBreakdownAdjusted
-  // (discount + SC-toggle aware, 2-decimal SC/GST, ONE final whole-rupee round) so the
-  // captain's FINAL AMOUNT === the customer wallet's YOUR TAB === the printed bill, to
-  // the rupee. The OLD path rounded SC and GST to whole rupees SEPARATELY and then
-  // summed them, which drifted ₹1 BELOW the canonical grand (e.g. ₹910 vs the wallet's
-  // ₹911). computeHodBreakdownAdjusted with scOn=false already excludes SC from the GST
-  // base, so the waived-Service-Charge case is handled too.
-  const discBreakdown = computeHodBreakdownAdjusted(allItems, discountPct, serviceCharge);
-  const discountAmt = Math.round(discBreakdown.discount);
-  const scAmt = discBreakdown.serviceCharge;
-  const taxAmt = discBreakdown.gst;
-  const finalAmount = discBreakdown.grandTotal;
+  const discountAmt = Math.round(subtotal * discountPct / 100);
+  const afterDiscount = subtotal - discountAmt;
+  // Scale all item prices by (1 - discount) and re-run computeHodBreakdown so
+  // SC + GST are computed with the correct rules (GST excludes alcohol, SC
+  // base is subtotal, GST base is food + non-alc + SC). This matches the
+  // bill print engine exactly so the on-screen amount = printed bill amount.
+  const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
+  const scaledItems = allItems.map(it => ({ ...it, p: (it.p || 0) * scaleFactor }));
+  const discBreakdown = computeHodBreakdown(scaledItems);
+  const scAmt = serviceCharge ? Math.round(discBreakdown.serviceCharge) : 0;
+  // GST base must exclude SC if SC is waived → recompute against waived base.
+  const taxAmt = serviceCharge
+    ? Math.round(discBreakdown.gst)
+    : Math.round((discBreakdown.foodSubtotal + discBreakdown.nonAlcSubtotal) * GST_RATE);
+  const finalAmount = afterDiscount + scAmt + taxAmt;
   // 🔴 2026-05-12 — Aggregator-net (what the venue actually nets after the
   // platform's commission/discount) — used for reports only, NOT for the
   // customer bill. MUST be computed off `finalAmount` (subtotal + SC + GST),
@@ -1332,10 +1297,12 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "#fff", border: "1px solid #000", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 21, fontWeight: 900, color: "#000", marginBottom: 4 }}>Mark Table Paid</div>
-        <div style={{ fontSize: 14, color: "#6B6B6B", marginBottom: 20 }}>
-          {reservation.tableId} · {reservation.customerName}
+      <div style={{ background: "#fff", border: "3px solid #000", borderRadius: 14, padding: 28, width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", boxShadow: "8px 8px 0 #000" }}>
+        <div style={{ margin: "-28px -28px 24px -28px", padding: "18px 24px 16px", background: "#FF90E8", borderBottom: "3px solid #000", borderRadius: "11px 11px 0 0" }}>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#000", letterSpacing: 0.5, fontFamily: "'Playfair Display',serif" }}>SETTLE BILL</div>
+          <div style={{ fontSize: 13, color: "#000", fontWeight: 700, marginTop: 4, opacity: 0.75 }}>
+            {reservation.tableId} · {reservation.customerName}
+          </div>
         </div>
 
         {/* ── 2026-05-20 — COVER+TABLE LINKED WALLET BANNER (Khushi spec) ──
@@ -1360,7 +1327,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
         )}
 
-        <div style={{ background: "#FBF3D6", border: "1px solid #FBF3D6", borderRadius: 12, padding: 14, marginBottom: 16 }}>
+        <div style={{ background: "#FBF3D6", border: "2px solid #000", borderRadius: 10, padding: 18, marginBottom: 18, boxShadow: "4px 4px 0 #000" }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, marginBottom: 6 }}>
             <span style={{ color: "#6B6B6B" }}>Tab Total</span>
             <span style={{ fontWeight: 800, color: "#000" }}>{formatINR(tabTotal)}</span>
@@ -1563,7 +1530,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         {payMethod !== "aggregator" && payable > 0 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontSize: 13, color: "#6B6B6B" }}>Payment Method · ₹{payable} owed</span>
+              <span style={{ fontSize: 13, color: "#000", fontWeight: 800, letterSpacing: 0.5 }}>PAYMENT METHOD · <span style={{ color: "#FF5733" }}>₹{payable} OWED</span></span>
               <button onClick={() => { setSplitMode(!splitMode); setError(""); if (!splitMode) { setSplitCash(payable); setSplitCard(0); setSplitUpi(0); } }}
                 style={{ padding: "4px 10px", borderRadius: 8, fontSize: 13, fontWeight: 800, cursor: "pointer",
                   background: splitMode ? "#FF5733" : "#fff",
@@ -1573,16 +1540,17 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               </button>
             </div>
             {!splitMode && (
-              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
                 {methods.map((m) => (
                   <button key={m.key} onClick={() => setPayMethod(m.key)}
-                    style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
-                      background: payMethod === m.key ? "#FBF3D6" : "#fff",
-                      border: `1px solid ${payMethod === m.key ? "#000" : "#6B6B6B"}`,
-                      color: payMethod === m.key ? "#000" : "#6B6B6B" }}>
+                    style={{ flex: 1, padding: "14px 10px", borderRadius: 8, fontSize: 14, fontWeight: 900, cursor: "pointer",
+                      background: payMethod === m.key ? "#F2C744" : "#fff",
+                      border: "2px solid #000",
+                      color: "#000",
+                      boxShadow: payMethod === m.key ? "none" : "3px 3px 0 #000",
+                      transition: "all .1s" }}>
                     {m.label}
                   </button>
-                ))}
               </div>
             )}
             {splitMode && (
@@ -1640,7 +1608,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 setManualDiscount(clamped);
               }}
               placeholder={`max ${CAPTAIN_DISCOUNT_MAX}%`} min={0} max={CAPTAIN_DISCOUNT_MAX}
-              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "#fff", border: "1px solid #000", color: "#000", fontSize: 17, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
+              style={{ width: "100%", padding: "12px 16px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 18, outline: "none", marginBottom: 20, boxSizing: "border-box", boxShadow: "3px 3px 0 #000" }} />
           </>
         )}
 
@@ -1658,7 +1626,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           style={{ width: "100%", padding: 14, borderRadius: 12, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
           {saving ? "Saving..." : (payable === 0 && walletPaidSoFar > 0 ? "✅ Close Bill (Wallet Paid)" : "✅ Confirm Payment")}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 12, borderRadius: 12, background: "transparent", border: "none", color: "#6B6B6B", fontSize: 16, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onClose} style={{ width: "100%", padding: 10, borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", boxShadow: "2px 2px 0 #000" }}>✕ Cancel</button>
       </div>
 
       {showWalletScan && (
@@ -1686,7 +1654,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               padding: 24, color: "#000", fontFamily: "inherit" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
               <span style={{ fontSize: 26 }}>⚠️</span>
-              <span style={{ fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 1.2, textTransform: "uppercase" }}>Collect From Customer</span>
+              <span style={{ fontSize: 18, fontWeight: 900, color: "#000", letterSpacing: 1, textTransform: "uppercase", fontFamily: "'Playfair Display',serif" }}>COLLECT FROM CUSTOMER</span>
             </div>
 
             <div style={{ padding: "22px 16px", marginBottom: 16, borderRadius: 12,
@@ -2245,13 +2213,8 @@ function AddOrderModal({ docId, tableId, captainName, onClose }: {
             );
           })}
         </div>
-        {/* 🆕 2026-06-05 v3.223 (Khushi) — the sub-category chips used to wrap
-            into 6+ rows for big tabs (LIQUOR etc.) and ate the WHOLE screen, so
-            captains could only see 2-3 items and had to scroll forever to add.
-            Cap the chip strip to ~2 rows with its own internal scroll so the
-            ITEM LIST below always gets the rest of the screen. */}
         {tabCategories.length > 1 && (
-          <div style={{ display: "flex", gap: 6, paddingBottom: 8, flexWrap: "wrap", maxHeight: 72, overflowY: "auto" }}>
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, flexWrap: "wrap" }}>
             <button onClick={() => setCategory("")}
               style={{ flexShrink: 0, padding: "6px 12px", borderRadius: 3, fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
                 background: !category ? "transparent" : "transparent",
@@ -2476,14 +2439,6 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     return () => { cancelled = true; clearInterval(id); };
   }, [r.paymentStatus, aggForFallback, r.customerName]);
   const paid = r.paymentStatus === "paid" || !!orphanPay;
-  // 🆕 2026-06-07 (Khushi) — a table booked online with a PREPAID COVER carries
-  // paymentStatus:"paid" from the cover deposit while its FOOD TAB is still OPEN
-  // (the guest keeps self-ordering). `paid` above stays true so the cover-PAID
-  // badge/display is unchanged, but ordering/settlement ACTIONS must key off the
-  // TRUE settlement stamp (markTablePaid writes paymentMode/paidAt) — otherwise
-  // the captain can't ADD ORDER or SETTLE the real food bill. orphanPay (zomato
-  // pre-claim) is still treated as locked, exactly as before.
-  const billSettled = isTableBillSettled(r) || !!orphanPay;
   // V3 2026-05-10 — `voided` reflects a Manager-PIN-gated bill void (customer
   // refused/walked out/etc). When true: hide payment + edit actions, show a
   // loud red badge, and only allow Release Table (which archives + clears).
@@ -2724,7 +2679,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     if (preparingRounds > 0) {
       if (!confirm(`⚠️ ${preparingRounds} round(s) still PREPARING in kitchen!\n\nRelease anyway? Kitchen orders will be lost.`)) return;
     }
-    const hasUnpaid = !billSettled && tabTotal > 0;
+    const hasUnpaid = !paid && tabTotal > 0;
     const msg = hasUnpaid
       ? `⚠️ UNPAID TAB: ₹${tabTotal}\n\nRelease without payment?`
       : `Release ${r.tableId} for new guests?`;
@@ -2763,17 +2718,16 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
     const subtotal = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
     const aggName = (r as any).aggregator || (r as any).source || "inhouse";
     const discountPct: number = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName) ?? 0;
-    // 🆕 2026-06-08 — canonical single-final-round grand (see Mark-Paid note) so the
-    // PRINTED bill total === the customer wallet === Mark Paid, to the rupee. Print
-    // always applies SC (there is no waiver toggle on the print path).
-    const bd = computeHodBreakdownAdjusted(allItems, discountPct, true);
-    const discountAmt = Math.round(bd.discount);
-    const afterDiscount = subtotal - bd.discount;
-    const scAmt = bd.serviceCharge;
-    const taxAmt = bd.gst;
-    const cgst = bd.cgst;
-    const sgst = bd.sgst;
-    const finalAmount = bd.grandTotal;
+    const discountAmt = Math.round(subtotal * discountPct / 100);
+    const afterDiscount = subtotal - discountAmt;
+    const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
+    const scaledItems = allItems.map((it) => ({ ...it, p: (it.p || 0) * scaleFactor }));
+    const bd = computeHodBreakdown(scaledItems);
+    const scAmt = Math.round(bd.serviceCharge);
+    const taxAmt = Math.round(bd.gst);
+    const cgst = Math.round((taxAmt / 2) * 100) / 100;
+    const sgst = Math.round((taxAmt / 2) * 100) / 100;
+    const finalAmount = afterDiscount + scAmt + taxAmt;
     const prevCount = r.billPrintCount || 0;
     return {
       items: allItems, subtotal, discountPct, discountAmt, afterDiscount,
@@ -3381,52 +3335,20 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           );
         })()}
 
-        {(() => {
-          /* 🔴 2026-06-08 v3.253 (Khushi) — UNIFIED ROUND SEQUENCE.
-             The captain list used to show ONLY the table-doc rounds, numbered by
-             the stored roundNum — which (a) renders out of order / DUPLICATED
-             ("ROUND 3 twice") because every writer computes roundNum off a
-             DIFFERENT array (collisions + gaps), and (b) hides the guest's BAR
-             rounds entirely, so the captain's bill didn't match the customer
-             wallet. We now build ONE chronological list:
-               • TABLE rounds — from r.tabRounds, keep their ORIGINAL array index
-                 (`idx`) so every handler (handleServe / handleMarkServed /
-                 setEditRound) still acts on the correct live round.
-               • BAR rounds — the cover-only rounds (source contains "bar":
-                 customer_self_order_bar / recharge_at_bar / bartender_bar) pulled
-                 from linkedCover.tabRounds. These are already redeemed at the bar,
-                 so they render READ-ONLY (no Print KOT / Edit) with a 🍸 badge.
-             Sort by placedAt (the only reliable order), then RENUMBER the DISPLAY
-             1..N — identical to the customer wallet — so it always reads
-             R1 bar → R2 bar → R3 table → R4 table … with no dup, no gap. */
-          const tableEntries = (r.tabRounds || []).map((rd, idx) => ({ rd, idx, coverOnly: false }));
-          const barEntries = ((linkedCover && Array.isArray(linkedCover.tabRounds)) ? linkedCover.tabRounds : [])
-            .filter((rd: HodTabRound) => rd && typeof rd.source === "string" && rd.source.toLowerCase().indexOf("bar") !== -1)
-            .map((rd: HodTabRound) => ({ rd, idx: -1, coverOnly: true }));
-          const allEntries = [...tableEntries, ...barEntries].sort((a, b) =>
-            String(a.rd.placedAt || "").localeCompare(String(b.rd.placedAt || "")));
-          if (!allEntries.length) {
-            return <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "#6B6B6B" }}>No orders yet</div>;
-          }
-          return (
+        {r.tabRounds && r.tabRounds.length > 0 ? (
           <div style={{ padding: "0 16px 10px" }}>
-            {allEntries.map(({ rd, idx, coverOnly }, dispIdx) => {
+            {r.tabRounds.map((rd, idx) => {
               const isPending = rd.status === "preparing";
               const isActivated = rd.status === "activated";
               const isServed = rd.status === "served";
-              const needsAction = !coverOnly && (isPending || isActivated);
+              const needsAction = isPending || isActivated;
               return (
-                <div key={coverOnly ? `bar-${dispIdx}` : `tbl-${idx}`} style={{ border: "2px solid #000", borderRadius: 12, padding: 14, marginTop: dispIdx === 0 ? 0 : 10, background: needsAction ? "#FBF3D6" : "#fff", ...((isServed || coverOnly) ? { opacity: 0.92 } : {}) }}>
+                <div key={idx} style={{ border: "2px solid #000", borderRadius: 12, padding: 14, marginTop: idx === 0 ? 0 : 10, background: needsAction ? "#FBF3D6" : "#fff", ...(isServed ? { opacity: 0.92 } : {}) }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
-                    <span style={{ fontSize: 17, fontWeight: 900, color: "#000", letterSpacing: .6, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      ● ROUND {dispIdx + 1}
-                      {coverOnly && (
-                        <span style={{ fontSize: 10, fontWeight: 900, padding: "2px 7px", borderRadius: 6, background: "#A855F7", color: "#fff", letterSpacing: .3, textTransform: "uppercase" }}>🍸 AT BAR</span>
-                      )}
-                    </span>
+                    <span style={{ fontSize: 17, fontWeight: 900, color: "#000", letterSpacing: .6, textTransform: "uppercase" }}>● ROUND {rd.roundNum}</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 14, fontWeight: 800, color: coverOnly ? "#23A094" : isPending ? "#000" : isActivated ? "#60A5FA" : "#23A094", letterSpacing: .3 }}>
-                        {coverOnly ? "✅ REDEEMED" : isPending ? "🔴 PREPARING" : isActivated ? "🔵 READY TO SERVE" : "✅ SERVED"}
+                      <span style={{ fontSize: 14, fontWeight: 800, color: isPending ? "#000" : isActivated ? "#60A5FA" : "#23A094", letterSpacing: .3 }}>
+                        {isPending ? "🔴 PREPARING" : isActivated ? "🔵 READY TO SERVE" : "✅ SERVED"}
                       </span>
                       {needsAction && (
                         // 🔴 2026-05-13 — Khushi: pencil icon was too cryptic;
@@ -3470,9 +3392,8 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                         - Print KOT (preparing → activated/Ready to Serve)
                         - Mark Served (activated → served, only when food has
                           actually reached the table)
-                      The wallet now matches reality. Bar rounds are already
-                      redeemed at the bar → no action buttons. */}
-                  {!coverOnly && isPending && (
+                      The wallet now matches reality. */}
+                  {isPending && (
                     <div style={{ marginTop: 10 }}>
                       {/* 🆕 2026-05-20 (Khushi) — blinking GREEN Print KOT.
                           As soon as a round exists in preparing state (customer
@@ -3490,7 +3411,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
                       </button>
                     </div>
                   )}
-                  {!coverOnly && isActivated && (
+                  {isActivated && (
                     <div style={{ marginTop: 8 }}>
                       <button onClick={() => handleMarkServed(idx)} disabled={busy === `served-${idx}`}
                         style={{ width: "100%", padding: 9, borderRadius: 8, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
@@ -3502,10 +3423,11 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               );
             })}
           </div>
-          );
-        })()}
+        ) : (
+          <div style={{ padding: "8px 16px 10px", fontSize: 14, color: "#6B6B6B" }}>No orders yet</div>
+        )}
 
-        {r.billStale && !billSettled && (
+        {r.billStale && !paid && (
           <div style={{ margin: "6px 16px 8px", padding: "10px 12px", borderRadius: 10,
             background: "linear-gradient(135deg, #FFF0EC, #FFF0EC)",
             border: "1px solid #FF5733",
@@ -3517,7 +3439,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
             <span>ITEMS CHANGED SINCE LAST BILL · REPRINT REQUIRED before Settle Bill</span>
           </div>
         )}
-        {(r.billPrintCount || 0) > 0 && !r.billStale && !billSettled && (
+        {(r.billPrintCount || 0) > 0 && !r.billStale && !paid && (
           <div style={{ margin: "6px 16px 8px", padding: "6px 10px", borderRadius: 8,
             background: "#FBF3D6", border: "1px solid #000",
             color: "#000", fontSize: 12, fontWeight: 700, letterSpacing: ".4px" }}>
@@ -3538,7 +3460,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
           {/* 🔴 2026-05-13 — Guest Arrived button removed from modal; it now lives
               inline on the BookingRow itself (one-tap arrival without opening the
               full booking detail). Modal kept clean for ordering / billing actions. */}
-          {!billSettled && (
+          {!paid && (
             <button onClick={() => {
               // 🆕 2026-05-27 v3.68 (Khushi LIVE-NIGHT) — table-assigned gate.
               // Bill-due rows sometimes land in the captain's modal with no
@@ -3566,7 +3488,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               ADD ORDER (gated above), couldn't print KOTs, had to walk to
               door girl. Reuses the existing ReassignTableModal which lists
               available tables across all 3 floors with time-aware occupancy. */}
-          {!billSettled && (
+          {!paid && (
             <button onClick={() => setShowReassign(true)}
               style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9,
                 background: !String(r.tableId || "").trim() ? "#23A094" : "#60A5FA",
@@ -3607,13 +3529,13 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
               </button>
             );
           })()}
-          {!billSettled && !voided && (tabTotal > 0 || billReq) && (
+          {!paid && !voided && (tabTotal > 0 || billReq) && (
             <button onClick={handleOpenMarkPaid}
               style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
               💰 Settle Bill
             </button>
           )}
-          {!billSettled && !voided && (r.billPrintCount || 0) > 0 && (
+          {!paid && !voided && (r.billPrintCount || 0) > 0 && (
             <button onClick={async () => {
               // V3 anti-fraud #A2 — pre-flight cap check; abort early w/ clear msg.
               try { await assertCaptainCanVoid(captainName); }
@@ -3661,10 +3583,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations 
         const subtotal = allItems.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
         const aggForVoid = (r as any).aggregator || (r as any).source || "inhouse";
         const discountPct: number = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggForVoid) ?? 0;
-        // 🆕 2026-06-08 — canonical grand so the VOID slip / leakage figure matches the
-        // paper bill the customer was handed (and the wallet), to the rupee.
-        const bd = computeHodBreakdownAdjusted(allItems, discountPct, true);
-        const billTotal = bd.grandTotal;
+        const discountAmt = Math.round(subtotal * discountPct / 100);
+        const afterDiscount = subtotal - discountAmt;
+        const scaleFactor = subtotal > 0 ? afterDiscount / subtotal : 1;
+        const scaledItems = allItems.map((it) => ({ ...it, p: (it.p || 0) * scaleFactor }));
+        const bd = computeHodBreakdown(scaledItems);
+        const billTotal = afterDiscount + Math.round(bd.serviceCharge) + Math.round(bd.gst);
         // Derive floor for void slip (matches handleThermalBill).
         const tid = (r.tableId || "").toUpperCase();
         let voidFloor: TabletFloor = "first";
@@ -3929,14 +3853,9 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
   const billReq = r.paymentStatus === "bill_requested";
   const paid = r.paymentStatus === "paid";
-  // 🆕 2026-06-07 (Khushi) — prepaid-cover tables carry paymentStatus:"paid" from
-  // the cover deposit while the food tab is still OPEN. `paid` stays for the PAID
-  // badge, but reassign/overlap/occupancy must key off the TRUE settlement stamp
-  // so a still-seated prepaid-cover table isn't treated as free/done.
-  const billSettled = isTableBillSettled(r);
   const voided = (r as any).status === "voided";
   const arrived = !!r.actualArrivalTime;
-  const canReassign = !billSettled && !voided;
+  const canReassign = !paid && !voided;
   // 🔴 2026-05-20 (Khushi) — customer-calling outranks bill_due AND pending
   // for visual priority. Captain must see this from the LIST, not just after
   // opening the card.
@@ -3949,10 +3868,10 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   const activeOnSameTable = (allReservations || []).filter((x) =>
     x.tableId === r.tableId && x._docId !== r._docId &&
     !!x.actualArrivalTime &&
-    !isTableBillSettled(x) &&
+    x.paymentStatus !== "paid" &&
     (x as any).status !== "voided"
   ).length;
-  const hasOverlap = arrived && !billSettled && !voided && activeOnSameTable > 0;
+  const hasOverlap = arrived && !paid && !voided && activeOnSameTable > 0;
 
   const borderColor = calling ? "#FF5733"
     : hasOverlap ? "#FF5733"
@@ -4671,77 +4590,43 @@ function FloorPlanView({
           Without this, taking a phone call for "Karthik on FD13" would leave
           captain wondering where the table went. */}
       {offMapReservations.length > 0 && (
-        <div style={{ marginTop: 12, background: "#F4F4F0", border: "2px solid #000", borderRadius: 12, padding: 12, boxShadow: "3px 3px 0 rgba(0,0,0,0.1)" }}>
-          <div style={{ fontSize: 12, fontWeight: 900, color: "#000", letterSpacing: 0.8, marginBottom: 10, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ background: "#FF90E8", border: "2px solid #000", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 900 }}>{offMapReservations.length}</span>
-            Tables Not On Map — Tap To Open
+        <div style={{ marginTop: 10, background: "#FBF3D6", border: "1px dashed #000", borderRadius: 10, padding: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 900, color: "#000", letterSpacing: 0.6, marginBottom: 6 }}>
+            🪑 {offMapReservations.length} TABLE{offMapReservations.length === 1 ? "" : "S"} NOT ON MAP — TAP TO OPEN
           </div>
-          {/* 🆕 2026-06-08 (Khushi) — off-map list re-laid as full-width Gumroad
-              rows (one table per row, white card + 2px black border + colored
-              left edge) instead of cramped wrap-pills, so the captain can read
-              and locate each table fast. The 3-color priority logic is unchanged:
-                RED    = customer calling, bill requested, OR KOT pending
-                ORANGE = KOT printed, kitchen cooking (activated rounds)
-                GREEN  = served / assigned / no action needed */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {offMapReservations.map(r => {
+              // 🆕 2026-05-20 (Khushi) — proxy / off-map tables now use the
+              // SAME 3-color logic as on-map tables so captain reads the strip
+              // like a priority queue:
+              //   RED    = customer calling, bill requested, OR KOT pending
+              //   ORANGE = KOT printed, kitchen cooking (activated rounds)
+              //   GREEN  = served / assigned / no action needed
               const callOrBill = !!r.customerCallRequest || r.paymentStatus === "bill_requested";
               const preparing = (r.tabRounds || []).some(rd => rd.status === "preparing");
               const activated = (r.tabRounds || []).some(rd => rd.status === "activated");
               let state: "red" | "orange" | "green" = "green";
               if (callOrBill || preparing) state = "red";
               else if (activated) state = "orange";
-              const accent = state === "red" ? "#E11900" : state === "orange" ? "#FF5733" : "#23A094";
+              const ringColor = state === "red" ? "#FF5733" : state === "orange" ? "#F59E0B" : "#23A094";
+              const fillBg = state === "red" ? "#FFF0EC" : state === "orange" ? "#FBF3D6" : "#E6F5F2";
               const allItems = (r.tabRounds || []).flatMap(rd => rd.items || []);
               const tab = allItems.length ? computeHodBreakdown(allItems).grandTotal : 0;
-              let statusLabel = "";
-              if (state === "red" && callOrBill) statusLabel = r.paymentStatus === "bill_requested" ? "BILL REQUESTED" : "CALLING";
-              else if (state === "red") statusLabel = "KOT PENDING";
-              else if (state === "orange") statusLabel = "PREPARING";
-              // 🆕 2026-06-08 (Khushi) — row re-laid: customer NAME is the bold
-              // primary; a clean "NO TABLE" badge (no ⚠️) sits under it (or the
-              // table id when one IS set); the right side is an explicit CTA —
-              // "ASSIGN TABLE" when no table yet, else "OPEN". The urgent status
-              // chip (CALLING / BILL REQUESTED / KOT PENDING / PREPARING) only
-              // shows when there's something to act on (green/idle hides it so it
-              // never contradicts the NO TABLE badge). Priority dot + left edge +
-              // flash are unchanged.
-              const ctaLabel = r.tableId ? "OPEN ›" : "ASSIGN TABLE ›";
+              let tail = "";
+              if (state === "red" && callOrBill) tail = r.paymentStatus === "bill_requested" ? " · BILL" : " · CALLING";
+              else if (state === "red") tail = " · KOT PENDING";
+              else if (state === "orange" && tab > 0) tail = ` · ₹${tab}`;
+              else if (state === "green" && tab > 0) tail = ` · ₹${tab}`;
+              else if (state === "green") tail = " · A";
               return (
                 <button key={r._docId} onClick={() => onSelectReservation(r._docId)}
                   className={state !== "green" ? "hod-flash" : undefined}
                   style={{
-                    display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
-                    background: "#fff", border: "2px solid #000", borderLeft: `6px solid ${accent}`,
-                    borderRadius: 8, padding: "10px 12px", color: "#000", cursor: "pointer",
-                    boxShadow: "2px 2px 0 rgba(0,0,0,0.1)",
+                    background: fillBg, border: `1.5px solid ${ringColor}`,
+                    borderRadius: 8, padding: "6px 10px", color: "#000", fontSize: 12, fontWeight: 800, cursor: "pointer",
+                    boxShadow: "none",
                   }}>
-                  <span style={{ width: 11, height: 11, borderRadius: "50%", background: accent, border: "1.5px solid #000", flexShrink: 0 }} />
-                  <span style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, flex: 1 }}>
-                    <span style={{ fontSize: 14, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {r.customerName || "Guest"}
-                    </span>
-                    <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      {r.tableId ? (
-                        <span style={{ fontSize: 10, fontWeight: 900, color: "#0B6B5E", background: "#D7F2EC", border: "1.5px solid #23A094", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
-                          {r.tableId}
-                        </span>
-                      ) : (
-                        <span style={{ fontSize: 10, fontWeight: 900, color: "#B91C1C", background: "#FFF1F0", border: "1.5px solid #E11900", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
-                          No Table
-                        </span>
-                      )}
-                      {state !== "green" && (
-                        <span style={{ fontSize: 9.5, fontWeight: 900, color: "#fff", background: accent, border: "1.5px solid #000", borderRadius: 5, padding: "2px 6px", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-                          {statusLabel}
-                        </span>
-                      )}
-                      {tab > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: "#000" }}>₹{tab}</span>}
-                    </span>
-                  </span>
-                  <span style={{ fontSize: 11, fontWeight: 900, color: "#000", background: "#FF90E8", border: "2px solid #000", borderRadius: 7, padding: "8px 12px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap", flexShrink: 0, boxShadow: "2px 2px 0 rgba(0,0,0,0.18)" }}>
-                    {ctaLabel}
-                  </span>
+                  {r.tableId ? r.tableId : "⚠️ NO TABLE"} · {r.customerName || "Guest"}{tail}
                 </button>
               );
             })}
@@ -4753,12 +4638,7 @@ function FloorPlanView({
 }
 
 function CaptainDashboard({ captainName }: { captainName: string }) {
-  // 🆕 2026-06-08 — default to the OPERATIONAL NIGHT (rolls 7AM IST), NOT the
-  // UTC/calendar date. Just after midnight the calendar date is already the next
-  // day while the night is still the previous date; defaulting to UTC made the
-  // captain miss tables seated after midnight (they file under the operational
-  // night, same as the cover/wallet). getOperationalNightStr keeps all three in sync.
-  const [date, setDate] = useState(() => getOperationalNightStr());
+  const [date, setDate] = useState(() => new Date().toISOString().split("T")[0]);
   // 🆕 2026-05-20 (Khushi) — floor filter retired; the new FloorPlanView has
   // 3 floor tabs of its own. Kept as "" so existing filter logic below is a no-op.
   const floor = "";
@@ -4797,14 +4677,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     } catch { return false; }
   });
   const tabletFloor = getTabletFloor();
-  // 🚫 2026-06-06 (Khushi) — FOCUS MODE DISABLED. It was locking/blurring the
-  // first-floor + Dining tables until a refresh. Forcing focusFloorKey to null
-  // neutralises ALL focus-mode behaviour (the table lock at the floor map, the
-  // auto-floor-snap, and the initial-floor pick) in one place while leaving the
-  // toggle/state plumbing intact so it can be reintroduced cleanly later.
-  const focusFloorKey: FloorKey | null = null;
-  // (was: (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null)
-  void tabletFloor;
+  const focusFloorKey: FloorKey | null = (focusMode && tabletFloor) ? TABLET_FLOOR_TO_FLOORKEY[tabletFloor] : null;
   // 🆕 2026-05-26 v3.10 (Khushi req) — Manager PIN gate on turning Focus OFF.
   // Reason: without it, a captain who finds focus mode "annoying" can quietly
   // toggle it off all night and we lose the perf win without anyone knowing.
@@ -4981,8 +4854,6 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // dedicated TAB above the floor selector. Tab pulses red when pending > 0.
   // Click → fullscreen modal with the same row + ACKNOWLEDGE UI we already had.
   const [showTableQrModal, setShowTableQrModal] = useState(false);
-  // 🆕 2026-06-07 (Khushi) — LIVE REPORTS modal toggle (Captain parity).
-  const [reportsOpen, setReportsOpen] = useState(false);
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
   // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
   // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
@@ -5079,23 +4950,6 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           design as the previous floating banner — just bigger and accessed
           on-demand via the tab pill so it doesn't permanently eat real estate.
           Captain still gets the chime + 8s alert badge on new rows. */}
-      {/* 🆕 2026-06-07 (Khushi) — CAPTAIN LIVE REPORTS (fullscreen modal).
-          Renders the same Boss-mode LiveReports component (table activity by
-          floor) so the captain sees identical, architect-passed numbers. The
-          component mounts here only while open → its Firestore subscriptions
-          run only while the modal is open (cost-safe). */}
-      {reportsOpen && (
-        <div style={{ position: "fixed", inset: 0, background: "#F4F4F0", zIndex: 100010, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
-          <div style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", background: "#fff", borderBottom: "2px solid #000" }}>
-            <div style={{ fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 0.4, fontFamily: "'Space Grotesk',sans-serif" }}>🪩 CAPTAIN · LIVE REPORTS</div>
-            <button onClick={() => setReportsOpen(false)}
-              style={{ flexShrink: 0, width: 40, height: 40, borderRadius: 10, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 22, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>×</button>
-          </div>
-          <div style={{ padding: 16 }}>
-            <LiveReports />
-          </div>
-        </div>
-      )}
       {showTableQrModal && (
         <div onClick={() => setShowTableQrModal(false)} style={{
           position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.55)",
@@ -5187,15 +5041,9 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       </div>
 
-      <div style={{ padding: "10px 16px", background: "#fff", borderBottom: "2px solid #000", display: "flex", gap: 8, alignItems: "center" }}>
+      <div style={{ padding: "10px 16px", background: "#fff", borderBottom: "2px solid #000" }}>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
-          style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
-        {/* 🆕 2026-06-07 (Khushi) — LIVE REPORTS button (parity with Bar / Door). */}
-        <button onClick={() => setReportsOpen(true)}
-          title="Live Reports — tonight's table numbers by floor"
-          style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 8, background: "#000", border: "1px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
-          📊 LIVE REPORTS
-        </button>
+          style={{ width: "100%", boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
       </div>
 
       {/* 🍳 2026-05-21 (Khushi) — KPI tiles bumped from 4 → 5 to add FOOD READY
