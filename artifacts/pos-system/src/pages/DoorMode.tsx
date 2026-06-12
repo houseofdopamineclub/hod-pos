@@ -6637,6 +6637,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   const [tablesFocusDocId, setTablesFocusDocId] = useState<string | null>(null);
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("all");
+  const [allPickerOpen, setAllPickerOpen] = useState(false);
 
   // Persist agent name as door staff in sessionStorage so check-ins pick it up too
   useEffect(() => {
@@ -6661,9 +6662,14 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     ? ""
     : (events.find((e) => e.id === selectedEventId)?.date || "");
 
-  // Auto-select tonight's event if exactly one
+  // Auto-select tonight's event if exactly one — only on first load, not on
+  // every Firestore refresh, so user can explicitly click ALL to see the picker.
+  const hasAutoSelected = useRef(false);
   useEffect(() => {
-    if (selectedEventId === "all" && tonight.length === 1) setSelectedEventId(tonight[0].id);
+    if (!hasAutoSelected.current && selectedEventId === "all" && tonight.length === 1) {
+      setSelectedEventId(tonight[0].id);
+      hasAutoSelected.current = true;
+    }
     // If selected event no longer in chip list (e.g. data refreshed), reset to all
     if (selectedEventId !== "all" && eventChips.length && !eventChips.find((e) => e.id === selectedEventId)) {
       setSelectedEventId("all");
@@ -7126,13 +7132,17 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, fontWeight: 900, color: "#000", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 8, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>EVENT</div>
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
-              <button onClick={() => setSelectedEventId("all")}
+              <button onClick={() => {
+                  if (selectedEventId !== "all") { setSelectedEventId("all"); setAllPickerOpen(false); }
+                  else { setAllPickerOpen(p => !p); }
+                }}
                 style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
                   textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
                   background: selectedEventId === "all" ? "#FF90E8" : "#fff",
-                  border: "2px solid #000",
-                  color: selectedEventId === "all" ? "#000" : "#6B6B6B" }}>
-                ALL
+                  border: selectedEventId === "all" && allPickerOpen ? "2px solid #FF90E8" : "2px solid #000",
+                  color: selectedEventId === "all" ? "#000" : "#6B6B6B",
+                  display: "flex", alignItems: "center", gap: 5 }}>
+                ALL <span style={{ fontSize: 10, opacity: 0.7 }}>{allPickerOpen ? "▴" : "▾"}</span>
               </button>
               {eventChips.map((ev) => {
                 const on = selectedEventId === ev.id;
@@ -7141,7 +7151,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                 const dateLabel = isTonight ? "Tonight" : (d ? d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }) : "");
                 const title = (ev.title || "Event").length > 18 ? (ev.title || "").slice(0, 18) + "…" : (ev.title || "Event");
                 return (
-                  <button key={ev.id} onClick={() => setSelectedEventId(ev.id)}
+                  <button key={ev.id} onClick={() => { setSelectedEventId(ev.id); setAllPickerOpen(false); }}
                     style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
                       textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
                       background: on ? "#FF90E8" : "#fff",
@@ -7155,6 +7165,39 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           </div>
         )}
 
+        {selectedEventId === "all" && allPickerOpen && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+            {eventChips.length === 0 && (
+              <div style={{ padding: 14, borderRadius: 8, background: "#fff", border: "2px dashed #000", fontSize: 13, color: "#6B6B6B", textAlign: "center" }}>
+                No events tonight.
+              </div>
+            )}
+            {eventChips.map((ev) => {
+              const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+              const isTonight = ev.date === todayStr;
+              const d = ev.date ? new Date(ev.date + "T00:00:00") : null;
+              const dateLabel = isTonight ? "TONIGHT" : (d ? d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() : "");
+              return (
+                <button key={ev.id}
+                  onClick={() => { setSelectedEventId(ev.id); setAllPickerOpen(false); }}
+                  style={{ textAlign: "left", padding: "14px 16px", borderRadius: 8, background: "#fff",
+                    border: "2px solid #000", color: "#000", cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: 0.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {ev.title || "Event"}
+                  </span>
+                  <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 6,
+                    background: isTonight ? "#FF90E8" : "#F4F4F0",
+                    border: "2px solid #000", letterSpacing: 0.8, textTransform: "uppercase", color: "#000" }}>
+                    {dateLabel}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {selectedEventId !== "all" && (<>
         {/* 🆕 2026-05-26 v3.25 (Khushi) — bigger dashboard fonts (v3.22 pattern).
             CONSTRAINT: 7 chips on a 331px Android phone = ~43px each, so the
             text labels stay at 10px (any bigger and GUEST LIST / ENTRY PASS
@@ -7191,6 +7234,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           tableResByDate={tableResByDate}
           query={searchInput}
           eventId={selectedEventId}
+          eventChips={eventChips}
           onBookingClick={(b) => setScanDetail(b)}
           onTableClick={(r, isCorp) => { setTab(isCorp ? "corporate" : "tables"); setTablesFocusDocId(r._docId!); }}
         />}
@@ -7200,6 +7244,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
+        </>)}
       </div>
 
       {/* 🔴 2026-05-20 (Khushi LIVE-NIGHT) — auto-match popup mounted at
@@ -7284,9 +7329,9 @@ type AllBookingsTabProps = {
 };
 
 function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId, eventChips, onBookingClick, onTableClick }: AllBookingsTabProps) {
-  const [pickedId, setPickedId] = React.useState<string>("");
+  const [pickedId, setPickedId] = useState<string>("");
   // Reset local pick when parent switches to a specific event
-  React.useEffect(() => { if (eventId !== "all") setPickedId(""); }, [eventId]);
+  useEffect(() => { if (eventId !== "all") setPickedId(""); }, [eventId]);
   const effectiveEventId = eventId === "all" ? pickedId : eventId;
 
   const todayDates = TODAY_DATE_SET();
