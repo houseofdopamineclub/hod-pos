@@ -5754,12 +5754,12 @@ function UnifiedWalkInModal({
         savedRef = r.ref;
       } else {
         const r = await createWalkInTicketBooking({
-          kind: "cover",
+          kind: kind === "onlyentry" ? "onlyentry" : kind === "group" ? "group" : "cover",
           name, email, phone,
           guests,
           total,            // cover + entry = total collected at the door
           tier: "",
-          type: "cover",
+          type: kind === "onlyentry" ? "onlyentry" : "cover",
           eventId, eventTitle,
           notes: noteStr,
           staffName: agentName,
@@ -5768,13 +5768,15 @@ function UnifiedWalkInModal({
           paymentSplit: payMethod === "split"
             ? { cash: splitCash, upi: splitUpi, card: splitCard }
             : undefined,
+          ...(kind === "onlyentry" ? { entryType: "entryonly", qty: 1 } : {}),
         });
         savedRef = r.ref;
       }
 
       // ── Activate the wallet. Balance = COVER ONLY. Two write paths because
       // activateCoverForBooking() rejects amount < 1 (₹0 → ensureZero stub).
-      const walletAmount = kind === "cover" ? coverAmount : 0;
+      // onlyentry may also carry an optional cover wallet (coverAmount > 0).
+      const walletAmount = (kind === "cover" || kind === "onlyentry") ? coverAmount : 0;
       if (walletAmount > 0) {
         const booking: HodBooking = {
           id: savedRef, ref: savedRef, name: name.trim(), phone: cleanPhone, email,
@@ -5829,9 +5831,13 @@ function UnifiedWalkInModal({
         }
       }
 
-      setDone({ ref: savedRef, phone: waPhone, isCover: kind === "cover", total, coverAmount: walletAmount });
+      setDone({ ref: savedRef, phone: waPhone, isCover: kind === "cover" || (kind === "onlyentry" && walletAmount > 0), total, coverAmount: walletAmount });
       setActionMsg(kind === "guestlist"
         ? `✅ GUEST LIST CONFIRMED · ₹0 WALLET SENT${linkMsg}`
+        : kind === "onlyentry"
+        ? walletAmount > 0
+          ? `✅ ENTRY ONLY + COVER WALLET ₹${okAmount.toLocaleString("en-IN")} ACTIVATED · ₹${total.toLocaleString("en-IN")} COLLECTED${linkMsg}`
+          : `✅ ENTRY ONLY · ₹${total.toLocaleString("en-IN")} COLLECTED${linkMsg}`
         : `✅ COVER ACTIVATION OF ₹${okAmount.toLocaleString("en-IN")} IS SUCCESSFUL${linkMsg}`);
 
       // ── Notify the customer. WhatsApp is AWAITED so we can auto-show the QR
@@ -5854,9 +5860,13 @@ function UnifiedWalkInModal({
         try {
           const totalStr = walletAmount > 0
             ? `₹${walletAmount.toLocaleString("en-IN")} Paid`
-            : "FREE";
+            : total > 0 ? `₹${total.toLocaleString("en-IN")} Paid` : "FREE";
           const entryType = kind === "guestlist"
             ? "Guest List · Free Entry · ₹0 Wallet"
+            : kind === "onlyentry"
+            ? walletAmount > 0
+              ? `Entry Only · ₹${entryTicket.toLocaleString("en-IN")} door fee + Cover Wallet ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`
+              : `Entry Only · ₹${total.toLocaleString("en-IN")} (Non-redeemable door fee · wallet ₹0)`
             : `Cover · ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`;
           fetch(EMAIL_CF_URL, {
             method: "POST",
@@ -6159,17 +6169,21 @@ function UnifiedWalkInModal({
           </div>
         )}
 
-        {/* 🆕 2026-06-02 (Khushi) — TWO TABS ONLY: GUEST LIST · BUY COVERS.
+        {/* THREE TABS: GUEST LIST · ENTRY ONLY · BUY COVERS.
             Hidden in COVER+TABLE flow (locked to "cover" by design). */}
         {!linkToTable && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-          <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist")}>
-            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: "#000" }}>GUEST LIST</div>
-            <div style={{ fontSize: 9.5, marginTop: 4, color: "#23A094", fontWeight: 800, letterSpacing: .8 }}>FREE ENTRY · ₹0 WALLET</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>GUEST LIST</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#23A094", fontWeight: 800, letterSpacing: .5 }}>FREE ENTRY</div>
           </button>
-          <button onClick={() => setKind("cover")} style={catCard(kind === "cover")}>
-            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: "#000" }}>BUY COVERS</div>
-            <div style={{ fontSize: 9.5, marginTop: 4, color: "#3D3D3D", fontWeight: 700, letterSpacing: .8 }}>REDEEMABLE F&amp;B</div>
+          <button onClick={() => setKind("onlyentry")} style={catCard(kind === "onlyentry", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>ENTRY ONLY</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#FF5733", fontWeight: 800, letterSpacing: .5 }}>NON-REDEEMABLE</div>
+          </button>
+          <button onClick={() => setKind("cover")} style={catCard(kind === "cover", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>BUY COVERS</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#3D3D3D", fontWeight: 700, letterSpacing: .5 }}>REDEEMABLE F&amp;B</div>
           </button>
         </div>
         )}
@@ -6214,18 +6228,32 @@ function UnifiedWalkInModal({
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" type="email" style={inp} />
         </div>
 
-        {/* ── COVER AMOUNT (redeemable wallet) — BUY COVERS tab only ───────── */}
+        {/* ── ENTRY FEE — dedicated input for ENTRY ONLY kind ────────────────── */}
+        {kind === "onlyentry" && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
+              ENTRY FEE (₹) <span style={{ color: "#FF5733", fontWeight: 800 }}>· NOT REDEEMABLE ON F&amp;B</span>
+            </div>
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
+              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder="e.g. 599" style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
+            <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
+              Door entry charge only. This amount is NOT added to the wallet — it cannot be used on F&amp;B.
+            </div>
+          </div>
+        )}
+
+        {/* ── ENTRY TICKET (non-redeemable door fee, ₹0 default) — cover tab ─ */}
         {kind === "cover" && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
-              COVER AMOUNT (₹) <span style={{ color: "#23A094", fontWeight: 800 }}>· REDEEMABLE WALLET</span>
+              ENTRY TICKET (₹) <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· NON-REDEEMABLE · OPTIONAL</span>
             </div>
-            <input type="text" inputMode="numeric" pattern="[0-9]*" value={coverAmountStr}
-              onChange={(e) => setCoverAmountStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
-              placeholder="Type any amount, e.g. 1000"
-              style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
+              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder="0" style={inp} />
             <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
-              100% redeemable on food &amp; drinks. Goes straight into the customer's wallet.
+              A flat door fee that is NOT added to the wallet. Leave 0 if there's no entry charge.
             </div>
           </div>
         )}
@@ -6246,17 +6274,23 @@ function UnifiedWalkInModal({
           </div>
         </div>
 
-        {/* ── ENTRY TICKET (non-redeemable door fee, ₹0 default) — cover tab ─ */}
-        {kind === "cover" && (
+        {/* ── COVER AMOUNT (redeemable wallet) — BUY COVERS + ENTRY ONLY tabs ─ */}
+        {(kind === "cover" || kind === "onlyentry") && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
-              ENTRY TICKET (₹) <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· NON-REDEEMABLE · OPTIONAL</span>
+              COVER AMOUNT (₹){" "}
+              {kind === "onlyentry"
+                ? <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· OPTIONAL · REDEEMABLE WALLET</span>
+                : <span style={{ color: "#23A094", fontWeight: 800 }}>· REDEEMABLE WALLET</span>}
             </div>
-            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
-              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
-              placeholder="0" style={inp} />
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={coverAmountStr}
+              onChange={(e) => setCoverAmountStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder={kind === "onlyentry" ? "0 (leave blank for entry-only)" : "Type any amount, e.g. 1000"}
+              style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
             <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
-              A flat door fee that is NOT added to the wallet. Leave 0 if there's no entry charge.
+              {kind === "onlyentry"
+                ? "Optional: add a redeemable wallet on top of the entry fee. Leave 0 if entry-only."
+                : "100% redeemable on food & drinks. Goes straight into the customer's wallet."}
             </div>
           </div>
         )}
