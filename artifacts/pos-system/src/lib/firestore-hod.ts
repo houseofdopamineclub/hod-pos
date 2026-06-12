@@ -324,6 +324,13 @@ export interface HodTableReservation {
   discountPercent?: number;
   discountAmount?: number;
   taxAmount?: number;
+  /** ₹ service charge actually applied at settlement (markTablePaid). May be
+   *  absent on older/unsettled docs. */
+  serviceChargeAmount?: number;
+  /** FALSE only when a manager-PIN SC waiver was applied at settlement; TRUE/
+   *  undefined otherwise. Lets read-only views (e.g. TABLE TRANSACTIONS) honour
+   *  the waiver instead of recomputing SC at the standard rate. */
+  serviceChargeApplied?: boolean;
   // ── Bill-print audit / anti-fraud (added in print-server v3.5 hardening) ──
   /** How many times a thermal bill has been printed for this reservation. */
   billPrintCount?: number;
@@ -947,7 +954,7 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     if (sum !== amount) throw new Error(`Split total ₹${sum} must equal cover amount ₹${amount}`);
   }
   if (!amount || amount < 1) throw new Error("Enter a valid cover amount");
-  if (amount > 5000) throw new Error("Cover amount cannot exceed ₹5,000");
+  if (amount > 50000) throw new Error("Cover amount cannot exceed ₹50,000");
   // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — PREFER booking.ref (HOD-XXX)
   // over booking.id (firestore auto-uid). Customer site saves bookings with
   // id=uid() and ref='HOD-XXX', and ALWAYS keys cover docs by ref. Wallet
@@ -1419,7 +1426,7 @@ export async function setCoverBillDiscount(
 }
 
 export async function editCoverAmount(coverId: string, newAmount: number, staffName: string): Promise<void> {
-  if (newAmount > 5000) throw new Error("Cover amount cannot exceed ₹5,000");
+  if (newAmount > 50000) throw new Error("Cover amount cannot exceed ₹50,000");
   const ref = doc(db, COVERS_COL, coverId);
   let _coverRef = ""; let _newBalAfter = 0;
   await runTransaction(db, async (txn) => {

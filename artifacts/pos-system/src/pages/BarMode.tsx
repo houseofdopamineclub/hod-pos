@@ -685,7 +685,15 @@ function WalletOverlay({ cover, staffName, onClose }: {
     // raw typed amount. ₹300 + 20% discount → ₹240 collected & credited.
     const amt = rcNet;
     if (amt < 1) { showToast("Discount brings the recharge to ₹0"); return; }
-    if (amt > 10000) { showToast("Max recharge is ₹10,000"); return; }
+    // 🆕 2026-06-12 (Khushi BUG) — a real cover bill can be ₹24-26k+, but the old
+    // ₹10,000 per-recharge cap silently toasted+returned on a 26k recharge → it
+    // looked "frozen" and forced the bartender to chunk it under 10k (5000+8000+
+    // 2000+…), which then triggered the deficit auto-prefill to top up tiny
+    // rounding residuals (84, 54, 2, 2). Raise the cap to ₹1,00,000 so a full bill
+    // recharges in ONE tap. Keep a typo-guard confirm above ₹30,000 so a fat-finger
+    // (e.g. 5000→50000) can't credit a wallet for cash never collected.
+    if (amt > 100000) { showToast("Max recharge is ₹1,00,000 — split a larger amount"); return; }
+    if (amt > 30000 && !confirm(`Recharge ₹${amt.toLocaleString("en-IN")} — confirm you've collected this full amount from the customer?`)) return;
     let splitArg: { cash?: number; upi?: number; card?: number } | undefined;
     if (rcMethod === "split") {
       const c = parseInt(rcSplit.cash) || 0;
@@ -2571,6 +2579,25 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // 🚶 2026-05-25 (Khushi GO-LIVE) — NEW WALK-IN button busy flag.
   const [walkinBusy, setWalkinBusy] = useState(false);
 
+  // 🆕 2026-06-12 v3.259 (Khushi) — RECENT TRANSACTIONS panel below the search
+  // box. Collapsed by default; tapping the header reveals tonight's most-recent
+  // 10 wallet transactions, with a "View full transactions" toggle (all of the
+  // night) and a CSV download. Each row expands into a bill-style breakdown
+  // (items ordered · amount redeemed · available balance). Scoped to the current
+  // operational night (rolls at 7 AM IST) so it auto-clears for the next party.
+  const [txOpen, setTxOpen] = useState(false);
+  const [txFull, setTxFull] = useState(false);
+  const [txCovers, setTxCovers] = useState<HodCover[]>([]);
+  const [txExpanded, setTxExpanded] = useState<Record<string, boolean>>({});
+  // Only subscribe WHILE the panel is open — the covers feed fans out reads per
+  // cover, so a permanent listener would tax the bar tablet all night. Collapsed
+  // = zero read cost. (Matches the project's read-cost discipline.)
+  useEffect(() => {
+    if (!txOpen) return;
+    const unsub = subscribeToCoversForNight(getOperationalNightStr(), setTxCovers);
+    return () => unsub();
+  }, [txOpen]);
+
   // 🍽 2026-05-25 v2 (Khushi safety net) — DASHBOARD-LEVEL food-ready listener.
   // Strip inside an open wallet only fires when bartender is LOOKING at that
   // cover. If wallet is closed → bartender misses it. This badge sits in the
@@ -2690,6 +2717,78 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
       if (covers.length === 0 && guests.length === 0) showToast("No results found");
     } catch { showToast("Search failed"); }
     setSearching(false);
+  };
+
+  // 🆕 2026-06-12 v3.259 (Khushi) — RECENT TRANSACTIONS data shaping.
+  // One row per cover (customer) that had ANY wallet activity tonight: orders,
+  // redemptions or recharges. Billed = ₹ of all rounds; Redeemed = coverUsed
+  // (₹ pulled from the wallet); Balance = coverBalance (₹ left). Sorted by the
+  // customer's MOST-RECENT activity so the newest transaction is always on top.
+  const _txTime = (ms: number) =>
+    ms ? new Date(ms).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true }) : "—";
+  const txRows = txCovers
+    .map((cv) => {
+      const rounds = cv.tabRounds || [];
+      const billed = rounds.reduce((s, r) => s + (r.roundTotal || 0), 0);
+      const redeemed = cv.coverUsed || 0;
+      const balance = cv.coverBalance || 0;
+      const topUp = cv.topUpTotal || 0;
+      // 🆕 2026-06-12 v3.261 (Khushi) — show the tax/SC/discount breakdown, not
+      // just the item lines. The round stores only items + roundTotal (the REAL
+      // charged grand total), so we re-derive subtotal/SC/GST from each round's
+      // items via the app's single source of truth (computeHodBreakdown — same
+      // food/drink/alc tax rules as the printed bill) and accumulate PER ROUND.
+      //
+      // Why per-round (not one aggregate breakdown): each round was charged with
+      // its own whole-rupee round-off, and a round with NO discount & SC-on has
+      // roundTotal === computeHodBreakdown(items).grandTotal to the rupee. So a
+      // per-round gap is ZERO for normal bills — no spurious "discount" from
+      // aggregate-level rounding drift. The gap is non-zero only when a real
+      // reduction was applied (bartender discount %, or an SC waiver). It is the
+      // amount actually taken off the bill; reconciles exactly:
+      //   Σ subtotal + Σ SC + Σ tax − Σ discount === billed.
+      let subtotal = 0, serviceCharge = 0, tax = 0, discount = 0;
+      for (const rd of rounds) {
+        const bd = computeHodBreakdown(rd.items || []);
+        subtotal += bd.subtotal;
+        serviceCharge += bd.serviceCharge;
+        tax += bd.gst;
+        discount += Math.max(0, Math.round(bd.grandTotal) - Math.round(rd.roundTotal || 0));
+      }
+      let ms = 0;
+      const bump = (iso?: string) => { if (iso) { const t = new Date(iso).getTime(); if (!isNaN(t) && t > ms) ms = t; } };
+      bump(cv.activatedAt); bump(cv.lastActivatedAt); bump(cv.actualArrivalTime); bump(cv.lastWalletBillPrintedAt);
+      rounds.forEach((r) => bump(r.placedAt));
+      (cv.transactions || []).forEach((t) => bump(t.timestamp));
+      (cv.walletBillPrintLog || []).forEach((b) => bump(b.at));
+      return { cv, rounds, billed, redeemed, balance, topUp, ms, subtotal, serviceCharge, tax, discount };
+    })
+    // 🆕 2026-06-12 v3.260 (Khushi) — TABLE bookings are EXCLUDED. This panel is
+    // for bar-served wallets only: bar covers, guestlist and entry covers. Table
+    // bookings are settled by the captain (Captain Mode / LIVE REPORTS), so they
+    // must NOT appear here. `isTableBooking` flags any HODTAB / TBL- / AGG- /
+    // walk-in-table cover, including a table guest who tapped "I'M AT THE BAR".
+    .filter((r) => !r.cv.isTableBooking)
+    .filter((r) => r.billed > 0 || r.redeemed > 0 || r.topUp > 0 || r.rounds.length > 0 || (r.cv.transactions || []).length > 0)
+    .sort((a, b) => b.ms - a.ms);
+  const txShown = txFull ? txRows : txRows.slice(0, 10);
+  const downloadTxCsv = () => {
+    const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const night = getOperationalNightStr();
+    const L: string[] = [];
+    L.push(`HOD Bar Transactions,${esc(night)}`);
+    L.push("");
+    L.push(["Date & Time", "Customer", "Phone", "Ref", "Subtotal Rs", "Discount Rs", "Service Charge Rs", "GST Tax Rs", "Amount Billed Rs", "Amount Redeemed Rs", "Available Balance Rs", "Items Ordered"].join(","));
+    for (const r of txRows) {
+      const items = r.rounds.flatMap((rd) => (rd.items || []).map((it) => `${it.qty}x ${it.n}`)).join("; ");
+      L.push([_txTime(r.ms), r.cv.name || "", r.cv.phone || "", r.cv.ref || "", Math.round(r.subtotal), Math.round(r.discount), Math.round(r.serviceCharge), Math.round(r.tax), Math.round(r.billed), Math.round(r.redeemed), Math.round(r.balance), items].map(esc).join(","));
+    }
+    const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `HOD_BarTransactions_${night}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -2887,6 +2986,123 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             style={{ padding: "12px 18px", borderRadius: 10, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
             {searching ? "..." : "Search"}
           </button>
+        </div>
+
+        {/* 🆕 2026-06-12 v3.259 (Khushi) — RECENT TRANSACTIONS panel. Sits in the
+            white area below the search box. Collapsed by default (zero read cost);
+            tap the header to load tonight's most-recent 10 wallet transactions.
+            "View full transactions" shows the whole night; the ⬇ button exports
+            CSV. Each row taps open into a bill-style breakdown. Auto-clears at the
+            7 AM operational-night rollover. */}
+        <div style={{ marginBottom: 16, border: "2px solid #000", borderRadius: 12, overflow: "hidden" }}>
+          <button onClick={() => setTxOpen((v) => !v)}
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: txOpen ? "#000" : "#F4F4F0", border: "none", cursor: "pointer" }}>
+            <span style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.4, color: txOpen ? "#fff" : "#000" }}>
+              🧾 RECENT TRANSACTIONS
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 800, color: txOpen ? "#FF90E8" : "#6B6B6B" }}>
+              {txOpen ? "▲ HIDE" : "▼ TAP TO VIEW"}
+            </span>
+          </button>
+
+          {txOpen && (
+            <div style={{ padding: 12, background: "#fff" }}>
+              {txRows.length === 0 ? (
+                <div style={{ padding: "18px 8px", textAlign: "center", fontSize: 13, color: "#6B6B6B", fontWeight: 700 }}>
+                  No transactions yet tonight.
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B" }}>
+                      {txFull ? `All ${txRows.length} tonight` : `Showing latest ${Math.min(10, txRows.length)} of ${txRows.length}`}
+                    </div>
+                    <button onClick={downloadTxCsv}
+                      style={{ padding: "7px 12px", borderRadius: 8, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap" }}>
+                      ⬇ Download
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: "#000", background: "#EAF7F5", border: "1.5px solid #000", borderRadius: 8, padding: "9px 11px", marginBottom: 10, lineHeight: 1.5 }}>
+                    🔒 VIEW ONLY — the real numbers can't be changed here.
+                  </div>
+
+                  {txShown.map((r) => {
+                    const open = !!txExpanded[r.cv.id];
+                    const items = r.rounds.flatMap((rd) => rd.items || []);
+                    return (
+                      <div key={r.cv.id} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
+                        <button onClick={() => setTxExpanded((m) => ({ ...m, [r.cv.id]: !m[r.cv.id] }))}
+                          style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: open ? "#FDF0C9" : "#fff", border: "none", cursor: "pointer" }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 17, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.cv.name || r.cv.ref}</div>
+                            <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, marginTop: 3 }}>
+                              {r.cv.phone || "—"} · {r.cv.ref}
+                            </div>
+                            <div style={{ fontSize: 13, color: "#6B6B6B", marginTop: 2 }}>{_txTime(r.ms)}</div>
+                          </div>
+                          <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                            <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B", letterSpacing: 0.3 }}>BILLED</div>
+                            <div style={{ fontSize: 22, fontWeight: 900, color: "#000" }}>₹{Math.round(r.billed)}</div>
+                            <div style={{ fontSize: 13, fontWeight: 800, color: "#23A094", marginTop: 2 }}>{open ? "▲" : "▼ details"}</div>
+                          </div>
+                        </button>
+
+                        {open && (
+                          <div style={{ padding: "12px 14px", background: "#F4F4F0", borderTop: "1.5px solid #000" }}>
+                            <div style={{ fontSize: 13, fontWeight: 900, color: "#000", letterSpacing: 0.4, marginBottom: 6 }}>ITEMS ORDERED</div>
+                            {items.length === 0 ? (
+                              <div style={{ fontSize: 14, color: "#6B6B6B", fontWeight: 700 }}>No items — recharge / wallet activity only.</div>
+                            ) : (
+                              <div style={{ marginBottom: 4 }}>
+                                {items.map((it, i) => (
+                                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#000", fontWeight: 700, padding: "3px 0" }}>
+                                    <span>{it.qty}× {it.n}</span>
+                                    <span>₹{Math.round((it.p || 0) * (it.qty || 0))}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed #000" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                                <span>Subtotal</span><span>₹{Math.round(r.subtotal)}</span>
+                              </div>
+                              {r.discount > 0 && (
+                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#C0392B", fontWeight: 700, padding: "3px 0" }}>
+                                  <span>Discount</span><span>−₹{Math.round(r.discount)}</span>
+                                </div>
+                              )}
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                                <span>Service charge (10%)</span><span>₹{Math.round(r.serviceCharge)}</span>
+                              </div>
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                                <span>GST / tax (5%)</span><span>₹{Math.round(r.tax)}</span>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#000", marginTop: 6, paddingTop: 6, borderTop: "1px solid #000" }}>
+                              <span>Amount billed</span><span>₹{Math.round(r.billed)}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#000", marginTop: 4 }}>
+                              <span>Amount redeemed</span><span>₹{Math.round(r.redeemed)}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 900, color: "#23A094", marginTop: 4 }}>
+                              <span>Available balance</span><span>₹{Math.round(r.balance)}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {txRows.length > 10 && (
+                    <button onClick={() => setTxFull((v) => !v)}
+                      style={{ width: "100%", padding: 12, borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", marginTop: 4 }}>
+                      {txFull ? "▲ Show latest 10 only" : `▼ View full transactions (${txRows.length})`}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 🆕 2026-05-25 (Khushi STRATEGY C) — INCOMING CUSTOMER ORDERS tile.
