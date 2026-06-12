@@ -1551,6 +1551,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                       transition: "all .1s" }}>
                     {m.label}
                   </button>
+                ))}
               </div>
             )}
             {splitMode && (
