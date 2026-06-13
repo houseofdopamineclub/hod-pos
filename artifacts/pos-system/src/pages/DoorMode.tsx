@@ -3365,6 +3365,18 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   const [editDate, setEditDate] = useState<string>("");
   const [editPhone, setEditPhone] = useState<string>(""); // 🔴 Khushi 16 May — Zomato parser leaves phone blank.
   const [editBusy, setEditBusy] = useState(false);
+  // 🆕 2026-06-13 (Khushi) — reschedule/save feedback popup. The shared toast
+  // rendered BEHIND the expanded booking card (toast viewport z-100 == card
+  // z-index) and looked off-brand. This is a self-contained Gumroad-style
+  // popup portaled to document.body at a very high z-index so it ALWAYS sits
+  // in front (the card root has backdrop-filter, which would trap a non-portal
+  // fixed child). Auto-dismisses; tap to close.
+  const [editPopup, setEditPopup] = useState<{ kind: "error" | "success"; title: string; body?: string } | null>(null);
+  useEffect(() => {
+    if (!editPopup) return;
+    const t = setTimeout(() => setEditPopup(null), editPopup.kind === "error" ? 5000 : 3500);
+    return () => clearTimeout(t);
+  }, [editPopup]);
   const today = TODAY_STR();
   const calToday = CALENDAR_TODAY_STR();
 
@@ -3779,6 +3791,34 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
 
   return (
     <div>
+      {/* 🆕 2026-06-13 (Khushi) — Gumroad-style save/reschedule popup, portaled
+          to document.body so it's ALWAYS in front of the expanded booking card
+          (the shared toast rendered behind it). Tap the popup / × to dismiss,
+          or it auto-dismisses. Wrapper is pointer-events:none so it never
+          blocks taps on the card behind it. */}
+      {editPopup && createPortal(
+        <div
+          style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 2147483000,
+            display: "flex", justifyContent: "center", padding: 16, pointerEvents: "none" }}>
+          <div onClick={() => setEditPopup(null)}
+            style={{ pointerEvents: "auto", cursor: "pointer", width: "100%", maxWidth: 420, marginTop: 10,
+              background: "#FFFFFF", border: "3px solid #000", borderRadius: 8,
+              boxShadow: "5px 5px 0 #000", overflow: "hidden" }}>
+            <div style={{ height: 8, background: editPopup.kind === "error" ? "#FF4D4D" : "#23A094" }} />
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "14px 16px" }}>
+              <div style={{ fontSize: 22, lineHeight: 1 }}>{editPopup.kind === "error" ? "⛔" : "✅"}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#000", letterSpacing: .3, textTransform: "uppercase" }}>{editPopup.title}</div>
+                {editPopup.body && <div style={{ fontSize: 13, fontWeight: 600, color: "#3D3D3D", marginTop: 3 }}>{editPopup.body}</div>}
+              </div>
+              <button onClick={() => setEditPopup(null)}
+                style={{ background: "#000", color: "#fff", border: "none", borderRadius: 4,
+                  width: 26, height: 26, fontSize: 14, fontWeight: 900, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>×</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
       {/* 🔴 2026-05-16 (Khushi) — mini dashboard. 3 status tiles (tap to filter)
           + per-aggregator strip showing booked-count per source.
           🆕 2026-05-26 v3.25 — bigger fonts (v3.22 pattern). BOOKED/ARRIVED/
@@ -4101,7 +4141,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                       </div>
                       <div style={{ padding: 10, background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
                         <div style={editLabel}>📅 Date (edit)</div>
-                        <input type="date" value={editDate}
+                        <input type="date" value={editDate} min={CALENDAR_TODAY_STR()}
                           onChange={(e) => setEditDate(e.target.value)} style={editInput} />
                       </div>
                       <div style={{ padding: 10, background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
@@ -4140,6 +4180,28 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                         disabled={editBusy}
                         onClick={async () => {
                           if (editBusy) return;
+                          // 🆕 2026-06-13 (Khushi) — block RESCHEDULING into the past.
+                          // The edit DATE/TIME pickers let staff move a booking to an
+                          // earlier date, or (on today) an earlier clock time, which
+                          // then resurfaced as a stale past booking. ONLY validate when
+                          // the date/time was actually CHANGED — a pax/phone-only edit on
+                          // an already-old booking must still be allowed to save.
+                          {
+                            const dateChanged = (editDate || "") !== (r.date || "");
+                            const timeChanged = (editTime || "") !== (r.arrivalTime || "");
+                            const todayStr = CALENDAR_TODAY_STR();
+                            if ((dateChanged || timeChanged) && editDate && editDate < todayStr) {
+                              setEditPopup({ kind: "error", title: "Can't reschedule to the past", body: "Pick today or a future date." });
+                              return;
+                            }
+                            if ((dateChanged || timeChanged) && editDate === todayStr && editTime) {
+                              const m = doorParseClockToMinutes(editTime);
+                              if (m != null && m < doorNowMinutesIST()) {
+                                setEditPopup({ kind: "error", title: "That time has already passed", body: "Pick a time from now onward." });
+                                return;
+                              }
+                            }
+                          }
                           setEditBusy(true);
                           try {
                             await updateReservationDetails(r._docId, {
@@ -4148,9 +4210,9 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                               date: editDate || undefined,
                               phone: phoneTrim || undefined,
                             }, agentName);
-                            toast({ title: "✓ Updated", description: "Pax / time / date / phone saved everywhere (admin · reports · sheets).", duration: 3500 });
+                            setEditPopup({ kind: "success", title: "Updated", body: "Pax / time / date / phone saved everywhere." });
                           } catch (err: any) {
-                            alert("Save failed: " + (err?.message || "Try again or note on paper."));
+                            setEditPopup({ kind: "error", title: "Save failed", body: err?.message || "Try again or note on paper." });
                           }
                           setEditBusy(false);
                         }}
@@ -4528,11 +4590,44 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
     if (t !== "corporate") setCorpTableIds([]);
   };
 
+  // 🆕 2026-06-13 (Khushi) — block PAST-dated bookings. The native <input type=date>
+  // `min` only greys out earlier days in the calendar popup; it does NOT stop a
+  // typed or programmatically-set past date, so a door girl was able to book the
+  // 10th on the 13th. Enforce it here at submit for EVERY create path. Floor =
+  // IST calendar today (same value the input min uses), compared as ISO
+  // YYYY-MM-DD strings (lexicographic === chronological for that format).
+  const pastBookingDateErr = (): string | null => {
+    const floor = CALENDAR_TODAY_STR();
+    return bookingDate && bookingDate < floor
+      ? `Booking date can't be in the past — earliest is ${formatBookingDateNice(floor)}.`
+      : null;
+  };
+
+  // 🆕 2026-06-13 (Khushi) — auto-unlock the customer menu for a table that is
+  // HAPPENING NOW. Creating a table only writes the reservation; the menu stays
+  // LOCKED until staff scan the table & tap ARRIVED (which stamps arrival + the
+  // cover doc). That's correct for an advance booking, but pointless for a guest
+  // standing at the door right now. So unlock at create time ONLY when:
+  //   • the booking is for TODAY (calendar IST) — any future DATE stays locked; and
+  //   • the arrival time is at/around the PRESENT time — "now or already due"
+  //     (arrival minutes-since-midnight <= now + UNLOCK_GRACE_MIN). A booking
+  //     made this morning for an EVENING slot is far in the future → stays locked
+  //     and unlocks normally when the guest actually arrives.
+  // Comparing minutes-since-midnight (both IST) keeps it a pure wall-clock check.
+  const UNLOCK_GRACE_MIN = 30;
+  const shouldUnlockNow = (): boolean => {
+    if (bookingDate !== CALENDAR_TODAY_STR()) return false;
+    const arrMin = doorParseClockToMinutes(arrival);
+    if (arrMin == null) return false;
+    return arrMin <= doorNowMinutesIST() + UNLOCK_GRACE_MIN;
+  };
+
   const submit = async () => {
     setErr("");
     if (!name.trim())  { setErr(tab === "corporate" ? "Enter contact name" : "Enter guest name"); return; }
     if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
     if (!bookingDate) { setErr("Pick a booking date"); return; }
+    { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
     if (!arrival.trim()) { setErr("Enter arrival time"); return; }
     if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
     if (tab === "corporate" && !companyName.trim()) { setErr("Enter company name"); return; }
@@ -4546,12 +4641,17 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
         amenities: includedAmenities.length ? includedAmenities : undefined,
       };
       if (tab === "tables") {
+        const unlockNow = shouldUnlockNow();
         refId = await createWalkInTableReservation({
           customerName: name.trim(), phone: phone.trim(), partySize: pax,
           date: bookingDate, arrivalTime: arrival.trim(),
           tableId: tableId || undefined, floor: floor || undefined,
           floorLabel: floorOpt?.label || undefined,
           notes: notes.trim() || undefined, staffName: agentName,
+          // Same-day, happening-now table → unlock the customer menu immediately
+          // (stamp arrival + write the cover doc). A future date or a later-tonight
+          // slot stays locked and unlocks normally on scan + ARRIVED.
+          markArrived: unlockNow, unlockMenu: unlockNow,
           ...sharedExtras,
         });
         summary = "TABLE BOOKING (IN-HOUSE)";
@@ -5043,8 +5143,8 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               <div>
                 <div style={labelStyle}>Discount %</div>
                 <input value={aggDiscount}
-                  onChange={(e) => setAggDiscount(Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0)))}
-                  inputMode="numeric" style={inputStyle} />
+                  onChange={(e) => setAggDiscount(Math.max(0, Math.min(50, parseInt(e.target.value || "0", 10) || 0)))}
+                  inputMode="numeric" max={50} style={inputStyle} />
               </div>
               <div>
                 <div style={labelStyle}>Aggregator Booking ID</div>
@@ -5334,6 +5434,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               if (!name.trim())  { setErr("Enter guest name"); return; }
               if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
               if (!bookingDate) { setErr("Pick a booking date"); return; }
+              { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
               setBusy(true);
               try {
                 const { ref } = await addToWaitlist({
@@ -5458,6 +5559,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               if (!name.trim())  { setErr("Enter guest name"); return; }
               if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
               if (!bookingDate) { setErr("Pick a booking date"); return; }
+              { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
               if (!arrival.trim()) { setErr("Enter arrival time"); return; }
               if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
               setBusy(true);

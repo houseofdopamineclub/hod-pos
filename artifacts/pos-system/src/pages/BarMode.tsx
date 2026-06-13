@@ -444,6 +444,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const readyKDSForThisCover = readyKDSAll.filter((it) => it.coverDocId === cover.id);
 
   const bal = cv.coverBalance || 0;
+  // 🆕 2026-06-13 v3.274 (Khushi) — a WALK-IN created in Bar Mode has NO wallet; it
+  // must NEVER be routed into the "recharge wallet" flow. Instead a deficit triggers
+  // a COLLECT-&-SEND payment screen (collect the exact bill cash/UPI/card → send the
+  // order in one tap). Detect by the cover's walkin source.
+  const isWalkinCover = String((cv as any).source || "").toLowerCase().indexOf("walkin") !== -1;
   const isExpired = cv.expiresAt ? new Date(cv.expiresAt).getTime() < Date.now() : false;
 
   // The customer wallet writes new orders into tabRounds[status='preparing'] (current flow).
@@ -679,12 +684,25 @@ function WalletOverlay({ cover, staffName, onClose }: {
   };
 
   const doRecharge = async () => {
-    const raw = parseInt(rcAmt) || 0;
-    if (raw < 1) { showToast("Enter a recharge amount"); return; }
-    // 🆕 v3.195 — collect AND credit the DISCOUNT-adjusted net (rcNet), not the
-    // raw typed amount. ₹300 + 20% discount → ₹240 collected & credited.
-    const amt = rcNet;
-    if (amt < 1) { showToast("Discount brings the recharge to ₹0"); return; }
+    // 🆕 2026-06-13 v3.275 (Khushi) — WALK-IN COLLECT-&-SEND. A walk-in pays the EXACT
+    // bill (activeTotal — already discount+SC adjusted), NOT an editable wallet top-up,
+    // so we collect activeTotal directly (never rcNet, which would re-apply the discount
+    // on an already-discounted bill). After the collect posts we SEND the order in the
+    // same tap (doActivate prints KOT+BILL). Net wallet: ₹0 → +bill → −bill → ₹0.
+    const walkin = isWalkinCover;
+    if (walkin) {
+      // PREFLIGHT the gates BEFORE charging — never collect money if the order can't be
+      // sent right after (the 30s activate cooldown / webhook-tick gate would make the
+      // immediately-following doActivate throw, leaving cash collected with no round).
+      if (blocked) { showToast("⏳ A round was just sent — wait ~30s before charging again."); return; }
+      if (tickGateBlocked) { showToast("⏳ Awaiting payment verification — wait a moment, then charge."); return; }
+    }
+    const raw = walkin ? Math.round(activeTotal) : (parseInt(rcAmt) || 0);
+    if (raw < 1) { showToast(walkin ? "Add items first — nothing to collect." : "Enter a recharge amount"); return; }
+    // 🆕 v3.195 — a normal recharge collects AND credits the DISCOUNT-adjusted net (rcNet);
+    // a walk-in collects the exact bill (activeTotal, discount already baked in).
+    const amt = walkin ? Math.round(activeTotal) : rcNet;
+    if (amt < 1) { showToast(walkin ? "Add items first — nothing to collect." : "Discount brings the recharge to ₹0"); return; }
     // 🆕 2026-06-12 (Khushi BUG) — a real cover bill can be ₹24-26k+, but the old
     // ₹10,000 per-recharge cap silently toasted+returned on a 26k recharge → it
     // looked "frozen" and forced the bartender to chunk it under 10k (5000+8000+
@@ -759,7 +777,22 @@ function WalletOverlay({ cover, staffName, onClose }: {
       // popover BEFORE showing the green popup, otherwise the yellow panel
       // visibly stays behind/around the popup and confuses the bartender.
       setRechargeOpen(false);
-      setRechargeSuccess({ amount: amt, newBalance: newBal, method: rcMethod });
+      if (walkin) {
+        // 🆕 v3.275 — collected → SEND the order + print KOT+BILL in the same tap. The
+        // cover is now credited (newBal), so the server activate txn passes; pass
+        // balanceOverride so the stale client-side `bal` closure (still 0 this render)
+        // doesn't trip doActivate's guard — the server re-reads the REAL balance.
+        // doActivate SWALLOWS its own errors (never throws), so we read its explicit
+        // boolean: false ⇒ money was collected but the SEND failed. The cover is
+        // already credited, so the normal green PRINT KOT+BILL CTA will send this
+        // exact order — warn the bartender NOT to collect again.
+        const sent = await doActivate(true, newBal);
+        if (!sent) {
+          showToast(`✅ ₹${amt.toLocaleString("en-IN")} COLLECTED — tap PRINT KOT+BILL to send. DO NOT charge again.`);
+        }
+      } else {
+        setRechargeSuccess({ amount: amt, newBalance: newBal, method: rcMethod });
+      }
     } catch (e: any) {
       // 🆕 2026-06-05 v3.221 — a stalled-network transaction now REJECTS with
       // NETWORK_SLOW (instead of hanging forever and freezing the screen). Tell
@@ -857,7 +890,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
     setBillBusy(false);
   };
 
-  const doActivate = async (alsoBill: boolean = false) => {
+  const doActivate = async (alsoBill: boolean = false, balanceOverride?: number) => {
     const allItems: HodOrderItem[] = [];
     // Carry tax class `t` end-to-end so wallet debit matches what the customer was shown.
     preOrderItems.forEach((it) => allItems.push({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", v: it.v }));
@@ -866,15 +899,22 @@ function WalletOverlay({ cover, staffName, onClose }: {
       if (existing) existing.qty += ci.qty;
       else allItems.push({ n: ci.n, p: ci.p, qty: ci.qty, cat: ci.cat || "", t: ci.t });
     });
-    if (!allItems.length) { showToast("Select items first"); return; }
-    if (isExpired) { showToast("Wallet has expired. Cannot activate."); return; }
+    if (!allItems.length) { showToast("Select items first"); return false; }
+    if (isExpired) { showToast("Wallet has expired. Cannot activate."); return false; }
     // v3.114 — SINGLE SOURCE OF TRUTH for activation total. Uses
     // computePrintAmounts so it honors barDiscPct + scOn, matching exactly
     // what the canActivate gate, ADD ROUND label, deficit/recharge prefill,
     // and the printed bill all use. Pre-v3.114 this used computeHodBreakdown
     // which ignored discount/SC → wallet would debit more than the bill.
     const total = computePrintAmounts(allItems).total;
-    if (total > bal) { showToast("Insufficient balance. Recharge first."); return; }
+    // 🆕 2026-06-13 v3.274 — the walk-in COLLECT-&-SEND path tops up the cover with the
+    // exact bill amount immediately before calling this, but the `bal` closure from the
+    // current render is still stale (₹0). It passes the post-collect balance via
+    // balanceOverride so this client-side guard isn't tripped. The server-side
+    // activateCoverOrder transaction independently re-reads the REAL cover balance, so a
+    // wrong/forged override can never let an order through unpaid.
+    const effBal = (balanceOverride != null) ? balanceOverride : bal;
+    if (total > effBal) { showToast("Insufficient balance. Recharge first."); return false; }
 
     // V4 2026-05-11 — webhook tick gate. If a recent online recharge has not
     // yet been server-verified AND we're inside the 60-sec block window,
@@ -885,7 +925,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
     if (pendingTickStillBlocking) {
       const sLeft = Math.ceil((PENDING_TICK_FAIL_OPEN_MS - pendingTickAgeMs) / 1000);
       showToast(`⏳ AWAITING ✅ WEBHOOK TICK — ${sLeft}s left (or accept and flag)`);
-      return;
+      return false;
     }
     // V4 2026-05-11 — fail-open: open the SCREENSHOT modal BEFORE letting
     // the bartender activate. Forces them to visually confirm the customer's
@@ -900,7 +940,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
       setSsUpiRef("");
       setSsPhoneSeen((cv as any).phone || (cv as any).customerPhone || "");
       setSsNote("");
-      return;
+      return false;
     }
     // Mark staff with PENDING-TICK suffix when we're fail-opening so the
     // tx audit row + downstream Reports/Live-Monitor can detect it without
@@ -911,6 +951,12 @@ function WalletOverlay({ cover, staffName, onClose }: {
           ssUpiRef ? ` SCREENSHOT upi_${ssUpiRef.replace(/\s+/g, "").slice(-12)}` : " NO-SCREENSHOT"
         }]`
       : staffName;
+    // 🆕 v3.275 — doActivate now reports whether the order was actually SENT.
+    // The walk-in COLLECT-&-SEND path needs to know if money was collected but
+    // the send then failed (so it can warn "tap PRINT KOT+BILL, do NOT charge
+    // again"). doActivate swallows its own errors internally, so a thrown error
+    // never reaches the caller — this explicit boolean is the reliable signal.
+    let activated = false;
     setActBusy(true);
     try {
       const result = await activateCoverOrder(cover.id, allItems, total, staffArg);
@@ -1019,6 +1065,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
       } else {
         setActDone(true);
       }
+      activated = true; // order WAS sent (round created server-side, even if bill print failed)
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (msg.startsWith("COOLDOWN:")) {
@@ -1043,6 +1090,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
             }));
             setActResult({ total, newBal: result.newBalance, note: allItems.map((it) => `${it.qty}x ${it.n}`).join(", ") });
             setActDone(true);
+            activated = true; // cooldown-retry succeeded → order sent
           } catch (e2: any) { showToast(e2?.message || String(e2)); }
         }
       } else if (msg.includes("NETWORK_SLOW")) {
@@ -1055,6 +1103,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
       }
     }
     setActBusy(false);
+    return activated;
   };
 
   if (billDone) {
@@ -1554,11 +1603,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
         const refundAmtIfVoid = billableRounds.reduce((s, r) => s + Number(r.roundTotal || 0), 0);
         const canActivateNew = hasItems && canActivateFinal && !actBusy;
         const canPrintBillOnly = !hasItems && billableRounds.length > 0 && !billBusy && !hasPreparing;
+        const over = activeTotal > bal;
+        const zero = bal <= 0;
+        // 🆕 2026-06-13 v3.275 (Khushi) — WALK-INS: a deficit shows a SINGLE "💳 COLLECT
+        // ₹X" button (the middle action) that opens the familiar payment page; the top
+        // PRINT KOT+BILL CTA is NOT duplicated as a second collect button.
         const canPrintKotBill = canActivateNew || canPrintBillOnly;
         const canReprint = printedCount > 0 && !reprintBusy && !billBusy;
         const canVoid = printedCount > 0 && !billVoided && refundAmtIfVoid > 0;
-        const over = activeTotal > bal;
-        const zero = bal <= 0;
         const rechargePulseRed = over || zero;
         const rechargeBg = rechargePulseRed ? "#FF5733" : "#FF90E8";
         const rechargeBorder = rechargePulseRed ? "2px solid #000" : "2px solid #000";
@@ -1671,13 +1723,22 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   background: "#23A094", border: "2px solid #000", color: "#fff", textTransform: "uppercase", lineHeight: 1.15 }}>
                 ➕ ADD<br />ORDER
               </button>
-              {/* 2. RECHARGE (middle, big, pulses red on deficit) */}
-              <button onClick={() => { setRechargeOpen(true); setTimeout(() => rechargeRowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); }}
+              {/* 2. RECHARGE (middle, big, pulses red on deficit). 🆕 v3.275 (Khushi) —
+                  for a WALK-IN this becomes the SINGLE "💳 COLLECT ₹X" button and opens
+                  the SAME familiar payment page (amount/discount/SC/method) — collecting
+                  the exact bill there sends the order. No separate mini pay-screen. */}
+              <button onClick={() => {
+                  if (isWalkinCover && !over) { showToast("Add items first — walk-ins pay per order."); return; }
+                  setRechargeOpen(true); setTimeout(() => rechargeRowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+                }}
                 style={{ padding: "12px 4px", borderRadius: 10, fontSize: 14, fontWeight: 900, cursor: "pointer",
                   letterSpacing: 0.4, textTransform: "uppercase", lineHeight: 1.15,
-                  background: rechargeBg, border: "2px solid #000", color: rechargeColor, animation: rechargeAnim,
+                  background: isWalkinCover ? (over ? "#23A094" : "#F4F4F0") : rechargeBg,
+                  border: isWalkinCover && !over ? "2px solid rgba(0,0,0,.2)" : "2px solid #000",
+                  color: isWalkinCover ? (over ? "#fff" : "#6B6B6B") : rechargeColor,
+                  animation: isWalkinCover ? "none" : rechargeAnim,
                   boxShadow: "none"}}>
-                {rechargeLabel}
+                {isWalkinCover ? (over ? `💳 COLLECT ₹${(activeTotal - bal).toLocaleString("en-IN")}` : "💳 COLLECT") : rechargeLabel}
               </button>
               {/* 3. VOID BILL (post-print only; hidden once voided) */}
               <button onClick={canVoid ? () => setShowVoidBill(true) : undefined} disabled={!canVoid}
@@ -1697,6 +1758,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
           </div>
         );
       })()}
+
 
       {/* V4 2026-05-11 — persistent PENDING TICK badge. Lives on the cover
           header until the webhook tick arrives. Khushi can spot any wallet
@@ -1927,12 +1989,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
               <button onClick={() => setRechargeOpen(false)} title="Close"
                 style={{ position: "absolute", top: 12, right: 14, width: 36, height: 36, borderRadius: 10, background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 0, fontWeight: 900 }}>×</button>
 
-              {/* HEADER */}
+              {/* HEADER — 🆕 v3.275: walk-ins COLLECT the exact bill, not "recharge". */}
               <div style={{ fontSize: 20, fontWeight: 900, color: "#000", marginBottom: 14, paddingRight: 42, letterSpacing: .5 }}>
-                ➕ RECHARGE WALLET
+                {isWalkinCover ? "💳 COLLECT PAYMENT" : "➕ RECHARGE WALLET"}
               </div>
 
-              {/* GREEN BALANCE CARD — customer's available balance */}
+              {/* GREEN BALANCE CARD — customer's available balance (hidden for a
+                  walk-in: there's no wallet balance, just the bill to collect). */}
+              {!isWalkinCover && (
               <div style={{ background: "#23A094", border: "2px solid #000", borderRadius: 12, padding: "14px 16px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "none"}}>
                 <div>
                   <div style={{ fontSize: 11, fontWeight: 800, color: "#23A094", letterSpacing: 1.2, marginBottom: 4 }}>AVAILABLE BALANCE</div>
@@ -1942,9 +2006,10 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   ₹{bal.toLocaleString("en-IN")}
                 </div>
               </div>
+              )}
 
-              {/* DEFICIT BANNER (if any) */}
-              {deficit > 0 && (() => {
+              {/* DEFICIT BANNER (if any) — not shown for a walk-in (the amount is the fixed bill). */}
+              {!isWalkinCover && deficit > 0 && (() => {
                 const currentAmt = parseInt(rcAmt) || 0;
                 const matches = currentAmt === suggestedRecharge;
                 return (
@@ -1958,13 +2023,19 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 );
               })()}
 
-              {/* AMOUNT INPUT — big */}
+              {/* AMOUNT INPUT — big. 🆕 v3.275 — a WALK-IN pays the EXACT bill, so the
+                  amount is READ-ONLY (= the live discounted bill); the DISCOUNT / SERVICE
+                  TAX controls below adjust it. A normal recharge keeps the editable field. */}
               <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6 }}>ENTER AMOUNT</div>
-                <div style={{ display: "flex", alignItems: "center", background: "#fff", border: "2px solid #000", borderRadius: 12, padding: "4px 14px" }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6 }}>{isWalkinCover ? "AMOUNT TO COLLECT (EXACT BILL)" : "ENTER AMOUNT"}</div>
+                <div style={{ display: "flex", alignItems: "center", background: isWalkinCover ? "#F4F4F0" : "#fff", border: "2px solid #000", borderRadius: 12, padding: "4px 14px" }}>
                   <span style={{ fontSize: 26, fontWeight: 900, color: "#000", marginRight: 6 }}>₹</span>
-                  <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="0"
-                    style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
+                  {isWalkinCover ? (
+                    <div style={{ flex: 1, padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, fontVariantNumeric: "tabular-nums" }}>{Math.round(activeTotal).toLocaleString("en-IN")}</div>
+                  ) : (
+                    <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="0"
+                      style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
+                  )}
                 </div>
               </div>
 
@@ -1995,8 +2066,9 @@ function WalletOverlay({ cover, staffName, onClose }: {
                       </div>
                     ))}
                     {(() => {
-                      // 🆕 v3.195 — split must total the DISCOUNT-adjusted net (rcNet).
-                      const amt = rcNet;
+                      // 🆕 v3.195 — split must total the DISCOUNT-adjusted net (rcNet);
+                      // 🆕 v3.275 — for a WALK-IN it must total the exact bill (activeTotal).
+                      const amt = isWalkinCover ? Math.round(activeTotal) : rcNet;
                       const sum = (parseInt(rcSplit.cash) || 0) + (parseInt(rcSplit.upi) || 0) + (parseInt(rcSplit.card) || 0);
                       const ok = amt > 0 && sum === amt;
                       return (
@@ -2054,10 +2126,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 </span>
               </button>
 
-              {/* BIG RECHARGE CTA */}
-              <button onClick={doRecharge} disabled={rcBusy || !rcAmt || rcNet < 1}
-                style={{ width: "100%", padding: "16px 14px", borderRadius: 14, background: rcBusy || !rcAmt ? "#FF90E8" : "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 17, fontWeight: 900, cursor: rcBusy ? "not-allowed" : "pointer", letterSpacing: .6, boxShadow: "none"}}>
-                {rcBusy ? "PROCESSING..." : `➕ RECHARGE ₹${rcNet}`}
+              {/* BIG CTA — 🆕 v3.275: a WALK-IN collects the exact bill + sends the order
+                  (PRINT KOT+BILL) in this one tap; a normal recharge tops up the wallet. */}
+              <button onClick={doRecharge} disabled={isWalkinCover ? (rcBusy || activeTotal < 1) : (rcBusy || !rcAmt || rcNet < 1)}
+                style={{ width: "100%", padding: "16px 14px", borderRadius: 14, background: isWalkinCover ? "#23A094" : "#FF90E8", border: "2px solid #000", color: isWalkinCover ? "#fff" : "#000", fontSize: 17, fontWeight: 900, cursor: rcBusy ? "not-allowed" : "pointer", letterSpacing: .6, boxShadow: "none"}}>
+                {rcBusy ? "PROCESSING..." : isWalkinCover ? `💳 COLLECT ₹${Math.round(activeTotal).toLocaleString("en-IN")} & PRINT KOT+BILL` : `➕ RECHARGE ₹${rcNet}`}
               </button>
             </div>
           </div>,
@@ -2261,7 +2334,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
           wallet balance. OK dismisses and suppresses the inline disabled
           banner; the RECHARGE button below keeps pulsing red. Re-arms when
           cart goes back under balance. Fail-open: never blocks any action. */}
-      {activeTotal > bal && !overAck && !showAddOrder && (
+      {activeTotal > bal && !overAck && !showAddOrder && !isWalkinCover && (
         <div
           onClick={() => setOverAck(true)}
           style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,.78)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: "'Space Grotesk',sans-serif" }}>
