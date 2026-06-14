@@ -5,7 +5,8 @@ import {
   type MenuCategory, type MenuCategoryItem,
   sha256,
 } from "@/lib/firestore-hod";
-import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
+import { type HodMenuItem, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
+import { useEffectiveMenu } from "@/lib/use-effective-menu";
 
 // Same manager hash as the rest of the admin pages (PIN 8888).
 const MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
@@ -38,6 +39,9 @@ export default function MenuCRM() {
   const [selectedItems, setSelectedItems] = useState<MenuCategoryItem[]>([]);
   const [itemSearch, setItemSearch] = useState("");
   const [saving, setSaving] = useState(false);
+  // Live effective menu = items added in the Menu Editor (venueMenu) merged
+  // over the static baseline, so anything created in Menu Editor is selectable.
+  const menuItems = useEffectiveMenu();
 
   useEffect(() => {
     const unsub = subscribeToMenuCategories((cats) => {
@@ -99,30 +103,45 @@ export default function MenuCRM() {
     } catch (e: any) { alert("Error: " + e?.message); }
   };
 
-  // HOD_MENU_ITEMS shape: { id, name, price, category, group, isVeg, isAlcohol, available }
-  const toggleItem = (item: typeof HOD_MENU_ITEMS[number]) => {
+  // HodMenuItem shape: { id, name, price, category, group, isVeg, isAlcohol, available }
+  const toMenuCategoryItem = (item: HodMenuItem): MenuCategoryItem => ({
+    id: item.id,
+    name: item.name,
+    price: item.price,
+    categoryType: item.group === "food" ? "food" : "drink",
+    veg: item.isVeg,
+    alc: item.isAlcohol,
+  });
+
+  const toggleItem = (item: HodMenuItem) => {
     const key = item.id;
     const exists = selectedItems.find((si) => si.id === key);
     if (exists) {
       setSelectedItems(selectedItems.filter((si) => si.id !== key));
     } else {
-      setSelectedItems([...selectedItems, {
-        id: item.id,
-        name: item.name,
-        price: item.price,
-        categoryType: item.group === "food" ? "food" : "drink",
-        veg: item.isVeg,
-        alc: item.isAlcohol,
-      }]);
+      setSelectedItems([...selectedItems, toMenuCategoryItem(item)]);
     }
   };
 
-  const filteredItems = HOD_MENU_ITEMS.filter((it) => {
+  const filteredItems = menuItems.filter((it) => {
     if (!itemSearch) return true;
     const s = itemSearch.toLowerCase();
     return it.name.toLowerCase().includes(s)
       || (HOD_CATEGORY_LABELS[it.category] || "").toLowerCase().includes(s);
   });
+
+  // Select All adds every item matching the current search (all items when the
+  // search box is empty); existing selections are preserved (de-duped by id).
+  const selectAllFiltered = () => {
+    setSelectedItems((prev) => {
+      const byId = new Map(prev.map((si) => [si.id, si]));
+      for (const it of filteredItems) {
+        if (!byId.has(it.id)) byId.set(it.id, toMenuCategoryItem(it));
+      }
+      return Array.from(byId.values());
+    });
+  };
+  const clearAllSelected = () => setSelectedItems([]);
 
   const isItemSelected = (id: string) => selectedItems.some((si) => si.id === id);
 
@@ -170,9 +189,23 @@ export default function MenuCRM() {
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, color: "#3D3D3D", display: "block", marginBottom: 6, fontWeight: 800, letterSpacing: 0.4 }}>
-              ITEMS ({selectedItems.length} selected)
-            </label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
+              <label style={{ fontSize: 12, color: "#3D3D3D", fontWeight: 800, letterSpacing: 0.4 }}>
+                ITEMS ({selectedItems.length} selected)
+              </label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button type="button" onClick={selectAllFiltered} style={{
+                  padding: "5px 12px", borderRadius: 8, border: `2px solid ${INK}`, background: TEAL, color: "#fff",
+                  fontSize: 11, fontWeight: 900, cursor: "pointer", textTransform: "uppercase", letterSpacing: 0.3,
+                }}>✓ SELECT ALL{itemSearch ? " (FILTERED)" : ""}</button>
+                <button type="button" onClick={clearAllSelected} disabled={selectedItems.length === 0} style={{
+                  padding: "5px 12px", borderRadius: 8, border: `2px solid ${INK}`, background: "#fff",
+                  color: selectedItems.length === 0 ? "#9A9A92" : INK,
+                  fontSize: 11, fontWeight: 900, cursor: selectedItems.length === 0 ? "default" : "pointer",
+                  textTransform: "uppercase", letterSpacing: 0.3,
+                }}>CLEAR ALL</button>
+              </div>
+            </div>
             <input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)}
               placeholder="Search menu items..."
               style={{ width: "100%", padding: 10, borderRadius: 8, border: `2px solid ${INK}`, background: "#fff", color: INK, fontSize: 14, fontWeight: 600, boxSizing: "border-box", marginBottom: 10 }} />

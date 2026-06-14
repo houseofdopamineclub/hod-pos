@@ -303,7 +303,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     setErr("");
     const amt = parseInt(amount, 10);
     if (!amt || amt < 1) { setErr("Enter a valid cover amount"); return; }
-    if (amt > 5000) { setErr("Max ₹5,000"); return; }
+    if (amt > 50000) { setErr("Max ₹50,000"); return; }
     if (!method) { setErr("Select a payment method"); return; }
     let paymentSplit: { cash?: number; upi?: number; card?: number; paid_online?: number } | undefined;
     if (method === "split") {
@@ -392,7 +392,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     const newAmt = parseInt(editAmt, 10);
     const used = existing.coverUsed || 0;
     if (!newAmt || newAmt < used) { setErr(`Min ₹${used} (already used)`); return; }
-    if (newAmt > 5000) { setErr("Max ₹5,000"); return; }
+    if (newAmt > 50000) { setErr("Max ₹50,000"); return; }
     if (newAmt === existing.coverActivated) { setErr("Amount unchanged"); return; }
     // 🆕 2026-05-26 v3.24 (Khushi) — open in-app confirm overlay instead of
     // window.confirm (which renders as an alien browser-native popup on the
@@ -483,7 +483,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
         ) : (
           <>
             <div style={{ fontSize: 13, fontWeight: 800, color: "#000", letterSpacing: 1.5, marginBottom: 8 }}>TONIGHT'S COVER (₹)</div>
-            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 1499" min={0} max={5000}
+            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 1499" min={0} max={50000}
               style={{ width: "100%", padding: "16px 16px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", marginBottom: 16, boxSizing: "border-box", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }} />
 
             <div style={{ fontSize: 13, fontWeight: 800, color: "#000", letterSpacing: 1.5, marginBottom: 10 }}>PAYMENT METHOD</div>
@@ -948,6 +948,21 @@ function CheckInPaymentModal({
         }
       }
 
+      // 🆕 2026-06-14 — COMP GATE (audit finding #2). A guest who was expected to
+      // PAY at the door (booking carries a price, was NOT prepaid online, and is
+      // NOT a free guest-list entry) must not be waved in for ₹0 without a
+      // Manager PIN — that's an unauthorised comp = financial leakage. Free-by-
+      // design entries (guest list, ₹0-priced tiers, prepaid-online) are exempt.
+      const _expectedDue = Math.max(0, Math.round(Number(booking.total) || 0));
+      const _collectedNow = isEntryOnly ? amt : walletAmt;
+      const _isComp = _expectedDue > 0 && paidOnline === 0 && _collectedNow === 0 && !booking._isGuestList;
+      if (_isComp) {
+        const ok = await requireDoorManagerPin(
+          `Comp / free entry for ${booking.name || "guest"} — they were expected to pay ₹${_expectedDue.toLocaleString("en-IN")}.`,
+        );
+        if (!ok) { setBusy(false); return; }
+      }
+
       // STEP 1 — check in (always runs first; this is the critical move).
       // ⚠️ Pass "table" through as-is — it's the ONLY source that updates
       // tableReservations.actualArrivalTime. Coercing to "booking" would
@@ -955,41 +970,75 @@ function CheckInPaymentModal({
       // move. (architect flagged 2026-05-21)
       const { checkedInAt, wasNew } = await checkInGuest(sourceKey, source, agentName);
 
-      // STEP 2 — wallet (fail-open: errors here do NOT block the check-in)
+      // STEP 2 — wallet (fail-open: errors here do NOT block the check-in).
+      // 🆕 2026-06-14 — ORPHAN-WALLET SAFETY NET (audit finding #1). The check-in
+      // already succeeded; if the SEPARATE wallet write fails we now (a) retry it
+      // once after a short pause (covers a transient network blip) and (b) track
+      // `walletOk` so the confirmation popup can honestly warn the door girl
+      // "WALLET NOT LOADED — retry" instead of a false "WALLET LIVE". We still
+      // NEVER block the guest at the door.
+      let walletOk = true;
       try {
-        if (walletAmt > 0 && !isEntryOnly) {
-          // Real wallet activation
-          const split = method === "split" ? {
-            cash: parseInt(splitCash || "0", 10) || 0,
-            upi: parseInt(splitUpi || "0", 10) || 0,
-            card: parseInt(splitCard || "0", 10) || 0,
-            paid_online: paidOnline,
-          } : undefined;
-          await activateCoverForBooking({
-            booking,
-            amount: walletAmt,
-            paymentMethod: method,
-            paymentSplit: split,
-            staffName: agentName,
-          });
-        } else {
-          // ₹0 wallet stub (entry-only OR door girl typed 0)
-          const mintSource: "booking" | "guestlist" =
-            source === "guestlist" ? "guestlist" : "booking";
-          await ensureZeroBalanceCoverForGuest({
-            bookingRef: booking.ref || booking.id,
-            sourceDocId: booking.id || booking.ref,
-            name: booking.name || "Guest",
-            phone: booking.phone || "",
-            source: mintSource,
-            eventId: (booking as any).eventId || "",
-            eventTitle: booking.eventTitle || "",
-            staffName: agentName,
-          });
+        const split = method === "split" ? {
+          cash: parseInt(splitCash || "0", 10) || 0,
+          upi: parseInt(splitUpi || "0", 10) || 0,
+          card: parseInt(splitCard || "0", 10) || 0,
+          paid_online: paidOnline,
+        } : undefined;
+        const doWalletWrite = async () => {
+          if (walletAmt > 0 && !isEntryOnly) {
+            // Real wallet activation
+            await activateCoverForBooking({
+              booking,
+              amount: walletAmt,
+              paymentMethod: method,
+              paymentSplit: split,
+              staffName: agentName,
+            });
+          } else {
+            // ₹0 wallet stub (entry-only OR door girl typed 0)
+            const mintSource: "booking" | "guestlist" =
+              source === "guestlist" ? "guestlist" : "booking";
+            await ensureZeroBalanceCoverForGuest({
+              bookingRef: booking.ref || booking.id,
+              sourceDocId: booking.id || booking.ref,
+              name: booking.name || "Guest",
+              phone: booking.phone || "",
+              source: mintSource,
+              eventId: (booking as any).eventId || "",
+              eventTitle: booking.eventTitle || "",
+              staffName: agentName,
+            });
+          }
+        };
+        try {
+          await doWalletWrite();
+        } catch (firstErr: any) {
+          // "Already activated" is a benign race (another tablet won) = success.
+          if (/already activated/i.test(String(firstErr?.message || firstErr))) {
+            walletOk = true;
+          } else {
+            // One retry after a short pause (covers a transient network blip).
+            await new Promise((r) => setTimeout(r, 700));
+            try {
+              await doWalletWrite();
+            } catch (retryErr: any) {
+              // If the FIRST attempt actually committed but returned a transient
+              // error, the retry throws "already activated" — that's SUCCESS, not
+              // an orphan (don't show a false "WALLET NOT LOADED").
+              if (/already activated/i.test(String(retryErr?.message || retryErr))) {
+                walletOk = true;
+              } else {
+                throw retryErr; // genuine double failure → outer catch sets walletOk=false
+              }
+            }
+          }
         }
       } catch (walletErr: any) {
-        // Wallet failed but check-in succeeded — log + let user retry via ACTIVATE COVER
-        console.warn("[CheckInPaymentModal] wallet write failed (non-fatal)", walletErr);
+        // Wallet failed twice but check-in succeeded — flag it so the popup tells
+        // the door girl to retry via ACTIVATE COVER (never a silent orphan).
+        walletOk = false;
+        console.warn("[CheckInPaymentModal] wallet write failed after retry (non-fatal)", walletErr);
       }
 
       // 🆕 2026-05-26 (Khushi) — RECHARGE SUCCESS POPUP. Mirrors the walk-in
@@ -1003,7 +1052,15 @@ function CheckInPaymentModal({
       // back to window.alert — never blocks the check-in completion.
       try {
         const guestName = (booking.name || "GUEST").toUpperCase();
-        if (walletAmt > 0 && !isEntryOnly) {
+        if (walletAmt > 0 && !isEntryOnly && !walletOk) {
+          // 🆕 2026-06-14 — orphan-wallet warning (audit finding #1).
+          await centeredAlert(
+            "⚠️ WALLET NOT LOADED",
+            `${guestName} IS CHECKED IN — but the ₹${walletAmt.toLocaleString("en-IN")} WALLET DID NOT SAVE (network issue).\n\nDON'T let them order yet.\nOpen the guest and tap ACTIVATE COVER to load ₹${walletAmt.toLocaleString("en-IN")} now.`,
+            "error",
+            true,
+          );
+        } else if (walletAmt > 0 && !isEntryOnly) {
           const collectMsg = method === "split"
             ? `COLLECT: ${splitCash ? `₹${splitCash} CASH ` : ""}${splitUpi ? `+ ₹${splitUpi} UPI ` : ""}${splitCard ? `+ ₹${splitCard} CARD` : ""}`.trim()
             : method === "paid_online"
@@ -1391,7 +1448,15 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
         // a cover on top, both amounts matter — show ENTRY + COVER together,
         // never let the cover hide the entry collection. For non-entry tickets,
         // keep v3.18 behavior (cover replaces the ticket amount).
-        const entryAmt = isEntryOnly ? (booking.total || 0) : 0;
+        // 🆕 2026-06-12 (Khushi) — entry fee must EXCLUDE the cover. For an
+        // entry-only booking that ALSO carries a cover wallet, `booking.total`
+        // is the COMBINED amount collected (entry + cover) — both the door
+        // walk-in flow (total = coverAmount + entryTicket) and an online
+        // entry-only booking that had a cover added at the door write it this
+        // way. So the non-redeemable ENTRY portion = total − coverActivated.
+        // (Cover ₹0 → entryAmt = total, unchanged.) Was showing ₹799 ENTRY
+        // for a ₹599 entry + ₹200 cover.
+        const entryAmt = isEntryOnly ? Math.max(0, (booking.total || 0) - coverActivated) : 0;
         const paymentLabel = (() => {
           if (isEntryOnly && entryAmt > 0) {
             // Entry-only ticket: entry charge is the primary payment.
@@ -3357,6 +3422,18 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   const [editDate, setEditDate] = useState<string>("");
   const [editPhone, setEditPhone] = useState<string>(""); // 🔴 Khushi 16 May — Zomato parser leaves phone blank.
   const [editBusy, setEditBusy] = useState(false);
+  // 🆕 2026-06-13 (Khushi) — reschedule/save feedback popup. The shared toast
+  // rendered BEHIND the expanded booking card (toast viewport z-100 == card
+  // z-index) and looked off-brand. This is a self-contained Gumroad-style
+  // popup portaled to document.body at a very high z-index so it ALWAYS sits
+  // in front (the card root has backdrop-filter, which would trap a non-portal
+  // fixed child). Auto-dismisses; tap to close.
+  const [editPopup, setEditPopup] = useState<{ kind: "error" | "success"; title: string; body?: string } | null>(null);
+  useEffect(() => {
+    if (!editPopup) return;
+    const t = setTimeout(() => setEditPopup(null), editPopup.kind === "error" ? 5000 : 3500);
+    return () => clearTimeout(t);
+  }, [editPopup]);
   const today = TODAY_STR();
   const calToday = CALENDAR_TODAY_STR();
 
@@ -3771,6 +3848,34 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
 
   return (
     <div>
+      {/* 🆕 2026-06-13 (Khushi) — Gumroad-style save/reschedule popup, portaled
+          to document.body so it's ALWAYS in front of the expanded booking card
+          (the shared toast rendered behind it). Tap the popup / × to dismiss,
+          or it auto-dismisses. Wrapper is pointer-events:none so it never
+          blocks taps on the card behind it. */}
+      {editPopup && createPortal(
+        <div
+          style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 2147483000,
+            display: "flex", justifyContent: "center", padding: 16, pointerEvents: "none" }}>
+          <div onClick={() => setEditPopup(null)}
+            style={{ pointerEvents: "auto", cursor: "pointer", width: "100%", maxWidth: 420, marginTop: 10,
+              background: "#FFFFFF", border: "3px solid #000", borderRadius: 8,
+              boxShadow: "5px 5px 0 #000", overflow: "hidden" }}>
+            <div style={{ height: 8, background: editPopup.kind === "error" ? "#FF4D4D" : "#23A094" }} />
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "14px 16px" }}>
+              <div style={{ fontSize: 22, lineHeight: 1 }}>{editPopup.kind === "error" ? "⛔" : "✅"}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#000", letterSpacing: .3, textTransform: "uppercase" }}>{editPopup.title}</div>
+                {editPopup.body && <div style={{ fontSize: 13, fontWeight: 600, color: "#3D3D3D", marginTop: 3 }}>{editPopup.body}</div>}
+              </div>
+              <button onClick={() => setEditPopup(null)}
+                style={{ background: "#000", color: "#fff", border: "none", borderRadius: 4,
+                  width: 26, height: 26, fontSize: 14, fontWeight: 900, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>×</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
       {/* 🔴 2026-05-16 (Khushi) — mini dashboard. 3 status tiles (tap to filter)
           + per-aggregator strip showing booked-count per source.
           🆕 2026-05-26 v3.25 — bigger fonts (v3.22 pattern). BOOKED/ARRIVED/
@@ -4088,12 +4193,12 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                       </div>
                       <div style={{ padding: 10, background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
                         <div style={editLabel}>🕐 Expected (edit)</div>
-                        <input type="text" placeholder="9:30 PM" value={editTime}
-                          onChange={(e) => setEditTime(e.target.value)} style={editInput} />
+                        <input type="time" value={doorTo24h(editTime)}
+                          onChange={(e) => setEditTime(doorTo12h(e.target.value))} style={editInput} />
                       </div>
                       <div style={{ padding: 10, background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
                         <div style={editLabel}>📅 Date (edit)</div>
-                        <input type="date" value={editDate}
+                        <input type="date" value={editDate} min={CALENDAR_TODAY_STR()}
                           onChange={(e) => setEditDate(e.target.value)} style={editInput} />
                       </div>
                       <div style={{ padding: 10, background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
@@ -4132,6 +4237,28 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                         disabled={editBusy}
                         onClick={async () => {
                           if (editBusy) return;
+                          // 🆕 2026-06-13 (Khushi) — block RESCHEDULING into the past.
+                          // The edit DATE/TIME pickers let staff move a booking to an
+                          // earlier date, or (on today) an earlier clock time, which
+                          // then resurfaced as a stale past booking. ONLY validate when
+                          // the date/time was actually CHANGED — a pax/phone-only edit on
+                          // an already-old booking must still be allowed to save.
+                          {
+                            const dateChanged = (editDate || "") !== (r.date || "");
+                            const timeChanged = (editTime || "") !== (r.arrivalTime || "");
+                            const todayStr = CALENDAR_TODAY_STR();
+                            if ((dateChanged || timeChanged) && editDate && editDate < todayStr) {
+                              setEditPopup({ kind: "error", title: "Can't reschedule to the past", body: "Pick today or a future date." });
+                              return;
+                            }
+                            if ((dateChanged || timeChanged) && editDate === todayStr && editTime) {
+                              const m = doorParseClockToMinutes(editTime);
+                              if (m != null && m < doorNowMinutesIST()) {
+                                setEditPopup({ kind: "error", title: "That time has already passed", body: "Pick a time from now onward." });
+                                return;
+                              }
+                            }
+                          }
                           setEditBusy(true);
                           try {
                             await updateReservationDetails(r._docId, {
@@ -4140,9 +4267,9 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                               date: editDate || undefined,
                               phone: phoneTrim || undefined,
                             }, agentName);
-                            toast({ title: "✓ Updated", description: "Pax / time / date / phone saved everywhere (admin · reports · sheets).", duration: 3500 });
+                            setEditPopup({ kind: "success", title: "Updated", body: "Pax / time / date / phone saved everywhere." });
                           } catch (err: any) {
-                            alert("Save failed: " + (err?.message || "Try again or note on paper."));
+                            setEditPopup({ kind: "error", title: "Save failed", body: err?.message || "Try again or note on paper." });
                           }
                           setEditBusy(false);
                         }}
@@ -4343,6 +4470,28 @@ type WalkInChoice = "guestlist" | "cover" | "onlyentry" | "group" | "agg";
 // doorTableOccupantAt) now live in @/lib/door-tables so the WAITLIST assign-table
 // picker shares the EXACT same config + availability logic (imported at top).
 
+// 🆕 2026-06-12 v3.268 (Khushi) — native clock-picker helpers. The Door form
+// stores arrival as a friendly 12-hour string ("9:30 PM") used VERBATIM in the
+// WhatsApp templates + every display, but <input type="time"> works in 24-hour
+// "HH:MM". These convert between the two so the captain/door girl gets the
+// native clock dropdown while everything downstream keeps the 12-hour text.
+function doorTo24h(s: string): string {
+  const min = doorParseClockToMinutes(s);
+  if (min == null) return "";
+  const h = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+function doorTo12h(s: string): string {
+  const min = doorParseClockToMinutes(s);
+  if (min == null) return "";
+  const h24 = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  const ampm = h24 >= 12 ? "PM" : "AM";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${String(h12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${ampm}`;
+}
+
 type TableBookingTab = "tables" | "aggregator" | "corporate";
 
 function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
@@ -4498,11 +4647,44 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
     if (t !== "corporate") setCorpTableIds([]);
   };
 
+  // 🆕 2026-06-13 (Khushi) — block PAST-dated bookings. The native <input type=date>
+  // `min` only greys out earlier days in the calendar popup; it does NOT stop a
+  // typed or programmatically-set past date, so a door girl was able to book the
+  // 10th on the 13th. Enforce it here at submit for EVERY create path. Floor =
+  // IST calendar today (same value the input min uses), compared as ISO
+  // YYYY-MM-DD strings (lexicographic === chronological for that format).
+  const pastBookingDateErr = (): string | null => {
+    const floor = CALENDAR_TODAY_STR();
+    return bookingDate && bookingDate < floor
+      ? `Booking date can't be in the past — earliest is ${formatBookingDateNice(floor)}.`
+      : null;
+  };
+
+  // 🆕 2026-06-13 (Khushi) — auto-unlock the customer menu for a table that is
+  // HAPPENING NOW. Creating a table only writes the reservation; the menu stays
+  // LOCKED until staff scan the table & tap ARRIVED (which stamps arrival + the
+  // cover doc). That's correct for an advance booking, but pointless for a guest
+  // standing at the door right now. So unlock at create time ONLY when:
+  //   • the booking is for TODAY (calendar IST) — any future DATE stays locked; and
+  //   • the arrival time is at/around the PRESENT time — "now or already due"
+  //     (arrival minutes-since-midnight <= now + UNLOCK_GRACE_MIN). A booking
+  //     made this morning for an EVENING slot is far in the future → stays locked
+  //     and unlocks normally when the guest actually arrives.
+  // Comparing minutes-since-midnight (both IST) keeps it a pure wall-clock check.
+  const UNLOCK_GRACE_MIN = 30;
+  const shouldUnlockNow = (): boolean => {
+    if (bookingDate !== CALENDAR_TODAY_STR()) return false;
+    const arrMin = doorParseClockToMinutes(arrival);
+    if (arrMin == null) return false;
+    return arrMin <= doorNowMinutesIST() + UNLOCK_GRACE_MIN;
+  };
+
   const submit = async () => {
     setErr("");
     if (!name.trim())  { setErr(tab === "corporate" ? "Enter contact name" : "Enter guest name"); return; }
     if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
     if (!bookingDate) { setErr("Pick a booking date"); return; }
+    { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
     if (!arrival.trim()) { setErr("Enter arrival time"); return; }
     if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
     if (tab === "corporate" && !companyName.trim()) { setErr("Enter company name"); return; }
@@ -4516,12 +4698,17 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
         amenities: includedAmenities.length ? includedAmenities : undefined,
       };
       if (tab === "tables") {
+        const unlockNow = shouldUnlockNow();
         refId = await createWalkInTableReservation({
           customerName: name.trim(), phone: phone.trim(), partySize: pax,
           date: bookingDate, arrivalTime: arrival.trim(),
           tableId: tableId || undefined, floor: floor || undefined,
           floorLabel: floorOpt?.label || undefined,
           notes: notes.trim() || undefined, staffName: agentName,
+          // Same-day, happening-now table → unlock the customer menu immediately
+          // (stamp arrival + write the cover doc). A future date or a later-tonight
+          // slot stays locked and unlocks normally on scan + ARRIVED.
+          markArrived: unlockNow, unlockMenu: unlockNow,
           ...sharedExtras,
         });
         summary = "TABLE BOOKING (IN-HOUSE)";
@@ -5013,8 +5200,8 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               <div>
                 <div style={labelStyle}>Discount %</div>
                 <input value={aggDiscount}
-                  onChange={(e) => setAggDiscount(Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0)))}
-                  inputMode="numeric" style={inputStyle} />
+                  onChange={(e) => setAggDiscount(Math.max(0, Math.min(50, parseInt(e.target.value || "0", 10) || 0)))}
+                  inputMode="numeric" max={50} style={inputStyle} />
               </div>
               <div>
                 <div style={labelStyle}>Aggregator Booking ID</div>
@@ -5156,9 +5343,9 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
             <span>Arrival Time (e.g. 10:30 PM)</span>
             {!arrivalEdited && <span style={{ color: "#23A094", fontSize: 10 }}>🟢 LIVE · auto</span>}
           </div>
-          <input value={arrival}
-            onChange={(e) => { setArrivalEdited(true); setArrival(e.target.value); }}
-            placeholder="10:30 PM" style={inputStyle} />
+          <input type="time" value={doorTo24h(arrival)}
+            onChange={(e) => { setArrivalEdited(true); setArrival(doorTo12h(e.target.value)); }}
+            style={inputStyle} />
         </div>
 
         {/* 🔴 2026-05-20 (Khushi) — ASSIGN TABLE section. Floor dropdown +
@@ -5304,6 +5491,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               if (!name.trim())  { setErr("Enter guest name"); return; }
               if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
               if (!bookingDate) { setErr("Pick a booking date"); return; }
+              { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
               setBusy(true);
               try {
                 const { ref } = await addToWaitlist({
@@ -5428,6 +5616,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               if (!name.trim())  { setErr("Enter guest name"); return; }
               if (!phone.trim() || phone.replace(/\D/g, "").length < 10) { setErr("Enter valid 10-digit phone"); return; }
               if (!bookingDate) { setErr("Pick a booking date"); return; }
+              { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
               if (!arrival.trim()) { setErr("Enter arrival time"); return; }
               if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
               setBusy(true);
@@ -5716,10 +5905,12 @@ function UnifiedWalkInModal({
     // only build a full international number when a non-+91 code is chosen.
     const ccDigits = (countryCode || "+91").replace(/\D/g, "");
     const waPhone = ccDigits && ccDigits !== "91" ? ccDigits + cleanPhone : cleanPhone;
-    // activateCoverForBooking() rejects amount > ₹5,000 — surface it cleanly
-    // here instead of a cryptic throw mid-flow.
-    if (kind === "cover" && coverAmount > 5000) {
-      setErr("Cover amount can't exceed ₹5,000 per wallet"); return;
+    // activateCoverForBooking() rejects amount > ₹50,000 — surface it cleanly
+    // here instead of a cryptic throw mid-flow. ENTRY ONLY can also carry an
+    // optional cover wallet, so guard that path too (else a >₹50k entry-only
+    // wallet saves the booking THEN fails activation = partial state).
+    if ((kind === "cover" || kind === "onlyentry") && coverAmount > 50000) {
+      setErr("Cover amount can't exceed ₹50,000 per wallet"); return;
     }
     if (kind === "cover" && total > 0 && payMethod === "split") {
       // 🛟 SPLIT + NON-REDEEMABLE guard. The wallet is credited with COVER ONLY,
@@ -5763,12 +5954,12 @@ function UnifiedWalkInModal({
         savedRef = r.ref;
       } else {
         const r = await createWalkInTicketBooking({
-          kind: "cover",
+          kind: kind === "onlyentry" ? "onlyentry" : kind === "group" ? "group" : "cover",
           name, email, phone,
           guests,
           total,            // cover + entry = total collected at the door
           tier: "",
-          type: "cover",
+          type: kind === "onlyentry" ? "onlyentry" : "cover",
           eventId, eventTitle,
           notes: noteStr,
           staffName: agentName,
@@ -5777,13 +5968,15 @@ function UnifiedWalkInModal({
           paymentSplit: payMethod === "split"
             ? { cash: splitCash, upi: splitUpi, card: splitCard }
             : undefined,
+          ...(kind === "onlyentry" ? { entryType: "entryonly", qty: 1 } : {}),
         });
         savedRef = r.ref;
       }
 
       // ── Activate the wallet. Balance = COVER ONLY. Two write paths because
       // activateCoverForBooking() rejects amount < 1 (₹0 → ensureZero stub).
-      const walletAmount = kind === "cover" ? coverAmount : 0;
+      // onlyentry may also carry an optional cover wallet (coverAmount > 0).
+      const walletAmount = (kind === "cover" || kind === "onlyentry") ? coverAmount : 0;
       if (walletAmount > 0) {
         const booking: HodBooking = {
           id: savedRef, ref: savedRef, name: name.trim(), phone: cleanPhone, email,
@@ -5838,9 +6031,13 @@ function UnifiedWalkInModal({
         }
       }
 
-      setDone({ ref: savedRef, phone: waPhone, isCover: kind === "cover", total, coverAmount: walletAmount });
+      setDone({ ref: savedRef, phone: waPhone, isCover: kind === "cover" || (kind === "onlyentry" && walletAmount > 0), total, coverAmount: walletAmount });
       setActionMsg(kind === "guestlist"
         ? `✅ GUEST LIST CONFIRMED · ₹0 WALLET SENT${linkMsg}`
+        : kind === "onlyentry"
+        ? walletAmount > 0
+          ? `✅ ENTRY ONLY + COVER WALLET ₹${okAmount.toLocaleString("en-IN")} ACTIVATED · ₹${total.toLocaleString("en-IN")} COLLECTED${linkMsg}`
+          : `✅ ENTRY ONLY · ₹${total.toLocaleString("en-IN")} COLLECTED${linkMsg}`
         : `✅ COVER ACTIVATION OF ₹${okAmount.toLocaleString("en-IN")} IS SUCCESSFUL${linkMsg}`);
 
       // ── Notify the customer. WhatsApp is AWAITED so we can auto-show the QR
@@ -5863,9 +6060,13 @@ function UnifiedWalkInModal({
         try {
           const totalStr = walletAmount > 0
             ? `₹${walletAmount.toLocaleString("en-IN")} Paid`
-            : "FREE";
+            : total > 0 ? `₹${total.toLocaleString("en-IN")} Paid` : "FREE";
           const entryType = kind === "guestlist"
             ? "Guest List · Free Entry · ₹0 Wallet"
+            : kind === "onlyentry"
+            ? walletAmount > 0
+              ? `Entry Only · ₹${entryTicket.toLocaleString("en-IN")} door fee + Cover Wallet ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`
+              : `Entry Only · ₹${total.toLocaleString("en-IN")} (Non-redeemable door fee · wallet ₹0)`
             : `Cover · ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`;
           fetch(EMAIL_CF_URL, {
             method: "POST",
@@ -5896,20 +6097,26 @@ function UnifiedWalkInModal({
             .catch((e) => { console.warn("[door][email] network error", e); setEmailStatus("Email failed — show QR"); });
         } catch (e) { console.warn("[door][email] threw", e); setEmailStatus("Email failed — show QR"); }
       }
+      // For entry-only walk-ins, walletAmount is always ₹0 (entry fee is
+      // non-redeemable). The WhatsApp template needs the ACTUAL collected amount
+      // (entry fee) as `total` so pickBookingTemplate doesn't see ₹0 and bail,
+      // and `entryType: "entryonly"` so detectWaCategory routes to entry_only_*
+      // templates instead of ticket_confirmed_* (wrong param count → Meta rejects).
+      const waTotal = kind === "onlyentry" ? total : walletAmount;
       const synthForWa: HodBooking = {
         id: savedRef, ref: savedRef, name: name.trim(), phone: waPhone,
         eventId: "", eventTitle: eventTitle || "Tonight at H.O.D",
         tier: "", type: kind === "guestlist" ? "stag" : "cover",
-        total: walletAmount, guests, date: TODAY_STR(),
-        // 🆕 2026-06-02 (Khushi) — the door girl ALREADY collected the money
-        // and confirmed the payment mode, so the customer must NOT see
-        // "PAY AT VENUE". Mark this synthetic booking PAID (cover>0) so the
-        // WhatsApp template + fallback both read "✅ PAID". `isWalkIn` makes
+        total: waTotal, guests, date: TODAY_STR(),
+        // The door girl ALREADY collected the money and confirmed the payment
+        // mode, so the customer must NOT see "PAY AT VENUE". Mark this synthetic
+        // booking PAID so WhatsApp template reads "✅ PAID". `isWalkIn` makes
         // the wording "PAID" (door) instead of "PAID ONLINE" (Razorpay only).
         // Throwaway object — never persisted.
-        paymentId: walletAmount > 0 ? `pay_walkin_${savedRef}` : "",
+        paymentId: waTotal > 0 ? `pay_walkin_${savedRef}` : "",
         isWalkIn: true,
         _isGuestList: kind === "guestlist",
+        ...(kind === "onlyentry" ? { entryType: "entryonly" } : {}),
       } as any;
       let tpl = pickBookingTemplate(synthForWa, walletUrl);
       let fallbackText = buildBookingWhatsAppText(synthForWa, walletUrl);
@@ -6162,17 +6369,21 @@ function UnifiedWalkInModal({
           </div>
         )}
 
-        {/* 🆕 2026-06-02 (Khushi) — TWO TABS ONLY: GUEST LIST · BUY COVERS.
+        {/* THREE TABS: GUEST LIST · ENTRY ONLY · BUY COVERS.
             Hidden in COVER+TABLE flow (locked to "cover" by design). */}
         {!linkToTable && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-          <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist")}>
-            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: "#000" }}>GUEST LIST</div>
-            <div style={{ fontSize: 9.5, marginTop: 4, color: "#23A094", fontWeight: 800, letterSpacing: .8 }}>FREE ENTRY · ₹0 WALLET</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => setKind("guestlist")} style={catCard(kind === "guestlist", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>GUEST LIST</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#23A094", fontWeight: 800, letterSpacing: .5 }}>FREE ENTRY</div>
           </button>
-          <button onClick={() => setKind("cover")} style={catCard(kind === "cover")}>
-            <div style={{ fontWeight: 900, fontSize: 13, letterSpacing: .8, color: "#000" }}>BUY COVERS</div>
-            <div style={{ fontSize: 9.5, marginTop: 4, color: "#3D3D3D", fontWeight: 700, letterSpacing: .8 }}>REDEEMABLE F&amp;B</div>
+          <button onClick={() => setKind("onlyentry")} style={catCard(kind === "onlyentry", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>ENTRY ONLY</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#FF5733", fontWeight: 800, letterSpacing: .5 }}>NON-REDEEMABLE</div>
+          </button>
+          <button onClick={() => setKind("cover")} style={catCard(kind === "cover", true)}>
+            <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: .5, color: "#000" }}>BUY COVERS</div>
+            <div style={{ fontSize: 9, marginTop: 4, color: "#3D3D3D", fontWeight: 700, letterSpacing: .5 }}>REDEEMABLE F&amp;B</div>
           </button>
         </div>
         )}
@@ -6217,18 +6428,32 @@ function UnifiedWalkInModal({
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" type="email" style={inp} />
         </div>
 
-        {/* ── COVER AMOUNT (redeemable wallet) — BUY COVERS tab only ───────── */}
+        {/* ── ENTRY FEE — dedicated input for ENTRY ONLY kind ────────────────── */}
+        {kind === "onlyentry" && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
+              ENTRY FEE (₹) <span style={{ color: "#FF5733", fontWeight: 800 }}>· NOT REDEEMABLE ON F&amp;B</span>
+            </div>
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
+              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder="e.g. 599" style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
+            <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
+              Door entry charge only. This amount is NOT added to the wallet — it cannot be used on F&amp;B.
+            </div>
+          </div>
+        )}
+
+        {/* ── ENTRY TICKET (non-redeemable door fee, ₹0 default) — cover tab ─ */}
         {kind === "cover" && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
-              COVER AMOUNT (₹) <span style={{ color: "#23A094", fontWeight: 800 }}>· REDEEMABLE WALLET</span>
+              ENTRY TICKET (₹) <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· NON-REDEEMABLE · OPTIONAL</span>
             </div>
-            <input type="text" inputMode="numeric" pattern="[0-9]*" value={coverAmountStr}
-              onChange={(e) => setCoverAmountStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
-              placeholder="Type any amount, e.g. 1000"
-              style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
+              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder="0" style={inp} />
             <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
-              100% redeemable on food &amp; drinks. Goes straight into the customer's wallet.
+              A flat door fee that is NOT added to the wallet. Leave 0 if there's no entry charge.
             </div>
           </div>
         )}
@@ -6249,17 +6474,23 @@ function UnifiedWalkInModal({
           </div>
         </div>
 
-        {/* ── ENTRY TICKET (non-redeemable door fee, ₹0 default) — cover tab ─ */}
-        {kind === "cover" && (
+        {/* ── COVER AMOUNT (redeemable wallet) — BUY COVERS + ENTRY ONLY tabs ─ */}
+        {(kind === "cover" || kind === "onlyentry") && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ ...lbl, fontSize: 9.5, marginBottom: 6 }}>
-              ENTRY TICKET (₹) <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· NON-REDEEMABLE · OPTIONAL</span>
+              COVER AMOUNT (₹){" "}
+              {kind === "onlyentry"
+                ? <span style={{ color: "#B0B0B0", fontWeight: 700 }}>· OPTIONAL · REDEEMABLE WALLET</span>
+                : <span style={{ color: "#23A094", fontWeight: 800 }}>· REDEEMABLE WALLET</span>}
             </div>
-            <input type="text" inputMode="numeric" pattern="[0-9]*" value={entryTicketStr}
-              onChange={(e) => setEntryTicketStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
-              placeholder="0" style={inp} />
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={coverAmountStr}
+              onChange={(e) => setCoverAmountStr(e.target.value.replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""))}
+              placeholder={kind === "onlyentry" ? "0 (leave blank for entry-only)" : "Type any amount, e.g. 1000"}
+              style={{ ...inp, fontSize: 18, fontWeight: 800 }} />
             <div style={{ marginTop: 5, fontSize: 10, color: "#6B6B6B", lineHeight: 1.4 }}>
-              A flat door fee that is NOT added to the wallet. Leave 0 if there's no entry charge.
+              {kind === "onlyentry"
+                ? "Optional: add a redeemable wallet on top of the entry fee. Leave 0 if entry-only."
+                : "100% redeemable on food & drinks. Goes straight into the customer's wallet."}
             </div>
           </div>
         )}
@@ -6640,6 +6871,22 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   const [tablesFocusDocId, setTablesFocusDocId] = useState<string | null>(null);
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("all");
+  const [allPickerOpen, setAllPickerOpen] = useState(false);
+
+  // 🆕 2026-06-14 — OFFLINE BANNER (audit finding #4). The door tablet runs all
+  // night on venue wifi; if it drops, check-ins still queue locally (Firestore
+  // offline persistence) and sync on reconnect — but staff must KNOW so they
+  // don't panic or double-enter a guest. navigator.onLine + online/offline events.
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine !== false,
+  );
+  useEffect(() => {
+    const up = () => setIsOnline(true);
+    const down = () => setIsOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
+  }, []);
 
   // Persist agent name as door staff in sessionStorage so check-ins pick it up too
   useEffect(() => {
@@ -6664,9 +6911,14 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     ? ""
     : (events.find((e) => e.id === selectedEventId)?.date || "");
 
-  // Auto-select tonight's event if exactly one
+  // Auto-select tonight's event if exactly one — only on first load, not on
+  // every Firestore refresh, so user can explicitly click ALL to see the picker.
+  const hasAutoSelected = useRef(false);
   useEffect(() => {
-    if (selectedEventId === "all" && tonight.length === 1) setSelectedEventId(tonight[0].id);
+    if (!hasAutoSelected.current && selectedEventId === "all" && tonight.length === 1) {
+      setSelectedEventId(tonight[0].id);
+      hasAutoSelected.current = true;
+    }
     // If selected event no longer in chip list (e.g. data refreshed), reset to all
     if (selectedEventId !== "all" && eventChips.length && !eventChips.find((e) => e.id === selectedEventId)) {
       setSelectedEventId("all");
@@ -6815,6 +7067,34 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     { key: "waitlist" as const,  label: "WAITLIST",       count: waitlistCount },
   ];
 
+  // 🆕 2026-06-14 — CAPACITY WARNING (audit finding #7). DORMANT unless tonight
+  // has exactly ONE event with a capacity configured (event.capacity > 0). Shows
+  // checked-in heads vs capacity; turns red at ≥90%. Purely informational — it
+  // NEVER blocks a check-in (door stays fail-open). Heads are counted defensively
+  // from the parent subscriptions, scoped to tonight's operational night.
+  const capacityInfo = (() => {
+    const ev = tonight.length === 1 ? tonight[0] : null;
+    const cap = Number((ev as any)?.capacity) || 0;
+    if (!ev || cap <= 0) return null;
+    const dates = TODAY_DATE_SET();
+    const inToday = (d?: string) => dates.has((d || "").slice(0, 10));
+    const paxOf = (x: any) =>
+      Number(x?.partySize) || Number(x?.guests) || Number(x?.pax) ||
+      ((Number(x?.girls) || 0) + (Number(x?.boys) || 0)) || 1;
+    let heads = 0;
+    allBookings.forEach((b) => {
+      if (b.checkedIn && inToday(b.date) && !isGuestlistBooking(b)) heads += paxOf(b);
+    });
+    allGuests.forEach((g: any) => {
+      if (g.checkedIn && inToday(g.date)) heads += paxOf(g);
+    });
+    Object.values(tableResByDate).forEach((rows) => rows.forEach((r: any) => {
+      if (inToday(r.date) && r.actualArrivalTime) heads += paxOf(r);
+    }));
+    const pct = cap > 0 ? Math.round((heads / cap) * 100) : 0;
+    return { cap, heads, pct, near: pct >= 90, eventTitle: (ev as any).title || (ev as any).name || "Tonight" };
+  })();
+
   return (
     <div style={{ minHeight: "100vh", background: "#F4F4F0", color: "#000", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
       <div style={{ background: "#F4F4F0", borderBottom: "2px solid #000", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -6845,6 +7125,18 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
       </div>
 
       <div style={{ padding: "12px 16px" }}>
+        {/* 🆕 2026-06-14 — OFFLINE banner (audit finding #4) */}
+        {!isOnline && (
+          <div style={{ background: "#FF5733", border: "2px solid #000", borderRadius: 8, padding: "10px 14px", marginBottom: 10, color: "#fff", fontWeight: 900, fontSize: 13, letterSpacing: .3, textAlign: "center", textTransform: "uppercase", lineHeight: 1.4 }}>
+            ⚠ OFFLINE — check-ins are saving on this tablet and will sync when wifi is back. Keep working.
+          </div>
+        )}
+        {/* 🆕 2026-06-14 — CAPACITY indicator (audit finding #7), dormant unless configured */}
+        {capacityInfo && (
+          <div style={{ background: capacityInfo.near ? "#FF5733" : "#fff", border: "2px solid #000", borderRadius: 8, padding: "10px 14px", marginBottom: 10, color: capacityInfo.near ? "#fff" : "#000", fontWeight: 900, fontSize: 13, letterSpacing: .3, textAlign: "center", textTransform: "uppercase" }}>
+            {capacityInfo.near ? "⚠ NEAR CAPACITY — " : "👥 CAPACITY — "}{capacityInfo.heads} / {capacityInfo.cap} CHECKED IN ({capacityInfo.pct}%)
+          </div>
+        )}
         {/* Search bar */}
         <div style={{ position: "relative", marginBottom: 10 }}>
           <input
@@ -7129,13 +7421,17 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, fontWeight: 900, color: "#000", letterSpacing: "1.2px", textTransform: "uppercase", marginBottom: 8, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>EVENT</div>
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
-              <button onClick={() => setSelectedEventId("all")}
+              <button onClick={() => {
+                  if (selectedEventId !== "all") { setSelectedEventId("all"); setAllPickerOpen(false); }
+                  else { setAllPickerOpen(p => !p); }
+                }}
                 style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
                   textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
                   background: selectedEventId === "all" ? "#FF90E8" : "#fff",
-                  border: "2px solid #000",
-                  color: selectedEventId === "all" ? "#000" : "#6B6B6B" }}>
-                ALL
+                  border: selectedEventId === "all" && allPickerOpen ? "2px solid #FF90E8" : "2px solid #000",
+                  color: selectedEventId === "all" ? "#000" : "#6B6B6B",
+                  display: "flex", alignItems: "center", gap: 5 }}>
+                ALL <span style={{ fontSize: 10, opacity: 0.7 }}>{allPickerOpen ? "▴" : "▾"}</span>
               </button>
               {eventChips.map((ev) => {
                 const on = selectedEventId === ev.id;
@@ -7144,7 +7440,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                 const dateLabel = isTonight ? "Tonight" : (d ? d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }) : "");
                 const title = (ev.title || "Event").length > 18 ? (ev.title || "").slice(0, 18) + "…" : (ev.title || "Event");
                 return (
-                  <button key={ev.id} onClick={() => setSelectedEventId(ev.id)}
+                  <button key={ev.id} onClick={() => { setSelectedEventId(ev.id); setAllPickerOpen(false); }}
                     style={{ flexShrink: 0, padding: "9px 14px", borderRadius: 6, fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap",
                       textTransform: "uppercase", letterSpacing: "0.5px", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
                       background: on ? "#FF90E8" : "#fff",
@@ -7158,6 +7454,39 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           </div>
         )}
 
+        {selectedEventId === "all" && allPickerOpen && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+            {eventChips.length === 0 && (
+              <div style={{ padding: 14, borderRadius: 8, background: "#fff", border: "2px dashed #000", fontSize: 13, color: "#6B6B6B", textAlign: "center" }}>
+                No events tonight.
+              </div>
+            )}
+            {eventChips.map((ev) => {
+              const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+              const isTonight = ev.date === todayStr;
+              const d = ev.date ? new Date(ev.date + "T00:00:00") : null;
+              const dateLabel = isTonight ? "TONIGHT" : (d ? d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() : "");
+              return (
+                <button key={ev.id}
+                  onClick={() => { setSelectedEventId(ev.id); setAllPickerOpen(false); }}
+                  style={{ textAlign: "left", padding: "14px 16px", borderRadius: 8, background: "#fff",
+                    border: "2px solid #000", color: "#000", cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: 0.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {ev.title || "Event"}
+                  </span>
+                  <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 6,
+                    background: isTonight ? "#FF90E8" : "#F4F4F0",
+                    border: "2px solid #000", letterSpacing: 0.8, textTransform: "uppercase", color: "#000" }}>
+                    {dateLabel}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {selectedEventId !== "all" && (<>
         {/* 🆕 2026-05-26 v3.25 (Khushi) — bigger dashboard fonts (v3.22 pattern).
             CONSTRAINT: 7 chips on a 331px Android phone = ~43px each, so the
             text labels stay at 10px (any bigger and GUEST LIST / ENTRY PASS
@@ -7194,6 +7523,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           tableResByDate={tableResByDate}
           query={searchInput}
           eventId={selectedEventId}
+          eventChips={eventChips}
           onBookingClick={(b) => setScanDetail(b)}
           onTableClick={(r, isCorp) => { setTab(isCorp ? "corporate" : "tables"); setTablesFocusDocId(r._docId!); }}
         />}
@@ -7203,6 +7533,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} />}
         {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
+        </>)}
       </div>
 
       {/* 🔴 2026-05-20 (Khushi LIVE-NIGHT) — auto-match popup mounted at
@@ -7282,11 +7613,17 @@ type AllBookingsTabProps = {
   tableResByDate: Record<string, HodTableReservation[]>;
   query: string;
   eventId: string;
+  eventChips: HodEvent[];
   onBookingClick: (b: HodBooking) => void;
   onTableClick: (r: HodTableReservation, isCorporate: boolean) => void;
 };
 
-function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId, onBookingClick, onTableClick }: AllBookingsTabProps) {
+function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId, eventChips, onBookingClick, onTableClick }: AllBookingsTabProps) {
+  const [pickedId, setPickedId] = useState<string>("");
+  // Reset local pick when parent switches to a specific event
+  useEffect(() => { if (eventId !== "all") setPickedId(""); }, [eventId]);
+  const effectiveEventId = eventId === "all" ? pickedId : eventId;
+
   const todayDates = TODAY_DATE_SET();
   const ql = (query || "").trim().toLowerCase();
   const qd = (query || "").replace(/\D/g, "");
@@ -7298,7 +7635,7 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
   };
   const matches = (name?: string, phone?: string, ref?: string) =>
     !ql ? true : (matchText(name) || matchPhone(phone) || matchText(ref));
-  const inEvent = (b: HodBooking) => eventId === "all" || !b.eventId || b.eventId === eventId;
+  const inEvent = (b: HodBooking) => !effectiveEventId || effectiveEventId === "all" || !b.eventId || b.eventId === effectiveEventId;
 
   type Row =
     | { kind: "ticket" | "entry" | "group"; key: string; booking: HodBooking; label: string; tone: string; sortAt: string }
@@ -7435,6 +7772,46 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
     return b.sortAt.localeCompare(a.sortAt);
   });
 
+
+  // 🆕 ALL-tab dropdown gate: when "ALL" event is selected and no specific
+  // event has been picked yet, show a picker instead of dumping everything.
+  if (eventId === "all" && !pickedId) {
+    const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+        <div style={{ padding: "14px 16px", borderRadius: 8, background: "#F4F4F0",
+          border: "2px solid #000", fontSize: 13, color: "#000", fontWeight: 700, lineHeight: 1.5 }}>
+          📋 Select an event to view its bookings:
+        </div>
+        {eventChips.length === 0 && (
+          <div style={{ padding: 14, borderRadius: 8, background: "#fff", border: "2px dashed #000",
+            fontSize: 13, color: "#6B6B6B", textAlign: "center" }}>
+            No events tonight.
+          </div>
+        )}
+        {eventChips.map((ev) => {
+          const isTonight = ev.date === todayStr;
+          const d = ev.date ? new Date(ev.date + "T00:00:00") : null;
+          const dateLabel = isTonight ? "TONIGHT" : (d ? d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() : "");
+          return (
+            <button key={ev.id} onClick={() => setPickedId(ev.id)}
+              style={{ textAlign: "left", padding: "14px 16px", borderRadius: 8, background: "#fff",
+                border: "2px solid #000", color: "#000", cursor: "pointer",
+                display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: 0.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {ev.title || "Event"}
+              </span>
+              <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 900, padding: "4px 10px", borderRadius: 6,
+                background: isTonight ? "#FF90E8" : "#F4F4F0",
+                border: "2px solid #000", letterSpacing: 0.8, textTransform: "uppercase", color: "#000" }}>
+                {dateLabel}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
   if (rows.length === 0) {
     return (
       <div style={{ background: "#fff", border: "2px dashed #000", borderRadius: 8, padding: 24, textAlign: "center", color: "#6B6B6B", fontSize: 13 }}>
@@ -7452,6 +7829,17 @@ function AllBookingsTab({ allBookings, allGuests, tableResByDate, query, eventId
   // both read big and crisp from across the lobby.
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+      {eventId === "all" && pickedId && (
+        <button onClick={() => setPickedId("")}
+          style={{ textAlign: "left", padding: "10px 14px", borderRadius: 8, background: "#FF90E8",
+            border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 8, letterSpacing: 0.5 }}>
+          ← ALL EVENTS
+          <span style={{ marginLeft: "auto", fontSize: 12, fontWeight: 700, opacity: 0.7 }}>
+            {eventChips.find(e => e.id === pickedId)?.title || pickedId}
+          </span>
+        </button>
+      )}
       {rows.map((row) => {
         if (row.kind === "table" || row.kind === "corporate") {
           const r = row.res;

@@ -34,7 +34,10 @@ import type {
   WastageRecord, HappyHourConfig, AggregatorSettings, AggregatorOrder,
   MenuOverride,
 } from "./types";
-import type { VenueMenuTab, VenueMenuTabId } from "./venue-menu";
+import { VENUE_MENU_TAB_ORDER, type VenueMenuTab, type VenueMenuTabId } from "./venue-menu";
+import { buildEffectiveMenu } from "./effective-menu";
+import type { HodMenuItem } from "./hod-menu";
+import { HOD_MENU_ITEMS } from "./hod-menu";
 import { nanoid } from "./utils-pos";
 
 const ORDERS_COL = "posOrders";
@@ -455,6 +458,44 @@ export async function saveVenueMenuTab(
   });
 }
 
+// ── Effective ordering menu (venueMenu merged over static) ────────────────
+// One shared, ref-counted subscription to all 4 venueMenu tab docs. Multiple
+// callers (Bar, Captain, Menu CRM) share ONE set of 4 listeners, so the read
+// cost is 4 tiny docs total regardless of how many screens are mounted, and
+// they only fire when a manager edits the menu (rare). Fail-open: a tab read
+// error leaves that tab null → buildEffectiveMenu falls back to the static
+// list for it, so the ordering menu never goes empty.
+let _emItems: HodMenuItem[] = HOD_MENU_ITEMS;
+const _emTabs: Partial<Record<VenueMenuTabId, VenueMenuTab | null>> = {};
+let _emSubs: Array<(items: HodMenuItem[]) => void> = [];
+let _emUnsubs: Unsubscribe[] | null = null;
+
+function _emRecompute() {
+  try {
+    _emItems = buildEffectiveMenu(_emTabs);
+  } catch {
+    _emItems = HOD_MENU_ITEMS; // fail-open
+  }
+  for (const cb of _emSubs) { try { cb(_emItems); } catch { /* ignore */ } }
+}
+
+export function subscribeToEffectiveMenu(cb: (items: HodMenuItem[]) => void): Unsubscribe {
+  _emSubs.push(cb);
+  try { cb(_emItems); } catch { /* ignore */ } // emit current immediately
+  if (!_emUnsubs) {
+    _emUnsubs = VENUE_MENU_TAB_ORDER.map((tabId) =>
+      subscribeToVenueMenuTab(tabId, (tab) => { _emTabs[tabId] = tab; _emRecompute(); }),
+    );
+  }
+  return () => {
+    _emSubs = _emSubs.filter((f) => f !== cb);
+    if (_emSubs.length === 0 && _emUnsubs) {
+      _emUnsubs.forEach((u) => { try { u(); } catch { /* ignore */ } });
+      _emUnsubs = null;
+    }
+  };
+}
+
 export function subscribeToAggregatorSettings(
   cb: (settings: AggregatorSettings[]) => void
 ): Unsubscribe {
@@ -503,7 +544,10 @@ export function subscribeToMenuOverrides(
     const result: Record<string, MenuOverride> = {};
     snap.docs.forEach((d) => {
       const data = d.data() as MenuOverride;
-      result[data.menuItemId] = { id: d.id, ...data };
+      // d.id IS the canonical name-slug (setMenuOverride writes the doc at that
+      // id and mirrors it into menuItemId). Fall back to d.id so a legacy doc
+      // missing menuItemId still indexes correctly instead of under `undefined`.
+      result[data.menuItemId || d.id] = { id: d.id, ...data };
     });
     cb(result);
   }, () => { cb({}); });

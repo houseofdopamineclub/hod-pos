@@ -200,6 +200,12 @@ export default function LiveReports() {
     const liveOrdered: Record<Floor3, Set<string>> = { Ground: new Set(), First: new Set(), Rooftop: new Set() };
     const walletRefs = new Set<string>();
     let walletRedeemed = 0;
+    // 🆕 2026-06-12 v3.267 (Khushi) — count/sum IN-HOUSE discounts applied to
+    // AGGREGATOR bookings. Aggregator bills normally print full menu price, so a
+    // house ₹-off on an aggregator table is unusual and means money collected is
+    // below the printed bill (e.g. FD7). Surfaced as a warning in the DISCOUNT box.
+    let aggInhouseDiscCount = 0;
+    let aggInhouseDiscAmt = 0;
 
     const addItem = (it: HodOrderItem) => {
       const name = (it.n || "").trim();
@@ -293,6 +299,7 @@ export default function LiveReports() {
       // money (open + paid both count toward sales of the night)
       const ch = channelOf(r);
       if (ch === "In-house") A.inhDisc += disc; else A.aggDisc += disc;
+      if (ch !== "In-house" && disc > 0) { aggInhouseDiscCount += 1; aggInhouseDiscAmt += disc; }
       A.sc += sc; A.tax += tax;
       A.food += foodSub; A.drink += drinkSub;
       A.net += Math.max(0, subtotal - disc);
@@ -337,7 +344,7 @@ export default function LiveReports() {
       Array.from(m.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 5);
     const topCaptain = Array.from(cap.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.amt - a.amt).slice(0, 5);
 
-    return { floor, channel, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount };
+    return { floor, channel, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt };
   }, [reservations, history, covers]);
 
   const sumFloors = (pick: (a: FloorAgg) => number) => FLOORS3.reduce((s, f) => s + pick(agg.floor[f]), 0);
@@ -508,6 +515,14 @@ export default function LiveReports() {
                 { label: "In-house", pick: (a) => a.inhDisc, money: true },
                 { label: "Total", pick: (a) => a.aggDisc + a.inhDisc, money: true },
               ]} />
+              {/* 🆕 2026-06-12 v3.267 (Khushi) — warn when an in-house discount was
+                  applied to an AGGREGATOR booking. Aggregator bills normally print
+                  full price, so this means money collected is below the printed bill. */}
+              {agg.aggInhouseDiscCount > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, fontWeight: 800, padding: "8px 10px", borderRadius: 8, background: "#FEF3C7", border: "1.5px solid #B45309", color: "#92400E", lineHeight: 1.4 }}>
+                  ⚠ {agg.aggInhouseDiscCount} aggregator booking{agg.aggInhouseDiscCount > 1 ? "s" : ""} had an IN-HOUSE discount (₹{Math.round(agg.aggInhouseDiscAmt)} total). Aggregator bills normally charge full price — check this was intended.
+                </div>
+              )}
             </Box>
             <Box title="🧾 SERVICE CHARGE & TAX" hint="Service charge (10%) and tax / GST collected per floor.">
               <FloorTable cols={[

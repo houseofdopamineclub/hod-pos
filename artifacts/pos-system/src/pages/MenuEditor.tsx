@@ -4,6 +4,8 @@ import {
   saveVenueMenuTab,
   logAudit,
   setMenuOverride,
+  subscribeToMenuOverrides,
+  menuOverrideKey,
 } from "@/lib/firestore";
 import {
   VENUE_MENU_TAB_LABELS,
@@ -15,7 +17,7 @@ import {
   type VenueMenuTab,
 } from "@/lib/venue-menu";
 import { sha256 } from "@/lib/firestore-hod";
-import type { StaffMember } from "@/lib/types";
+import type { StaffMember, MenuOverride } from "@/lib/types";
 
 // Same MGR PIN gate used elsewhere in AdminPage. Duplicated here so the
 // MenuEditor page is self-contained and doesn't reach back into the parent.
@@ -51,6 +53,12 @@ export default function MenuEditor({ currentStaff }: Props) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
+  // 🆕 2026-06-14 v3.288 — live posMenuOverrides, the AUTHORITATIVE out-of-stock
+  // source every OTHER mode (Bar/Captain/customer) reads. The venueMenu `oos`
+  // draft flag is in-memory until PUBLISH, so without merging this the editor
+  // showed an item back "IN STOCK" on re-entry even though the override (and
+  // every other mode) still had it OUT. Keyed by name-slug (menuItemId).
+  const [overrides, setOverrides] = useState<Record<string, MenuOverride>>({});
 
   // Subscribe to current tab. Whenever the remote doc changes we reset the
   // draft to it — the editor explicitly does NOT try to merge concurrent
@@ -65,6 +73,10 @@ export default function MenuEditor({ currentStaff }: Props) {
     });
     return unsub;
   }, [tabId]);
+
+  // Authoritative OOS feed — independent of the per-tab venueMenu draft so the
+  // displayed IN STOCK / OUT badge always reflects what Bar/Captain see.
+  useEffect(() => subscribeToMenuOverrides(setOverrides), []);
 
   const dirty = loaded && JSON.stringify(draft) !== JSON.stringify(remote?.categories || []);
 
@@ -290,9 +302,19 @@ export default function MenuEditor({ currentStaff }: Props) {
                   const realIi = draft[realCi]?.items.findIndex((x) => x === draft[realCi].items.find((y) => y.n === item.n && y.p === item.p)) ?? -1;
                   // Fallback: find by reference identity via index in the visible cat.
                   const ii = draft[realCi]?.items.indexOf(item) ?? realIi;
+                  // Effective OOS = authoritative override if one exists for this
+                  // item name, else the local draft flag. This makes the badge
+                  // survive leaving + re-entering the editor (the bug Khushi hit).
+                  const liveOos = overrides[menuOverrideKey(item.n)]?.outOfStock;
+                  const effOos = liveOos !== undefined ? liveOos : !!item.oos;
                   return (
-                    <div key={ii + item.n} className="flex items-center gap-2 px-2 py-1 rounded"
-                      style={{ background: "#FBFBF9", border: `1px solid ${INK}`, opacity: item.oos ? 0.5 : 1 }}>
+                    // ⚠️ Key MUST be stable while typing. It used to be `ii + item.n`,
+                    // but `item.n` changes on every keystroke in the name field, which
+                    // changed the key → React remounted the <input> → focus was lost
+                    // after each character (Khushi's "type one letter then click" bug).
+                    // Key by position only (category + draft index) — stable per render.
+                    <div key={`${realCi}-${ii}`} className="flex items-center gap-2 px-2 py-1 rounded"
+                      style={{ background: "#FBFBF9", border: `1px solid ${INK}`, opacity: effOos ? 0.5 : 1 }}>
                       <input
                         value={item.n}
                         onChange={(e) => updateItem(realCi, ii, { n: e.target.value })}
@@ -345,7 +367,7 @@ export default function MenuEditor({ currentStaff }: Props) {
                           //       the posMenuOverrides live listener (re-enabled
                           //       same night with a per-doc limit safety cap).
                           // Manager PIN gated so a misclick can't 86 an item.
-                          const goingOOS = !item.oos;
+                          const goingOOS = !effOos;
                           if (!(await requireManagerPin(
                             `${goingOOS ? "MARK OUT OF STOCK" : "MARK BACK IN STOCK"}: ${item.n}`
                           ))) return;
@@ -372,13 +394,13 @@ export default function MenuEditor({ currentStaff }: Props) {
                         }}
                         className="text-xs px-2 py-1 rounded"
                         style={{
-                          background: item.oos ? RED : "#fff",
-                          color: item.oos ? "#fff" : INK,
+                          background: effOos ? RED : "#fff",
+                          color: effOos ? "#fff" : INK,
                           border: `2px solid ${INK}`,
                           fontWeight: 900,
                           minWidth: 90,
                         }}>
-                        {item.oos ? "OUT" : "IN STOCK"}
+                        {effOos ? "OUT" : "IN STOCK"}
                       </button>
                       <button
                         onClick={() => deleteItem(realCi, ii)}
