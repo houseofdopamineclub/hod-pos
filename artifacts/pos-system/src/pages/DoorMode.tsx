@@ -948,6 +948,21 @@ function CheckInPaymentModal({
         }
       }
 
+      // 🆕 2026-06-14 — COMP GATE (audit finding #2). A guest who was expected to
+      // PAY at the door (booking carries a price, was NOT prepaid online, and is
+      // NOT a free guest-list entry) must not be waved in for ₹0 without a
+      // Manager PIN — that's an unauthorised comp = financial leakage. Free-by-
+      // design entries (guest list, ₹0-priced tiers, prepaid-online) are exempt.
+      const _expectedDue = Math.max(0, Math.round(Number(booking.total) || 0));
+      const _collectedNow = isEntryOnly ? amt : walletAmt;
+      const _isComp = _expectedDue > 0 && paidOnline === 0 && _collectedNow === 0 && !booking._isGuestList;
+      if (_isComp) {
+        const ok = await requireDoorManagerPin(
+          `Comp / free entry for ${booking.name || "guest"} — they were expected to pay ₹${_expectedDue.toLocaleString("en-IN")}.`,
+        );
+        if (!ok) { setBusy(false); return; }
+      }
+
       // STEP 1 — check in (always runs first; this is the critical move).
       // ⚠️ Pass "table" through as-is — it's the ONLY source that updates
       // tableReservations.actualArrivalTime. Coercing to "booking" would
@@ -955,41 +970,75 @@ function CheckInPaymentModal({
       // move. (architect flagged 2026-05-21)
       const { checkedInAt, wasNew } = await checkInGuest(sourceKey, source, agentName);
 
-      // STEP 2 — wallet (fail-open: errors here do NOT block the check-in)
+      // STEP 2 — wallet (fail-open: errors here do NOT block the check-in).
+      // 🆕 2026-06-14 — ORPHAN-WALLET SAFETY NET (audit finding #1). The check-in
+      // already succeeded; if the SEPARATE wallet write fails we now (a) retry it
+      // once after a short pause (covers a transient network blip) and (b) track
+      // `walletOk` so the confirmation popup can honestly warn the door girl
+      // "WALLET NOT LOADED — retry" instead of a false "WALLET LIVE". We still
+      // NEVER block the guest at the door.
+      let walletOk = true;
       try {
-        if (walletAmt > 0 && !isEntryOnly) {
-          // Real wallet activation
-          const split = method === "split" ? {
-            cash: parseInt(splitCash || "0", 10) || 0,
-            upi: parseInt(splitUpi || "0", 10) || 0,
-            card: parseInt(splitCard || "0", 10) || 0,
-            paid_online: paidOnline,
-          } : undefined;
-          await activateCoverForBooking({
-            booking,
-            amount: walletAmt,
-            paymentMethod: method,
-            paymentSplit: split,
-            staffName: agentName,
-          });
-        } else {
-          // ₹0 wallet stub (entry-only OR door girl typed 0)
-          const mintSource: "booking" | "guestlist" =
-            source === "guestlist" ? "guestlist" : "booking";
-          await ensureZeroBalanceCoverForGuest({
-            bookingRef: booking.ref || booking.id,
-            sourceDocId: booking.id || booking.ref,
-            name: booking.name || "Guest",
-            phone: booking.phone || "",
-            source: mintSource,
-            eventId: (booking as any).eventId || "",
-            eventTitle: booking.eventTitle || "",
-            staffName: agentName,
-          });
+        const split = method === "split" ? {
+          cash: parseInt(splitCash || "0", 10) || 0,
+          upi: parseInt(splitUpi || "0", 10) || 0,
+          card: parseInt(splitCard || "0", 10) || 0,
+          paid_online: paidOnline,
+        } : undefined;
+        const doWalletWrite = async () => {
+          if (walletAmt > 0 && !isEntryOnly) {
+            // Real wallet activation
+            await activateCoverForBooking({
+              booking,
+              amount: walletAmt,
+              paymentMethod: method,
+              paymentSplit: split,
+              staffName: agentName,
+            });
+          } else {
+            // ₹0 wallet stub (entry-only OR door girl typed 0)
+            const mintSource: "booking" | "guestlist" =
+              source === "guestlist" ? "guestlist" : "booking";
+            await ensureZeroBalanceCoverForGuest({
+              bookingRef: booking.ref || booking.id,
+              sourceDocId: booking.id || booking.ref,
+              name: booking.name || "Guest",
+              phone: booking.phone || "",
+              source: mintSource,
+              eventId: (booking as any).eventId || "",
+              eventTitle: booking.eventTitle || "",
+              staffName: agentName,
+            });
+          }
+        };
+        try {
+          await doWalletWrite();
+        } catch (firstErr: any) {
+          // "Already activated" is a benign race (another tablet won) = success.
+          if (/already activated/i.test(String(firstErr?.message || firstErr))) {
+            walletOk = true;
+          } else {
+            // One retry after a short pause (covers a transient network blip).
+            await new Promise((r) => setTimeout(r, 700));
+            try {
+              await doWalletWrite();
+            } catch (retryErr: any) {
+              // If the FIRST attempt actually committed but returned a transient
+              // error, the retry throws "already activated" — that's SUCCESS, not
+              // an orphan (don't show a false "WALLET NOT LOADED").
+              if (/already activated/i.test(String(retryErr?.message || retryErr))) {
+                walletOk = true;
+              } else {
+                throw retryErr; // genuine double failure → outer catch sets walletOk=false
+              }
+            }
+          }
         }
       } catch (walletErr: any) {
-        // Wallet failed but check-in succeeded — log + let user retry via ACTIVATE COVER
-        console.warn("[CheckInPaymentModal] wallet write failed (non-fatal)", walletErr);
+        // Wallet failed twice but check-in succeeded — flag it so the popup tells
+        // the door girl to retry via ACTIVATE COVER (never a silent orphan).
+        walletOk = false;
+        console.warn("[CheckInPaymentModal] wallet write failed after retry (non-fatal)", walletErr);
       }
 
       // 🆕 2026-05-26 (Khushi) — RECHARGE SUCCESS POPUP. Mirrors the walk-in
@@ -1003,7 +1052,15 @@ function CheckInPaymentModal({
       // back to window.alert — never blocks the check-in completion.
       try {
         const guestName = (booking.name || "GUEST").toUpperCase();
-        if (walletAmt > 0 && !isEntryOnly) {
+        if (walletAmt > 0 && !isEntryOnly && !walletOk) {
+          // 🆕 2026-06-14 — orphan-wallet warning (audit finding #1).
+          await centeredAlert(
+            "⚠️ WALLET NOT LOADED",
+            `${guestName} IS CHECKED IN — but the ₹${walletAmt.toLocaleString("en-IN")} WALLET DID NOT SAVE (network issue).\n\nDON'T let them order yet.\nOpen the guest and tap ACTIVATE COVER to load ₹${walletAmt.toLocaleString("en-IN")} now.`,
+            "error",
+            true,
+          );
+        } else if (walletAmt > 0 && !isEntryOnly) {
           const collectMsg = method === "split"
             ? `COLLECT: ${splitCash ? `₹${splitCash} CASH ` : ""}${splitUpi ? `+ ₹${splitUpi} UPI ` : ""}${splitCard ? `+ ₹${splitCard} CARD` : ""}`.trim()
             : method === "paid_online"
@@ -6816,6 +6873,21 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   const [selectedEventId, setSelectedEventId] = useState<string>("all");
   const [allPickerOpen, setAllPickerOpen] = useState(false);
 
+  // 🆕 2026-06-14 — OFFLINE BANNER (audit finding #4). The door tablet runs all
+  // night on venue wifi; if it drops, check-ins still queue locally (Firestore
+  // offline persistence) and sync on reconnect — but staff must KNOW so they
+  // don't panic or double-enter a guest. navigator.onLine + online/offline events.
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine !== false,
+  );
+  useEffect(() => {
+    const up = () => setIsOnline(true);
+    const down = () => setIsOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
+  }, []);
+
   // Persist agent name as door staff in sessionStorage so check-ins pick it up too
   useEffect(() => {
     sessionStorage.setItem("hod_door_staff", agentName);
@@ -6995,6 +7067,34 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     { key: "waitlist" as const,  label: "WAITLIST",       count: waitlistCount },
   ];
 
+  // 🆕 2026-06-14 — CAPACITY WARNING (audit finding #7). DORMANT unless tonight
+  // has exactly ONE event with a capacity configured (event.capacity > 0). Shows
+  // checked-in heads vs capacity; turns red at ≥90%. Purely informational — it
+  // NEVER blocks a check-in (door stays fail-open). Heads are counted defensively
+  // from the parent subscriptions, scoped to tonight's operational night.
+  const capacityInfo = (() => {
+    const ev = tonight.length === 1 ? tonight[0] : null;
+    const cap = Number((ev as any)?.capacity) || 0;
+    if (!ev || cap <= 0) return null;
+    const dates = TODAY_DATE_SET();
+    const inToday = (d?: string) => dates.has((d || "").slice(0, 10));
+    const paxOf = (x: any) =>
+      Number(x?.partySize) || Number(x?.guests) || Number(x?.pax) ||
+      ((Number(x?.girls) || 0) + (Number(x?.boys) || 0)) || 1;
+    let heads = 0;
+    allBookings.forEach((b) => {
+      if (b.checkedIn && inToday(b.date) && !isGuestlistBooking(b)) heads += paxOf(b);
+    });
+    allGuests.forEach((g: any) => {
+      if (g.checkedIn && inToday(g.date)) heads += paxOf(g);
+    });
+    Object.values(tableResByDate).forEach((rows) => rows.forEach((r: any) => {
+      if (inToday(r.date) && r.actualArrivalTime) heads += paxOf(r);
+    }));
+    const pct = cap > 0 ? Math.round((heads / cap) * 100) : 0;
+    return { cap, heads, pct, near: pct >= 90, eventTitle: (ev as any).title || (ev as any).name || "Tonight" };
+  })();
+
   return (
     <div style={{ minHeight: "100vh", background: "#F4F4F0", color: "#000", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
       <div style={{ background: "#F4F4F0", borderBottom: "2px solid #000", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -7025,6 +7125,18 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
       </div>
 
       <div style={{ padding: "12px 16px" }}>
+        {/* 🆕 2026-06-14 — OFFLINE banner (audit finding #4) */}
+        {!isOnline && (
+          <div style={{ background: "#FF5733", border: "2px solid #000", borderRadius: 8, padding: "10px 14px", marginBottom: 10, color: "#fff", fontWeight: 900, fontSize: 13, letterSpacing: .3, textAlign: "center", textTransform: "uppercase", lineHeight: 1.4 }}>
+            ⚠ OFFLINE — check-ins are saving on this tablet and will sync when wifi is back. Keep working.
+          </div>
+        )}
+        {/* 🆕 2026-06-14 — CAPACITY indicator (audit finding #7), dormant unless configured */}
+        {capacityInfo && (
+          <div style={{ background: capacityInfo.near ? "#FF5733" : "#fff", border: "2px solid #000", borderRadius: 8, padding: "10px 14px", marginBottom: 10, color: capacityInfo.near ? "#fff" : "#000", fontWeight: 900, fontSize: 13, letterSpacing: .3, textAlign: "center", textTransform: "uppercase" }}>
+            {capacityInfo.near ? "⚠ NEAR CAPACITY — " : "👥 CAPACITY — "}{capacityInfo.heads} / {capacityInfo.cap} CHECKED IN ({capacityInfo.pct}%)
+          </div>
+        )}
         {/* Search bar */}
         <div style={{ position: "relative", marginBottom: 10 }}>
           <input

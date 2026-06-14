@@ -2894,7 +2894,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
               style={{
                 padding: "6px 10px", borderRadius: 8,
                 background: "#23A094", border: "2px solid #000",
-                color: "#23A094", fontSize: 11, fontWeight: 900, cursor: "pointer",
+                color: "#fff", fontSize: 11, fontWeight: 900, cursor: "pointer",
                 letterSpacing: 0.4, whiteSpace: "nowrap",
               }}>
               🍽 {readyKDSBar.length} READY

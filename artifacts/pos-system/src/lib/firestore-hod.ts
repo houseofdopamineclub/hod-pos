@@ -3661,6 +3661,39 @@ async function findTableSlotConflict(
   return null;
 }
 
+// 🆕 2026-06-14 — POST-WRITE double-booking reconcile helper (audit finding #6).
+// Like findTableSlotConflict but (a) skips our OWN just-written doc and (b) only
+// reports a conflict created BEFORE us (earlier bookedAt; ref-string tiebreak on
+// an exact tie) — i.e. the booking that legitimately won a same-second race.
+async function findEarlierTableConflict(
+  tableId: string, date: string, arrivalTime: string | undefined,
+  selfRef: string, selfBookedAt: string,
+): Promise<{ customerName?: string; arrivalTime?: string } | null> {
+  const q2 = query(collection(db, TABLE_RES_COL),
+    where("tableId", "==", tableId), where("date", "==", date));
+  const snap = await getDocs(q2);
+  if (snap.empty) return null;
+  const target = parseClock(arrivalTime);
+  const selfT = Date.parse(selfBookedAt) || 0;
+  for (const d of snap.docs) {
+    if (d.id === selfRef) continue; // never conflict with ourselves
+    const r = d.data() as any;
+    // Deterministic first-writer-wins: the other doc beats us only if it was
+    // created earlier (or the same instant but a lower ref id breaks the tie).
+    const otherT = Date.parse(r.bookedAt || "") || 0;
+    const otherWins = otherT > 0 && (otherT < selfT || (otherT === selfT && String(d.id) < String(selfRef)));
+    if (!otherWins) continue;
+    const seatedNow = !!r.actualArrivalTime || (Array.isArray(r.tabRounds) && r.tabRounds.length > 0);
+    if (seatedNow) return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+    const start = parseClock(r.arrivalTime);
+    if (start == null || target == null) return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+    const winStart = start - SLOT_LEAD_IN_DEFAULT;
+    const winEnd = start + SLOT_MIN_DEFAULT;
+    if (target >= winStart && target <= winEnd) return { customerName: r.customerName, arrivalTime: r.arrivalTime };
+  }
+  return null;
+}
+
 export async function createAggregatorTableBooking(input: {
   aggregator: string;          // "zomato" | "swiggy-dineout" | "swiggy-scenes" | "eazydiner"
   discountPercent?: number;    // override aggregator default if door staff agrees a different %
@@ -3870,6 +3903,35 @@ export async function createWalkInTableReservation(input: {
     ...(unlockMenu ? { hasLinkedCover: true } : {}),
     ...(hasLinkedCover ? { hasLinkedCover: true, linkedCoverPending: true } : {}),
   });
+
+  // 🆕 2026-06-14 — DOUBLE-BOOKING RECONCILE (audit finding #6). The pre-write
+  // findTableSlotConflict is read-before-write, so two tablets can both pass it
+  // and seat the SAME table in the same second. The client SDK can't query
+  // inside a transaction, so we reconcile AFTER the write: if another booking
+  // for this table+slot was created BEFORE ours, we lost the race — remove our
+  // just-written docs and ask the hostess to re-pick. FAIL-OPEN: we only throw
+  // when our rollback actually succeeded; any other error keeps our booking so
+  // the guest is never stranded at the door.
+  if (tableId) {
+    try {
+      const winner = await findEarlierTableConflict(tableId, effDate, arrivalTime, ref, nowIso);
+      if (winner) {
+        let rolledBack = true;
+        try { await deleteDoc(doc(db, TABLE_RES_COL, ref)); } catch { rolledBack = false; }
+        // Only remove the cover/menu-unlock doc if the reservation delete itself
+        // succeeded — otherwise we'd strip the cover off a booking we're KEEPING
+        // (true fail-open consistency: keep both docs together, or neither).
+        if (rolledBack && unlockMenu) { try { await deleteDoc(doc(db, COVERS_COL, ref)); } catch {} }
+        if (rolledBack) {
+          throw new Error(`Table ${tableId} was just taken${winner.customerName ? " by " + winner.customerName : ""}${winner.arrivalTime ? " @ " + winner.arrivalTime : ""}. Please pick another table.`);
+        }
+        console.warn("[createWalkInTableReservation] double-book detected but rollback failed — keeping booking", ref);
+      }
+    } catch (e: any) {
+      if (/just taken/i.test(String((e as any)?.message || ""))) throw e;
+      console.warn("[createWalkInTableReservation] reconcile error (fail-open)", e);
+    }
+  }
   return ref;
 }
 

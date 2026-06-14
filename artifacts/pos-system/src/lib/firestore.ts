@@ -503,7 +503,10 @@ export function subscribeToMenuOverrides(
     const result: Record<string, MenuOverride> = {};
     snap.docs.forEach((d) => {
       const data = d.data() as MenuOverride;
-      result[data.menuItemId] = { id: d.id, ...data };
+      // d.id IS the canonical name-slug (setMenuOverride writes the doc at that
+      // id and mirrors it into menuItemId). Fall back to d.id so a legacy doc
+      // missing menuItemId still indexes correctly instead of under `undefined`.
+      result[data.menuItemId || d.id] = { id: d.id, ...data };
     });
     cb(result);
   }, () => { cb({}); });
