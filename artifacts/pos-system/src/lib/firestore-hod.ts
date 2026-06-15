@@ -1624,7 +1624,7 @@ export async function updatePreparingRoundItems(
     const editHistory = (rounds[idx] as { editHistory?: unknown[] }).editHistory || [];
     rounds[idx] = {
       ...rounds[idx],
-      items: cleaned.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", v: it.v })),
+      items: cleaned.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc === false ? false : (it.t === "food" ? false : true), v: it.v })),
       roundTotal,
       editHistory: [...editHistory, { prevItems, editedBy, editedAt: now }],
     } as HodTabRound;
@@ -1662,7 +1662,7 @@ export async function activateCoverOrder(
       updRounds = freshRounds.map((r) =>
         r.status === "preparing"
           ? { ...r, status: "activated" as const, activatedBy: staffName, activatedAt: now,
-              items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "" })), roundTotal: total }
+              items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc === false ? false : (it.t === "food" ? false : true) })), roundTotal: total }
           : r
       );
     } else {
@@ -1670,7 +1670,7 @@ export async function activateCoverOrder(
         ...freshRounds,
         {
           roundNum: freshRounds.length + 1,
-          items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "" })),
+          items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc === false ? false : (it.t === "food" ? false : true) })),
           roundTotal: total, status: "activated" as const,
           placedAt: now, activatedBy: staffName, activatedAt: now, placedBy: staffName,
           // 🆕 2026-06-08 v3.253 (Khushi) — TAG bartender-created bar rounds with a

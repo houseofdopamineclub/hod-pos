@@ -166,6 +166,11 @@ interface CartItem {
   menuId: string;
   isVeg?: boolean;
   t: "food" | "drink";
+  // 🆕 2026-06-15 — alcohol flag (GST-exempt). MUST be carried into every tax
+  // computation: alcohol pays SC but NO GST, non-alcoholic drinks pay BOTH.
+  // Omitting this made the bar treat every non-food item as alcohol (no GST),
+  // so a soft drink/mocktail bill came out ~₹21 LOWER than the customer wallet.
+  alc?: boolean;
 }
 
 // 🆕 2026-05-25 (Khushi) — Bar login now uses unified per-staff `StaffLogin`
@@ -478,7 +483,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // Tax-inclusive totals so customer-app cart total === bartender screen === wallet debit.
   const preOrderTotal = computeHodBreakdown(preOrderItems).grandTotal;
 
-  const cartItemsForTax: HodOrderItem[] = Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }));
+  const cartItemsForTax: HodOrderItem[] = Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t, alc: c.alc }));
   const cartBreakdown = computeHodBreakdownAdjusted(cartItemsForTax, barDiscPct, scOn);
   const cartTotal = cartBreakdown.grandTotal;
   // v3.114 — activeTotal now honors barDiscPct + scOn so the "RECHARGE
@@ -486,7 +491,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // Mirrors computePrintAmounts() math (line 363) so deficit, recharge
   // suggestion, ADD ROUND button, and printed bill all agree to the rupee.
   const activeTotal = (() => {
-    const allItems: HodOrderItem[] = [...preOrderItems, ...Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t }))];
+    const allItems: HodOrderItem[] = [...preOrderItems, ...Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t, alc: c.alc }))];
     // 🆕 2026-06-07 — same single-source math as the printed bill + customer
     // wallet (computeHodBreakdownAdjusted) so RECHARGE-required === customer
     // ORDER TOTAL to the rupee (fixes ₹535 vs ₹534).
@@ -676,7 +681,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
     setCart((prev) => {
       const existing = prev[key];
       if (existing) return { ...prev, [key]: { ...existing, qty: existing.qty + 1 } };
-      return { ...prev, [key]: { n: item.name, p: usePrice, qty: 1, cat: item.category, menuId: item.id, isVeg: item.isVeg, t: taxClassFor(item) } };
+      return { ...prev, [key]: { n: item.name, p: usePrice, qty: 1, cat: item.category, menuId: item.id, isVeg: item.isVeg, t: taxClassFor(item), alc: !!item.isAlcohol } };
     });
   };
 
@@ -905,11 +910,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
   const doActivate = async (alsoBill: boolean = false, balanceOverride?: number) => {
     const allItems: HodOrderItem[] = [];
     // Carry tax class `t` end-to-end so wallet debit matches what the customer was shown.
-    preOrderItems.forEach((it) => allItems.push({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", v: it.v }));
+    preOrderItems.forEach((it) => allItems.push({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc, v: it.v }));
     Object.values(cart).forEach((ci) => {
       const existing = allItems.find((a) => a.n === ci.n && a.p === ci.p && (a.t || "drink") === ci.t);
       if (existing) existing.qty += ci.qty;
-      else allItems.push({ n: ci.n, p: ci.p, qty: ci.qty, cat: ci.cat || "", t: ci.t });
+      else allItems.push({ n: ci.n, p: ci.p, qty: ci.qty, cat: ci.cat || "", t: ci.t, alc: ci.alc });
     });
     if (!allItems.length) { showToast("Select items first"); return false; }
     if (isExpired) { showToast("Wallet has expired. Cannot activate."); return false; }
