@@ -3058,7 +3058,17 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
               </Row>
               {(detailGuest as any).joinedAt && (
                 <Row label="ADDED">
-                  <span style={{ color: "#6B6B6B" }}>{String((detailGuest as any).joinedAt).slice(0, 16).replace("T", " ")}</span>
+                  {/* 🆕 2026-06-15 v3.298 (Khushi) — was showing the raw UTC ISO
+                      string (slice+replace) → "09:47" instead of IST. Now converts
+                      the stored UTC timestamp to Asia/Kolkata for display. Stored
+                      value (joinedAt) is unchanged (UTC ISO). Fail-open: bad/blank
+                      timestamp falls back to the old raw slice, never blank. */}
+                  <span style={{ color: "#6B6B6B" }}>{(() => {
+                    const _d = new Date(String((detailGuest as any).joinedAt));
+                    return isNaN(_d.getTime())
+                      ? String((detailGuest as any).joinedAt).slice(0, 16).replace("T", " ")
+                      : _d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
+                  })()}</span>
                 </Row>
               )}
               <Row label="PAYMENT">
