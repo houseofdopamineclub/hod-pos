@@ -3057,6 +3057,7 @@ export async function getRecentKotPrints(maxRows = 200): Promise<Array<{
   id: string; tableId: string; customerName?: string; staff: string;
   roundNum: number; itemCount: number; roundTotal: number; time: string;
   destinations: string[]; createdAt: number; isDuplicate: boolean;
+  items: HodOrderItem[];
 }>> {
   const q = query(
     collection(db, "posKOTs"),
@@ -3068,11 +3069,20 @@ export async function getRecentKotPrints(maxRows = 200): Promise<Array<{
     id: string; tableId: string; customerName?: string; staff: string;
     roundNum: number; itemCount: number; roundTotal: number; time: string;
     destinations: string[]; createdAt: number; isDuplicate: boolean;
+    items: HodOrderItem[];
   }> = [];
   snap.forEach((d) => {
     const data = d.data() as Record<string, unknown>;
     if (data.kind === "bill") return; // bills come through getRecentBillPrints
-    const items = Array.isArray(data.items) ? data.items as Array<{ qty?: number }> : [];
+    const rawItems = Array.isArray(data.items) ? data.items as Array<Record<string, unknown>> : [];
+    const items: HodOrderItem[] = rawItems.map((it) => ({
+      n: String(it.n ?? it.name ?? ""),
+      p: Number(it.p ?? it.price) || 0,
+      qty: Number(it.qty) || 0,
+      t: (it.t === "food" ? "food" : it.t === "drink" ? "drink" : undefined),
+      v: it.v === true ? true : undefined,
+      alc: it.alc === true ? true : it.alc === false ? false : undefined,
+    }));
     const itemCount = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
     const ts = data.createdAt as { toMillis?: () => number } | undefined;
     rows.push({
@@ -3087,6 +3097,7 @@ export async function getRecentKotPrints(maxRows = 200): Promise<Array<{
       destinations: Array.isArray(data.destinations) ? (data.destinations as string[]) : [],
       createdAt: ts?.toMillis ? ts.toMillis() : 0,
       isDuplicate: Boolean(data.isDuplicate),
+      items,
     });
   });
   return rows;
@@ -3158,6 +3169,30 @@ export interface BillAuditRow {
   isDuplicate: boolean;
   billNumber: string;
   printIndex: number;    // 1 = original, 2+ = reprint
+  // 🆕 2026-06-16 v3.302 — item lines + persisted tax breakdown so the Audit
+  // page can show the FULL bill (items + GST/SC/discount) when a row is tapped.
+  // Items are the cumulative running tab (all tabRounds flattened), matching
+  // the printed chit. Tax fields come from the bill log (0 for pre-v3.224 rows).
+  items: HodOrderItem[];
+  subtotal: number;
+  discount: number;
+  serviceCharge: number;
+  tax: number;
+}
+/** Flatten every round's items into ONE merged line list (qty-summed by
+ *  name+price) — mirrors the cumulative running-tab a printed bill shows. */
+function flattenRoundItems(rounds?: HodTabRound[]): HodOrderItem[] {
+  if (!Array.isArray(rounds) || rounds.length === 0) return [];
+  const byKey = new Map<string, HodOrderItem>();
+  for (const rd of rounds) {
+    for (const it of (Array.isArray(rd.items) ? rd.items : [])) {
+      const key = `${it.n}|${it.p}|${it.t || ""}|${it.alc ?? ""}`;
+      const ex = byKey.get(key);
+      if (ex) ex.qty += Number(it.qty) || 0;
+      else byKey.set(key, { ...it, qty: Number(it.qty) || 0 });
+    }
+  }
+  return Array.from(byKey.values());
 }
 export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]> {
   const rows: BillAuditRow[] = [];
@@ -3171,12 +3206,15 @@ export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]
     const data = d.data() as HodCover & { id?: string };
     const log = data.walletBillPrintLog;
     if (!Array.isArray(log) || log.length === 0) return;
+    const items = flattenRoundItems(data.tabRounds);
     log.forEach((e, i) => {
       rows.push({
         at: e.at, source: "wallet", docId: d.id,
         ref: (data.ref || d.id).toUpperCase(), customerName: data.name || "",
         by: e.by, total: e.total, itemCount: e.itemCount,
         isDuplicate: e.isDuplicate, billNumber: e.billNumber, printIndex: i + 1,
+        items, subtotal: e.subtotal ?? 0, discount: e.discount ?? 0,
+        serviceCharge: e.serviceCharge ?? 0, tax: e.tax ?? 0,
       });
     });
   });
@@ -3186,12 +3224,15 @@ export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]
     const data = d.data() as HodTableReservation;
     const log = data.billPrintLog;
     if (!Array.isArray(log) || log.length === 0) return;
-    log.forEach((e: typeof log[number] & { itemCount?: number }, i) => {
+    const items = flattenRoundItems(data.tabRounds);
+    log.forEach((e: typeof log[number] & { itemCount?: number; subtotal?: number; discount?: number; serviceCharge?: number; tax?: number }, i) => {
       rows.push({
         at: e.at, source: "table", docId: d.id,
         ref: (data.tableId || d.id).toUpperCase(), customerName: data.customerName || "",
         by: e.by, total: e.total, itemCount: e.itemCount ?? 0,
         isDuplicate: e.isDuplicate, billNumber: e.billNumber, printIndex: i + 1,
+        items, subtotal: e.subtotal ?? 0, discount: e.discount ?? 0,
+        serviceCharge: e.serviceCharge ?? 0, tax: e.tax ?? 0,
       });
     });
   });

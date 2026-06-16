@@ -307,7 +307,7 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
 function classifyWallet(args: {
   paymentId?: string; entryType: string; isGuestListFlag: boolean;
   hasGuestMatch: boolean; coverSource: string; aggregator?: any;
-  bookingTotal?: number;
+  bookingTotal?: number; paymentMethod?: string;
 }): { source: string; payChannel: WalletRow["payChannel"]; isGuestList: boolean } {
   const et = (args.entryType || "").toLowerCase();
   const cs = (args.coverSource || "").toLowerCase();
@@ -330,6 +330,19 @@ function classifyWallet(args: {
   else if (typeof args.bookingTotal === "number" && args.bookingTotal === 0) payChannel = "free_entry";
   else if (pid && pid.length >= 10 && !pid.startsWith("demo_")) payChannel = "paid_online";
   else payChannel = "unknown";
+  // 🆕 2026-06-15 v3.301 (Khushi) — "PAY AT VENUE was showing ⚠ UNKNOWN". When
+  // the paymentId carries no prefix proof (cash_/pay_/free_) we now fall back to
+  // the booking/cover's RECORDED payment method/mode so a genuine cash-at-door
+  // (or settled card/upi) row resolves instead of defaulting to UNKNOWN. Only
+  // fires when we'd otherwise give up — real paymentId proof above always wins.
+  if (payChannel === "unknown") {
+    const pm = String(args.paymentMethod || "").toLowerCase().trim();
+    if (pm === "cash" || pm === "pay_at_venue" || pm === "venue" || pm === "cash_pending" || pm === "pay at venue") payChannel = "pay_at_venue";
+    else if (pm === "card") payChannel = "card";
+    else if (pm === "upi") payChannel = "upi";
+    else if (pm === "split") payChannel = "split";
+    else if (pm === "paid_online" || pm === "online" || pm === "razorpay") payChannel = "paid_online";
+  }
   // 1) Aggregator (Zomato/Swiggy/EazyDiner) — explicit marker
   if (args.aggregator || cs.startsWith("aggregator")) {
     return { source: "aggregator", payChannel: "", isGuestList: false };
@@ -391,6 +404,7 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     coverSource: String(cAny.source || ""),
     aggregator: cAny.aggregator,
     bookingTotal: typeof (linkedBooking as any)?.total === "number" ? (linkedBooking as any).total : undefined,
+    paymentMethod: String((linkedBooking as any)?.paymentMode || cAny.paymentMode || c.paymentMethod || ""),
   });
   let { source, payChannel } = cls;
   // 🔴 2026-05-25 v4 (Khushi screenshot) — WALK-IN pay column was showing
@@ -767,6 +781,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         hasGuestMatch: false, coverSource: "",
         aggregator: undefined,
         bookingTotal: typeof (b as any).total === "number" ? (b as any).total : undefined,
+        paymentMethod: String((b as any).paymentMode || (b as any).paymentMethod || ""),
       });
       rows.push({
         coverId: "", ref: refKey, name: b.name || "", phone: b.phone || "",
@@ -1142,7 +1157,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
   );
 
   return (
-    <div style={{ color: "#fff" }}>
+    <div style={{ color: "#000" }}>
       {/* Header + view tabs + date picker */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1151,13 +1166,13 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
               ← POS link style used in CaptainMode. */}
           {!embedded && (
             <Link href="/"
-              style={{ padding: "8px 12px", borderRadius: 10, background: GOLD, border: `1.5px solid ${GOLD}`, color: "#0A0A0A", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
+              style={{ padding: "8px 12px", borderRadius: 10, background: "#F2C744", border: "2px solid #000", boxShadow: "2px 2px 0px #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
               ← POS
             </Link>
           )}
           <div>
-            <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, fontFamily: "'Playfair Display', serif" }}>📋 Reports</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
+            <div style={{ fontSize: 20, fontWeight: 900, color: "#000" }}>📋 Reports</div>
+            <div style={{ fontSize: 11, color: "#888" }}>
               {selectedDate === todayNight ? "🟢 LIVE — tonight" : `📅 Archive — ${selectedDate}`} · Live from Firestore · CSV export opens in Excel + Google Sheets.
             </div>
           </div>
@@ -1165,39 +1180,41 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <select value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)}
             title="Pick a night (last 7 days kept; older nights live in Google Sheets archive)"
-            style={{ padding: "8px 10px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(201,168,76,.3)", color: "#fff", fontSize: 12, fontWeight: 700 }}>
+            style={{ padding: "8px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 700 }}>
             {last7Dates.map((d, i) => (
               <option key={d} value={d}>{i === 0 ? `Tomorrow (${d})` : i === 1 ? `Tonight (${d})` : i === 2 ? `Last night (${d})` : d}</option>
             ))}
           </select>
-          <button onClick={() => setView("tables")} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
-            background: view === "tables" ? GOLD : "rgba(255,255,255,.06)", color: view === "tables" ? "#030305" : "#fff" }}>
+          <button onClick={() => setView("tables")} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+            border: "2px solid #000", boxShadow: view === "tables" ? "3px 3px 0px #000" : "none", transform: view === "tables" ? "translate(-1px,-1px)" : "none",
+            background: view === "tables" ? "#FF90E8" : "#fff", color: "#000" }}>
             🍽 All Tables ({tableRows.length})
           </button>
-          <button onClick={() => setView("wallets")} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
-            background: view === "wallets" ? GOLD : "rgba(255,255,255,.06)", color: view === "wallets" ? "#030305" : "#fff" }}>
+          <button onClick={() => setView("wallets")} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+            border: "2px solid #000", boxShadow: view === "wallets" ? "3px 3px 0px #000" : "none", transform: view === "wallets" ? "translate(-1px,-1px)" : "none",
+            background: view === "wallets" ? "#FF90E8" : "#fff", color: "#000" }}>
             🎟 Wallets / Guestlist ({walletRows.length})
           </button>
           <button onClick={() => setView("tally")}
             title="Compares every printed KOT against the final bill (subtracting manager-approved voids). Catches drinks served but never billed = cash-pocket leakage."
-            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
-              background: view === "tally" ? GOLD : "rgba(255,255,255,.06)",
-              color: view === "tally" ? "#030305" : "#fff",
-              boxShadow: tallyTotals.leakageTables > 0 && view !== "tally" ? `0 0 0 2px ${RED}88` : "none" }}>
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+              border: "2px solid #000", boxShadow: view === "tally" ? "3px 3px 0px #000" : "none", transform: view === "tally" ? "translate(-1px,-1px)" : "none",
+              background: view === "tally" ? "#FF90E8" : "#fff", color: "#000" }}>
             🧾 KOT vs Bill ({tallyRows.length})
-            {tallyTotals.leakageTables > 0 && <span style={{ marginLeft: 6, color: view === "tally" ? RED : RED, fontWeight: 900 }}>· 🔴 {tallyTotals.leakageTables}</span>}
+            {tallyTotals.leakageTables > 0 && <span style={{ marginLeft: 6, color: RED, fontWeight: 900 }}>· 🔴 {tallyTotals.leakageTables}</span>}
           </button>
           <button onClick={() => setView("edc")}
             title="Card-machine charges pushed from Door Mode tonight. Source of truth for cover card payments — no manual reconciliation needed."
-            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
-              background: view === "edc" ? GOLD : "rgba(255,255,255,.06)", color: view === "edc" ? "#030305" : "#fff" }}>
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+              border: "2px solid #000", boxShadow: view === "edc" ? "3px 3px 0px #000" : "none", transform: view === "edc" ? "translate(-1px,-1px)" : "none",
+              background: view === "edc" ? "#FF90E8" : "#fff", color: "#000" }}>
             💳 EDC Card ({edcTxns.length})
           </button>
           <button onClick={() => setView("settlement")}
             title="Upload tonight's vendor settlement file (Pine Labs / Razorpay) to auto-match against EDC card swipes. Catches missed webhooks and short-settled txns."
-            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer", border: "none",
-              background: view === "settlement" ? GOLD : "rgba(255,255,255,.06)", color: view === "settlement" ? "#030305" : "#fff",
-              boxShadow: reconResult && reconResult.totals.issueCount > 0 && view !== "settlement" ? `0 0 0 2px ${RED}88` : "none" }}>
+            style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, cursor: "pointer",
+              border: "2px solid #000", boxShadow: view === "settlement" ? "3px 3px 0px #000" : "none", transform: view === "settlement" ? "translate(-1px,-1px)" : "none",
+              background: view === "settlement" ? "#FF90E8" : "#fff", color: "#000" }}>
             🧮 Settlement{reconResult ? ` (${reconResult.totals.issueCount} issue${reconResult.totals.issueCount === 1 ? "" : "s"})` : ""}
           </button>
         </div>
@@ -1230,11 +1247,11 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
             <Tile label="Cover sales" value={`₹${walletTotals.coverSales.toLocaleString()}`} color={GOLD} />
           </div>
           {walletTotals.events.length > 0 && (
-            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(168, 85, 247, .08)", border: "1px solid rgba(168, 85, 247, .3)", fontSize: 11, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", boxShadow: "2px 2px 0px #000", fontSize: 11, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
               <span style={{ color: "#a855f7", fontWeight: 800, marginRight: 4 }}>🎤 EVENT:</span>
               <button onClick={() => setEventFilter("all")}
-                style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "1px solid rgba(168,85,247,.4)",
-                  background: eventFilter === "all" ? "#a855f7" : "transparent", color: eventFilter === "all" ? "#fff" : "rgba(255,255,255,.85)" }}>
+                style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "2px solid #000",
+                  background: eventFilter === "all" ? "#a855f7" : "#fff", color: eventFilter === "all" ? "#fff" : "#000" }}>
                 ALL ({walletRows.length})
               </button>
               {walletTotals.events.map(ev => {
@@ -1242,8 +1259,8 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                 const active = eventFilter === ev;
                 return (
                   <button key={ev} onClick={() => setEventFilter(ev)}
-                    style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: "pointer", border: "1px solid rgba(168,85,247,.4)",
-                      background: active ? "#a855f7" : "transparent", color: active ? "#fff" : "rgba(255,255,255,.85)" }}>
+                    style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: "pointer", border: "2px solid #000",
+                      background: active ? "#a855f7" : "#fff", color: active ? "#fff" : "#000" }}>
                     {ev} ({count})
                   </button>
                 );
@@ -1253,21 +1270,18 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         </>
       )}
 
-      {/* Data-source warning — surfaced once so Darshan knows what's real vs gap */}
-      <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(245, 158, 11, .08)", border: "1px solid rgba(245, 158, 11, .25)", fontSize: 11, color: "rgba(255,255,255,.75)" }}>
-        <strong style={{ color: ORANGE }}>📡 DATA SOURCE:</strong> Real-time from Firestore (`tableReservations` + `covers` + `bookings` + `guestlist`).
-        <strong> Email</strong> appears only when hodclub.in passes it in the booking — walk-ins captured at the door without a website booking will show "—".
-        Aggregator-paid amounts are matched from the Zomato email parser by phone (last 10 digits) — verify before reconciling.
-      </div>
+      {/* 🆕 2026-06-15 v3.301 (Khushi) — removed the standing "📡 DATA SOURCE"
+          caption banner that sat above the filter bar (visual clutter). */}
 
       {/* Filter bar — search + ⚙ filter toggle + export */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="🔍 Search name / phone / table / captain / event"
-          style={{ flex: "1 1 240px", padding: "8px 12px", borderRadius: 8, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 12 }} />
+          style={{ flex: "1 1 240px", padding: "8px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 12 }} />
         <button onClick={() => setShowFilters(!showFilters)}
           title="Show / hide source + ambiguity filters"
-          style={{ padding: "8px 14px", borderRadius: 8, border: showFilters ? `1px solid ${GOLD}` : "1px solid rgba(255,255,255,.1)",
-            background: showFilters ? "rgba(201,168,76,.15)" : "rgba(255,255,255,.06)", color: showFilters ? GOLD : "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+          style={{ padding: "8px 14px", borderRadius: 8, border: "2px solid #000",
+            background: showFilters ? "#F2C744" : "#fff", color: "#000", fontSize: 12, fontWeight: 800, cursor: "pointer",
+            boxShadow: showFilters ? "3px 3px 0px #000" : "none", transform: showFilters ? "translate(-1px,-1px)" : "none" }}>
           ⚙ Filter & Sort {(filter !== "all" || sourceFilter !== "all") ? "•" : ""}
         </button>
         <button onClick={view === "tables" ? exportTables : view === "wallets" ? exportWallets : view === "edc" ? exportEdc : view === "settlement" ? exportReconIssues : exportTally}
@@ -1296,10 +1310,10 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
             <Tile label="Tables tallied" value={String(tallyRows.length)} color={GOLD} />
             <Tile label="🟢 Match" value={String(tallyTotals.matchTables)} color={GREEN} />
             <Tile label="⚠ Mismatched" value={String(tallyTotals.leakageTables + tallyTotals.phantomTables + tallyTotals.minorTables)} color={tallyTotals.leakageTables > 0 ? RED : ORANGE} />
-            <Tile label="⚫ Bill voided" value={String(tallyTotals.billVoidedTables)} color="rgba(255,255,255,.5)" />
+            <Tile label="⚫ Bill voided" value={String(tallyTotals.billVoidedTables)} color="#888" />
             <Tile label="🔴 Leakage ₹" value={`₹${tallyTotals.leakageVal.toLocaleString()}`} color={RED} />
           </div>
-          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(239, 68, 68, .06)", border: "1px solid rgba(239, 68, 68, .25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "#FFF3F3", border: "2px solid #000", boxShadow: "2px 2px 0px #000", fontSize: 11, color: "#333" }}>
             <strong style={{ color: RED }}>🧾 KOT vs BILL TALLY:</strong> Every printed KOT (drink/food slip) compared to the final bill,
             after subtracting manager-PIN-approved voids. <strong>🔴 LEAKAGE</strong> = items physically served but never charged
             (cash-pocket risk). <strong>👻 PHANTOM</strong> = items billed but no KOT (rare — usually a comp / bartender error).
@@ -1307,23 +1321,23 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
             the table simply shows "no data" — never false-flags.
           </div>
           {tallyByCaptain.filter(c => c.totalLeakage + c.totalPhantom > 0).length > 0 && (
-            <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, background: "rgba(239,68,68,.05)", border: "1px solid rgba(239,68,68,.25)" }}>
+            <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, background: "#fff", border: "2px solid #000", boxShadow: "3px 3px 0px #000" }}>
               <div style={{ fontSize: 12, fontWeight: 800, color: RED, marginBottom: 8 }}>👤 PER-CAPTAIN LEAKAGE — {selectedDate}</div>
               <div style={{ display: "grid", gridTemplateColumns: "1.5fr 0.6fr 0.7fr 1fr 0.7fr 1fr", gap: 8, fontSize: 12 }}>
-                <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", fontSize: 10 }}>CAPTAIN</div>
-                <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", fontSize: 10, textAlign: "right" }}>TABLES</div>
+                <div style={{ fontWeight: 800, color: "#888", fontSize: 10 }}>CAPTAIN</div>
+                <div style={{ fontWeight: 800, color: "#888", fontSize: 10, textAlign: "right" }}>TABLES</div>
                 <div style={{ fontWeight: 800, color: RED, fontSize: 10, textAlign: "right" }}>🔴 LEAK#</div>
                 <div style={{ fontWeight: 800, color: RED, fontSize: 10, textAlign: "right" }}>🔴 LEAK ₹</div>
                 <div style={{ fontWeight: 800, color: ORANGE, fontSize: 10, textAlign: "right" }}>👻 PHAN#</div>
                 <div style={{ fontWeight: 800, color: ORANGE, fontSize: 10, textAlign: "right" }}>👻 PHAN ₹</div>
                 {tallyByCaptain.filter(c => c.totalLeakage + c.totalPhantom > 0).map(c => (
                   <Fragment key={c.captain}>
-                    <div style={{ color: "#fff", fontWeight: 700 }}>{c.captain}</div>
-                    <div style={{ textAlign: "right", color: "rgba(255,255,255,.7)" }}>{c.tables}</div>
-                    <div style={{ textAlign: "right", color: c.leakageTables > 0 ? RED : "rgba(255,255,255,.3)", fontWeight: 800 }}>{c.leakageTables || "—"}</div>
-                    <div style={{ textAlign: "right", color: c.totalLeakage > 0 ? RED : "rgba(255,255,255,.3)", fontWeight: 800 }}>{c.totalLeakage > 0 ? `₹${c.totalLeakage.toLocaleString()}` : "—"}</div>
-                    <div style={{ textAlign: "right", color: c.phantomTables > 0 ? ORANGE : "rgba(255,255,255,.3)", fontWeight: 800 }}>{c.phantomTables || "—"}</div>
-                    <div style={{ textAlign: "right", color: c.totalPhantom > 0 ? ORANGE : "rgba(255,255,255,.3)", fontWeight: 800 }}>{c.totalPhantom > 0 ? `₹${c.totalPhantom.toLocaleString()}` : "—"}</div>
+                    <div style={{ color: "#000", fontWeight: 700 }}>{c.captain}</div>
+                    <div style={{ textAlign: "right", color: "#555" }}>{c.tables}</div>
+                    <div style={{ textAlign: "right", color: c.leakageTables > 0 ? RED : "#ccc", fontWeight: 800 }}>{c.leakageTables || "—"}</div>
+                    <div style={{ textAlign: "right", color: c.totalLeakage > 0 ? RED : "#ccc", fontWeight: 800 }}>{c.totalLeakage > 0 ? `₹${c.totalLeakage.toLocaleString()}` : "—"}</div>
+                    <div style={{ textAlign: "right", color: c.phantomTables > 0 ? ORANGE : "#ccc", fontWeight: 800 }}>{c.phantomTables || "—"}</div>
+                    <div style={{ textAlign: "right", color: c.totalPhantom > 0 ? ORANGE : "#ccc", fontWeight: 800 }}>{c.totalPhantom > 0 ? `₹${c.totalPhantom.toLocaleString()}` : "—"}</div>
                   </Fragment>
                 ))}
               </div>
@@ -1331,17 +1345,19 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           )}
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
             {([
-              ["all", "ALL", GOLD],
+              ["all", "ALL", "#F2C744"],
               ["mismatched",
                 `⚠ MISMATCHED (${tallyTotals.leakageTables + tallyTotals.phantomTables + tallyTotals.minorTables})`,
                 tallyTotals.leakageTables > 0 ? RED : ORANGE],
               ["match", `🟢 MATCH (${tallyTotals.matchTables})`, GREEN],
-              ["bill-voided", `⚫ BILL VOIDED (${tallyTotals.billVoidedTables})`, "rgba(255,255,255,.5)"],
+              ["bill-voided", `⚫ BILL VOIDED (${tallyTotals.billVoidedTables})`, "#888"],
             ] as const).map(([v, label, c]) => (
               <button key={v} onClick={() => setTallyVerdictFilter(v as any)}
-                style={{ padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 800,
-                  background: tallyVerdictFilter === v ? c : "rgba(255,255,255,.06)",
-                  color: tallyVerdictFilter === v ? "#030305" : "#fff" }}>
+                style={{ padding: "6px 12px", borderRadius: 6, border: "2px solid #000", cursor: "pointer", fontSize: 11, fontWeight: 800,
+                  background: tallyVerdictFilter === v ? c : "#fff",
+                  color: "#000",
+                  boxShadow: tallyVerdictFilter === v ? "2px 2px 0px #000" : "none",
+                  transform: tallyVerdictFilter === v ? "translate(-1px,-1px)" : "none" }}>
                 {label}
               </button>
             ))}
@@ -1351,21 +1367,21 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
 
       {/* Filter drawer (collapsed by default) */}
       {showFilters && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.08)", alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 700, marginRight: 4 }}>SOURCE:</span>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, padding: 10, borderRadius: 8, background: "#fff", border: "2px solid #000", boxShadow: "3px 3px 0px #000", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "#000", fontWeight: 700, marginRight: 4 }}>SOURCE:</span>
           <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
-            style={{ padding: "6px 10px", borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", fontSize: 12 }}>
+            style={{ padding: "6px 10px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 12 }}>
             <option value="all">All sources</option>
             {(view === "tables" ? sources : ["guestlist", "entry-only", "cover", "group-booking", "walk-in", "aggregator"]).map(s => <option key={s} value={s}>{s.toUpperCase().replace("-", " ")}</option>)}
           </select>
           {view === "tables" && (
             <>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 700, marginLeft: 8, marginRight: 4 }}>AMBIGUITY:</span>
+              <span style={{ fontSize: 11, color: "#000", fontWeight: 700, marginLeft: 8, marginRight: 4 }}>AMBIGUITY:</span>
               <div style={{ display: "flex", gap: 4 }}>
                 {(["all", "green", "orange", "red"] as const).map((f) => (
-                  <button key={f} onClick={() => setFilter(f)} style={{ padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 800,
-                    background: filter === f ? (f === "all" ? GOLD : ambColor(f as Ambiguity)) : "rgba(255,255,255,.06)",
-                    color: filter === f ? "#030305" : "#fff" }}>
+                  <button key={f} onClick={() => setFilter(f)} style={{ padding: "6px 12px", borderRadius: 6, border: "2px solid #000", cursor: "pointer", fontSize: 11, fontWeight: 800,
+                    background: filter === f ? (f === "all" ? "#F2C744" : ambColor(f as Ambiguity)) : "#fff",
+                    color: "#000" }}>
                     {f === "all" ? "ALL" : f === "red" ? "🔴 RED" : f === "orange" ? "🟠 ORANGE" : "🟢 GREEN"}
                   </button>
                 ))}
@@ -1374,39 +1390,49 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           )}
           {(filter !== "all" || sourceFilter !== "all") && (
             <button onClick={() => { setFilter("all"); setSourceFilter("all"); }}
-              style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(255,255,255,.15)", background: "transparent", color: "rgba(255,255,255,.7)", fontSize: 11, cursor: "pointer", marginLeft: "auto" }}>
+              style={{ padding: "6px 10px", borderRadius: 6, border: "2px solid #000", background: "#fff", color: "#000", fontSize: 11, cursor: "pointer", marginLeft: "auto" }}>
               Clear
             </button>
           )}
         </div>
       )}
 
+      {/* 🆕 2026-06-15 v3.301 (Khushi) — Gumroad data-grid: hard 1px black
+          horizontal + vertical lines on every cell, bigger base font (13px,
+          headers 12px) and roomier padding so the Tables/Wallets reports read
+          like a proper ledger instead of borderless rows. */}
+      <style>{`
+        .hod-rpt-grid { font-size: 13px; }
+        .hod-rpt-grid thead tr { font-size: 12px !important; }
+        .hod-rpt-grid th, .hod-rpt-grid td { border: 1px solid #000 !important; padding: 9px 8px !important; }
+      `}</style>
+
       {/* TABLE VIEW */}
       {view === "tables" && (
-        <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+        <div style={{ overflowX: "auto", border: "2px solid #000", borderRadius: 10, boxShadow: "4px 4px 0px #000" }}>
+          <table className="hod-rpt-grid" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
             <thead>
-              <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+              <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
                 {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Bill ₹ (Full)", "Net ₹ (After Disc)", "Disc Δ ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
-                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredTables.length === 0 ? (
-                <tr><td colSpan={20} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No tables match filters.</td></tr>
+                <tr><td colSpan={20} style={{ padding: 24, textAlign: "center", color: "#888" }}>No tables match filters.</td></tr>
               ) : filteredTables.map((r) => (
-                <tr key={r.reservationId} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                <tr key={r.reservationId} style={{ borderBottom: "1px solid #eee" }}>
                   <td style={{ padding: "6px 6px" }}>{dot(r.ambiguity)}</td>
-                  <td style={{ padding: "6px 6px", color: GOLD, fontWeight: 800 }}>{r.tableId}<div style={{ fontSize: 9, color: "rgba(255,255,255,.4)" }}>{r.floor}</div></td>
+                  <td style={{ padding: "6px 6px", color: "#000", fontWeight: 800 }}>{r.tableId}<div style={{ fontSize: 9, color: "#888" }}>{r.floor}</div></td>
                   <td style={{ padding: "6px 6px" }}>{r.sourceLabel}{r.modifiedDiscount && <span title={`Default ${r.defaultDiscount}% → ${r.discountPct}%`} style={{ marginLeft: 4, color: ORANGE, fontWeight: 800 }}>✎</span>}</td>
                   <td style={{ padding: "6px 6px" }}>{r.customerName || "—"}</td>
                   <td style={{ padding: "6px 6px", fontFamily: "monospace" }}>{r.phone || "—"}</td>
-                  <td style={{ padding: "6px 6px", fontSize: 10, color: "rgba(255,255,255,.6)" }}>{r.email || "—"}</td>
+                  <td style={{ padding: "6px 6px", fontSize: 10, color: "#666" }}>{r.email || "—"}</td>
                   <td style={{ padding: "6px 6px" }}>{r.captain || "—"}</td>
                   <td style={{ padding: "6px 6px" }}>{r.partySize || "—"}</td>
-                  <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{fmtTime(r.arrival)}</td>
-                  <td style={{ padding: "6px 6px", color: r.minutesOnTable > 240 ? ORANGE : "rgba(255,255,255,.7)" }}>{r.minutesOnTable || "—"}</td>
+                  <td style={{ padding: "6px 6px", color: "#555" }}>{fmtTime(r.arrival)}</td>
+                  <td style={{ padding: "6px 6px", color: r.minutesOnTable > 240 ? ORANGE : "#555" }}>{r.minutesOnTable || "—"}</td>
                   {/* 🔴 2026-05-12 — `Bill ₹` is the FULL printed bill (no
                       discount applied at the door). `Net ₹` is what the
                       venue actually nets after the aggregator/captain
@@ -1415,30 +1441,30 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                       bill-then-discount cases at a glance. */}
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800 }}>₹{r.total.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
-                    color: r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total ? GREEN : "rgba(255,255,255,.7)" }}
+                    color: r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total ? GREEN : "#555" }}
                     title={r.aggregatorNetAmount === null ? "No discount recorded — net == bill"
                       : `Venue nets ₹${r.aggregatorNetAmount.toLocaleString()} after ${r.discountPct}% ${r.paymentMethod || "discount"}`}>
                     {r.aggregatorNetAmount !== null ? `₹${r.aggregatorNetAmount.toLocaleString()}` : `₹${r.total.toLocaleString()}`}
                   </td>
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
                     color: r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) >= 200 ? ORANGE
-                      : r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) > 0 ? "rgba(255,255,255,.7)"
-                      : "rgba(255,255,255,.3)" }}
+                      : r.aggregatorNetAmount !== null && (r.total - r.aggregatorNetAmount) > 0 ? "#555"
+                      : "#ccc" }}
                     title="Discount leakage = Full bill − Net received">
                     {r.aggregatorNetAmount !== null && r.aggregatorNetAmount < r.total
                       ? `−₹${(r.total - r.aggregatorNetAmount).toLocaleString()}`
                       : "—"}
                   </td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: r.modifiedDiscount ? ORANGE : "rgba(255,255,255,.7)" }}>{r.discountPct}%</td>
-                  <td style={{ padding: "6px 6px", color: r.paymentStatus === "paid" ? GREEN : r.paymentStatus === "bill_requested" ? ORANGE : "rgba(255,255,255,.6)" }}>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: r.modifiedDiscount ? ORANGE : "#555" }}>{r.discountPct}%</td>
+                  <td style={{ padding: "6px 6px", color: r.paymentStatus === "paid" ? GREEN : r.paymentStatus === "bill_requested" ? ORANGE : "#666" }}>
                     {r.paymentStatus === "paid" ? "✅ paid" : r.paymentStatus === "bill_requested" ? "🧾 bill due" : "open"}
                   </td>
                   <td style={{ padding: "6px 6px", textTransform: "uppercase", fontSize: 10 }}>{r.paymentMethod || "—"}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: r.aggregatorPaidAmount ? "#a855f7" : "rgba(255,255,255,.4)" }}>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: r.aggregatorPaidAmount ? "#a855f7" : "#ccc" }}>
                     {r.aggregatorPaidAmount ? `₹${r.aggregatorPaidAmount.toLocaleString()}` : "—"}
                   </td>
                   <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800,
-                    color: r.aggregatorVariance === null ? "rgba(255,255,255,.3)"
+                    color: r.aggregatorVariance === null ? "#ccc"
                       : r.aggregatorVariance <= -500 ? RED
                       : Math.abs(r.aggregatorVariance) >= 200 ? ORANGE
                       : GREEN }}
@@ -1450,7 +1476,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                       : r.aggregatorVariance === 0 ? "✓"
                       : `${r.aggregatorVariance > 0 ? "+" : ""}₹${r.aggregatorVariance.toLocaleString()}`}
                   </td>
-                  <td style={{ padding: "6px 6px", color: r.billPrintCount > 1 ? RED : "rgba(255,255,255,.6)", fontWeight: r.billPrintCount > 1 ? 900 : 400, textAlign: "center" }}>
+                  <td style={{ padding: "6px 6px", color: r.billPrintCount > 1 ? RED : "#666", fontWeight: r.billPrintCount > 1 ? 900 : 400, textAlign: "center" }}>
                     {r.billPrintCount}{r.billPrintCount > 1 ? " ⚠" : ""}
                   </td>
                   <td style={{ padding: "6px 6px", fontSize: 10, color: ambColor(r.ambiguity) }}>{r.flags.join(", ") || "—"}</td>
@@ -1463,18 +1489,18 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
 
       {/* WALLET VIEW */}
       {view === "wallets" && (
-        <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+        <div style={{ overflowX: "auto", border: "2px solid #000", borderRadius: 10, boxShadow: "4px 4px 0px #000" }}>
+          <table className="hod-rpt-grid" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
             <thead>
-              <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+              <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
                 {["Source", "Pay Channel", "Name", "Phone", "Email", "Event", "Agent", "Activated", "✓In", "Cover ₹", "Recharged ₹", "Redeemed ₹", "Balance ₹", "Pay", "Bill ×", "Bill ₹"].map((h) => (
-                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredWallets.length === 0 ? (
-                <tr><td colSpan={15} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>No wallet/guestlist entries for this date.</td></tr>
+                <tr><td colSpan={15} style={{ padding: 24, textAlign: "center", color: "#888" }}>No wallet/guestlist entries for this date.</td></tr>
               ) : filteredWallets.map((w) => {
                 // 🔴 UX 2026-05-10 — color chip per category (matches hodclub.in flows)
                 const sourceColor = w.source === "guestlist" ? "#a855f7"
@@ -1486,7 +1512,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   : GREEN;
                 const sourceLabel = w.source.toUpperCase().replace("-", " ");
                 return (
-                <tr key={w.coverId || `synth:${w.ref}` || `${w.source}:${w.name}:${w.phone}`} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                <tr key={w.coverId || `synth:${w.ref}` || `${w.source}:${w.name}:${w.phone}`} style={{ borderBottom: "1px solid #eee" }}>
                   <td style={{ padding: "6px 6px" }}>
                     <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, letterSpacing: ".5px",
                       background: `${sourceColor}22`, border: `1px solid ${sourceColor}55`, color: sourceColor }}>{sourceLabel}</span>
@@ -1522,25 +1548,25 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                       <span title="Booking has no payment record. Could be legacy data, admin-created, or an abandoned checkout. VERIFY MANUALLY before reconciling."
                             style={{ fontSize: 10, fontWeight: 800, color: RED, cursor: "help" }}>⚠ UNKNOWN</span>
                     ) : (
-                      <span style={{ fontSize: 10, color: "rgba(255,255,255,.3)" }}>—</span>
+                      <span style={{ fontSize: 10, color: "#ccc" }}>—</span>
                     )}
                   </td>
-                  <td style={{ padding: "6px 6px", color: "#fff", fontWeight: 700 }}>{w.name}</td>
+                  <td style={{ padding: "6px 6px", color: "#000", fontWeight: 700 }}>{w.name}</td>
                   <td style={{ padding: "6px 6px", fontFamily: "monospace" }}>{w.phone || "—"}</td>
-                  <td style={{ padding: "6px 6px", fontSize: 10, color: "rgba(255,255,255,.6)" }}>{w.email || "—"}</td>
+                  <td style={{ padding: "6px 6px", fontSize: 10, color: "#666" }}>{w.email || "—"}</td>
                   <td style={{ padding: "6px 6px", fontSize: 10 }}>{w.eventTitle || "—"}</td>
                   <td style={{ padding: "6px 6px" }}>{w.agent || "—"}</td>
-                  <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{fmtTime(w.activatedAt)}</td>
-                  <td style={{ padding: "6px 6px", color: w.checkedIn ? GREEN : "rgba(255,255,255,.4)" }}>{w.checkedIn ? "✓" : "—"}</td>
+                  <td style={{ padding: "6px 6px", color: "#555" }}>{fmtTime(w.activatedAt)}</td>
+                  <td style={{ padding: "6px 6px", color: w.checkedIn ? GREEN : "#ccc" }}>{w.checkedIn ? "✓" : "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverActivated.toLocaleString()}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.topUpTotal > 0 ? GOLD : "rgba(255,255,255,.4)" }}>{w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.topUpTotal > 0 ? GOLD : "#ccc" }}>{w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverUsed.toLocaleString()}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.coverBalance > 0 ? GREEN : "rgba(255,255,255,.4)", fontWeight: 800 }}>₹{w.coverBalance.toLocaleString()}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.coverBalance > 0 ? GREEN : "#ccc", fontWeight: 800 }}>₹{w.coverBalance.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", fontSize: 10, textTransform: "uppercase" }}>{w.paymentMethod || "—"}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "center", color: w.walletBillPrints > 1 ? RED : "rgba(255,255,255,.6)", fontWeight: w.walletBillPrints > 1 ? 900 : 400 }}>
+                  <td style={{ padding: "6px 6px", textAlign: "center", color: w.walletBillPrints > 1 ? RED : "#666", fontWeight: w.walletBillPrints > 1 ? 900 : 400 }}>
                     {w.walletBillPrints || 0}{w.walletBillPrints > 1 ? " ⚠" : ""}
                   </td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.billTotal > 0 ? GOLD : "rgba(255,255,255,.4)", fontWeight: 800 }}
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.billTotal > 0 ? GOLD : "#ccc", fontWeight: 800 }}
                       title={w.billTotal > 0 ? `Subtotal ₹${w.billSubtotal.toLocaleString()} · Disc ₹${w.billDiscount.toLocaleString()} · SC ₹${w.billServiceCharge.toLocaleString()} · Tax ₹${w.billTax.toLocaleString()}${w.billNumber ? ` · ${w.billNumber}` : ""}` : "No bill printed"}>
                     {w.billTotal > 0 ? `₹${w.billTotal.toLocaleString()}` : "—"}
                   </td>
@@ -1591,18 +1617,18 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         const statusColor = (s: string) =>
           s === "success" ? GREEN
           : s === "failed" ? RED
-          : s === "cancelled" ? "rgba(255,255,255,.5)"
+          : s === "cancelled" ? "#888"
           : s === "refunded" ? "#A855F7"
           : s === "refund_failed" ? "#EC4899"
           : ORANGE;
-        const rateColor = successRate == null ? "rgba(255,255,255,.5)" : successRate >= 90 ? GREEN : successRate >= 70 ? ORANGE : RED;
+        const rateColor = successRate == null ? "#888" : successRate >= 90 ? GREEN : successRate >= 70 ? ORANGE : RED;
         return (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
               <Tile label="Charges tonight" value={String(sorted.length)} color={GOLD} />
               <Tile label="✅ Successful" value={String(successCount)} color={GREEN} />
               <Tile label="❌ Declined" value={String(failCount)} color={RED} />
-              <Tile label="🚫 Cancelled" value={String(cancelCount)} color="rgba(255,255,255,.5)" />
+              <Tile label="🚫 Cancelled" value={String(cancelCount)} color="#888" />
               <Tile label="⏳ Pending" value={String(pendingCount)} color={ORANGE} />
               <Tile label="↩ Refunded" value={String(refundedCount)} color="#A855F7" />
               <Tile label="Success rate" value={successRate == null ? "—" : `${successRate}%`} color={rateColor} />
@@ -1612,46 +1638,48 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
               )}
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12, alignItems: "center" }}>
-              <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px" }}>STATUS:</span>
+              <span style={{ fontSize: 10, color: "#888", fontWeight: 800, letterSpacing: ".5px" }}>STATUS:</span>
               {(["all", "success", "failed", "cancelled", "pending", "refunded", "refund_failed"] as const).map(s => (
                 <button key={s} onClick={() => setEdcStatusFilter(s)}
-                  style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "1px solid rgba(255,255,255,.1)",
-                    background: edcStatusFilter === s ? GOLD : "rgba(255,255,255,.06)", color: edcStatusFilter === s ? "#030305" : "rgba(255,255,255,.85)" }}>
+                  style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: "pointer", border: "2px solid #000",
+                    background: edcStatusFilter === s ? "#F2C744" : "#fff", color: "#000",
+                    boxShadow: edcStatusFilter === s ? "2px 2px 0px #000" : "none",
+                    transform: edcStatusFilter === s ? "translate(-1px,-1px)" : "none" }}>
                   {s.toUpperCase()}
                 </button>
               ))}
               {vendors.length > 1 && (<>
-                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>VENDOR:</span>
+                <span style={{ fontSize: 10, color: "#888", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>VENDOR:</span>
                 <select value={edcVendorFilter} onChange={e => setEdcVendorFilter(e.target.value)}
-                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "#fff", border: "2px solid #000", color: "#000" }}>
                   <option value="all">All vendors</option>
                   {vendors.map(v => <option key={v} value={v}>{v.toUpperCase()}</option>)}
                 </select>
               </>)}
               {bouncers.length > 1 && (<>
-                <span style={{ fontSize: 10, color: "rgba(255,255,255,.5)", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>BOUNCER:</span>
+                <span style={{ fontSize: 10, color: "#888", fontWeight: 800, letterSpacing: ".5px", marginLeft: 8 }}>BOUNCER:</span>
                 <select value={edcBouncerFilter} onChange={e => setEdcBouncerFilter(e.target.value)}
-                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                  style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, background: "#fff", border: "2px solid #000", color: "#000" }}>
                   <option value="all">All bouncers</option>
                   {bouncers.map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
               </>)}
             </div>
-            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "rgba(168,85,247,.06)", border: "1px solid rgba(168,85,247,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
+            <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "#F5EEFF", border: "2px solid #000", boxShadow: "2px 2px 0px #000", fontSize: 11, color: "#333" }}>
               <strong style={{ color: "#A855F7" }}>💳 EDC CLOUD:</strong> Bouncer-tapped Card payments dispatched to the door card machine via Razorpay POS Terminal API (or Pine Labs Plutus Cloud). Source of truth for door card revenue — the accountant should reconcile this against the vendor settlement report each morning, not the cash sheet.
             </div>
-            <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+            <div style={{ overflowX: "auto", border: "2px solid #000", borderRadius: 10, boxShadow: "4px 4px 0px #000" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
                 <thead>
-                  <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                  <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
                     {["When", "Status", "Vendor", "Amount", "Booking Ref", "Card", "EDC Ref", "Bouncer", "Reason", "Refund"].map((h) => (
-                      <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                      <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.length === 0 ? (
-                    <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
+                    <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "#888" }}>
                       {sorted.length === 0
                         ? "No card-machine charges yet for this night. Once Door Mode pushes a card payment, it'll appear here in real time."
                         : "No charges match this search."}
@@ -1659,24 +1687,24 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   ) : filtered.map((t) => {
                     const c = statusColor(String(t.status || ""));
                     return (
-                      <tr key={t.id} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
-                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", whiteSpace: "nowrap" }}>{fmtTime(t.createdAt || "")}</td>
+                      <tr key={t.id} style={{ borderBottom: "1px solid #eee" }}>
+                        <td style={{ padding: "6px 6px", color: "#555", whiteSpace: "nowrap" }}>{fmtTime(t.createdAt || "")}</td>
                         <td style={{ padding: "6px 6px" }}>
                           <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
                             {String(t.status || "").toUpperCase()}
                           </span>
                         </td>
-                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.85)" }}>{t.vendor || "—"}</td>
-                        <td style={{ padding: "6px 6px", textAlign: "right", color: GOLD, fontWeight: 800 }}>₹{Number(t.amount || 0).toLocaleString()}</td>
-                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontFamily: "monospace", fontSize: 10 }}>{t.bookingRef || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: "#333" }}>{t.vendor || "—"}</td>
+                        <td style={{ padding: "6px 6px", textAlign: "right", color: "#000", fontWeight: 800 }}>₹{Number(t.amount || 0).toLocaleString()}</td>
+                        <td style={{ padding: "6px 6px", color: "#555", fontFamily: "monospace", fontSize: 10 }}>{t.bookingRef || "—"}</td>
                         <td style={{ padding: "6px 6px" }}>
-                          {t.last4 ? <span>{t.cardNetwork || "CARD"} ••••{t.last4}</span> : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                          {t.last4 ? <span>{t.cardNetwork || "CARD"} ••••{t.last4}</span> : <span style={{ color: "#ccc" }}>—</span>}
                         </td>
-                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>
+                        <td style={{ padding: "6px 6px", color: "#666", fontFamily: "monospace", fontSize: 10 }}>
                           {t.edcRef || t.razorpayPaymentId || t.pineLabsRef || "—"}
                         </td>
-                        <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{t.bouncerName || "—"}</td>
-                        <td style={{ padding: "6px 6px", color: t.errorReason || t.refundError ? RED : "rgba(255,255,255,.4)", fontSize: 10 }}>{t.errorReason || t.refundError || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: "#555" }}>{t.bouncerName || "—"}</td>
+                        <td style={{ padding: "6px 6px", color: t.errorReason || t.refundError ? RED : "#ccc", fontSize: 10 }}>{t.errorReason || t.refundError || "—"}</td>
                         <td style={{ padding: "6px 6px" }}>
                           {/* Refund column — only successful captures are
                               refundable. Already-refunded txns surface the
@@ -1707,7 +1735,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                                 }
                               }}
                               disabled={!!edcRefunding[t.id]}
-                              style={{ padding: "4px 9px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: edcRefunding[t.id] ? "wait" : "pointer", border: "1px solid rgba(168,85,247,.4)", background: "rgba(168,85,247,.12)", color: "#A855F7" }}>
+                              style={{ padding: "4px 9px", borderRadius: 6, fontSize: 10, fontWeight: 800, cursor: edcRefunding[t.id] ? "wait" : "pointer", border: "2px solid #000", background: "#F5EEFF", color: "#A855F7" }}>
                               {edcRefunding[t.id] ? "…" : "↩ Refund"}
                             </button>
                           ) : t.status === "refunded" ? (
@@ -1719,7 +1747,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                               refund failed
                             </span>
                           ) : (
-                            <span style={{ color: "rgba(255,255,255,.3)", fontSize: 10 }}>—</span>
+                            <span style={{ color: "#ccc", fontSize: 10 }}>—</span>
                           )}
                         </td>
                       </tr>
@@ -1742,44 +1770,44 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           : "🟧 NOT YET SETTLED";
         return (
           <>
-            <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.25)", fontSize: 11, color: "rgba(255,255,255,.78)" }}>
-              <strong style={{ color: GREEN }}>🧮 SETTLEMENT RECONCILIATION:</strong> Upload tonight's settlement file (Pine Labs Plutus dashboard → Reports → Daily Settlement, or Razorpay Dashboard → Settlements → Export). Each row is matched against this night's <code style={{ color: GOLD }}>edcTransactions</code> by RRN / Approval Code. Mismatches surface below — fix at standup, not month-end.
+            <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "#E8FFF3", border: "2px solid #000", boxShadow: "2px 2px 0px #000", fontSize: 11, color: "#333" }}>
+              <strong style={{ color: GREEN }}>🧮 SETTLEMENT RECONCILIATION:</strong> Upload tonight's settlement file (Pine Labs Plutus dashboard → Reports → Daily Settlement, or Razorpay Dashboard → Settlements → Export). Each row is matched against this night's <code style={{ color: "#000", background: "#F4F4F0", padding: "0 4px", borderRadius: 3 }}>edcTransactions</code> by RRN / Approval Code. Mismatches surface below — fix at standup, not month-end.
             </div>
 
             {/* Upload bar */}
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12, padding: 12, borderRadius: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(201,168,76,.2)" }}>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)", fontWeight: 800, letterSpacing: ".5px" }}>VENDOR:</span>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12, padding: 12, borderRadius: 10, background: "#fff", border: "2px solid #000", boxShadow: "3px 3px 0px #000" }}>
+              <span style={{ fontSize: 11, color: "#000", fontWeight: 800, letterSpacing: ".5px" }}>VENDOR:</span>
               <select value={reconVendor} onChange={(e) => { setReconVendor(e.target.value as SettlementVendor); setReconResult(null); setReconFileName(""); }}
-                style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }}>
+                style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700, background: "#fff", border: "2px solid #000", color: "#000" }}>
                 <option value="pinelabs">Pine Labs (Plutus Smart Cloud)</option>
                 <option value="razorpay">Razorpay (POS Settlement)</option>
               </select>
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: 8, background: GOLD, color: "#030305", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: 8, background: "#F2C744", border: "2px solid #000", boxShadow: "2px 2px 0px #000", color: "#000", fontWeight: 900, fontSize: 12, cursor: "pointer" }}>
                 📂 {reconFileName ? "Replace settlement file" : "Upload settlement file (.csv)"}
                 <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
                   onChange={(e) => { const f = e.target.files?.[0]; if (f) handleSettlementFile(f); e.target.value = ""; }} />
               </label>
               {reconFileName && (
-                <span style={{ fontSize: 11, color: "rgba(255,255,255,.6)" }}>
-                  📄 {reconFileName} · matched against <strong style={{ color: GOLD }}>{edcTxns.filter(t => (t.vendor || "").toLowerCase() === reconVendor).length}</strong> {reconVendor} txn(s) for {today}
+                <span style={{ fontSize: 11, color: "#555" }}>
+                  📄 {reconFileName} · matched against <strong style={{ color: "#000" }}>{edcTxns.filter(t => (t.vendor || "").toLowerCase() === reconVendor).length}</strong> {reconVendor} txn(s) for {today}
                 </span>
               )}
               {reconResult && (
                 <button onClick={() => { setReconResult(null); setReconFileName(""); setReconError(""); }}
-                  style={{ padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.15)", color: "rgba(255,255,255,.7)", cursor: "pointer" }}>
+                  style={{ padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: "#fff", border: "2px solid #000", color: "#000", cursor: "pointer" }}>
                   Clear
                 </button>
               )}
             </div>
 
             {reconError && (
-              <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(239,68,68,.08)", border: `1px solid ${RED}55`, color: RED, fontSize: 12 }}>
+              <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 8, background: "#FFF3F3", border: `2px solid ${RED}`, color: RED, fontSize: 12 }}>
                 ⚠️ {reconError}
               </div>
             )}
 
             {!r && !reconError && (
-              <div style={{ padding: 32, textAlign: "center", color: "rgba(255,255,255,.4)", fontSize: 12, border: "1px dashed rgba(255,255,255,.1)", borderRadius: 10 }}>
+              <div style={{ padding: 32, textAlign: "center", color: "#888", fontSize: 12, border: "2px dashed #000", borderRadius: 10 }}>
                 No settlement file loaded yet. Pick a vendor above and upload its daily CSV to begin.
               </div>
             )}
@@ -1792,15 +1820,15 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   <Tile label="✅ Matched clean" value={String(r.totals.matchedCount)} color={GREEN} />
                   <Tile label="Matched ₹" value={`₹${Math.round(r.totals.matchedAmount).toLocaleString()}`} color={GREEN} />
                   <Tile label="⚠ Issues" value={String(r.totals.issueCount)} color={r.totals.issueCount > 0 ? RED : GREEN} />
-                  <Tile label="Unparsed lines" value={String(r.unparsed.length)} color={r.unparsed.length > 0 ? ORANGE : "rgba(255,255,255,.5)"} />
+                  <Tile label="Unparsed lines" value={String(r.unparsed.length)} color={r.unparsed.length > 0 ? ORANGE : "#888"} />
                 </div>
 
-                <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+                <div style={{ overflowX: "auto", border: "2px solid #000", borderRadius: 10, boxShadow: "4px 4px 0px #000" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
                     <thead>
-                      <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                      <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
                         {["Issue", "Ref (RRN / Auth)", "Vendor ₹", "Firestore ₹", "Δ ₹", "Booking", "Card", "Bouncer", "What happened"].map((h) => (
-                          <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                          <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -1813,30 +1841,30 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                         const c = issueColor(i.kind);
                         const drift = Math.round(i.firestoreAmount - i.settlementAmount);
                         return (
-                          <tr key={`${i.kind}-${i.ref}-${idx}`} style={{ borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                          <tr key={`${i.kind}-${i.ref}-${idx}`} style={{ borderBottom: "1px solid #eee" }}>
                             <td style={{ padding: "6px 6px" }}>
                               <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${c}22`, border: `1px solid ${c}55`, color: c }}>
                                 {issueLabel(i.kind)}
                               </span>
                             </td>
-                            <td style={{ padding: "6px 6px", fontFamily: "monospace", fontSize: 10, color: "rgba(255,255,255,.85)" }}>{i.ref}</td>
-                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.settlementAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                            <td style={{ padding: "6px 6px", fontFamily: "monospace", fontSize: 10, color: "#333" }}>{i.ref}</td>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.settlementAmount > 0 ? "#000" : "#ccc", fontWeight: 700 }}>
                               {i.settlementAmount > 0 ? `₹${i.settlementAmount.toLocaleString()}` : "—"}
                             </td>
-                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.firestoreAmount > 0 ? GOLD : "rgba(255,255,255,.3)", fontWeight: 700 }}>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: i.firestoreAmount > 0 ? "#000" : "#ccc", fontWeight: 700 }}>
                               {i.firestoreAmount > 0 ? `₹${i.firestoreAmount.toLocaleString()}` : "—"}
                             </td>
-                            <td style={{ padding: "6px 6px", textAlign: "right", color: drift === 0 ? "rgba(255,255,255,.4)" : drift > 0 ? ORANGE : RED, fontWeight: 800 }}>
+                            <td style={{ padding: "6px 6px", textAlign: "right", color: drift === 0 ? "#ccc" : drift > 0 ? ORANGE : RED, fontWeight: 800 }}>
                               {drift === 0 ? "—" : `${drift > 0 ? "+" : ""}₹${drift.toLocaleString()}`}
                             </td>
-                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.6)", fontFamily: "monospace", fontSize: 10 }}>{i.txn?.bookingRef || "—"}</td>
+                            <td style={{ padding: "6px 6px", color: "#666", fontFamily: "monospace", fontSize: 10 }}>{i.txn?.bookingRef || "—"}</td>
                             <td style={{ padding: "6px 6px" }}>
                               {(i.txn?.last4 || i.settlement?.last4)
                                 ? <span>••••{i.txn?.last4 || i.settlement?.last4}</span>
-                                : <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>}
+                                : <span style={{ color: "#ccc" }}>—</span>}
                             </td>
-                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{i.txn?.bouncerName || "—"}</td>
-                            <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)", fontSize: 10 }}>{i.detail}</td>
+                            <td style={{ padding: "6px 6px", color: "#555" }}>{i.txn?.bouncerName || "—"}</td>
+                            <td style={{ padding: "6px 6px", color: "#555", fontSize: 10 }}>{i.detail}</td>
                           </tr>
                         );
                       })}
@@ -1845,11 +1873,11 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                 </div>
 
                 {r.unparsed.length > 0 && (
-                  <details style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(245,158,11,.06)", border: `1px solid ${ORANGE}33` }}>
+                  <details style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "#FFFBE6", border: `2px solid #000` }}>
                     <summary style={{ cursor: "pointer", fontSize: 11, fontWeight: 800, color: ORANGE }}>
                       ⚠ {r.unparsed.length} line(s) couldn't be parsed (no RRN / reference column found) — click to inspect
                     </summary>
-                    <pre style={{ marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.6)", maxHeight: 200, overflow: "auto" }}>
+                    <pre style={{ marginTop: 8, fontSize: 10, color: "#555", maxHeight: 200, overflow: "auto" }}>
                       {r.unparsed.slice(0, 20).map((u, i) => `${i + 1}. ${JSON.stringify(u)}`).join("\n")}
                       {r.unparsed.length > 20 ? `\n… and ${r.unparsed.length - 20} more` : ""}
                     </pre>
@@ -1863,18 +1891,18 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
 
       {/* TALLY VIEW */}
       {view === "tally" && (
-        <div style={{ overflowX: "auto", border: "1px solid rgba(201,168,76,.2)", borderRadius: 10 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#fff" }}>
+        <div style={{ overflowX: "auto", border: "2px solid #000", borderRadius: 10, boxShadow: "4px 4px 0px #000" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
             <thead>
-              <tr style={{ background: "rgba(201,168,76,.1)", color: GOLD, fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
+              <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
                 {["", "Verdict", "Table", "Customer", "Captain", "Paid At", "KOTs", "KOT ₹", "Void ₹", "Bill ₹", "Diff ₹", "Mismatched items"].map((h) => (
-                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)" }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredTally.length === 0 ? (
-                <tr><td colSpan={12} style={{ padding: 24, textAlign: "center", color: "rgba(255,255,255,.4)" }}>
+                <tr><td colSpan={12} style={{ padding: 24, textAlign: "center", color: "#888" }}>
                   {tallyKots.length === 0 && tallyRows.length === 0
                     ? "No closed tables yet for this night — once captains mark tables paid, they'll show here."
                     : "No tables match this filter."}
@@ -1883,7 +1911,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                 const vColor = r.verdict === "leakage" ? RED
                   : r.verdict === "phantom" ? ORANGE
                   : r.verdict === "minor" ? ORANGE
-                  : r.verdict === "bill-voided" ? "rgba(255,255,255,.5)"
+                  : r.verdict === "bill-voided" ? "#888"
                   : r.verdict === "unknown" ? AMBER : GREEN;
                 const vLabel = r.verdict === "leakage" ? "🔴 LEAKAGE"
                   : r.verdict === "phantom" ? "👻 PHANTOM"
@@ -1893,32 +1921,32 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                 const expanded = expandedTally === r.reservationId;
                 return (
                   <Fragment key={r.reservationId}>
-                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,.04)", cursor: r.itemDiffs.length > 0 ? "pointer" : "default" }}
+                    <tr style={{ borderBottom: "1px solid #eee", cursor: r.itemDiffs.length > 0 ? "pointer" : "default" }}
                       onClick={() => r.itemDiffs.length > 0 && setExpandedTally(expanded ? null : r.reservationId)}>
                       <td style={{ padding: "6px 6px" }}>
-                        <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 5, background: vColor, boxShadow: `0 0 6px ${vColor}aa` }} />
+                        <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 5, background: vColor }} />
                       </td>
                       <td style={{ padding: "6px 6px" }}>
                         <span style={{ display: "inline-block", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 800, background: `${vColor}22`, border: `1px solid ${vColor}55`, color: vColor }}>
                           {vLabel}
                         </span>
                       </td>
-                      <td style={{ padding: "6px 6px", color: GOLD, fontWeight: 800 }}>{r.tableId}<div style={{ fontSize: 9, color: "rgba(255,255,255,.4)" }}>{r.floor}</div></td>
+                      <td style={{ padding: "6px 6px", color: "#000", fontWeight: 800 }}>{r.tableId}<div style={{ fontSize: 9, color: "#888" }}>{r.floor}</div></td>
                       <td style={{ padding: "6px 6px" }}>{r.customerName || "—"}</td>
                       <td style={{ padding: "6px 6px" }}>{r.captain || "—"}</td>
-                      <td style={{ padding: "6px 6px", color: "rgba(255,255,255,.7)" }}>{fmtTime(r.paidAt)}</td>
+                      <td style={{ padding: "6px 6px", color: "#555" }}>{fmtTime(r.paidAt)}</td>
                       <td style={{ padding: "6px 6px", textAlign: "right" }}>{r.kotCount}</td>
                       <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{Math.round(r.kotValue).toLocaleString()}</td>
-                      <td style={{ padding: "6px 6px", textAlign: "right", color: r.voidValue > 0 ? AMBER : "rgba(255,255,255,.4)" }}>
+                      <td style={{ padding: "6px 6px", textAlign: "right", color: r.voidValue > 0 ? AMBER : "#ccc" }}>
                         {r.voidValue > 0 ? `₹${Math.round(r.voidValue).toLocaleString()}` : "—"}
                       </td>
                       <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{Math.round(r.billValue).toLocaleString()}</td>
                       <td style={{ padding: "6px 6px", textAlign: "right", color: vColor, fontWeight: 800 }}>
                         {Math.abs(r.diffValue) < 1 ? "✓" : `${r.diffValue > 0 ? "+" : ""}₹${Math.round(r.diffValue).toLocaleString()}`}
                       </td>
-                      <td style={{ padding: "6px 6px", fontSize: 10, color: "rgba(255,255,255,.7)" }}>
+                      <td style={{ padding: "6px 6px", fontSize: 10, color: "#555" }}>
                         {r.itemDiffs.length === 0
-                          ? <span style={{ color: "rgba(255,255,255,.3)" }}>—</span>
+                          ? <span style={{ color: "#ccc" }}>—</span>
                           : <span>{r.itemDiffs.length} item{r.itemDiffs.length !== 1 ? "s" : ""} · click {expanded ? "▲" : "▼"}</span>}
                       </td>
                     </tr>
@@ -1939,33 +1967,33 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                         ? `🟠 MINOR — small mismatch under ₹500 threshold. Likely a typo, a pricing tweak mid-night, or an unprinted comp. Worth a quick check but not a fraud red-flag.`
                         : "";
                       return (
-                      <tr style={{ background: "rgba(0,0,0,.25)" }}>
+                      <tr style={{ background: "#F9F9F9" }}>
                         <td colSpan={12} style={{ padding: "10px 14px" }}>
                           {explainer && (
-                            <div style={{ marginBottom: 10, padding: "8px 10px", borderRadius: 6, background: `${vColor}11`, border: `1px solid ${vColor}44`, fontSize: 12, color: "#fff", lineHeight: 1.45 }}>
+                            <div style={{ marginBottom: 10, padding: "8px 10px", borderRadius: 6, background: `${vColor}11`, border: `2px solid ${vColor}55`, fontSize: 12, color: "#000", lineHeight: 1.45 }}>
                               <div style={{ fontWeight: 800, color: vColor, marginBottom: 4 }}>WHY THIS IS MISMATCHED</div>
                               <div style={{ marginBottom: phrases.length ? 6 : 0 }}>{explainer}</div>
-                              {phrases.length > 0 && <div style={{ color: "rgba(255,255,255,.85)", fontSize: 11.5 }}><strong style={{ color: vColor }}>What happened:</strong> {sentence}.</div>}
+                              {phrases.length > 0 && <div style={{ color: "#333", fontSize: 11.5 }}><strong style={{ color: vColor }}>What happened:</strong> {sentence}.</div>}
                             </div>
                           )}
-                          <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginBottom: 6, fontWeight: 800, letterSpacing: ".5px" }}>📋 ITEM-LEVEL BREAKDOWN — {r.tableId}</div>
+                          <div style={{ fontSize: 10, color: "#888", marginBottom: 6, fontWeight: 800, letterSpacing: ".5px" }}>📋 ITEM-LEVEL BREAKDOWN — {r.tableId}</div>
                           <div style={{ display: "grid", gridTemplateColumns: "2fr 0.6fr 0.6fr 0.6fr 0.7fr 0.8fr 0.9fr", gap: 6, fontSize: 11 }}>
-                            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.5)", fontSize: 10 }}>ITEM</div>
-                            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.5)", fontSize: 10, textAlign: "right" }}>UNIT ₹</div>
-                            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.5)", fontSize: 10, textAlign: "right" }}>KOT</div>
+                            <div style={{ fontWeight: 800, color: "#888", fontSize: 10 }}>ITEM</div>
+                            <div style={{ fontWeight: 800, color: "#888", fontSize: 10, textAlign: "right" }}>UNIT ₹</div>
+                            <div style={{ fontWeight: 800, color: "#888", fontSize: 10, textAlign: "right" }}>KOT</div>
                             <div style={{ fontWeight: 800, color: AMBER, fontSize: 10, textAlign: "right" }}>VOIDED</div>
-                            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.5)", fontSize: 10, textAlign: "right" }}>EXPECTED</div>
-                            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.5)", fontSize: 10, textAlign: "right" }}>BILLED</div>
+                            <div style={{ fontWeight: 800, color: "#888", fontSize: 10, textAlign: "right" }}>EXPECTED</div>
+                            <div style={{ fontWeight: 800, color: "#888", fontSize: 10, textAlign: "right" }}>BILLED</div>
                             <div style={{ fontWeight: 800, color: vColor, fontSize: 10, textAlign: "right" }}>DIFF ₹</div>
                             {r.itemDiffs.map((d, i) => {
                               const dColor = d.diffValue > 0 ? RED : d.diffValue < 0 ? ORANGE : GREEN;
                               return (
                                 <Fragment key={i}>
-                                  <div style={{ color: "#fff" }}>{d.name}</div>
-                                  <div style={{ textAlign: "right", color: "rgba(255,255,255,.6)" }}>₹{d.unitPrice.toLocaleString()}</div>
+                                  <div style={{ color: "#000" }}>{d.name}</div>
+                                  <div style={{ textAlign: "right", color: "#666" }}>₹{d.unitPrice.toLocaleString()}</div>
                                   <div style={{ textAlign: "right" }}>{d.kotQty}</div>
-                                  <div style={{ textAlign: "right", color: d.voidQty > 0 ? AMBER : "rgba(255,255,255,.3)" }}>{d.voidQty || "—"}</div>
-                                  <div style={{ textAlign: "right", color: "rgba(255,255,255,.7)" }}>{d.expectedBillQty}</div>
+                                  <div style={{ textAlign: "right", color: d.voidQty > 0 ? AMBER : "#ccc" }}>{d.voidQty || "—"}</div>
+                                  <div style={{ textAlign: "right", color: "#555" }}>{d.expectedBillQty}</div>
                                   <div style={{ textAlign: "right" }}>{d.billQty}</div>
                                   <div style={{ textAlign: "right", color: dColor, fontWeight: 800 }}>
                                     {d.diffQty > 0 ? `+${d.diffQty} = ₹${Math.round(d.diffValue).toLocaleString()}`
@@ -1988,7 +2016,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         </div>
       )}
 
-      <div style={{ marginTop: 10, fontSize: 10, color: "rgba(255,255,255,.4)" }}>
+      <div style={{ marginTop: 10, fontSize: 10, color: "#888" }}>
         Tip: filter by 🟠 / 🔴 then export to share with your accountant. Aggregator-paid amounts are matched from the Zomato email-parser (orphanZomatoPayments) by phone — verify before reconciling.
       </div>
     </div>
@@ -1997,8 +2025,8 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
 
 function Tile({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div style={{ padding: 12, borderRadius: 10, background: `linear-gradient(135deg, ${color}1a, ${color}0a)`, border: `1px solid ${color}55` }}>
-      <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.65)", letterSpacing: ".5px" }}>{label.toUpperCase()}</div>
+    <div style={{ padding: 12, borderRadius: 10, background: "#fff", border: "2px solid #000", boxShadow: "4px 4px 0px #000" }}>
+      <div style={{ fontSize: 10, fontWeight: 800, color: "#000", letterSpacing: ".5px" }}>{label.toUpperCase()}</div>
       <div style={{ fontSize: 20, fontWeight: 900, color, marginTop: 4 }}>{value}</div>
     </div>
   );

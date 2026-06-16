@@ -63,14 +63,16 @@ export function getOperationalNightStr(): string {
   return shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
-// Returns a Date set to 12:00 IST (noon) on the day AFTER the given YYYY-MM-DD
-// operational night. Used as cover expiry timestamp (covers stay valid until
-// the next day's noon — deliberately later than the 7 AM night rollover so a
-// cover is never invalidated early). 12:00 IST = 06:30 UTC same calendar day.
+// Returns a Date set to 3:00 IST on the day AFTER the given YYYY-MM-DD
+// operational night. Used as the cover/wallet expiry timestamp — ALL wallet
+// QRs (covers + prepaid table bookings) stay valid until 3:00 AM the next
+// morning (the end of the operational night) and then expire.
+// 🆕 2026-06-15 (Khushi) — was next-day NOON; now 3:00 AM next day per request.
+// 3:00 IST = the next IST date's 3 AM wall-clock minus the 5h30m IST offset
+// (= 21:30 UTC on the operational-night calendar day itself).
 export function getCoverExpiryFor(operationalNightStr: string): Date {
   const [y, m, d] = operationalNightStr.split("-").map(Number);
-  // Date.UTC of next IST date at 06:30 UTC = 12:00 IST that day.
-  return new Date(Date.UTC(y, m - 1, d + 1, 6, 30, 0));
+  return new Date(Date.UTC(y, m - 1, d + 1, 3, 0, 0) - (5 * 60 + 30) * 60 * 1000);
 }
 
 export function getCurrentHour(): number {

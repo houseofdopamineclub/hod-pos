@@ -127,6 +127,11 @@ const STARTER_PACK: { q: string; a: string; k: string; c: string }[] = [
     k: "contact, phone, number, email, instagram, social, call, reach, manager, customer care" },
 ];
 
+const inpStyle: React.CSSProperties = {
+  width: "100%", padding: 10, border: "2px solid #000",
+  background: "#fff", color: "#000", fontSize: 14, boxSizing: "border-box" as const,
+};
+
 export default function KnowledgeBaseAdmin() {
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -138,7 +143,6 @@ export default function KnowledgeBaseAdmin() {
   const [category, setCategory] = useState("General");
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
-  const gold = "#C9A84C";
 
   useEffect(() => {
     const unsub = onSnapshot(
@@ -153,36 +157,25 @@ export default function KnowledgeBaseAdmin() {
   }, []);
 
   const resetForm = () => {
-    setQuestion("");
-    setAnswer("");
-    setKeywords("");
-    setCategory("General");
-    setShowForm(false);
-    setEditingId(null);
+    setQuestion(""); setAnswer(""); setKeywords(""); setCategory("General");
+    setShowForm(false); setEditingId(null);
   };
 
   const handleSave = async () => {
     if (!question.trim() || !answer.trim()) { alert("Question and answer required"); return; }
     if (!(await requireManagerPin(editingId ? "Update knowledge" : "Add knowledge"))) return;
-
     setSaving(true);
     try {
       if (editingId) {
         await updateDoc(doc(db, "posBotKnowledge", editingId), {
-          question: question.trim(),
-          answer: answer.trim(),
-          keywords: keywords.trim(),
-          category,
-          updatedAt: serverTimestamp(),
+          question: question.trim(), answer: answer.trim(),
+          keywords: keywords.trim(), category, updatedAt: serverTimestamp(),
         });
       } else {
         await addDoc(collection(db, "posBotKnowledge"), {
-          question: question.trim(),
-          answer: answer.trim(),
-          keywords: keywords.trim(),
-          category,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
+          question: question.trim(), answer: answer.trim(),
+          keywords: keywords.trim(), category,
+          createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
       }
       resetForm();
@@ -194,10 +187,7 @@ export default function KnowledgeBaseAdmin() {
   const handleBulkSeed = async () => {
     const existingQuestions = new Set(entries.map((e) => e.question.trim().toLowerCase()));
     const toAdd = STARTER_PACK.filter((s) => !existingQuestions.has(s.q.trim().toLowerCase()));
-    if (toAdd.length === 0) {
-      alert("✅ All starter entries already loaded! Bot KB is fully seeded.");
-      return;
-    }
+    if (toAdd.length === 0) { alert("✅ All starter entries already loaded! Bot KB is fully seeded."); return; }
     if (!confirm(`Add ${toAdd.length} curated HOD knowledge entries to the bot?\n\n(Duplicates skipped automatically.)`)) return;
     if (!(await requireManagerPin(`Bulk-add ${toAdd.length} starter entries`))) return;
     setBulkLoading(true);
@@ -217,36 +207,32 @@ export default function KnowledgeBaseAdmin() {
 
   const handleDelete = async (id: string, q: string) => {
     if (!confirm(`Delete "${q}"?`)) return;
-    if (!(await requireManagerPin(`Delete knowledge`))) return;
+    if (!(await requireManagerPin("Delete knowledge"))) return;
     try { await deleteDoc(doc(db, "posBotKnowledge", id)); } catch (e: any) { alert("Error: " + e?.message); }
   };
 
   const startEdit = (entry: KnowledgeEntry) => {
-    setEditingId(entry.id);
-    setQuestion(entry.question);
-    setAnswer(entry.answer);
-    setKeywords(entry.keywords || "");
-    setCategory(entry.category || "General");
+    setEditingId(entry.id); setQuestion(entry.question); setAnswer(entry.answer);
+    setKeywords(entry.keywords || ""); setCategory(entry.category || "General");
     setShowForm(true);
   };
 
   const filtered = entries.filter((e) => {
     if (!search) return true;
     const s = search.toLowerCase();
-    return e.question.toLowerCase().includes(s) ||
-      e.answer.toLowerCase().includes(s) ||
-      e.keywords.toLowerCase().includes(s) ||
-      e.category.toLowerCase().includes(s);
+    return e.question.toLowerCase().includes(s) || e.answer.toLowerCase().includes(s) ||
+      e.keywords.toLowerCase().includes(s) || e.category.toLowerCase().includes(s);
   });
 
   return (
-    <div style={{ padding: 16, color: "#fff", maxWidth: 900, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: gold }}>🧠 BOT KNOWLEDGE BASE</h2>
+    <div style={{ color: "#000", maxWidth: 900, margin: "0 auto" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 900, color: "#000", textTransform: "uppercase", letterSpacing: "-.5px" }}>🧠 BOT KNOWLEDGE BASE</h2>
         {!showForm && (
           <button onClick={() => setShowForm(true)} style={{
-            padding: "10px 20px", borderRadius: 10, border: "none", background: gold, color: "#030305",
-            fontWeight: 800, cursor: "pointer", fontSize: 14,
+            padding: "10px 20px", border: "2px solid #000", background: "#F2C744", color: "#000",
+            fontWeight: 900, cursor: "pointer", fontSize: 13, boxShadow: "3px 3px 0px #000",
           }}>➕ ADD KNOWLEDGE</button>
         )}
       </div>
@@ -254,15 +240,15 @@ export default function KnowledgeBaseAdmin() {
       {/* Search */}
       <input value={search} onChange={(e) => setSearch(e.target.value)}
         placeholder="Search knowledge base..."
-        style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, marginBottom: 12, boxSizing: "border-box" }} />
+        style={{ width: "100%", padding: 10, border: "2px solid #000", background: "#fff", color: "#000", fontSize: 14, marginBottom: 12, boxSizing: "border-box" }} />
 
-      {/* 🚀 Bulk seed button */}
+      {/* Bulk seed button */}
       {!showForm && (
         <button onClick={handleBulkSeed} disabled={bulkLoading} style={{
-          width: "100%", padding: 14, borderRadius: 12, border: `2px solid ${gold}`,
-          background: `linear-gradient(135deg, ${gold}25, ${gold}10)`, color: gold,
-          fontWeight: 800, fontSize: 14, cursor: bulkLoading ? "wait" : "pointer", marginBottom: 16,
-          letterSpacing: 0.5,
+          width: "100%", padding: 14, border: "2px solid #F2C744",
+          background: "#FFFBEB", color: "#000",
+          fontWeight: 900, fontSize: 14, cursor: bulkLoading ? "wait" : "pointer", marginBottom: 16,
+          letterSpacing: 0.5, boxShadow: "3px 3px 0px #000",
         }}>
           {bulkLoading ? "⏳ ADDING..." : `🚀 ADD HOD STARTER PACK (${STARTER_PACK.length} CURATED ENTRIES)`}
         </button>
@@ -270,50 +256,42 @@ export default function KnowledgeBaseAdmin() {
 
       {/* Form */}
       {showForm && (
-        <div style={{ background: "hsl(240 12% 8%)", border: `1px solid ${gold}40`, borderRadius: 14, padding: 20, marginBottom: 24 }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 16, color: gold }}>
+        <div style={{ background: "#fff", border: "2px solid #000", padding: 20, marginBottom: 24, boxShadow: "4px 4px 0px #000" }}>
+          <h3 style={{ margin: "0 0 16px", fontSize: 15, color: "#000", fontWeight: 900, textTransform: "uppercase" }}>
             {editingId ? "✏️ EDIT KNOWLEDGE" : "➕ ADD KNOWLEDGE"}
           </h3>
-
           <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>QUESTION / TOPIC</label>
+            <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 6, fontWeight: 700, textTransform: "uppercase" }}>QUESTION / TOPIC</label>
             <input value={question} onChange={(e) => setQuestion(e.target.value)}
-              placeholder="e.g. What are your opening hours?"
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box" }} />
+              placeholder="e.g. What are your opening hours?" style={inpStyle} />
           </div>
-
           <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>ANSWER</label>
+            <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 6, fontWeight: 700, textTransform: "uppercase" }}>ANSWER</label>
             <textarea value={answer} onChange={(e) => setAnswer(e.target.value)}
               placeholder="e.g. We open at 8 PM and close at 2 AM. Kitchen serves till 1:30 AM."
-              rows={4}
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box", resize: "vertical" }} />
+              rows={4} style={{ ...inpStyle, resize: "vertical" }} />
           </div>
-
           <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
             <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>KEYWORDS (comma separated)</label>
+              <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 6, fontWeight: 700, textTransform: "uppercase" }}>KEYWORDS (comma separated)</label>
               <input value={keywords} onChange={(e) => setKeywords(e.target.value)}
-                placeholder="e.g. timing, hours, open, close"
-                style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box" }} />
+                placeholder="e.g. timing, hours, open, close" style={inpStyle} />
             </div>
             <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, color: "rgba(255,255,255,.5)", display: "block", marginBottom: 6 }}>CATEGORY</label>
-              <select value={category} onChange={(e) => setCategory(e.target.value)}
-                style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,.15)", background: "rgba(255,255,255,.05)", color: "#fff", fontSize: 14, boxSizing: "border-box" }}>
-                {CATEGORIES.map((c) => <option key={c} value={c} style={{ background: "#1a1a1a" }}>{c}</option>)}
+              <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 6, fontWeight: 700, textTransform: "uppercase" }}>CATEGORY</label>
+              <select value={category} onChange={(e) => setCategory(e.target.value)} style={inpStyle}>
+                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
           </div>
-
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={handleSave} disabled={saving} style={{
-              flex: 1, padding: 12, borderRadius: 10, border: "none", background: gold, color: "#030305",
-              fontWeight: 800, cursor: saving ? "wait" : "pointer", fontSize: 14,
+              flex: 1, padding: 12, border: "2px solid #000", background: "#F2C744", color: "#000",
+              fontWeight: 900, cursor: saving ? "wait" : "pointer", fontSize: 14, boxShadow: "3px 3px 0px #000",
             }}>{saving ? "SAVING..." : (editingId ? "💾 UPDATE" : "➕ ADD")}</button>
             <button onClick={resetForm} style={{
-              padding: "12px 20px", borderRadius: 10, border: "1px solid rgba(255,255,255,.2)",
-              background: "transparent", color: "#fff", fontWeight: 700, cursor: "pointer",
+              padding: "12px 20px", border: "2px solid #000",
+              background: "#F4F4F0", color: "#000", fontWeight: 700, cursor: "pointer", boxShadow: "2px 2px 0px #000",
             }}>CANCEL</button>
           </div>
         </div>
@@ -321,37 +299,37 @@ export default function KnowledgeBaseAdmin() {
 
       {/* List */}
       {loading ? (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.4)" }}>Loading...</div>
+        <div style={{ textAlign: "center", padding: 40, color: "#888", fontWeight: 500 }}>Loading...</div>
       ) : filtered.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 40, color: "rgba(255,255,255,.4)" }}>
+        <div style={{ textAlign: "center", padding: 40, color: "#888", border: "2px dashed #ccc", fontWeight: 500 }}>
           {search ? "No matches." : "No knowledge entries yet. Click ➕ ADD KNOWLEDGE to start."}
         </div>
       ) : (
         <div>
           {filtered.map((entry) => (
             <div key={entry.id} style={{
-              background: "hsl(240 12% 8%)", border: "1px solid rgba(255,255,255,.08)",
-              borderRadius: 12, padding: "14px 18px", marginBottom: 10,
+              background: "#fff", border: "2px solid #000",
+              padding: "14px 18px", marginBottom: 10, boxShadow: "2px 2px 0px rgba(0,0,0,.12)",
             }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: gold, marginBottom: 4 }}>{entry.question}</div>
-                  <div style={{ fontSize: 13, color: "rgba(255,255,255,.8)", lineHeight: 1.5, marginBottom: 8 }}>{entry.answer}</div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: "rgba(201,168,76,.15)", color: gold }}>{entry.category}</span>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#000", marginBottom: 4 }}>{entry.question}</div>
+                  <div style={{ fontSize: 13, color: "#333", lineHeight: 1.5, marginBottom: 8 }}>{entry.answer}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, padding: "2px 8px", background: "#FFFBEB", color: "#000", border: "1px solid #F2C744", fontWeight: 700 }}>{entry.category}</span>
                     {entry.keywords && entry.keywords.split(",").map((kw) => (
-                      <span key={kw} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: "rgba(255,255,255,.06)", color: "rgba(255,255,255,.5)" }}>{kw.trim()}</span>
+                      <span key={kw} style={{ fontSize: 10, padding: "2px 8px", background: "#F4F4F0", color: "#555", border: "1px solid #ccc" }}>{kw.trim()}</span>
                     ))}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 6, marginLeft: 10 }}>
                   <button onClick={() => startEdit(entry)} style={{
-                    padding: "4px 10px", borderRadius: 6, border: `1px solid ${gold}40`, background: `${gold}10`, color: gold,
-                    fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    padding: "4px 10px", border: "2px solid #F2C744", background: "#FFFBEB", color: "#000",
+                    fontSize: 11, fontWeight: 700, cursor: "pointer", boxShadow: "2px 2px 0px #000",
                   }}>✏️</button>
                   <button onClick={() => handleDelete(entry.id, entry.question)} style={{
-                    padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,.3)", background: "rgba(239,68,68,.08)", color: "#EF4444",
-                    fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    padding: "4px 10px", border: "2px solid #EF4444", background: "#FFF0EE", color: "#EF4444",
+                    fontSize: 11, fontWeight: 700, cursor: "pointer", boxShadow: "2px 2px 0px rgba(239,68,68,.3)",
                   }}>🗑️</button>
                 </div>
               </div>
@@ -362,8 +340,8 @@ export default function KnowledgeBaseAdmin() {
 
       {/* Default Knowledge Suggestions */}
       {!showForm && entries.length < 5 && (
-        <div style={{ marginTop: 24, padding: 16, borderRadius: 12, background: "rgba(201,168,76,.08)", border: `1px solid ${gold}20` }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: gold, marginBottom: 10 }}>📝 SUGGESTED KNOWLEDGE TO ADD</div>
+        <div style={{ marginTop: 24, padding: 16, background: "#FFFBEB", border: "2px solid #F2C744" }}>
+          <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 10, textTransform: "uppercase" }}>📝 SUGGESTED KNOWLEDGE TO ADD</div>
           {[
             { q: "What are your opening hours?", a: "We open at 8 PM and close at 2 AM. Kitchen serves till 1:30 AM. Last entry is 1 AM.", k: "timing, hours, open, close", c: "Timing" },
             { q: "Where are you located?", a: "House of Dopamine is at 5th Block, Koramangala, Bangalore — above Starbucks, near Sony Signal.", k: "location, address, where, reach", c: "Location" },
@@ -371,9 +349,10 @@ export default function KnowledgeBaseAdmin() {
             { q: "What events are happening tonight?", a: "Check our events at hodclub.in/events or ask me to book! Every night is different — from Techno Tuesdays to Ladies Nights.", k: "event, tonight, happening, party", c: "Events" },
             { q: "Do you serve food?", a: "Yes! Our kitchen serves till 1:30 AM. Pizzas, finger food, and gourmet bites available.", k: "food, menu, kitchen, eat, serve", c: "Menu" },
           ].map((s, i) => (
-            <div key={i} onClick={() => { setQuestion(s.q); setAnswer(s.a); setKeywords(s.k); setCategory(s.c); setShowForm(true); }}
-              style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(255,255,255,.03)", marginBottom: 8, cursor: "pointer", fontSize: 13, color: "rgba(255,255,255,.7)" }}>
-              <span style={{ color: gold }}>+</span> {s.q}
+            <div key={i}
+              onClick={() => { setQuestion(s.q); setAnswer(s.a); setKeywords(s.k); setCategory(s.c); setShowForm(true); }}
+              style={{ padding: "8px 12px", background: "#fff", border: "1px solid #eee", marginBottom: 6, cursor: "pointer", fontSize: 13, color: "#333" }}>
+              <span style={{ color: "#000", fontWeight: 700 }}>+</span> {s.q}
             </div>
           ))}
         </div>

@@ -2509,13 +2509,23 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       setOrphanPay(null);
       return () => { cancelled = true; };
     }
+    // 💰 READ-COST FIX 2026-06-16 — lookupOrphanZomatoPaymentByName runs an
+    // UNBOUNDED `aggregatorBookings WHERE source==zomato AND status==pending-booking`
+    // scan. This used to fire every 30s FOREVER, per unpaid Zomato table, per
+    // tablet — thousands of Firestore reads/night for a badge that only needs
+    // to flip ONCE. Now: (1) STOP polling the instant the orphan payment is
+    // found, (2) idle poll slowed 30s → 3min. Badge behaviour is unchanged.
+    let id: ReturnType<typeof setInterval> | null = null;
+    const stop = () => { if (id !== null) { clearInterval(id); id = null; } };
     const tick = async () => {
       const o = await lookupOrphanZomatoPaymentByName(r.customerName || "", r.phone || "");
-      if (!cancelled) setOrphanPay(o);
+      if (cancelled) return;
+      setOrphanPay(o);
+      if (o) stop();  // payment matched — badge has flipped, no need to keep scanning
     };
     tick();
-    const id = setInterval(tick, 30000);
-    return () => { cancelled = true; clearInterval(id); };
+    id = setInterval(tick, 180000);
+    return () => { cancelled = true; stop(); };
   }, [r.paymentStatus, aggForFallback, r.customerName]);
   const paid = r.paymentStatus === "paid" || !!orphanPay;
   // 🆕 2026-06-07 (Khushi) — a table booked online with a PREPAID COVER carries
@@ -5509,16 +5519,20 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         {[
           { label: "Tables", value: reservations.length, filter: "" as const, tint: "#FF90E8", fg: "#000", kind: "default" as const, pulse: false },
           { label: "Calling", value: calling, filter: "calling" as const, tint: "#FF5733", fg: "#fff", kind: "red" as const, pulse: calling > 0 },
-          { label: "Pending", value: pending, filter: "pending" as const, tint: "#F2C744", fg: "#000", kind: "default" as const, pulse: false },
-          { label: "Bill Due", value: billDue, filter: "bill" as const, tint: "#FF5733", fg: "#fff", kind: "default" as const, pulse: false },
+          { label: "Pending", value: pending, filter: "pending" as const, tint: "#F2C744", fg: "#000", kind: "default" as const, pulse: pending > 0 },
+          { label: "Bill Due", value: billDue, filter: "bill" as const, tint: "#FF5733", fg: "#fff", kind: "default" as const, pulse: billDue > 0 },
           { label: "Food Ready", value: readyGroups.length, filter: "ready" as const, tint: "#23A094", fg: "#fff", kind: "green" as const, pulse: readyGroups.length > 0 },
         ].map((s) => {
-          const isGreenPulse = s.kind === "green" && s.pulse;
-          const isRedPulse = s.kind === "red" && s.pulse;
-          const isActive = pendingFilter === s.filter && !!s.filter;
+          // 🆕 2026-06-15 v3.301 (Khushi) — (1) the TABLES tile (the "show all"
+          // default, filter="") now highlights pink whenever no other filter is
+          // active, so the selected tab is always visible. (2) BILL DUE + PENDING
+          // now BLINK red (pulse-red) whenever their count > 0, matching CALLING —
+          // so an open bill or a preparing order is impossible to miss.
+          const pulseClass = s.pulse ? (s.kind === "green" ? "hod-tile-ready" : "pulse-red") : "";
+          const isActive = pendingFilter === s.filter;
           return (
             <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
-              className={isRedPulse ? "pulse-red" : isGreenPulse ? "hod-tile-ready" : ""}
+              className={pulseClass}
               style={{ background: isActive ? s.tint : "#fff", border: `${isActive ? 3 : 2}px solid #000`, borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s", transform: isActive ? "scale(1.03)" : "none" }}>
               <div style={{ fontSize: 22, fontWeight: 900, color: isActive ? s.fg : "#000" }}>{s.value}</div>
               <div style={{ fontSize: 10, color: isActive ? s.fg : "#000", marginTop: 2, fontWeight: 800, letterSpacing: .5 }}>

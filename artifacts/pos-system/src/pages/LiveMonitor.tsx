@@ -412,9 +412,9 @@ export function LiveMonitor() {
   const tileBg = (s: Severity, alert: boolean) => {
     const c = sevColor(s);
     return {
-      background: `linear-gradient(135deg, ${c}1a, ${c}0a)`,
-      border: `1.5px solid ${c}${alert ? "aa" : "55"}`,
-      boxShadow: alert ? `0 0 18px ${c}55` : "none",
+      background: `${c}18`,
+      border: `2px solid ${c}`,
+      boxShadow: alert ? `4px 4px 0px #000` : "3px 3px 0px rgba(0,0,0,.15)",
       animation: alert ? "hodPulse 2s ease-in-out infinite" : undefined,
     } as const;
   };
@@ -433,67 +433,70 @@ export function LiveMonitor() {
   }, [drill, discountOverrides, sourceOverrides, voids, silentEdits, kotEvents, staleBills, unpaid30, auditEvents]);
 
   return (
-    <div style={{ color: "#fff" }}>
+    <div style={{ color: "#000" }}>
       <style>{`@keyframes hodPulse { 0%,100% { transform: scale(1);} 50% { transform: scale(1.015);} }`}</style>
 
+      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 900, color: GOLD, fontFamily: "'Playfair Display', serif" }}>🔴 Live Monitor</div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)" }}>
-            Operational night: {getOperationalNightStr()} · Auto-refreshes from Firestore · Red tiles = activity in last 15min
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#000", letterSpacing: "-.5px" }}>🔴 LIVE MONITOR</div>
+          <div style={{ fontSize: 11, color: "#666", fontWeight: 500, marginTop: 2 }}>
+            Operational night: {getOperationalNightStr()} · Auto-refreshes from Firestore · Red tiles = activity in last 15 min
           </div>
         </div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,.4)" }}>
+        <div style={{ fontSize: 11, color: "#888", fontWeight: 600 }}>
           {reservations.length} reservation(s) · {discountOverrides.length + sourceOverrides.length + voids.length + kotEvents.length} flagged event(s)
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10, marginBottom: 16 }}>
+      {/* Metric tiles */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10, marginBottom: 16 }}>
         {tiles.map((t) => (
           <button key={t.id} onClick={() => setDrill(t.id === drill ? null : t.id)}
-            style={{ textAlign: "left", padding: 14, borderRadius: 12, cursor: "pointer", color: "#fff",
+            style={{ textAlign: "left", padding: 14, cursor: "pointer", color: "#000",
               ...tileBg(t.severity, t.recentRed && t.severity === "red"),
-              outline: drill === t.id ? `2px solid ${sevColor(t.severity)}` : "none" }}>
-            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".5px", color: "rgba(255,255,255,.7)", marginBottom: 6 }}>{t.label}</div>
+              outline: drill === t.id ? `3px solid ${sevColor(t.severity)}` : "none",
+              outlineOffset: 2 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".6px", color: "#333", marginBottom: 6, textTransform: "uppercase" }}>{t.label}</div>
             <div style={{ fontSize: 28, fontWeight: 900, color: sevColor(t.severity), lineHeight: 1 }}>{t.count}</div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 6 }}>{t.sub}</div>
+            <div style={{ fontSize: 10, color: "#666", marginTop: 6, fontWeight: 500 }}>{t.sub}</div>
           </button>
         ))}
       </div>
 
-      {/* Per-staff Leakage Score — count flags ÷ tables handled to find the high-RATE outlier */}
-      <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(201,168,76,.2)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 800, color: GOLD, marginBottom: 4 }}>👥 Per-Staff Leakage Score (tonight)</div>
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginBottom: 10 }}>
+      {/* Per-staff Leakage Score */}
+      <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, textTransform: "uppercase", letterSpacing: "-.2px" }}>👥 Per-Staff Leakage Score (tonight)</div>
+        <div style={{ fontSize: 10, color: "#666", marginBottom: 10, fontWeight: 500 }}>
           Leakage % = (overrides + source-swaps + voids + duplicates) ÷ tables handled. Catches high-rate outliers — a captain
           with 3 flags on 5 tables (60%) is more suspicious than one with 5 flags on 30 tables (17%).
         </div>
         {perStaff.length === 0 ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)" }}>No staff activity yet — clean shift so far.</div>
+          <div style={{ fontSize: 12, color: "#888", fontWeight: 600 }}>No staff activity yet — clean shift so far.</div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1.5fr repeat(6, 0.7fr) 0.9fr", gap: 6, fontSize: 12 }}>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)" }}>STAFF</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>TABLES</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>OVRD</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>SWAPS</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>VOIDS</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>DUPS</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>FLAGS</div>
-            <div style={{ fontWeight: 800, color: "rgba(255,255,255,.6)", textAlign: "right" }}>LEAKAGE %</div>
+            <div style={{ fontWeight: 800, color: "#444", fontSize: 10, textTransform: "uppercase" }}>STAFF</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>TABLES</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>OVRD</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>SWAPS</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>VOIDS</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>DUPS</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>FLAGS</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>LEAKAGE%</div>
             {perStaff.map((s) => {
-              const leakSev = s.tables < 3 ? "rgba(255,255,255,.4)" : s.leakagePct >= 30 ? RED : s.leakagePct >= 15 ? AMBER : GREEN;
+              const leakSev = s.tables < 3 ? "#aaa" : s.leakagePct >= 30 ? RED : s.leakagePct >= 15 ? AMBER : GREEN;
               return (
                 <Fragment key={s.name}>
-                  <div style={{ color: "#fff" }}>{s.name}</div>
-                  <div style={{ textAlign: "right", color: "rgba(255,255,255,.7)" }}>{s.tables}</div>
-                  <div style={{ textAlign: "right", color: s.overrides > 0 ? AMBER : "rgba(255,255,255,.5)" }}>{s.overrides}</div>
-                  <div style={{ textAlign: "right", color: s.sourceSwaps > 0 ? AMBER : "rgba(255,255,255,.5)" }}>{s.sourceSwaps}</div>
-                  <div style={{ textAlign: "right", color: s.voids > 0 ? AMBER : "rgba(255,255,255,.5)" }}>{s.voids}</div>
-                  <div style={{ textAlign: "right", color: s.duplicates > 0 ? AMBER : "rgba(255,255,255,.5)" }}>{s.duplicates}</div>
+                  <div style={{ color: "#000", fontWeight: 600 }}>{s.name}</div>
+                  <div style={{ textAlign: "right", color: "#555" }}>{s.tables}</div>
+                  <div style={{ textAlign: "right", color: s.overrides > 0 ? AMBER : "#bbb" }}>{s.overrides}</div>
+                  <div style={{ textAlign: "right", color: s.sourceSwaps > 0 ? AMBER : "#bbb" }}>{s.sourceSwaps}</div>
+                  <div style={{ textAlign: "right", color: s.voids > 0 ? AMBER : "#bbb" }}>{s.voids}</div>
+                  <div style={{ textAlign: "right", color: s.duplicates > 0 ? AMBER : "#bbb" }}>{s.duplicates}</div>
                   <div style={{ textAlign: "right", fontWeight: 900, color: s.total >= 5 ? RED : s.total >= 3 ? AMBER : GREEN }}>{s.total}</div>
                   <div style={{ textAlign: "right", fontWeight: 900, color: leakSev, fontSize: 13 }}>
                     {s.tables === 0 ? "—" : `${s.leakagePct}%`}
-                    {s.tables < 3 && s.tables > 0 && <span style={{ fontSize: 9, color: "rgba(255,255,255,.4)" }}> (low n)</span>}
+                    {s.tables < 3 && s.tables > 0 && <span style={{ fontSize: 9, color: "#aaa" }}> (low n)</span>}
                   </div>
                 </Fragment>
               );
@@ -502,23 +505,23 @@ export function LiveMonitor() {
         )}
       </div>
 
-      {/* Discount Drift Heatmap — captain × source: avg (actual - default) discount points */}
+      {/* Discount Drift Heatmap */}
       {driftHeatmap.captains.length > 0 && driftHeatmap.sources.length > 0 && (
-        <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(201,168,76,.2)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: GOLD, marginBottom: 4 }}>🌡 Discount Drift Heatmap (tonight)</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", marginBottom: 10 }}>
+        <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, textTransform: "uppercase" }}>🌡 Discount Drift Heatmap (tonight)</div>
+          <div style={{ fontSize: 10, color: "#666", marginBottom: 10, fontWeight: 500 }}>
             Avg gap between actual discount % and the source's locked default. RED ≥ +3pp, AMBER ≥ +1pp, GREEN at default.
-            Negative gap (under-discount) is a non-issue — shown white. Cells show "Δpp · n tables".
+            Negative gap (under-discount) is a non-issue. Cells show "Δpp · n tables".
           </div>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", fontSize: 11, color: "#fff", minWidth: "100%" }}>
+            <table style={{ borderCollapse: "collapse", fontSize: 11, color: "#000", minWidth: "100%" }}>
               <thead>
                 <tr>
-                  <th style={{ padding: "6px 10px", textAlign: "left", borderBottom: "1px solid rgba(201,168,76,.3)", color: "rgba(255,255,255,.6)" }}>CAPTAIN ↓ / SOURCE →</th>
+                  <th style={{ padding: "6px 10px", textAlign: "left", borderBottom: "2px solid #000", color: "#444", fontWeight: 800, fontSize: 10, textTransform: "uppercase" }}>CAPTAIN ↓ / SOURCE →</th>
                   {driftHeatmap.sources.map((s) => (
-                    <th key={s} style={{ padding: "6px 10px", textAlign: "center", borderBottom: "1px solid rgba(201,168,76,.3)", color: GOLD, textTransform: "uppercase", fontSize: 10, letterSpacing: ".3px" }}>
+                    <th key={s} style={{ padding: "6px 10px", textAlign: "center", borderBottom: "2px solid #000", color: "#000", textTransform: "uppercase", fontSize: 10, letterSpacing: ".3px", fontWeight: 900 }}>
                       {AGGREGATOR_OPTIONS.find(a => a.value === s)?.label || s}
-                      <div style={{ fontSize: 9, color: "rgba(255,255,255,.4)", fontWeight: 400 }}>def {getAggregatorDiscount(s)}%</div>
+                      <div style={{ fontSize: 9, color: "#888", fontWeight: 500, marginTop: 2 }}>def {getAggregatorDiscount(s)}%</div>
                     </th>
                   ))}
                 </tr>
@@ -526,19 +529,19 @@ export function LiveMonitor() {
               <tbody>
                 {driftHeatmap.captains.map((cap) => (
                   <tr key={cap}>
-                    <td style={{ padding: "6px 10px", color: "#fff", fontWeight: 700, borderBottom: "1px solid rgba(255,255,255,.05)" }}>{cap}</td>
+                    <td style={{ padding: "6px 10px", color: "#000", fontWeight: 700, borderBottom: "1px solid #eee" }}>{cap}</td>
                     {driftHeatmap.sources.map((s) => {
                       const cell = driftHeatmap.grid.get(cap)?.get(s);
                       if (!cell || cell.count === 0) {
-                        return <td key={s} style={{ padding: "6px 10px", textAlign: "center", color: "rgba(255,255,255,.2)", borderBottom: "1px solid rgba(255,255,255,.05)" }}>—</td>;
+                        return <td key={s} style={{ padding: "6px 10px", textAlign: "center", color: "#ccc", borderBottom: "1px solid #eee" }}>—</td>;
                       }
                       const avgDelta = Math.round((cell.sumDelta / cell.count) * 10) / 10;
-                      const sevColor = avgDelta >= 3 ? RED : avgDelta >= 1 ? AMBER : avgDelta <= -1 ? "rgba(255,255,255,.5)" : GREEN;
+                      const sevColor = avgDelta >= 3 ? RED : avgDelta >= 1 ? AMBER : avgDelta <= -1 ? "#aaa" : GREEN;
                       const bgAlpha = Math.min(0.35, Math.abs(avgDelta) * 0.06);
                       return (
-                        <td key={s} style={{ padding: "6px 10px", textAlign: "center", background: avgDelta > 0 ? `${sevColor}${Math.round(bgAlpha * 255).toString(16).padStart(2, "0")}` : "transparent", color: sevColor, fontWeight: 800, borderBottom: "1px solid rgba(255,255,255,.05)" }}>
+                        <td key={s} style={{ padding: "6px 10px", textAlign: "center", background: avgDelta > 0 ? `${sevColor}${Math.round(bgAlpha * 255).toString(16).padStart(2, "0")}` : "transparent", color: sevColor, fontWeight: 800, borderBottom: "1px solid #eee" }}>
                           {avgDelta > 0 ? "+" : ""}{avgDelta}pp
-                          <div style={{ fontSize: 9, color: "rgba(255,255,255,.45)", fontWeight: 400 }}>{cell.count} tab{cell.count > 1 ? "s" : ""}</div>
+                          <div style={{ fontSize: 9, color: "#999", fontWeight: 400, marginTop: 2 }}>{cell.count} tab{cell.count > 1 ? "s" : ""}</div>
                         </td>
                       );
                     })}
@@ -550,29 +553,29 @@ export function LiveMonitor() {
         </div>
       )}
 
-      {/* Drill-down — KOT-vs-BILL leakage (Feature #2) — custom rich panel */}
+      {/* Drill-down — KOT vs Bill leakage */}
       {drill === "kotBillTally" && (
-        <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(201,168,76,.2)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
+        <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 800, color: GOLD }}>🧾 KOT vs Bill — leakage drill-down</div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>
+              <div style={{ fontSize: 13, fontWeight: 900, color: "#000", textTransform: "uppercase" }}>🧾 KOT vs Bill — Leakage Drill-down</div>
+              <div style={{ fontSize: 10, color: "#666", marginTop: 2, fontWeight: 500 }}>
                 Closed tables tonight where printed KOTs don't match the final bill (after subtracting manager-approved voids).
                 🔴 ≥₹500 unbilled · 🟠 small gap · 👻 phantom = bill &gt; KOT. Full breakdown in <strong>Reports → 🧾 KOT vs Bill</strong>.
               </div>
             </div>
-            <button onClick={() => setDrill(null)} style={{ background: "transparent", border: "1px solid rgba(255,255,255,.2)", color: "rgba(255,255,255,.7)", padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+            <button onClick={() => setDrill(null)} style={{ background: "#F4F4F0", border: "2px solid #000", color: "#000", padding: "4px 10px", fontSize: 11, cursor: "pointer", fontWeight: 700, boxShadow: "2px 2px 0px #000" }}>✕ Close</button>
           </div>
           {tallyRows.filter(r => r.verdict === "leakage" || r.verdict === "phantom" || r.verdict === "minor").length === 0 ? (
             <div style={{ fontSize: 12, color: GREEN, fontWeight: 700 }}>✓ All {tallyRows.length} closed tables tonight tally clean — no KOT-bill mismatches.</div>
           ) : (
             <>
               {tallyByCaptain.filter(c => c.totalLeakage + c.totalPhantom > 0).length > 0 && (
-                <div style={{ marginBottom: 12, padding: 10, borderRadius: 8, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.25)" }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: RED, marginBottom: 6 }}>👤 PER-CAPTAIN LEAKAGE TONIGHT</div>
+                <div style={{ marginBottom: 12, padding: 10, background: "#FFF0EE", border: "2px solid #FF5733" }}>
+                  <div style={{ fontSize: 11, fontWeight: 900, color: RED, marginBottom: 6, textTransform: "uppercase" }}>👤 Per-Captain Leakage Tonight</div>
                   {tallyByCaptain.filter(c => c.totalLeakage + c.totalPhantom > 0).map(c => (
-                    <div key={c.captain} style={{ display: "flex", justifyContent: "space-between", padding: "4px 2px", fontSize: 12, borderBottom: "1px solid rgba(255,255,255,.04)" }}>
-                      <div><strong style={{ color: "#fff" }}>{c.captain}</strong> · {c.tables} table{c.tables !== 1 ? "s" : ""}</div>
+                    <div key={c.captain} style={{ display: "flex", justifyContent: "space-between", padding: "4px 2px", fontSize: 12, borderBottom: "1px solid #eee" }}>
+                      <div><strong style={{ color: "#000" }}>{c.captain}</strong> · {c.tables} table{c.tables !== 1 ? "s" : ""}</div>
                       <div style={{ color: c.totalLeakage > 0 ? RED : AMBER, fontWeight: 800 }}>
                         {c.leakageTables > 0 && <>🔴 {c.leakageTables} · ₹{c.totalLeakage.toLocaleString()} unbilled</>}
                         {c.phantomTables > 0 && <span style={{ marginLeft: 8, color: AMBER }}>👻 {c.phantomTables} · ₹{c.totalPhantom.toLocaleString()} phantom</span>}
@@ -583,22 +586,22 @@ export function LiveMonitor() {
               )}
               <div style={{ maxHeight: 360, overflowY: "auto" }}>
                 {tallyRows.filter(r => r.verdict === "leakage" || r.verdict === "phantom" || r.verdict === "minor").map(r => (
-                  <div key={r.reservationId} style={{ padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,.06)", fontSize: 12 }}>
+                  <div key={r.reservationId} style={{ padding: "8px 6px", borderBottom: "1px solid #eee", fontSize: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div>
-                        <span style={{ color: GOLD, fontWeight: 800 }}>{r.tableId}</span>
-                        <span style={{ color: "rgba(255,255,255,.5)", marginLeft: 6 }}>{r.floor}</span>
-                        <span style={{ color: "#fff", marginLeft: 8 }}>{r.customerName || "—"}</span>
-                        <span style={{ color: "rgba(255,255,255,.5)", marginLeft: 6 }}>· {r.captain || "—"}</span>
+                        <span style={{ color: "#000", fontWeight: 800 }}>{r.tableId}</span>
+                        <span style={{ color: "#888", marginLeft: 6 }}>{r.floor}</span>
+                        <span style={{ color: "#000", marginLeft: 8 }}>{r.customerName || "—"}</span>
+                        <span style={{ color: "#888", marginLeft: 6 }}>· {r.captain || "—"}</span>
                       </div>
-                      <div style={{ fontWeight: 800, color: r.verdict === "leakage" ? RED : r.verdict === "phantom" ? AMBER : "rgba(255,255,255,.6)" }}>
+                      <div style={{ fontWeight: 800, color: r.verdict === "leakage" ? RED : r.verdict === "phantom" ? AMBER : "#888" }}>
                         {r.verdict === "leakage" && `🔴 ₹${r.leakageValue.toLocaleString()} UNBILLED`}
                         {r.verdict === "phantom" && `👻 ₹${r.phantomValue.toLocaleString()} PHANTOM`}
                         {r.verdict === "minor" && `🟠 ₹${Math.abs(r.diffValue).toLocaleString()} gap`}
                       </div>
                     </div>
                     {r.itemDiffs.length > 0 && (
-                      <div style={{ fontSize: 10, color: "rgba(255,255,255,.55)", marginTop: 4, paddingLeft: 8 }}>
+                      <div style={{ fontSize: 10, color: "#666", marginTop: 4, paddingLeft: 8 }}>
                         {r.itemDiffs.slice(0, 4).map((d, i) => (
                           <span key={i} style={{ marginRight: 12 }}>
                             <strong>{d.name}</strong>: KOT {d.kotQty}{d.voidQty > 0 ? ` − void ${d.voidQty}` : ""} → bill {d.billQty} ({d.diffQty > 0 ? "+" : ""}{d.diffQty})
@@ -615,24 +618,24 @@ export function LiveMonitor() {
         </div>
       )}
 
-      {/* Drill-down */}
+      {/* Drill-down — generic tiles */}
       {drill && drill !== "kotBillTally" && drillEvents.length > 0 && (
-        <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(201,168,76,.2)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
+        <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: GOLD }}>📋 {tiles.find(t => t.id === drill)?.label} — drill-down</div>
-            <button onClick={() => setDrill(null)} style={{ background: "transparent", border: "1px solid rgba(255,255,255,.2)", color: "rgba(255,255,255,.7)", padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+            <div style={{ fontSize: 13, fontWeight: 900, color: "#000", textTransform: "uppercase" }}>📋 {tiles.find(t => t.id === drill)?.label} — Drill-down</div>
+            <button onClick={() => setDrill(null)} style={{ background: "#F4F4F0", border: "2px solid #000", color: "#000", padding: "4px 10px", fontSize: 11, cursor: "pointer", fontWeight: 700, boxShadow: "2px 2px 0px #000" }}>✕ Close</button>
           </div>
           <div style={{ maxHeight: 360, overflowY: "auto" }}>
             {drillEvents.map((e) => (
-              <div key={e.id} style={{ display: "grid", gridTemplateColumns: "70px 60px 80px 1fr 80px", gap: 8, padding: "8px 6px", borderBottom: "1px solid rgba(255,255,255,.06)", fontSize: 12, alignItems: "center" }}>
-                <div style={{ color: "rgba(255,255,255,.5)", fontSize: 10 }}>{fmtRel(e.at)}</div>
-                <div style={{ color: GOLD, fontWeight: 800 }}>{e.table}</div>
-                <div style={{ color: "#fff" }}>{e.staff}</div>
-                <div style={{ color: "rgba(255,255,255,.85)" }}>
+              <div key={e.id} style={{ display: "grid", gridTemplateColumns: "70px 60px 80px 1fr 80px", gap: 8, padding: "8px 6px", borderBottom: "1px solid #eee", fontSize: 12, alignItems: "center" }}>
+                <div style={{ color: "#888", fontSize: 10, fontWeight: 500 }}>{fmtRel(e.at)}</div>
+                <div style={{ color: "#000", fontWeight: 800 }}>{e.table}</div>
+                <div style={{ color: "#000", fontWeight: 600 }}>{e.staff}</div>
+                <div style={{ color: "#222" }}>
                   <div>{e.details}</div>
-                  {e.reason && <div style={{ fontSize: 10, color: "rgba(255,255,255,.5)", marginTop: 2 }}>↳ "{e.reason}"</div>}
+                  {e.reason && <div style={{ fontSize: 10, color: "#777", marginTop: 2 }}>↳ "{e.reason}"</div>}
                 </div>
-                <div style={{ textAlign: "right", color: e.amount ? sevColor(e.severity) : "rgba(255,255,255,.4)", fontWeight: 800 }}>
+                <div style={{ textAlign: "right", color: e.amount ? sevColor(e.severity) : "#ccc", fontWeight: 800 }}>
                   {e.amount ? `₹${e.amount.toLocaleString()}` : ""}
                 </div>
               </div>
@@ -641,13 +644,13 @@ export function LiveMonitor() {
         </div>
       )}
 
-      {/* Modified discount list (always visible, low-criticality) */}
+      {/* Modified discount list */}
       {modifiedDiscount.length > 0 && (
-        <div style={{ background: "rgba(255,200,0,.05)", border: "1px solid rgba(255,200,0,.25)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: AMBER, marginBottom: 10 }}>✎ Tabs with non-default discount (live)</div>
+        <div style={{ background: "#FFFBEB", border: "2px solid #F2C744", padding: 14, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 10, textTransform: "uppercase" }}>✎ Tabs with non-default discount (live)</div>
           {modifiedDiscount.map((m) => (
-            <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 4px", borderBottom: "1px solid rgba(255,255,255,.05)", fontSize: 12 }}>
-              <div><span style={{ color: GOLD, fontWeight: 800 }}>{m.tableId}</span> · {m.customerName} · {m.aggregator}</div>
+            <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 4px", borderBottom: "1px solid #eee", fontSize: 12 }}>
+              <div><span style={{ color: "#000", fontWeight: 800 }}>{m.tableId}</span> · {m.customerName} · {m.aggregator}</div>
               <div style={{ color: AMBER, fontWeight: 800 }}>{m.defaultDisc}% → {m.actualDisc}%</div>
             </div>
           ))}
@@ -655,17 +658,18 @@ export function LiveMonitor() {
       )}
 
       {/* Admin actions log */}
-      <div style={{ background: "rgba(255,255,255,.03)", border: "1px solid rgba(201,168,76,.15)", borderRadius: 12, padding: 14 }}>
+      <div style={{ background: "#fff", border: "2px solid #000", padding: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: GOLD }}>🛠 Admin / Manager actions tonight ({auditEvents.length})</div>
-          <button onClick={() => setDrill(drill === "audit" ? null : "audit")} style={{ background: "transparent", border: "1px solid rgba(201,168,76,.3)", color: GOLD, padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>
+          <div style={{ fontSize: 13, fontWeight: 900, color: "#000", textTransform: "uppercase" }}>🛠 Admin / Manager Actions Tonight ({auditEvents.length})</div>
+          <button onClick={() => setDrill(drill === "audit" ? null : "audit")}
+            style={{ background: "#F4F4F0", border: "2px solid #000", color: "#000", padding: "4px 10px", fontSize: 11, cursor: "pointer", fontWeight: 700, boxShadow: "2px 2px 0px #000" }}>
             {drill === "audit" ? "Hide" : "Show all"}
           </button>
         </div>
         {auditEvents.length === 0 ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)" }}>No admin-side changes logged tonight.</div>
+          <div style={{ fontSize: 12, color: "#888", fontWeight: 500 }}>No admin-side changes logged tonight.</div>
         ) : drill !== "audit" ? (
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)" }}>Latest: {auditEvents[0].details} ({fmtRel(auditEvents[0].at)})</div>
+          <div style={{ fontSize: 11, color: "#555", fontWeight: 500 }}>Latest: {auditEvents[0].details} ({fmtRel(auditEvents[0].at)})</div>
         ) : null}
       </div>
     </div>

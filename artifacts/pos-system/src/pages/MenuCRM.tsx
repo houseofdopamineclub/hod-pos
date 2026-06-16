@@ -210,7 +210,7 @@ export default function MenuCRM() {
               placeholder="Search menu items..."
               style={{ width: "100%", padding: 10, borderRadius: 8, border: `2px solid ${INK}`, background: "#fff", color: INK, fontSize: 14, fontWeight: 600, boxSizing: "border-box", marginBottom: 10 }} />
             <div style={{ maxHeight: 240, overflow: "auto", border: `2px solid ${INK}`, borderRadius: 8, padding: 8, background: "#fff" }}>
-              {filteredItems.slice(0, 200).map((it) => (
+              {filteredItems.map((it) => (
                 <label key={it.id} style={{
                   display: "flex", alignItems: "center", gap: 8, padding: "6px 8px",
                   borderRadius: 6, cursor: "pointer",
@@ -229,9 +229,9 @@ export default function MenuCRM() {
                   </span>
                 </label>
               ))}
-              {filteredItems.length > 200 && (
+              {filteredItems.length === 0 && (
                 <div style={{ padding: 8, fontSize: 11, color: "#6B6B63", textAlign: "center", fontWeight: 600 }}>
-                  Showing first 200 of {filteredItems.length} — refine search to see more.
+                  No items match your search.
                 </div>
               )}
             </div>

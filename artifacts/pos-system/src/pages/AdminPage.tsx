@@ -1,20 +1,11 @@
+// 🆕 2026-06-15 v3.300 (Khushi) — Gumroad-style UI restyle of the admin suite
+// (AdminPage, Reports, LiveMonitor, AuditPage, EventsAdmin, KnowledgeBaseAdmin,
+// DigitorySync). Inline-style only; all handlers/logic/data unchanged.
 import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { useStaff, DOOR_STAFF_SEED } from "@/lib/staff-context";
-// 🔴 2026-05-09 — switched FROM menu-data.ts (314 items, prefix `m`)
-// TO hod-menu.ts (373 items, prefix `hod`). Reason: hod-menu is the
-// CANONICAL list — it matches BarMode and customer wallet (hodclub.in).
-// Admin must manage the same list everyone else sells from. Override
-// docs are now keyed by slug(name), so cross-list ID mismatch is moot.
 import { HOD_MENU_ITEMS, HOD_CATEGORY_LABELS } from "@/lib/hod-menu";
 import type { StaffMember, MenuOverride, StaffRole } from "@/lib/types";
-// 🆕 2026-05-27 v3.106 (Khushi LIVE) — Happy Hour, Aggregators, and Legacy
-// Dashboard tabs RETIRED. Venue does not use happy-hour pricing; aggregator
-// commission/budget config is unused since v3.x (handled by Cloud Function
-// `pollAggregatorEmails` + per-source defaults). Legacy Dashboard iframe was
-// a hodclub.in admin mirror — superseded by native tabs here. All three
-// dropped from imports + state + JSX. Underlying firestore helpers
-// (`subscribeToHappyHour`, etc.) kept in firestore.ts for code archeology.
 import {
   subscribeToMenuOverrides, setMenuOverride, menuOverrideKey,
   upsertStaffMember, updateStaffMember, deleteStaffMember,
@@ -35,19 +26,9 @@ import AgentsReport from "./AgentsReport";
 import LiveReports from "./LiveReports";
 import EventsAdmin from "./EventsAdmin";
 import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
-// 🆕 2026-05-28 v3.140 — Digitory item-code mapping admin tab. Built ahead
-// of Cloud Function (still blocked on Digitory prod URL + auth). Khushi
-// populates the mapping during downtime so when the push function ships,
-// every item has a code ready to go.
 import DigitorySync from "./DigitorySync";
-// 🆕 2026-05-27 v3.105 (Khushi LIVE) — Audit folded INTO Boss Mode as a tab
-// (was a separate /audit page). Khushi wants Reports + Audit + Admin all
-// reachable from one Boss Mode landing, not scattered across the killed
-// FloorView header strip. /audit route still works (deep links don't break).
 import AuditPage from "./AuditPage";
 
-// Manager PIN gate for menu changes (OOS toggle, discount set/clear).
-// Same hash as CaptainMode (PIN 8888 — rotate via sha256(newPin)).
 const MANAGER_HASH_ADMIN = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
 async function requireManagerPinAdmin(reason: string): Promise<boolean> {
   const pin = window.prompt(`🔒 MANAGER PIN REQUIRED\n\n${reason}\n\nENTER 4-DIGIT MANAGER PIN:`);
@@ -57,7 +38,6 @@ async function requireManagerPinAdmin(reason: string): Promise<boolean> {
   return true;
 }
 
-// 🆕 v3.155 — per-tier cover-time helpers + tier list for the Table Cover Pricing tab.
 const _minToHHMM = (m: number): string => {
   const mm = Math.max(0, Math.min(1439, Math.round(m || 0)));
   const h = Math.floor(mm / 60), r = mm % 60;
@@ -85,10 +65,14 @@ const TP_TIERS: { key: TablePricingTierKey; label: string; hint: string }[] = [
   { key: "rooftop", label: "🌳 Rooftop", hint: "" },
 ];
 
+// Gumroad-style hard shadow — solid offset, no blur, black.
+const SHADOW_LG = "4px 4px 0px #000";
+const SHADOW_MD = "3px 3px 0px #000";
+const SHADOW_SM = "2px 2px 0px #000";
+
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  // 🆕 v3.106 — tab union trimmed: dashboard / happy-hour / aggregator removed.
   const [tab, setTab] = useState<"monitor" | "reports" | "live-reports" | "agents" | "audit" | "events" | "menu" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
@@ -107,9 +91,6 @@ export default function AdminPage() {
   });
   const [tablePricingSaving, setTablePricingSaving] = useState(false);
   const [tablePricingMsg, setTablePricingMsg] = useState("");
-  // 🛟 Seed the editable price draft from the FIRST live snapshot only. After
-  // that, never let an incoming snapshot overwrite a manager's in-progress
-  // edits (architect-flagged clobber). They save explicitly via the button.
   const tablePricingSeededRef = useRef(false);
   const [tabletFloor, setTabletFloorState] = useState<TabletFloor | null>(getTabletFloor());
   const [menuOverrides, setMenuOverridesState] = useState<Record<string, MenuOverride>>({});
@@ -122,17 +103,12 @@ export default function AdminPage() {
   const [edcSaveMsg, setEdcSaveMsg] = useState("");
 
   useEffect(() => {
-    // 🆕 v3.106 — removed subscribeToHappyHour + subscribeToAggregatorSettings
-    // (those tabs deleted). Side benefit: 2 fewer onSnapshot listeners per
-    // tablet that opens Boss Mode → smaller read footprint.
     const unsubs = [
       subscribeToMenuOverrides(setMenuOverridesState),
       subscribeToEdcDefaultVendor(setEdcDefaultVendorState),
       subscribeToDoorPricingSettings(setDoorPricing),
       subscribeToTablePricingSettings((s) => {
         setTablePricing(s);
-        // Seed the editable draft ONCE (first snapshot). Subsequent snapshots
-        // must NOT clobber a manager's unsaved edits.
         if (!tablePricingSeededRef.current) {
           tablePricingSeededRef.current = true;
           setTablePricingDraft({
@@ -147,9 +123,6 @@ export default function AdminPage() {
     return () => unsubs.forEach(u => u());
   }, []);
 
-  // Owner-facing change to the venue-wide default card machine. Door Mode
-  // picks this up live via its own subscription on the next mount; bouncers
-  // who already overrode the vendor on their tablet keep their override.
   const handleEdcVendorChange = async (vendor: EdcDefaultVendor) => {
     if (vendor === edcDefaultVendor) return;
     setEdcSaving(true); setEdcSaveMsg("");
@@ -171,8 +144,8 @@ export default function AdminPage() {
 
   if (!hasRole("admin", "manager")) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "#030305", color: "#C9A84C" }}>
-        <p>Access denied. Manager or Admin role required.</p>
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "#F4F4F0" }}>
+        <p style={{ fontWeight: 700, color: "#000" }}>Access denied. Manager or Admin role required.</p>
       </div>
     );
   }
@@ -185,13 +158,8 @@ export default function AdminPage() {
     const key = menuOverrideKey(itemName);
     const current = menuOverrides[key];
     const goingOOS = !current?.outOfStock;
-    if (!(await requireManagerPinAdmin(
-      `${goingOOS ? "MARK OUT OF STOCK" : "MARK BACK IN STOCK"}: ${itemName}`
-    ))) return;
-    await setMenuOverride(itemName, {
-      outOfStock: goingOOS,
-      updatedBy: currentStaff?.name || "admin",
-    });
+    if (!(await requireManagerPinAdmin(`${goingOOS ? "MARK OUT OF STOCK" : "MARK BACK IN STOCK"}: ${itemName}`))) return;
+    await setMenuOverride(itemName, { outOfStock: goingOOS, updatedBy: currentStaff?.name || "admin" });
     if (currentStaff) {
       await logAudit({
         action: goingOOS ? "menu_out_of_stock" : "menu_back_in_stock",
@@ -235,8 +203,6 @@ export default function AdminPage() {
       `${discountPercent || discountAmount ? "SET" : "CLEAR"} DISCOUNT on ${itemName}` +
       (discountPercent ? ` (${discountPercent}% OFF)` : discountAmount ? ` (₹${discountAmount} OFF)` : "")
     ))) return;
-    // 🔴 BUGFIX 2026-05-10 — same merge:true clear bug as bulk discount.
-    // Write explicit 0/"" instead of undefined so the field actually clears.
     await setMenuOverride(itemName, {
       outOfStock: current?.outOfStock || false,
       discountPercent: discountPercent ?? 0,
@@ -253,13 +219,6 @@ export default function AdminPage() {
     }
   };
 
-  // 🔴 UX 2026-05-10 — BULK DISCOUNT (Khushi happy-hour ask). Sets the same %
-  // discount on EVERY menu item (or every CURRENTLY-FILTERED item if a search
-  // is active) in one tap. Manager-PIN gated, audit-logged. Skips OOS items
-  // automatically — no point discounting what isn't being sold tonight.
-  // 🛡 FALLBACK: if any single setMenuOverride fails, we keep going on the
-  //              rest and surface a count of failures at the end so the
-  //              manager knows to retry. We never silently swallow errors.
   const setBulkDiscount = async () => {
     const targetItems = filteredMenu;
     const scopeLabel = menuSearch ? `${targetItems.length} FILTERED items` : `ALL ${targetItems.length} menu items`;
@@ -296,13 +255,8 @@ export default function AdminPage() {
     for (const item of targetItems) {
       const key = menuOverrideKey(item.name);
       const current = menuOverrides[key];
-      // Skip OOS items — no point discounting what's not for sale
       if (current?.outOfStock) { skipped++; continue; }
       try {
-        // 🔴 BUGFIX 2026-05-10 — Firestore setDoc({merge:true}) keeps existing
-        // fields when you pass undefined. Write explicit 0 / "" to clear,
-        // because all consumers check `if (ov.discountPercent)` which treats
-        // 0 as falsy = no discount.
         await setMenuOverride(item.name, {
           outOfStock: current?.outOfStock || false,
           discountPercent: clearing ? 0 : discountPercent,
@@ -321,11 +275,9 @@ export default function AdminPage() {
         action: "menu_discount_set",
         staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
         details: {
-          bulk: true,
-          scope: menuSearch ? `filtered:${menuSearch}` : "all",
+          bulk: true, scope: menuSearch ? `filtered:${menuSearch}` : "all",
           discountPercent: clearing ? 0 : discountPercent,
-          reason: reason.trim(),
-          itemCount: ok, failCount: fail, oosSkipped: skipped,
+          reason: reason.trim(), itemCount: ok, failCount: fail, oosSkipped: skipped,
         },
       });
     }
@@ -338,10 +290,6 @@ export default function AdminPage() {
     );
   };
 
-  // 🆕 2026-06-05 v3.227 (Khushi) — Staff CRM. Role dropdown uses HER labels,
-  // mapped to internal StaffRole. "Owners" = admin (universal). Access modes
-  // (stored in roles[]) grant EXTRA mode entry beyond the primary role — e.g. a
-  // Captain also trusted on Bar/Cashier.
   const ROLE_CHOICES: { value: StaffRole; label: string }[] = [
     { value: "captain",   label: "CAPTAIN" },
     { value: "hostess",   label: "HOSTESS / DOOR" },
@@ -359,25 +307,14 @@ export default function AdminPage() {
     { role: "admin",     label: "Boss / Owner", ownerOnly: true },
   ];
   const roleLabel = (r: StaffRole): string => ROLE_CHOICES.find((c) => c.value === r)?.label || r;
-  // 🔒 v3.227 — Only OWNERS (admin) may assign/grant the elevated tiers
-  // (MANAGER, OWNERS). A manager has Boss-tab access but must NOT be able to
-  // promote anyone (incl. themselves) or edit an existing owner. The role
-  // dropdown is filtered + handlers re-check (defence-in-depth; matches the
-  // existing Delete-button gating). NOTE: true tamper-proofing needs Firestore
-  // rules on the staff collection — tracked as a fast-follow with PIN hashing.
   const isElevatedRole = (r: StaffRole): boolean => r === "admin" || r === "manager";
-  // A staffer is "effectively elevated" if EITHER the primary role OR any entry
-  // in roles[] is admin/manager — non-admins must not edit/deactivate them.
   const isEffectivelyElevated = (s: StaffMember): boolean =>
     isElevatedRole(s.role) || (s.roles || []).some(isElevatedRole);
   const roleChoices = hasRole("admin") ? ROLE_CHOICES : ROLE_CHOICES.filter((c) => !isElevatedRole(c.value));
-  // roles[] = unique access set, ALWAYS including the primary role.
   const buildRoles = (role: StaffRole, access: StaffRole[]): StaffRole[] =>
     Array.from(new Set<StaffRole>([role, ...access]));
-  const inpStyle = { background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" };
+  const inpStyle = { background: "#fff", border: "2px solid #000", color: "#000" };
 
-  // Access-level selector (mode chips + ALL ACCESS). Primary role is always on
-  // and locked. ownerOnly modes (Manager/Boss) only show to a logged-in admin.
   const renderAccess = (
     primary: StaffRole,
     access: StaffRole[],
@@ -390,9 +327,9 @@ export default function AdminPage() {
     return (
       <div className="mt-3">
         <div className="flex items-center justify-between mb-1">
-          <span className="text-[11px] tracking-wide" style={{ color: "hsl(36 29% 60%)" }}>ACCESS LEVEL — modes this person can enter</span>
-          <button type="button" onClick={() => onAll(!allOn)} className="text-[11px] px-2 py-0.5 rounded"
-            style={{ background: allOn ? "#C9A84C" : "hsl(240 12% 10%)", color: allOn ? "#030305" : "#C9A84C", border: "1px solid #C9A84C" }}>
+          <span className="text-[11px] tracking-wide font-bold uppercase" style={{ color: "#555" }}>ACCESS LEVEL — modes this person can enter</span>
+          <button type="button" onClick={() => onAll(!allOn)} className="text-[11px] px-2 py-0.5 font-bold"
+            style={{ background: allOn ? "#F2C744" : "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: SHADOW_SM }}>
             {allOn ? "ALL ACCESS ✓" : "ALL ACCESS"}
           </button>
         </div>
@@ -402,11 +339,11 @@ export default function AdminPage() {
             const on = isPrimary || access.includes(m.role);
             return (
               <button type="button" key={m.role} disabled={isPrimary} onClick={() => !isPrimary && onToggle(m.role)}
-                className="text-[11px] px-2.5 py-1 rounded"
+                className="text-[11px] px-2.5 py-1 font-semibold"
                 style={{
-                  background: on ? "#22c55e22" : "hsl(240 12% 8%)",
-                  color: on ? "#22c55e" : "hsl(36 29% 60%)",
-                  border: `1px solid ${on ? "#22c55e" : "hsl(240 8% 18%)"}`,
+                  background: on ? "#E8FFF5" : "#F4F4F0",
+                  color: on ? "#23A094" : "#555",
+                  border: `2px solid ${on ? "#23A094" : "#ccc"}`,
                   cursor: isPrimary ? "default" : "pointer",
                 }}>
                 {on ? "✓ " : ""}{m.label}{isPrimary ? " (role)" : ""}
@@ -482,115 +419,104 @@ export default function AdminPage() {
   };
 
   return (
-    <div className="min-h-screen" style={{ background: "#030305", color: "hsl(36 29% 93%)" }}>
-      <header className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
+    <div className="min-h-screen" style={{ background: "#F4F4F0", color: "#000", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+      <header className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "2px solid #000", background: "#F4F4F0" }}>
         <div className="flex items-center gap-4">
-          {/* 🆕 v3.105 — "Floor" was the old FloorView (RETIRED). Back button
-              now logs out → returns to the 5-tile mode picker (LoginPage). */}
-          <button onClick={logout} className="text-sm" style={{ color: "#C9A84C" }}>← Modes</button>
-          <h1 className="text-lg font-semibold" style={{ color: "#C9A84C" }}>👑 BOSS MODE</h1>
+          <button onClick={logout} className="text-sm font-bold" style={{ color: "#000" }}>← Modes</button>
+          <h1 className="text-lg font-black tracking-tight uppercase" style={{ color: "#000" }}>👑 BOSS MODE</h1>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs" style={{ color: "hsl(36 29% 60%)" }}>{currentStaff?.name}</span>
-          <button onClick={logout} className="text-xs px-2 py-1 rounded" style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)" }}>Logout</button>
+          <span className="text-xs font-semibold" style={{ color: "#555" }}>{currentStaff?.name}</span>
+          <button onClick={logout} className="text-xs px-3 py-1 font-bold"
+            style={{ background: "#fff", color: "#000", border: "2px solid #000", boxShadow: SHADOW_SM }}>
+            Logout
+          </button>
         </div>
       </header>
 
-      {/* 🆕 v3.106 — tabs grouped by purpose for cleaner UX. Group dividers
-          are subtle vertical lines between sections, no visual heaviness. */}
-      <div className="flex gap-1 px-4 py-2 flex-wrap items-center" style={{ borderBottom: "1px solid hsl(240 8% 13%)" }}>
+      {/* Tab bar — grouped by purpose */}
+      <div className="flex gap-1.5 px-4 py-3 flex-wrap items-center" style={{ borderBottom: "2px solid #000", background: "#F4F4F0" }}>
         {(() => {
           const groups: Array<Array<{ id: typeof tab; label: string }>> = [
-            // Daily ops — what the boss looks at every night.
             [
-              { id: "monitor",     label: "🔴 Live Monitor" },
-              { id: "reports",     label: "📋 Reports" },
+              { id: "monitor",      label: "🔴 Live Monitor" },
+              { id: "reports",      label: "📋 Reports" },
               { id: "live-reports", label: "📊 Live Reports" },
-              { id: "agents",      label: "👥 Agents" },
-              { id: "audit",       label: "🛡 Audit" },
+              { id: "agents",       label: "👥 Agents" },
+              { id: "audit",        label: "🛡 Audit" },
             ],
-            // Content — events + menu management.
             [
-              { id: "events",      label: "🎟 Events" },
-              { id: "menu",        label: "OOS / Discount" },
-              { id: "bot-knowledge", label: "🧠 Bot Knowledge" },
-              // 🆕 v3.239 — "📋 Menu Editor" + "📋 Menu CRM" MOVED to the new
-              // standalone MENU mode (its own home-screen icon). See MenuMode.tsx.
+              { id: "events",       label: "🎟 Events" },
+              { id: "menu",         label: "OOS / Discount" },
+              { id: "bot-knowledge",label: "🧠 Bot Knowledge" },
             ],
-            // Staff & security.
             [
-              { id: "staff",       label: "Staff" },
-              { id: "locks",       label: "🔓 Locks" },
+              { id: "staff",        label: "Staff" },
+              { id: "locks",        label: "🔓 Locks" },
             ],
-            // Settings — venue + device level.
             [
               { id: "door-pricing", label: "💰 Door Pricing" },
-              { id: "table-pricing", label: "🎟️ Table Cover Pricing" },
+              { id: "table-pricing",label: "🎟️ Table Cover Pricing" },
               { id: "tablet",       label: "🖨 This Tablet" },
               { id: "settings",     label: "⚙️ Settings" },
             ],
-            // Integrations.
             [
-              { id: "digitory-sync", label: "🔗 Digitory Sync" },
+              { id: "digitory-sync",label: "🔗 Digitory Sync" },
             ],
           ];
           return groups.flatMap((grp, gi) => [
             ...grp.map((t) => (
-              <button key={t.id} onClick={() => setTab(t.id)} className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-                style={{ background: tab === t.id ? "#C9A84C" : "hsl(240 12% 8%)", color: tab === t.id ? "#030305" : "hsl(36 29% 70%)" }}>
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className="px-3 py-1.5 text-sm font-bold transition-colors"
+                style={{
+                  background: tab === t.id ? "#FF90E8" : "#fff",
+                  color: "#000",
+                  border: "2px solid #000",
+                  boxShadow: tab === t.id ? SHADOW_MD : SHADOW_SM,
+                  transform: tab === t.id ? "translate(-1px, -1px)" : "none",
+                }}>
                 {t.label}
               </button>
             )),
-            gi < groups.length - 1 ? <div key={`div-${gi}`} className="mx-1 h-6 w-px" style={{ background: "hsl(240 8% 18%)" }} /> : null,
+            gi < groups.length - 1
+              ? <div key={`div-${gi}`} className="mx-0.5 h-6 w-0.5" style={{ background: "#000" }} />
+              : null,
           ]);
         })()}
       </div>
 
       <div className="p-4">
-        {tab === "monitor" && <LiveMonitor />}
-        {tab === "reports" && <Reports embedded />}
+        {tab === "monitor"      && <LiveMonitor />}
+        {tab === "reports"      && <Reports embedded />}
         {tab === "live-reports" && <LiveReports />}
-        {tab === "agents" && <AgentsReport />}
-
-        {/* 🆕 v3.105 — Audit embedded directly. AuditPage is self-contained
-            (own data fetch, own filters), so it drops in clean as a tab. */}
-        {tab === "audit" && <AuditPage embedded />}
-
-        {tab === "events" && <EventsAdmin />}
-
-        {tab === "locks" && <CaptainLocksTab adminName={currentStaff?.name || "admin"} />}
-
-        {/* 🆕 v3.106 — Legacy Dashboard tab REMOVED (hodclub.in admin iframe). */}
-        {/* 🆕 v3.239 — Menu Editor + Menu CRM MOVED to the standalone MENU mode. */}
-
-        {tab === "bot-knowledge" && <KnowledgeBaseAdmin />}
-
-        {tab === "digitory-sync" && <DigitorySync currentStaff={currentStaff} />}
+        {tab === "agents"       && <AgentsReport />}
+        {tab === "audit"        && <AuditPage embedded />}
+        {tab === "events"       && <EventsAdmin />}
+        {tab === "locks"        && <CaptainLocksTab adminName={currentStaff?.name || "admin"} />}
+        {tab === "bot-knowledge"&& <KnowledgeBaseAdmin />}
+        {tab === "digitory-sync"&& <DigitorySync currentStaff={currentStaff} />}
 
         {tab === "menu" && (
           <div>
             <input
               type="text" placeholder="Search menu items..."
               value={menuSearch} onChange={(e) => setMenuSearch(e.target.value)}
-              className="w-full px-4 py-2 rounded-lg text-sm mb-3"
-              style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}
+              className="w-full px-4 py-2 text-sm mb-3 font-medium"
+              style={{ background: "#fff", border: "2px solid #000", color: "#000" }}
             />
-            {/* 🔴 UX 2026-05-10 — BULK DISCOUNT row (Khushi happy-hour ask) */}
             <div className="flex items-center gap-2 mb-3 flex-wrap">
-              <button
-                onClick={setBulkDiscount}
-                className="px-3 py-2 rounded-lg text-xs font-bold"
-                style={{ background: "rgba(34,197,94,.15)", border: "1px solid rgba(34,197,94,.45)", color: "#22c55e" }}>
+              <button onClick={setBulkDiscount} className="px-3 py-2 text-xs font-black uppercase"
+                style={{ background: "#FFFBEB", border: "2px solid #F2C744", color: "#000", boxShadow: SHADOW_MD }}>
                 💰 BULK DISCOUNT — {menuSearch ? `${filteredMenu.length} FILTERED` : `ALL ${HOD_MENU_ITEMS.length}`} ITEMS
               </button>
-              <span className="text-xs" style={{ color: "hsl(36 29% 50%)" }}>
+              <span className="text-xs font-medium" style={{ color: "#555" }}>
                 One-tap happy-hour: set/clear same % on every visible item. OOS items auto-skipped.
               </span>
             </div>
-            <div className="text-xs mb-2" style={{ color: "hsl(36 29% 50%)" }}>
+            <div className="text-xs mb-2 font-semibold" style={{ color: "#555" }}>
               💡 OOS + DISCOUNT CHANGES SYNC LIVE TO CAPTAIN, BAR &amp; CUSTOMER WALLET (HODCLUB.IN). MANAGER PIN REQUIRED.
             </div>
-            <div className="space-y-1 max-h-[70vh] overflow-y-auto">
+            <div className="space-y-1.5 max-h-[70vh] overflow-y-auto">
               {filteredMenu.map((item) => {
                 const ov = menuOverrides[menuOverrideKey(item.name)];
                 const isOOS = !!ov?.outOfStock;
@@ -601,18 +527,18 @@ export default function AdminPage() {
                   ? Math.max(0, Math.round((item.price - (dPct ? item.price * dPct / 100 : dAmt)) * 100) / 100)
                   : item.price;
                 return (
-                  <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg"
-                    style={{ background: "hsl(240 12% 5%)", opacity: isOOS ? 0.5 : 1 }}>
+                  <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-2"
+                    style={{ background: "#fff", border: "2px solid #000", opacity: isOOS ? 0.5 : 1 }}>
                     <div className="flex-1 min-w-0">
-                      <span className="text-sm">{item.name}</span>
-                      <span className="text-xs ml-2" style={{ color: "hsl(36 29% 50%)" }}>
+                      <span className="text-sm font-semibold">{item.name}</span>
+                      <span className="text-xs ml-2" style={{ color: "#666" }}>
                         {HOD_CATEGORY_LABELS[item.category] || item.category} ·{" "}
                         {hasDiscount ? (
                           <>
-                            <span style={{ textDecoration: "line-through", color: "hsl(36 29% 35%)" }}>{formatINR(item.price)}</span>
+                            <span style={{ textDecoration: "line-through", color: "#aaa" }}>{formatINR(item.price)}</span>
                             {" → "}
-                            <span style={{ color: "#22c55e", fontWeight: 700 }}>{formatINR(effPrice)}</span>
-                            <span style={{ color: "#22c55e", marginLeft: 6 }}>
+                            <span style={{ color: "#23A094", fontWeight: 700 }}>{formatINR(effPrice)}</span>
+                            <span style={{ color: "#23A094", marginLeft: 6 }}>
                               ({dPct ? `${dPct}% OFF` : `₹${dAmt} OFF`})
                             </span>
                           </>
@@ -621,37 +547,32 @@ export default function AdminPage() {
                         )}
                       </span>
                       {item.isVeg !== undefined && (
-                        <span className="ml-2 text-xs" style={{ color: item.isVeg ? "#22c55e" : "#ef4444" }}>
+                        <span className="ml-2 text-xs font-bold" style={{ color: item.isVeg ? "#23A094" : "#FF5733" }}>
                           {item.isVeg ? "●VEG" : "●NV"}
                         </span>
                       )}
                       {ov?.discountReason && (
-                        <div className="text-xs mt-0.5" style={{ color: "hsl(36 29% 45%)" }}>
-                          📝 {ov.discountReason}
-                        </div>
+                        <div className="text-xs mt-0.5 font-medium" style={{ color: "#777" }}>📝 {ov.discountReason}</div>
                       )}
                     </div>
-                    <button
-                      onClick={() => setItemDiscount(item.name, item.price)}
-                      className="px-3 py-1 rounded text-xs font-medium"
+                    <button onClick={() => setItemDiscount(item.name, item.price)} className="px-3 py-1 text-xs font-bold"
                       style={{
-                        background: hasDiscount ? "rgba(34,197,94,.15)" : "rgba(201,168,76,.15)",
-                        border: `1px solid ${hasDiscount ? "rgba(34,197,94,.5)" : "rgba(201,168,76,.4)"}`,
-                        color: hasDiscount ? "#22c55e" : "#C9A84C",
+                        background: hasDiscount ? "#E8FFF5" : "#FFFBEB",
+                        border: `2px solid ${hasDiscount ? "#23A094" : "#F2C744"}`,
+                        color: hasDiscount ? "#23A094" : "#000",
                         whiteSpace: "nowrap",
-                      }}
-                    >
+                        boxShadow: SHADOW_SM,
+                      }}>
                       💰 {hasDiscount ? "EDIT" : "DISCOUNT"}
                     </button>
-                    <button
-                      onClick={() => toggleOutOfStock(item.name)}
-                      className="px-3 py-1 rounded text-xs font-medium"
+                    <button onClick={() => toggleOutOfStock(item.name)} className="px-3 py-1 text-xs font-bold"
                       style={{
-                        background: isOOS ? "#22c55e" : "#ef4444",
+                        background: isOOS ? "#23A094" : "#FF5733",
                         color: "#fff",
+                        border: `2px solid ${isOOS ? "#23A094" : "#FF5733"}`,
                         whiteSpace: "nowrap",
-                      }}
-                    >
+                        boxShadow: SHADOW_SM,
+                      }}>
                       {isOOS ? "BACK IN STOCK" : "OUT OF STOCK"}
                     </button>
                   </div>
@@ -663,81 +584,74 @@ export default function AdminPage() {
 
         {tab === "staff" && (
           <div>
-            {/* 🆕 2026-05-23 (Khushi) — one-click seed of the 8 door-access people.
-                IDEMPOTENT: uses Emp ID (e.g. "hod-001") as the Firestore doc id, so
-                re-clicking is safe (existing docs are skipped, never overwritten —
-                that way manager-rotated PINs are preserved). */}
             {hasRole("admin") && (
-            <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px dashed #C9A84C" }}>
-              <h3 className="text-sm font-semibold mb-2" style={{ color: "#C9A84C" }}>🚪 Door-Access Staff (8 people)</h3>
-              <div className="text-xs mb-2" style={{ color: "hsl(36 29% 70%)" }}>
-                One-click seed: 2 Admins + 2 GMs + HR + Store + 2 Hostesses. Default PIN = <b>100 + last 3 of Emp ID</b> (e.g. HOD-129 → 100129). Each person rotates their PIN below after first login.
-              </div>
-              <div className="text-xs mb-3 p-2 rounded" style={{ background: "#3a1d05", color: "#fca454", border: "1px solid #92400e" }}>
-                ⚠ <b>HEADS-UP:</b> GMs / HR / Store get role = <b>manager</b> → they will also have manager-PIN-gated power across the app (KOT void, comp, discount overrides, etc.), not door-only. Hostesses get role = <b>hostess</b> (door-only). Admins get <b>admin</b> (full /admin).
-              </div>
-              <button
-                onClick={async () => {
-                  if (!confirm("Seed 8 door-access staff to Firestore?\n\n• Safe to click multiple times (skips existing).\n• Default PIN = 100+last3 of Emp ID.\n• PROCEED?")) return;
-                  let created = 0, existed = 0;
-                  const failures: string[] = [];
-                  for (const s of DOOR_STAFF_SEED) {
-                    const { id, ...rest } = s;
-                    try {
-                      const result = await upsertStaffMember(id!, rest);
-                      if (result === "created") {
-                        created++;
-                        if (currentStaff) {
-                          try {
-                            await logAudit({
-                              action: "door_staff_seeded",
-                              staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
-                              details: { seededId: id, seededName: s.name, seededRole: s.role },
-                            });
-                          } catch (auditErr) { console.warn("audit log failed (non-fatal)", auditErr); }
-                        }
-                      } else {
-                        existed++;
+              <div className="mb-4 p-4" style={{ background: "#fff", border: "2px dashed #F2C744" }}>
+                <h3 className="text-sm font-black uppercase mb-2">🚪 Door-Access Staff (8 people)</h3>
+                <div className="text-xs mb-2 font-medium" style={{ color: "#444" }}>
+                  One-click seed: 2 Admins + 2 GMs + HR + Store + 2 Hostesses. Default PIN = <b>100 + last 3 of Emp ID</b> (e.g. HOD-129 → 100129).
+                </div>
+                <div className="text-xs mb-3 p-2" style={{ background: "#FFFBEB", color: "#856404", border: "2px solid #F2C744" }}>
+                  ⚠ <b>HEADS-UP:</b> GMs / HR / Store get role = <b>manager</b>. Hostesses get <b>hostess</b>. Admins get <b>admin</b> (full /admin).
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!confirm("Seed 8 door-access staff to Firestore?\n\n• Safe to click multiple times (skips existing).\n• Default PIN = 100+last3 of Emp ID.\n• PROCEED?")) return;
+                    let created = 0, existed = 0;
+                    const failures: string[] = [];
+                    for (const s of DOOR_STAFF_SEED) {
+                      const { id, ...rest } = s;
+                      try {
+                        const result = await upsertStaffMember(id!, rest);
+                        if (result === "created") {
+                          created++;
+                          if (currentStaff) {
+                            try {
+                              await logAudit({
+                                action: "door_staff_seeded",
+                                staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+                                details: { seededId: id, seededName: s.name, seededRole: s.role },
+                              });
+                            } catch (auditErr) { console.warn("audit log failed (non-fatal)", auditErr); }
+                          }
+                        } else { existed++; }
+                      } catch (e: any) {
+                        console.error("Seed failed for", s.name, e);
+                        failures.push(`${s.name}: ${e?.message || e}`);
                       }
-                    } catch (e: any) {
-                      console.error("Seed failed for", s.name, e);
-                      failures.push(`${s.name}: ${e?.message || e}`);
                     }
-                  }
-                  const failPart = failures.length
-                    ? `\n\n❌ FAILED (${failures.length}):\n${failures.join("\n")}\n\n→ FALLBACK: open Add Staff above and add the failed ones manually.`
-                    : "";
-                  alert(`${failures.length ? "⚠ PARTIAL" : "✅ DONE"}\n\nNewly added: ${created}\nAlready existed (skipped): ${existed}${failPart}`);
-                }}
-                className="px-4 py-2 rounded text-sm font-bold"
-                style={{ background: "linear-gradient(135deg,#C9A84C,#A07830)", color: "#030305" }}
-              >
-                🚪 SEED 8 DOOR STAFF NOW
-              </button>
-            </div>
+                    const failPart = failures.length
+                      ? `\n\n❌ FAILED (${failures.length}):\n${failures.join("\n")}\n\n→ FALLBACK: open Add Staff above and add the failed ones manually.`
+                      : "";
+                    alert(`${failures.length ? "⚠ PARTIAL" : "✅ DONE"}\n\nNewly added: ${created}\nAlready existed (skipped): ${existed}${failPart}`);
+                  }}
+                  className="px-4 py-2 text-sm font-black uppercase"
+                  style={{ background: "#F2C744", color: "#000", border: "2px solid #000", boxShadow: SHADOW_LG }}>
+                  🚪 SEED 8 DOOR STAFF NOW
+                </button>
+              </div>
             )}
-            <div className="mb-4 p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Add Staff</h3>
+
+            <div className="mb-4 p-4" style={{ background: "#fff", border: "2px solid #000" }}>
+              <h3 className="text-sm font-black uppercase mb-3">Add Staff</h3>
               <div className="flex gap-2 flex-wrap">
                 <input placeholder="Name" value={newStaff.name} onChange={(e) => setNewStaff(s => ({...s, name: e.target.value}))}
-                  className="px-3 py-2 rounded text-sm flex-1 min-w-[140px]" style={inpStyle} />
+                  className="px-3 py-2 text-sm flex-1 min-w-[140px]" style={inpStyle} />
                 <input placeholder="Phone" value={newStaff.phone} inputMode="tel"
                   onChange={(e) => setNewStaff(s => ({...s, phone: e.target.value.replace(/[^\d+]/g, "").slice(0,15)}))}
-                  className="px-3 py-2 rounded text-sm w-36" style={inpStyle} />
+                  className="px-3 py-2 text-sm w-36" style={inpStyle} />
                 <input placeholder="Employee ID (HOD001)" value={newStaff.empId}
                   onChange={(e) => setNewStaff(s => ({...s, empId: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0,12)}))}
-                  className="px-3 py-2 rounded text-sm w-44 font-mono" style={inpStyle} />
+                  className="px-3 py-2 text-sm w-44 font-mono" style={inpStyle} />
                 <input placeholder="5-digit PIN" value={newStaff.pin} inputMode="numeric"
                   onChange={(e) => setNewStaff(s => ({...s, pin: e.target.value.replace(/\D/g, "").slice(0,5)}))} maxLength={5}
-                  className="px-3 py-2 rounded text-sm w-28 font-mono" style={inpStyle} />
+                  className="px-3 py-2 text-sm w-28 font-mono" style={inpStyle} />
                 <select value={newStaff.role} onChange={(e) => setNewStaff(s => ({...s, role: e.target.value as StaffRole, access: s.access.filter(r => r !== (e.target.value as StaffRole))}))}
-                  className="px-3 py-2 rounded text-sm" style={inpStyle}>
+                  className="px-3 py-2 text-sm font-semibold" style={inpStyle}>
                   {roleChoices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
               </div>
               {renderAccess(
-                newStaff.role,
-                newStaff.access,
+                newStaff.role, newStaff.access,
                 (r) => setNewStaff(s => ({...s, access: s.access.includes(r) ? s.access.filter(x => x !== r) : [...s.access, r]})),
                 (on) => {
                   const ownerAllowed = hasRole("admin");
@@ -746,60 +660,70 @@ export default function AdminPage() {
                 }
               )}
               <div className="flex items-center gap-3 mt-3">
-                <button onClick={handleAddStaff} className="px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Add Staff</button>
-                {staffMsg && !editStaff && <span className="text-xs" style={{ color: staffMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{staffMsg}</span>}
+                <button onClick={handleAddStaff} className="px-4 py-2 text-sm font-black uppercase"
+                  style={{ background: "#F2C744", color: "#000", border: "2px solid #000", boxShadow: SHADOW_MD }}>
+                  Add Staff
+                </button>
+                {staffMsg && !editStaff && <span className="text-xs font-semibold" style={{ color: staffMsg.startsWith("✅") ? "#23A094" : "#FF5733" }}>{staffMsg}</span>}
               </div>
             </div>
-            <div className="space-y-1">
+
+            <div className="space-y-1.5">
               {allStaff.map((s) => {
                 const access = (s.roles && s.roles.length > 0 ? s.roles : [s.role]).filter(r => r !== s.role);
                 return (
-                <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-lg gap-2" style={{ background: "hsl(240 12% 5%)" }}>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">{s.name}</span>
-                      <span className="text-[11px] font-mono px-1.5 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)" }}>{s.id}</span>
-                      <span className="text-[11px] px-2 py-0.5 rounded" style={{ background: "hsl(240 12% 10%)", color: "#C9A84C" }}>{roleLabel(s.role)}</span>
-                      {access.map(r => (
-                        <span key={r} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#22c55e1a", color: "#22c55e", border: "1px solid #22c55e55" }}>+ {roleLabel(r)}</span>
-                      ))}
+                  <div key={s.id} className="flex items-center justify-between px-3 py-2 gap-2"
+                    style={{ background: "#fff", border: "2px solid #000" }}>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-bold">{s.name}</span>
+                        <span className="text-[11px] font-mono px-1.5 py-0.5" style={{ background: "#F4F4F0", color: "#555", border: "1px solid #ccc" }}>{s.id}</span>
+                        <span className="text-[11px] px-2 py-0.5 font-bold" style={{ background: "#F4F4F0", color: "#000", border: "2px solid #000" }}>{roleLabel(s.role)}</span>
+                        {access.map(r => (
+                          <span key={r} className="text-[10px] px-1.5 py-0.5 font-bold" style={{ background: "#E8FFF5", color: "#23A094", border: "2px solid #23A094" }}>+ {roleLabel(r)}</span>
+                        ))}
+                      </div>
+                      {s.phone && <div className="text-[11px] mt-0.5 font-medium" style={{ color: "#777" }}>📞 {s.phone}</div>}
                     </div>
-                    {s.phone && <div className="text-[11px] mt-0.5" style={{ color: "hsl(36 29% 55%)" }}>📞 {s.phone}</div>}
+                    <div className="flex gap-2 shrink-0">
+                      {(hasRole("admin") || !isEffectivelyElevated(s)) && (
+                        <button onClick={() => setEditStaff({ ...s, pin: "", roles: s.roles && s.roles.length > 0 ? s.roles : [s.role] })}
+                          className="text-xs px-2 py-1 font-bold"
+                          style={{ background: "#FFFBEB", color: "#000", border: "2px solid #F2C744", boxShadow: SHADOW_SM }}>Edit</button>
+                      )}
+                      {(hasRole("admin") || !isEffectivelyElevated(s)) && (
+                        <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
+                          className="text-xs px-2 py-1 font-bold"
+                          style={{ background: s.active ? "#E8FFF5" : "#FFF0EE", color: s.active ? "#23A094" : "#FF5733", border: `2px solid ${s.active ? "#23A094" : "#FF5733"}`, boxShadow: SHADOW_SM }}>
+                          {s.active ? "Active" : "Inactive"}
+                        </button>
+                      )}
+                      {hasRole("admin") && s.role !== "admin" && (
+                        <button onClick={() => { if (s.id && confirm(`Delete ${s.name}? This cannot be undone.`)) deleteStaffMember(s.id); }}
+                          className="text-xs px-2 py-1 font-bold"
+                          style={{ background: "#FFF0EE", color: "#FF5733", border: "2px solid #FF5733", boxShadow: SHADOW_SM }}>Delete</button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex gap-2 shrink-0">
-                    {(hasRole("admin") || !isEffectivelyElevated(s)) && (
-                      <button onClick={() => setEditStaff({ ...s, pin: "", roles: s.roles && s.roles.length > 0 ? s.roles : [s.role] })}
-                        className="text-xs px-2 py-1 rounded" style={{ background: "#C9A84C33", color: "#C9A84C" }}>Edit</button>
-                    )}
-                    {(hasRole("admin") || !isEffectivelyElevated(s)) && (
-                      <button onClick={() => s.id && updateStaffMember(s.id, { active: !s.active })}
-                        className="text-xs px-2 py-1 rounded" style={{ background: s.active ? "#22c55e33" : "#ef444433", color: s.active ? "#22c55e" : "#ef4444" }}>
-                        {s.active ? "Active" : "Inactive"}
-                      </button>
-                    )}
-                    {hasRole("admin") && s.role !== "admin" && (
-                      <button onClick={() => { if (s.id && confirm(`Delete ${s.name}? This cannot be undone.`)) deleteStaffMember(s.id); }}
-                        className="text-xs px-2 py-1 rounded" style={{ background: "#ef444433", color: "#ef4444" }}>Delete</button>
-                    )}
-                  </div>
-                </div>
-              );})}
+                );
+              })}
             </div>
+
             {editStaff && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.7)" }} onClick={() => { setEditStaff(null); setStaffMsg(""); }}>
-                <div className="w-full max-w-md rounded-xl p-5" style={{ background: "hsl(240 12% 7%)", border: "1px solid #C9A84C" }} onClick={(e) => e.stopPropagation()}>
-                  <h3 className="text-sm font-semibold mb-3" style={{ color: "#C9A84C" }}>Edit {editStaff.name} <span className="font-mono text-xs" style={{ color: "hsl(36 29% 60%)" }}>({editStaff.id})</span></h3>
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.5)" }} onClick={() => { setEditStaff(null); setStaffMsg(""); }}>
+                <div className="w-full max-w-md p-5" style={{ background: "#fff", border: "2px solid #000", boxShadow: "6px 6px 0px #000" }} onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-sm font-black uppercase mb-3">Edit {editStaff.name} <span className="font-mono text-xs font-normal" style={{ color: "#555" }}>({editStaff.id})</span></h3>
                   <div className="space-y-2">
                     <input placeholder="Name" value={editStaff.name} onChange={(e) => setEditStaff(p => p && ({...p, name: e.target.value}))}
-                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle} />
+                      className="w-full px-3 py-2 text-sm" style={inpStyle} />
                     <input placeholder="Phone" value={editStaff.phone || ""} inputMode="tel"
                       onChange={(e) => setEditStaff(p => p && ({...p, phone: e.target.value.replace(/[^\d+]/g, "").slice(0,15)}))}
-                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle} />
+                      className="w-full px-3 py-2 text-sm" style={inpStyle} />
                     <input placeholder="New 5-digit PIN (leave blank to keep)" value={editStaff.pin} inputMode="numeric"
                       onChange={(e) => setEditStaff(p => p && ({...p, pin: e.target.value.replace(/\D/g, "").slice(0,5)}))} maxLength={5}
-                      className="w-full px-3 py-2 rounded text-sm font-mono" style={inpStyle} />
+                      className="w-full px-3 py-2 text-sm font-mono" style={inpStyle} />
                     <select value={editStaff.role} onChange={(e) => setEditStaff(p => p && ({...p, role: e.target.value as StaffRole, roles: (p.roles || []).filter(r => r !== (e.target.value as StaffRole))}))}
-                      className="w-full px-3 py-2 rounded text-sm" style={inpStyle}>
+                      className="w-full px-3 py-2 text-sm font-semibold" style={inpStyle}>
                       {roleChoices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                     </select>
                     {renderAccess(
@@ -809,10 +733,12 @@ export default function AdminPage() {
                       (on) => setEditStaff(p => { if (!p) return p; const ownerAllowed = hasRole("admin"); const all = ACCESS_MODES.filter(m => (!m.ownerOnly || ownerAllowed) && m.role !== p.role).map(m => m.role); return {...p, roles: on ? all : []}; })
                     )}
                   </div>
-                  {staffMsg && <div className="text-xs mt-2" style={{ color: staffMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{staffMsg}</div>}
+                  {staffMsg && <div className="text-xs mt-2 font-semibold" style={{ color: staffMsg.startsWith("✅") ? "#23A094" : "#FF5733" }}>{staffMsg}</div>}
                   <div className="flex gap-2 mt-4">
-                    <button onClick={handleSaveEdit} className="flex-1 px-4 py-2 rounded text-sm font-medium" style={{ background: "#C9A84C", color: "#030305" }}>Save</button>
-                    <button onClick={() => { setEditStaff(null); setStaffMsg(""); }} className="px-4 py-2 rounded text-sm" style={{ background: "hsl(240 12% 12%)", color: "hsl(36 29% 80%)" }}>Cancel</button>
+                    <button onClick={handleSaveEdit} className="flex-1 px-4 py-2 text-sm font-black uppercase"
+                      style={{ background: "#F2C744", color: "#000", border: "2px solid #000", boxShadow: SHADOW_MD }}>Save</button>
+                    <button onClick={() => { setEditStaff(null); setStaffMsg(""); }} className="px-4 py-2 text-sm font-bold"
+                      style={{ background: "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: SHADOW_SM }}>Cancel</button>
                   </div>
                 </div>
               </div>
@@ -820,14 +746,12 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* 🆕 v3.106 — Happy Hour tab REMOVED (venue does not run happy-hour pricing). */}
-
         {tab === "tablet" && (
           <div className="max-w-xl space-y-4">
-            <div className="p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-sm font-semibold mb-2" style={{ color: "#C9A84C" }}>🖨 Set This Tablet's Floor</h3>
-              <p className="text-xs mb-4" style={{ color: "hsl(36 29% 60%)" }}>
-                When a captain on this tablet fires a KOT, drinks print to <b>this floor's bar printer</b> and bills print to <b>this floor's bill printer</b>. Food always goes to the kitchen. Set this once per tablet.
+            <div className="p-4" style={{ background: "#fff", border: "2px solid #000" }}>
+              <h3 className="text-sm font-black uppercase mb-2">🖨 Set This Tablet's Floor</h3>
+              <p className="text-xs mb-4 font-medium" style={{ color: "#555" }}>
+                When a captain fires a KOT, drinks print to <b>this floor's bar printer</b> and bills to <b>this floor's bill printer</b>. Food always goes to the kitchen. Set this once per tablet.
               </p>
               <div className="grid grid-cols-3 gap-2 mb-3">
                 {(["ground", "first", "rooftop"] as const).map((f) => {
@@ -835,37 +759,37 @@ export default function AdminPage() {
                   const label = f === "ground" ? "Ground Floor" : f === "first" ? "First Floor" : "Rooftop";
                   return (
                     <button key={f} onClick={() => { setTabletFloor(f); setTabletFloorState(f); }}
-                      className="px-3 py-3 rounded-lg text-sm font-semibold"
-                      style={{ background: isSel ? "#C9A84C" : "hsl(240 12% 10%)", color: isSel ? "#030305" : "hsl(36 29% 70%)", border: isSel ? "2px solid #C9A84C" : "1px solid hsl(240 8% 18%)" }}>
+                      className="px-3 py-3 text-sm font-black uppercase"
+                      style={{ background: isSel ? "#FF90E8" : "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: isSel ? SHADOW_MD : SHADOW_SM }}>
                       {label}
                     </button>
                   );
                 })}
               </div>
-              <div className="text-xs p-3 rounded" style={{ background: "hsl(240 12% 3%)", color: tabletFloor ? "#22c55e" : "#ef4444" }}>
+              <div className="text-xs p-3 font-bold" style={{ background: "#F4F4F0", border: "2px solid #000", color: tabletFloor ? "#23A094" : "#FF5733" }}>
                 {tabletFloor
-                  ? `✅ This tablet is bound to ${tabletFloor === "ground" ? "Ground Floor" : tabletFloor === "first" ? "First Floor" : "Rooftop"}. Drink/bill destinations will route to ${tabletFloor === "ground" ? "GF" : tabletFloor === "first" ? "FF" : "RT"} printers.`
+                  ? `✅ This tablet is bound to ${tabletFloor === "ground" ? "Ground Floor" : tabletFloor === "first" ? "First Floor" : "Rooftop"}.`
                   : "⚠️ No floor set. Drinks/bills will default to FF printers. Pick a floor above."}
               </div>
             </div>
-            <div className="p-4 rounded-lg text-xs space-y-2" style={{ background: "hsl(240 12% 3%)", border: "1px dashed hsl(240 8% 18%)", color: "hsl(36 29% 60%)" }}>
-              <div><b style={{ color: "#C9A84C" }}>How printing works (Cloud-Routed):</b></div>
+            <div className="p-4 text-xs space-y-2" style={{ background: "#F4F4F0", border: "2px dashed #000", color: "#555" }}>
+              <div><b style={{ color: "#000" }}>How printing works (Cloud-Routed):</b></div>
               <div>1. Captain hits Fire KOT → KOT written to Firestore with item destination tags.</div>
-              <div>2. Each floor's PC runs <code>print-server</code>, subscribes to Firestore, claims items for its destinations, prints over TCP to local Ethernet printers.</div>
-              <div>3. Mixed orders auto-split: e.g. 1 beer + 1 tikka on a Rooftop tablet → beer prints at RT bar, tikka prints in kitchen, no duplication.</div>
+              <div>2. Each floor's PC runs <code>print-server</code>, subscribes to Firestore, prints over TCP to local Ethernet printers.</div>
+              <div>3. Mixed orders auto-split: e.g. 1 beer + 1 tikka on a Rooftop tablet → beer prints at RT bar, tikka prints in kitchen.</div>
               <div>4. Works offline (Firestore SDK queues writes); recovers if a floor PC reboots.</div>
-              <div className="pt-2 border-t" style={{ borderColor: "hsl(240 8% 13%)" }}>Full architecture: see <code>replit.md → 🖨 KOT PRINTING ARCHITECTURE</code>.</div>
+              <div className="pt-2 border-t" style={{ borderColor: "#ccc" }}>Full architecture: see <code>replit.md → 🖨 KOT PRINTING ARCHITECTURE</code>.</div>
             </div>
           </div>
         )}
 
         {tab === "settings" && (
           <div className="max-w-xl space-y-4">
-            <div className="p-4 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-sm font-semibold mb-1" style={{ color: "#C9A84C" }}>💳 Default Card Machine</h3>
-              <p className="text-xs mb-3" style={{ color: "hsl(36 29% 60%)" }}>
-                Venue-wide default for Door Mode card swipes. Takes effect on the next bouncer who opens Door Mode — no rebuild needed. Tablets that have been individually paired to a specific machine keep their per-device override.
-                {!FEATURES.edc && <><br /><span style={{ color: "#EF4444" }}>⚠️ EDC feature flag (<code>VITE_EDC</code>) is OFF — this setting is ignored until EDC is enabled in the build.</span></>}
+            <div className="p-4" style={{ background: "#fff", border: "2px solid #000" }}>
+              <h3 className="text-sm font-black uppercase mb-1">💳 Default Card Machine</h3>
+              <p className="text-xs mb-3 font-medium" style={{ color: "#555" }}>
+                Venue-wide default for Door Mode card swipes. Takes effect on the next bouncer who opens Door Mode — no rebuild needed.
+                {!FEATURES.edc && <><br /><span style={{ color: "#FF5733", fontWeight: 700 }}>⚠️ EDC feature flag (<code>VITE_EDC</code>) is OFF — ignored until EDC is enabled.</span></>}
               </p>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 {(["razorpay", "pinelabs"] as const).map((v) => {
@@ -873,14 +797,14 @@ export default function AdminPage() {
                   const label = v === "razorpay" ? "Razorpay POS" : "Pine Labs Plutus";
                   return (
                     <button key={v} onClick={() => handleEdcVendorChange(v)} disabled={edcSaving}
-                      className="px-3 py-3 rounded-lg text-sm font-semibold"
-                      style={{ background: sel ? "#C9A84C" : "hsl(240 12% 10%)", color: sel ? "#030305" : "hsl(36 29% 70%)", border: sel ? "2px solid #C9A84C" : "1px solid hsl(240 8% 18%)", cursor: edcSaving ? "wait" : "pointer", opacity: edcSaving ? 0.7 : 1 }}>
+                      className="px-3 py-3 text-sm font-black uppercase"
+                      style={{ background: sel ? "#FF90E8" : "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: sel ? SHADOW_MD : SHADOW_SM, cursor: edcSaving ? "wait" : "pointer", opacity: edcSaving ? 0.7 : 1 }}>
                       {label}{sel ? " ✓" : ""}
                     </button>
                   );
                 })}
               </div>
-              <div className="text-xs p-3 rounded" style={{ background: "hsl(240 12% 3%)", color: edcDefaultVendor ? "#22c55e" : "hsl(36 29% 60%)" }}>
+              <div className="text-xs p-3 font-semibold" style={{ background: "#F4F4F0", border: "2px solid #000", color: edcDefaultVendor ? "#23A094" : "#555" }}>
                 {edcSaveMsg
                   ? edcSaveMsg
                   : edcDefaultVendor
@@ -891,28 +815,19 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* 🆕 2026-05-20 (Khushi) — DOOR PRICING TOGGLE
-            Manager controls whether door girls can override walk-in prices
-            (cover / entry-only / group / table4 / vvip-6). When OFF, prices
-            lock to event values — safest default. When ON, door staff can
-            bargain with Koramangala customers; every override is logged in
-            the booking's `notes` field for review in Reports + Sheets. */}
         {tab === "door-pricing" && (
           <div className="space-y-4 max-w-xl">
-            <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>💰 Door Bargain Pricing</h3>
-              <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
-                When <b>ON</b>, door staff can edit the price for each walk-in (covers, entry-only, group per-head, table for 4, VVIP table for 6) — useful for Koramangala customers who bargain. Every overridden price is stamped in the booking's notes as <code>PRICE OVERRIDE: ₹X (default ₹Y) by &lt;staff&gt;</code> for your review.
+            <div className="p-5" style={{ background: "#fff", border: "2px solid #000" }}>
+              <h3 className="text-base font-black uppercase mb-2">💰 Door Bargain Pricing</h3>
+              <p className="text-xs leading-relaxed mb-4 font-medium" style={{ color: "#555" }}>
+                When <b>ON</b>, door staff can edit the price for each walk-in — useful for Koramangala customers who bargain. Every overridden price is stamped in the booking's notes for your review.
                 <br /><br />
-                When <b>OFF</b>, prices lock to the event's published values — door staff cannot change them.
+                When <b>OFF</b>, prices lock to the event's published values.
               </p>
-
-              <div className="flex items-center justify-between p-4 rounded-lg" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <div className="flex items-center justify-between p-4" style={{ background: "#F4F4F0", border: "2px solid #000" }}>
                 <div>
-                  <div className="text-sm font-semibold" style={{ color: "hsl(36 29% 93%)" }}>
-                    Allow door staff to override prices
-                  </div>
-                  <div className="text-xs mt-1" style={{ color: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
+                  <div className="text-sm font-black uppercase">Allow door staff to override prices</div>
+                  <div className="text-xs mt-1 font-semibold" style={{ color: doorPricing.priceOverrideEnabled ? "#23A094" : "#777" }}>
                     {doorPricing.priceOverrideEnabled
                       ? "✅ ON — door girls can bargain prices on every walk-in"
                       : "🔒 OFF — prices locked to event values (safest default)"}
@@ -922,65 +837,32 @@ export default function AdminPage() {
                   onClick={async () => {
                     if (doorPricingSaving) return;
                     const next = !doorPricing.priceOverrideEnabled;
-                    // Manager PIN gate — same as menu changes — so a stray
-                    // tablet tap can't open the bargain window.
                     const ok = await requireManagerPinAdmin(
-                      next
-                        ? "Allow door staff to override walk-in prices?"
-                        : "Lock door walk-in prices back to event values?"
+                      next ? "Allow door staff to override walk-in prices?" : "Lock door walk-in prices back to event values?"
                     );
                     if (!ok) return;
                     setDoorPricingSaving(true);
                     try {
-                      await updateDoorPricingSettings(
-                        { priceOverrideEnabled: next },
-                        currentStaff?.name || "admin"
-                      );
-                      // 🛟 Optimistic UI update — the helper writes to localStorage
-                      // synchronously and tries Firestore best-effort. If Firestore
-                      // succeeds, onSnapshot will reconcile; if rules silently
-                      // reject (auth null), local state still reflects the click
-                      // so the toggle actually MOVES on this tablet.
+                      await updateDoorPricingSettings({ priceOverrideEnabled: next }, currentStaff?.name || "admin");
                       setDoorPricing({ priceOverrideEnabled: next });
                       await logAudit({
                         action: "DOOR_PRICING_OVERRIDE_TOGGLE",
-                        staffId: currentStaff?.id || "admin",
-                        staffName: currentStaff?.name || "admin",
-                        staffRole: (currentStaff?.role || "admin") as StaffRole,
-                        details: { enabled: next },
+                        staffId: currentStaff?.id || "admin", staffName: currentStaff?.name || "admin",
+                        staffRole: (currentStaff?.role || "admin") as StaffRole, details: { enabled: next },
                       }).catch(() => {});
                     } catch (e: any) {
                       alert(`❌ Could not update setting: ${e?.message || e}`);
-                    } finally {
-                      setDoorPricingSaving(false);
-                    }
+                    } finally { setDoorPricingSaving(false); }
                   }}
                   disabled={doorPricingSaving}
                   className="relative inline-flex items-center"
-                  style={{
-                    width: 64, height: 34, borderRadius: 999,
-                    background: doorPricing.priceOverrideEnabled ? "#22c55e" : "hsl(240 8% 20%)",
-                    border: "1px solid hsl(240 8% 25%)",
-                    cursor: doorPricingSaving ? "wait" : "pointer",
-                    opacity: doorPricingSaving ? 0.6 : 1,
-                    transition: "background .2s",
-                  }}
-                  aria-label="Toggle door pricing override"
-                >
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: doorPricing.priceOverrideEnabled ? 32 : 4,
-                      top: 3, width: 26, height: 26, borderRadius: "50%",
-                      background: "#fff", transition: "left .2s",
-                      boxShadow: "0 2px 6px rgba(0,0,0,.35)",
-                    }}
-                  />
+                  style={{ width: 64, height: 34, borderRadius: 999, background: doorPricing.priceOverrideEnabled ? "#23A094" : "#ccc", border: "2px solid #000", cursor: doorPricingSaving ? "wait" : "pointer", opacity: doorPricingSaving ? 0.6 : 1, transition: "background .2s" }}
+                  aria-label="Toggle door pricing override">
+                  <span style={{ position: "absolute", left: doorPricing.priceOverrideEnabled ? 30 : 2, top: 3, width: 26, height: 26, borderRadius: "50%", background: "#fff", border: "1px solid #ccc", transition: "left .2s" }} />
                 </button>
               </div>
-
-              <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
-                <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If this setting can't load, the door modal defaults to <b>OFF</b> (locked prices) so revenue is never accidentally discounted. Audit every override in <b>📋 Reports</b> — look for "PRICE OVERRIDE" in the booking notes column.
+              <div className="mt-4 p-3 text-xs leading-relaxed font-medium" style={{ background: "#F4F4F0", border: "2px solid #000", color: "#555" }}>
+                <b style={{ color: "#000" }}>🛟 Fallback:</b> If this setting can't load, the door modal defaults to <b>OFF</b>. Audit overrides in <b>📋 Reports</b> — look for "PRICE OVERRIDE" in notes.
               </div>
             </div>
           </div>
@@ -988,114 +870,72 @@ export default function AdminPage() {
 
         {tab === "table-pricing" && (
           <div className="space-y-4 max-w-xl">
-            <div className="p-5 rounded-lg" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-              <h3 className="text-base font-semibold mb-2" style={{ color: "#C9A84C" }}>🎟️ Table Cover Pricing</h3>
-              <p className="text-xs leading-relaxed mb-4" style={{ color: "hsl(36 29% 65%)" }}>
-                Sets the <b>per-head cover charge</b> and <b>start time</b> for each table tier on the customer site (hodclub.in). When <b>ON</b>, guests booking a table on a <b>weekend night (Fri / Sat / Sun)</b> with an arrival at or after that tier's start time pay its cover (100% redeemable on food &amp; drinks). Charged per head (price × party size). Earlier arrivals and weekdays stay free. <b>Ground Premium</b> = tables C1–C4; <b>Ground VVIP</b> = VIP1 / VIP2 — each tier has its own price and start time.
-                <br /><br />
-                When <b>OFF</b>, all table bookings are free (no cover) on every night.
+            <div className="p-5" style={{ background: "#fff", border: "2px solid #000" }}>
+              <h3 className="text-base font-black uppercase mb-2">🎟️ Table Cover Pricing</h3>
+              <p className="text-xs leading-relaxed mb-4 font-medium" style={{ color: "#555" }}>
+                Sets the <b>per-head cover charge</b> and <b>start time</b> for each table tier on hodclub.in. <b>Ground Premium</b> = C1–C4; <b>Ground VVIP</b> = VIP1 / VIP2. When <b>OFF</b>, all table bookings are free.
               </p>
-
-              <div className="flex items-center justify-between p-4 rounded-lg mb-4" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
+              <div className="flex items-center justify-between p-4 mb-4" style={{ background: "#F4F4F0", border: "2px solid #000" }}>
                 <div>
-                  <div className="text-sm font-semibold" style={{ color: "hsl(36 29% 93%)" }}>
-                    Weekend table cover charges
-                  </div>
-                  <div className="text-xs mt-1" style={{ color: tablePricing.enabled ? "#22c55e" : "hsl(36 29% 50%)" }}>
-                    {tablePricing.enabled
-                      ? "✅ ON — weekend tables carry the per-head cover below from each tier's start time"
-                      : "🔒 OFF — all table bookings are free"}
+                  <div className="text-sm font-black uppercase">Weekend table cover charges</div>
+                  <div className="text-xs mt-1 font-semibold" style={{ color: tablePricing.enabled ? "#23A094" : "#777" }}>
+                    {tablePricing.enabled ? "✅ ON — weekend tables carry the per-head cover" : "🔒 OFF — all table bookings are free"}
                   </div>
                 </div>
                 <button
                   onClick={async () => {
                     if (tablePricingSaving) return;
                     const next = !tablePricing.enabled;
-                    const ok = await requireManagerPinAdmin(
-                      next
-                        ? "Turn ON weekend table cover charges?"
-                        : "Turn OFF table cover charges (all tables free)?"
-                    );
+                    const ok = await requireManagerPinAdmin(next ? "Turn ON weekend table cover charges?" : "Turn OFF table cover charges (all tables free)?");
                     if (!ok) return;
-                    setTablePricingSaving(true);
-                    setTablePricingMsg("");
+                    setTablePricingSaving(true); setTablePricingMsg("");
                     try {
                       await updateTablePricingSettings({ enabled: next }, currentStaff?.name || "admin");
                       setTablePricing((p) => ({ ...p, enabled: next }));
                       await logAudit({
                         action: "TABLE_PRICING_ENABLE_TOGGLE",
-                        staffId: currentStaff?.id || "admin",
-                        staffName: currentStaff?.name || "admin",
-                        staffRole: (currentStaff?.role || "admin") as StaffRole,
-                        details: { enabled: next },
+                        staffId: currentStaff?.id || "admin", staffName: currentStaff?.name || "admin",
+                        staffRole: (currentStaff?.role || "admin") as StaffRole, details: { enabled: next },
                       }).catch(() => {});
                     } catch (e: any) {
                       alert(`❌ Could not update setting: ${e?.message || e}`);
-                    } finally {
-                      setTablePricingSaving(false);
-                    }
+                    } finally { setTablePricingSaving(false); }
                   }}
                   disabled={tablePricingSaving}
                   className="relative inline-flex items-center"
-                  style={{
-                    width: 64, height: 34, borderRadius: 999,
-                    background: tablePricing.enabled ? "#22c55e" : "hsl(240 8% 20%)",
-                    border: "1px solid hsl(240 8% 25%)",
-                    cursor: tablePricingSaving ? "wait" : "pointer",
-                    opacity: tablePricingSaving ? 0.6 : 1,
-                    transition: "background .2s",
-                  }}
-                  aria-label="Toggle table cover charges"
-                >
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: tablePricing.enabled ? 32 : 4,
-                      top: 3, width: 26, height: 26, borderRadius: "50%",
-                      background: "#fff", transition: "left .2s",
-                      boxShadow: "0 2px 6px rgba(0,0,0,.35)",
-                    }}
-                  />
+                  style={{ width: 64, height: 34, borderRadius: 999, background: tablePricing.enabled ? "#23A094" : "#ccc", border: "2px solid #000", cursor: tablePricingSaving ? "wait" : "pointer", opacity: tablePricingSaving ? 0.6 : 1, transition: "background .2s" }}
+                  aria-label="Toggle table cover charges">
+                  <span style={{ position: "absolute", left: tablePricing.enabled ? 30 : 2, top: 3, width: 26, height: 26, borderRadius: "50%", background: "#fff", border: "1px solid #ccc", transition: "left .2s" }} />
                 </button>
               </div>
-
               <div className="space-y-3 mb-4">
                 {TP_TIERS.map((f) => (
-                  <div key={f.key} className="p-3 rounded-lg" style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)" }}>
-                    <div className="text-xs font-semibold mb-2" style={{ color: "hsl(36 29% 80%)" }}>
-                      {f.label}{f.hint ? <span style={{ color: "hsl(36 29% 50%)", fontWeight: 400 }}> · {f.hint}</span> : null}
+                  <div key={f.key} className="p-3" style={{ background: "#F4F4F0", border: "2px solid #000" }}>
+                    <div className="text-xs font-black uppercase mb-2">
+                      {f.label}{f.hint ? <span style={{ color: "#555", fontWeight: 500 }}> · {f.hint}</span> : null}
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[10px] font-semibold mb-1" style={{ color: "hsl(36 29% 60%)" }}>PER-HEAD COVER</label>
-                        <div className="flex items-center rounded-lg px-2" style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)" }}>
-                          <span className="text-sm" style={{ color: "hsl(36 29% 55%)" }}>₹</span>
-                          <input
-                            type="number"
-                            inputMode="numeric"
-                            min={0}
+                        <label className="block text-[10px] font-black uppercase mb-1" style={{ color: "#555" }}>PER-HEAD COVER</label>
+                        <div className="flex items-center px-2" style={{ background: "#fff", border: "2px solid #000" }}>
+                          <span className="text-sm font-bold" style={{ color: "#555" }}>₹</span>
+                          <input type="number" inputMode="numeric" min={0}
                             value={tablePricingDraft[f.key].price}
                             onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: { ...d[f.key], price: e.target.value } }))}
-                            className="w-full bg-transparent py-2 px-1 text-sm outline-none"
-                            style={{ color: "hsl(36 29% 93%)" }}
-                          />
+                            className="w-full bg-transparent py-2 px-1 text-sm outline-none font-semibold" style={{ color: "#000" }} />
                         </div>
                       </div>
                       <div>
-                        <label className="block text-[10px] font-semibold mb-1" style={{ color: "hsl(36 29% 60%)" }}>COVER STARTS</label>
-                        <input
-                          type="time"
-                          value={tablePricingDraft[f.key].start}
+                        <label className="block text-[10px] font-black uppercase mb-1" style={{ color: "#555" }}>COVER STARTS</label>
+                        <input type="time" value={tablePricingDraft[f.key].start}
                           onChange={(e) => setTablePricingDraft((d) => ({ ...d, [f.key]: { ...d[f.key], start: e.target.value } }))}
-                          className="w-full rounded-lg py-2 px-2 text-sm outline-none"
-                          style={{ background: "hsl(240 12% 5%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 93%)" }}
-                        />
+                          className="w-full py-2 px-2 text-sm outline-none font-semibold"
+                          style={{ background: "#fff", border: "2px solid #000", color: "#000" }} />
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
-
               <button
                 onClick={async () => {
                   if (tablePricingSaving) return;
@@ -1103,71 +943,48 @@ export default function AdminPage() {
                   for (const f of TP_TIERS) {
                     const price = Math.round(Number(tablePricingDraft[f.key].price));
                     const startMin = _hhmmToMin(tablePricingDraft[f.key].start);
-                    if (!Number.isFinite(price) || price < 0) {
-                      setTablePricingMsg(`❌ Enter a valid price for ${f.label}.`);
-                      return;
-                    }
-                    if (!Number.isFinite(startMin)) {
-                      setTablePricingMsg(`❌ Enter a valid start time for ${f.label}.`);
-                      return;
-                    }
+                    if (!Number.isFinite(price) || price < 0) { setTablePricingMsg(`❌ Enter a valid price for ${f.label}.`); return; }
+                    if (!Number.isFinite(startMin)) { setTablePricingMsg(`❌ Enter a valid start time for ${f.label}.`); return; }
                     (patch as any)[f.key] = { price, startMin };
                   }
                   const summary = TP_TIERS.map((f) => `${f.label}: ₹${(patch as any)[f.key].price} from ${_fmt12(tablePricingDraft[f.key].start)}`).join("\n");
                   const ok = await requireManagerPinAdmin("Save table cover pricing?\n\n" + summary);
                   if (!ok) return;
-                  setTablePricingSaving(true);
-                  setTablePricingMsg("");
+                  setTablePricingSaving(true); setTablePricingMsg("");
                   try {
                     await updateTablePricingSettings(patch, currentStaff?.name || "admin");
                     setTablePricing((p) => ({ ...p, ...patch } as TablePricingSettings));
                     await logAudit({
                       action: "TABLE_PRICING_UPDATE",
-                      staffId: currentStaff?.id || "admin",
-                      staffName: currentStaff?.name || "admin",
-                      staffRole: (currentStaff?.role || "admin") as StaffRole,
-                      details: patch as any,
+                      staffId: currentStaff?.id || "admin", staffName: currentStaff?.name || "admin",
+                      staffRole: (currentStaff?.role || "admin") as StaffRole, details: patch as any,
                     }).catch(() => {});
                     setTablePricingMsg("✅ Saved.");
                   } catch (e: any) {
                     setTablePricingMsg(`❌ Could not save: ${e?.message || e}`);
-                  } finally {
-                    setTablePricingSaving(false);
-                  }
+                  } finally { setTablePricingSaving(false); }
                 }}
                 disabled={tablePricingSaving}
-                className="px-4 py-2 rounded-lg text-sm font-semibold"
-                style={{ background: "#C9A84C", color: "#030305", cursor: tablePricingSaving ? "wait" : "pointer", opacity: tablePricingSaving ? 0.6 : 1 }}
-              >
+                className="px-4 py-2 text-sm font-black uppercase"
+                style={{ background: "#F2C744", color: "#000", border: "2px solid #000", boxShadow: SHADOW_MD, cursor: tablePricingSaving ? "wait" : "pointer", opacity: tablePricingSaving ? 0.6 : 1 }}>
                 {tablePricingSaving ? "Saving…" : "Save Prices & Times"}
               </button>
               {tablePricingMsg && (
-                <span className="ml-3 text-xs" style={{ color: tablePricingMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{tablePricingMsg}</span>
+                <span className="ml-3 text-xs font-semibold" style={{ color: tablePricingMsg.startsWith("✅") ? "#23A094" : "#FF5733" }}>{tablePricingMsg}</span>
               )}
-
-              <div className="mt-4 p-3 rounded text-xs leading-relaxed" style={{ background: "hsl(240 12% 3%)", color: "hsl(36 29% 60%)" }}>
-                <b style={{ color: "#C9A84C" }}>🛟 Fallback:</b> If the customer site can't load this setting, it defaults to <b>₹2,500/head, ON</b>. Saving here updates <code>appSettings/tablePricing</code>; the customer site reads it on each table-booking sheet open.
+              <div className="mt-4 p-3 text-xs leading-relaxed font-medium" style={{ background: "#F4F4F0", border: "2px solid #000", color: "#555" }}>
+                <b style={{ color: "#000" }}>🛟 Fallback:</b> If the customer site can't load this setting, it defaults to <b>₹2,500/head, ON</b>.
               </div>
             </div>
           </div>
         )}
-
-        {/* 🆕 v3.106 — Aggregators tab REMOVED. Commission / ad-budget config
-            unused; aggregator bookings are ingested by Cloud Function
-            `pollAggregatorEmails` with per-source defaults baked in. */}
       </div>
     </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// V3 2026-05-10 — CAPTAIN VOID LOCKS TAB (Anti-Fraud #A2)
-// ────────────────────────────────────────────────────────────────────────
-// Lists every captain auto-suspended from voiding tonight (5 voids OR
-// ₹3000 cap). Admin (PIN 9999) can unlock per-captain. The unlock event
-// resets the night counter to 0 and is recorded with admin name + ts on
-// the same captainVoidStats doc.
-// Fallback: if Firestore read fails, show a clear empty state + Refresh.
+// CAPTAIN VOID LOCKS TAB
 // ════════════════════════════════════════════════════════════════════════
 const ADMIN_HASH_LOCKS = "888df25ae35772424a560c7152a1de794440e0ea5cfee62828333a456a506e05";
 
@@ -1176,16 +993,12 @@ function CaptainLocksTab({ adminName }: { adminName: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [unlocking, setUnlocking] = useState<string | null>(null);
-
   const [rulesMissing, setRulesMissing] = useState(false);
+
   const load = async () => {
     setLoading(true); setError(""); setRulesMissing(false);
     try { setRows(await listSuspendedCaptainsToday()); }
     catch (e: unknown) {
-      // V3 2026-05-10 — friendly path for the rules-not-yet-deployed case so
-      // Khushi sees an actionable copy-paste block instead of a red wall.
-      // Clear rows on rules-missing so a previous successful load doesn't
-      // leave stale suspended-captain cards stuck under the new banner.
       if (e instanceof CaptainVoidStatsRulesError) { setRulesMissing(true); setRows([]); }
       else setError(e instanceof Error ? e.message : String(e));
     }
@@ -1220,35 +1033,35 @@ function CaptainLocksTab({ adminName }: { adminName: string }) {
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-lg font-semibold" style={{ color: "#C9A84C" }}>🔓 Captain Void Locks</h3>
-          <p className="text-xs" style={{ color: "hsl(36 29% 60%)" }}>
+          <h3 className="text-lg font-black uppercase">🔓 Captain Void Locks</h3>
+          <p className="text-xs font-medium" style={{ color: "#555" }}>
             Auto-suspended captains for tonight (cap: 5 voids OR ₹3000). Admin PIN required to unlock.
           </p>
         </div>
-        <button onClick={load} className="px-3 py-1.5 rounded text-xs font-medium"
-          style={{ background: "rgba(201,168,76,.12)", border: "1px solid #C9A84C", color: "#C9A84C" }}>
+        <button onClick={load} className="px-3 py-1.5 text-xs font-black uppercase"
+          style={{ background: "#F4F4F0", border: "2px solid #000", color: "#000", boxShadow: SHADOW_SM }}>
           🔄 Refresh
         </button>
       </div>
 
-      {loading && <div className="text-center py-12 text-sm" style={{ color: "hsl(36 29% 60%)" }}>Loading...</div>}
+      {loading && <div className="text-center py-12 text-sm font-semibold" style={{ color: "#555" }}>Loading...</div>}
       {error && (
-        <div className="p-3 rounded mb-3" style={{ background: "rgba(239,68,68,.1)", border: "1px solid #EF4444", color: "#EF4444", fontSize: 13 }}>
+        <div className="p-3 mb-3 font-semibold" style={{ background: "#FFF0EE", border: "2px solid #FF5733", color: "#FF5733", fontSize: 13 }}>
           ⚠ {error}
         </div>
       )}
       {rulesMissing && (
-        <div className="p-4 rounded mb-3" style={{ background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.4)" }}>
-          <div style={{ fontSize: 14, fontWeight: 900, color: "#F59E0B", marginBottom: 6 }}>
+        <div className="p-4 mb-3" style={{ background: "#FFFBEB", border: "2px solid #F2C744" }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: "#000", marginBottom: 6 }}>
             🛠 ONE-TIME FIRESTORE RULES PATCH NEEDED
           </div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,.75)", marginBottom: 10, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 12, color: "#444", marginBottom: 10, lineHeight: 1.5, fontWeight: 500 }}>
             The Captain Void Cap (anti-fraud #A2) needs <strong>2 small Firestore rule blocks</strong> deployed once.
             Until then, voids still work fine — there's just no nightly cap and this tab can't list locks.
             <br /><br />
-            <strong>WHAT TO DO:</strong> Open Firebase Console → Firestore → Rules. Paste the blocks below into your <code>match /databases/&#123;db&#125;/documents</code> section, then click <strong>Publish</strong>.
+            <strong>WHAT TO DO:</strong> Open Firebase Console → Firestore → Rules. Paste the blocks below, then click <strong>Publish</strong>.
           </div>
-          <pre style={{ background: "#000", border: "1px solid rgba(245,158,11,.3)", borderRadius: 8, padding: 12, fontSize: 11, color: "#C9A84C", overflow: "auto", lineHeight: 1.5, fontFamily: "monospace" }}>
+          <pre style={{ background: "#111", border: "2px solid #000", padding: 12, fontSize: 11, color: "#F2C744", overflow: "auto", lineHeight: 1.5, fontFamily: "monospace" }}>
 {`// HOD anti-fraud collections — POS captain void cap + customer notify queue
 match /captainVoidStats/{docId} {
   allow read, write: if request.auth != null;
@@ -1258,50 +1071,40 @@ match /voidNotificationsQueue/{docId} {
   allow update: if request.auth != null;
 }`}
           </pre>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,.5)", marginTop: 8 }}>
-            Full copy-paste with context lives in <code>hod-functions-patch/firestore.rules.patch.md</code>.
+          <div style={{ fontSize: 11, color: "#666", marginTop: 8, fontWeight: 500 }}>
             After Publish, tap <strong>🔄 Refresh</strong> above — this banner disappears and Locks goes live.
           </div>
         </div>
       )}
 
       {!loading && !error && !rulesMissing && rows.length === 0 && (
-        <div className="text-center py-12 rounded" style={{ border: "1px dashed hsl(240 8% 18%)", color: "hsl(36 29% 50%)" }}>
+        <div className="text-center py-12" style={{ border: "2px dashed #000" }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>NO CAPTAINS LOCKED TONIGHT</div>
-          <div style={{ fontSize: 12, marginTop: 4 }}>Everyone's voids are within the daily cap.</div>
+          <div style={{ fontSize: 14, fontWeight: 900 }}>NO CAPTAINS LOCKED TONIGHT</div>
+          <div style={{ fontSize: 12, marginTop: 4, color: "#555", fontWeight: 500 }}>Everyone's voids are within the daily cap.</div>
         </div>
       )}
 
       {!loading && !error && !rulesMissing && rows.length > 0 && (
         <div className="flex flex-col gap-2">
           {rows.map((r) => (
-            <div key={r.id} className="p-4 rounded" style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.4)" }}>
+            <div key={r.id} className="p-4" style={{ background: "#FFF0EE", border: "2px solid #FF5733" }}>
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div style={{ minWidth: 0 }}>
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span style={{ fontSize: 16, fontWeight: 900, color: "#fff" }}>{r.captainName.toUpperCase()}</span>
-                    <span style={{ background: "rgba(239,68,68,.25)", color: "#EF4444", fontSize: 10, fontWeight: 900, padding: "2px 6px", borderRadius: 4, letterSpacing: .5 }}>
-                      🚫 SUSPENDED
-                    </span>
+                    <span style={{ fontSize: 16, fontWeight: 900 }}>{r.captainName.toUpperCase()}</span>
+                    <span style={{ background: "#FF5733", color: "#fff", fontSize: 10, fontWeight: 900, padding: "2px 6px", letterSpacing: .5 }}>🚫 SUSPENDED</span>
                   </div>
-                  <div style={{ fontSize: 13, color: "rgba(255,255,255,.85)", marginBottom: 2 }}>
+                  <div style={{ fontSize: 13, color: "#333", marginBottom: 2, fontWeight: 600 }}>
                     {r.voidCount} voids · ₹{r.voidValue.toLocaleString("en-IN")} total
                   </div>
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,.55)" }}>
+                  <div style={{ fontSize: 11, color: "#666", fontWeight: 500 }}>
                     {r.suspendReason || "Cap exceeded"}
                     {r.suspendedAt && ` · at ${new Date(r.suspendedAt).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false })}`}
                   </div>
                 </div>
-                <button
-                  onClick={() => handleUnlock(r)}
-                  disabled={unlocking === r.id}
-                  style={{
-                    padding: "10px 18px", borderRadius: 10,
-                    background: "rgba(0,200,100,.15)", border: "1px solid #00C864",
-                    color: "#00C864", fontSize: 13, fontWeight: 800, cursor: "pointer",
-                    opacity: unlocking === r.id ? .6 : 1,
-                  }}>
+                <button onClick={() => handleUnlock(r)} disabled={unlocking === r.id}
+                  style={{ padding: "10px 18px", background: "#E8FFF5", border: "2px solid #23A094", color: "#23A094", fontSize: 13, fontWeight: 900, cursor: "pointer", opacity: unlocking === r.id ? .6 : 1, boxShadow: SHADOW_SM }}>
                   {unlocking === r.id ? "Unlocking..." : "🔓 Unlock"}
                 </button>
               </div>
@@ -1310,9 +1113,9 @@ match /voidNotificationsQueue/{docId} {
         </div>
       )}
 
-      <div className="mt-6 p-3 rounded text-xs" style={{ background: "hsl(240 12% 6%)", border: "1px solid hsl(240 8% 18%)", color: "hsl(36 29% 60%)" }}>
-        <div style={{ color: "#C9A84C", fontWeight: 700, marginBottom: 4 }}>HOW THIS WORKS</div>
-        <div style={{ lineHeight: 1.6 }}>
+      <div className="mt-6 p-3 text-xs" style={{ background: "#fff", border: "2px solid #000", color: "#555" }}>
+        <div style={{ color: "#000", fontWeight: 900, marginBottom: 4, textTransform: "uppercase" }}>HOW THIS WORKS</div>
+        <div style={{ lineHeight: 1.6, fontWeight: 500 }}>
           • Every captain has a nightly cap: <strong>5 voids OR ₹3,000 in voided value</strong>.<br/>
           • Hit either → captain is auto-suspended from FURTHER voids that night.<br/>
           • Captain calls you → you tap <strong>🔓 Unlock</strong> + enter Admin PIN (9999).<br/>

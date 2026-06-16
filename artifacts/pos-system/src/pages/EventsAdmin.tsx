@@ -7,6 +7,9 @@ import {
 type Tab = "list" | "form";
 type StatusFilter = "upcoming" | "past" | "all";
 
+const SHADOW_SM = "2px 2px 0px #000";
+const SHADOW_MD = "3px 3px 0px #000";
+
 const todayStr = (): string => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -31,7 +34,6 @@ const emptyForm = (): Partial<HodEvent> => ({
   description: "", color: "#C9A84C", image: "", published: false,
 });
 
-/** Detect WebP encode support (modern browsers; Safari 14+, all Chrome/Firefox/Edge). */
 function _webpSupported(): boolean {
   try {
     const cv = document.createElement("canvas");
@@ -40,7 +42,6 @@ function _webpSupported(): boolean {
   } catch { return false; }
 }
 
-/** Compress poster aggressively for PageSpeed: cap width 800px, WebP if supported, target ~120KB. */
 async function compressImage(file: File | string, maxBytes = 140_000, maxWidth = 800): Promise<string> {
   const dataUrl = typeof file === "string"
     ? file
@@ -66,10 +67,7 @@ async function compressImage(file: File | string, maxBytes = 140_000, maxWidth =
   const fmt = _webpSupported() ? "image/webp" : "image/jpeg";
   let q = 0.82;
   let out = cv.toDataURL(fmt, q);
-  while (out.length > maxBytes && q > 0.35) {
-    q -= 0.08;
-    out = cv.toDataURL(fmt, q);
-  }
+  while (out.length > maxBytes && q > 0.35) { q -= 0.08; out = cv.toDataURL(fmt, q); }
   return out;
 }
 
@@ -84,20 +82,11 @@ export default function EventsAdmin() {
   const [query, setQuery] = useState("");
   const optimizeRunning = useRef(false);
 
-  // Live Firestore subscription — same collection hodclub.in customers read
   useEffect(() => {
-    const unsub = subscribeToHodEvents((evs) => {
-      setEvents(evs);
-      setLoading(false);
-    });
+    const unsub = subscribeToHodEvents((evs) => { setEvents(evs); setLoading(false); });
     return unsub;
   }, []);
 
-  // 🆕 2026-05-24 (Khushi) — Auto-purge expired event posters on admin mount.
-  // Khushi: "once event is over poster must be autodeleted both from firestore
-  // and on our app too". 2-day grace window lets the operator fix any
-  // reconciliation/payment issues before the doc vanishes.
-  // 🛟 Fail-open: errors are logged only — admin tab still loads.
   const purgedRef = useRef(false);
   useEffect(() => {
     if (purgedRef.current) return;
@@ -112,21 +101,9 @@ export default function EventsAdmin() {
 
   const editing = useMemo(() => events.find((e) => e.id === editId) || null, [events, editId]);
 
-  const startEdit = (ev: HodEvent) => {
-    setForm({ ...ev });
-    setEditId(ev.id);
-    setTab("form");
-  };
-  const startNew = () => {
-    setForm(emptyForm());
-    setEditId(null);
-    setTab("form");
-  };
-  const cancelForm = () => {
-    setTab("list");
-    setEditId(null);
-    setForm(emptyForm());
-  };
+  const startEdit = (ev: HodEvent) => { setForm({ ...ev }); setEditId(ev.id); setTab("form"); };
+  const startNew = () => { setForm(emptyForm()); setEditId(null); setTab("form"); };
+  const cancelForm = () => { setTab("list"); setEditId(null); setForm(emptyForm()); };
 
   const handleSave = async (publish: boolean) => {
     if (!form.title?.trim()) { alert("Event title is required."); return; }
@@ -137,9 +114,7 @@ export default function EventsAdmin() {
       if (editId) await updateHodEvent(editId, data);
       else await createHodEvent(data);
       cancelForm();
-    } catch (e: any) {
-      alert("Save failed: " + (e?.message || String(e)));
-    }
+    } catch (e: any) { alert("Save failed: " + (e?.message || String(e))); }
     setBusy("");
   };
 
@@ -165,47 +140,24 @@ export default function EventsAdmin() {
 
   const handleImageFile = async (file: File) => {
     setBusy("img");
-    try {
-      const url = await compressImage(file);
-      setForm((f) => ({ ...f, image: url }));
-    } catch (e: any) {
-      alert("Image processing failed: " + (e?.message || String(e)));
-    }
+    try { const url = await compressImage(file); setForm((f) => ({ ...f, image: url })); }
+    catch (e: any) { alert("Image processing failed: " + (e?.message || String(e))); }
     setBusy("");
   };
 
-  /** One-click bulk re-compress: shrinks every existing poster on hodclub.in.
-   *  Skips posters already small (<150KB) or missing. Writes back to same
-   *  Firestore docs the customer site reads — instant page-speed win.
-   *  ⚠️ Uses updateHodEventImageOnly (image-only patch) to avoid clobbering
-   *  live-booking-mutated stock fields. Re-entrancy guarded by optimizeRunning. */
   const handleOptimizeAll = async () => {
     if (optimizeRunning.current) return;
     optimizeRunning.current = true;
-    // 💰 COST FIX 2026-05-21 — include ALL external URLs (firebasestorage, lh3, etc.)
-    // regardless of URL length, so the optimizer pulls them in and inlines as base64.
-    // Old filter required >150KB which excluded short URL strings entirely — that's
-    // why Firebase Storage poster URLs were never migrated and kept leaking ₹3,160/mo
-    // in egress fees. data: URLs still need the >150KB gate so already-small posters
-    // are skipped.
     const targets = events.filter((e) => {
       if (!e.image) return false;
-      if (e.image.startsWith("http")) return true;                  // any external URL → migrate
-      if (e.image.startsWith("data:") && e.image.length > 150_000) return true;  // big base64 → recompress
+      if (e.image.startsWith("http")) return true;
+      if (e.image.startsWith("data:") && e.image.length > 150_000) return true;
       return false;
     });
-    if (targets.length === 0) {
-      optimizeRunning.current = false;
-      alert("All posters are already optimized — nothing to do.");
-      return;
-    }
+    if (targets.length === 0) { optimizeRunning.current = false; alert("All posters are already optimized — nothing to do."); return; }
     const totalKb = Math.round(targets.reduce((s, e) => s + (e.image?.length || 0), 0) / 1024);
     const ok = window.confirm(
-      `Optimize ${targets.length} poster(s)?\n\n` +
-      `Current total: ~${totalKb} KB\n` +
-      `Will resize to max 800px wide + WebP, target ~120 KB each.\n\n` +
-      `Customer-facing site will load much faster.\n` +
-      `Existing bookings/stock are NOT touched.`
+      `Optimize ${targets.length} poster(s)?\n\nCurrent total: ~${totalKb} KB\nWill resize to max 800px wide + WebP, target ~120 KB each.\n\nCustomer-facing site will load much faster.\nExisting bookings/stock are NOT touched.`
     );
     if (!ok) { optimizeRunning.current = false; return; }
     setBusy("optimize-all");
@@ -213,7 +165,6 @@ export default function EventsAdmin() {
     for (const ev of targets) {
       try {
         let src = ev.image!;
-        // For external URLs, fetch + convert to data URL first
         if (src.startsWith("http")) {
           const r = await fetch(src);
           const blob = await r.blob();
@@ -227,23 +178,17 @@ export default function EventsAdmin() {
         const before = src.length;
         const out = await compressImage(src);
         if (out.length < before * 0.9) {
-          // Image-only patch — never overwrite live stock/sold fields.
           await updateHodEventImageOnly(ev.id, out);
           savedKb += Math.round((before - out.length) / 1024);
           done++;
         }
-      } catch (e) {
-        console.error("Optimize failed for", ev.id, e);
-        failed++;
-      }
+      } catch (e) { console.error("Optimize failed for", ev.id, e); failed++; }
       setBusy(`optimize-${done + failed}/${targets.length}`);
     }
-    setBusy("");
-    optimizeRunning.current = false;
+    setBusy(""); optimizeRunning.current = false;
     alert(`✅ Done: ${done} optimized, ${failed} failed.\nSaved ~${savedKb} KB on the live site.`);
   };
 
-  // ── List view filtering
   const tStr = todayStr();
   const filtered = useMemo(() => {
     let xs = events.slice();
@@ -261,49 +206,37 @@ export default function EventsAdmin() {
     return xs;
   }, [events, filter, query, tStr]);
 
-  const tonightEvs = useMemo(
-    () => events.filter((e) => e.published && e.date === tStr),
-    [events, tStr]
-  );
-
-  // ─────────────────────────────── RENDER ───────────────────────────────
+  const tonightEvs = useMemo(() => events.filter((e) => e.published && e.date === tStr), [events, tStr]);
 
   if (tab === "form") {
     return (
       <FormView
-        form={form}
-        setForm={setForm}
-        editing={editing}
-        busy={busy}
-        onCancel={cancelForm}
-        onSave={() => handleSave(false)}
-        onPublish={() => handleSave(true)}
-        onImageFile={handleImageFile}
+        form={form} setForm={setForm} editing={editing} busy={busy}
+        onCancel={cancelForm} onSave={() => handleSave(false)}
+        onPublish={() => handleSave(true)} onImageFile={handleImageFile}
       />
     );
   }
 
   return (
-    <div>
-      {/* Header bar */}
+    <div style={{ color: "#000" }}>
+      {/* Header */}
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
-          <div className="text-lg font-bold" style={{ color: "#C9A84C" }}>🎟 Events</div>
-          <div className="text-xs" style={{ color: "hsl(36 29% 55%)" }}>
+          <div style={{ fontSize: 18, fontWeight: 900, color: "#000", textTransform: "uppercase" }}>🎟 Events</div>
+          <div style={{ fontSize: 12, color: "#666", marginTop: 2, fontWeight: 500 }}>
             Same data as hodclub.in — edits go live instantly on the customer site.
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">
           <button onClick={handleOptimizeAll} disabled={busy.startsWith("optimize")}
-            className="px-3 py-2 rounded-lg text-xs font-bold disabled:opacity-60"
-            style={{ background: "hsl(240 12% 8%)", color: "#C9A84C", border: "1px solid rgba(201,168,76,.4)" }}
+            style={{ padding: "8px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", background: "#FFFBEB", color: "#000", border: "2px solid #F2C744", boxShadow: SHADOW_SM, opacity: busy.startsWith("optimize") ? 0.6 : 1 }}
             title="Re-compress all event posters to <150 KB WebP — speeds up hodclub.in">
             {busy.startsWith("optimize-") ? `⏳ ${busy.replace("optimize-", "")}` :
              busy === "optimize-all" ? "⏳ Starting…" : "🚀 Optimize Posters"}
           </button>
           <button onClick={startNew}
-            className="px-4 py-2 rounded-lg text-sm font-bold"
-            style={{ background: "#C9A84C", color: "#030305" }}>
+            style={{ padding: "8px 16px", fontSize: 13, fontWeight: 900, cursor: "pointer", background: "#F2C744", color: "#000", border: "2px solid #000", boxShadow: SHADOW_MD }}>
             + Add Event
           </button>
         </div>
@@ -311,32 +244,22 @@ export default function EventsAdmin() {
 
       {/* Tonight summary */}
       {tonightEvs.length > 0 && (
-        <div className="rounded-xl p-4 mb-4"
-          style={{ background: "linear-gradient(135deg,rgba(201,168,76,.12),rgba(123,47,190,.06))",
-            border: "1px solid rgba(201,168,76,.3)" }}>
-          <div className="text-[10px] font-bold tracking-widest mb-2" style={{ color: "#C9A84C" }}>
-            🔥 TONIGHT
-          </div>
+        <div style={{ background: "#FFFBEB", border: "2px solid #F2C744", padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, marginBottom: 8, color: "#000" }}>🔥 TONIGHT</div>
           {tonightEvs.map((ev, i) => {
             const pct = (ev.capacity || 0) > 0 ? Math.round(((ev.sold || 0) / (ev.capacity || 1)) * 100) : 0;
             return (
-              <div key={ev.id}
-                className="flex items-center justify-between gap-3 py-2"
-                style={{ borderBottom: i < tonightEvs.length - 1 ? "1px solid rgba(255,255,255,.05)" : "none" }}>
+              <div key={ev.id} className="flex items-center justify-between gap-3 py-2"
+                style={{ borderBottom: i < tonightEvs.length - 1 ? "1px solid #eee" : "none" }}>
                 <div className="min-w-0 flex-1">
-                  <div className="font-bold text-sm truncate">{ev.title}</div>
-                  <div className="text-xs" style={{ color: "hsl(36 29% 55%)" }}>
-                    {ev.dj || "—"} · {ev.time || ""}
-                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{ev.title}</div>
+                  <div style={{ fontSize: 12, color: "#666" }}>{ev.dj || "—"} · {ev.time || ""}</div>
                 </div>
                 <div className="text-right shrink-0">
-                  <div className="text-lg font-bold" style={{ color: "#C9A84C" }}>
-                    {ev.sold || 0}
-                    <span className="text-xs font-semibold" style={{ color: "hsl(36 29% 55%)" }}>
-                      /{ev.capacity || 0}
-                    </span>
+                  <div style={{ fontSize: 18, fontWeight: 900, color: "#000" }}>
+                    {ev.sold || 0}<span style={{ fontSize: 12, color: "#888" }}>/{ev.capacity || 0}</span>
                   </div>
-                  <div className="text-[10px]" style={{ color: "hsl(36 29% 55%)" }}>{pct}% sold</div>
+                  <div style={{ fontSize: 10, color: "#888" }}>{pct}% sold</div>
                 </div>
               </div>
             );
@@ -348,13 +271,16 @@ export default function EventsAdmin() {
       <div className="flex gap-2 mb-3 flex-wrap">
         {(["upcoming", "past", "all"] as StatusFilter[]).map((f) => (
           <button key={f} onClick={() => setFilter(f)}
-            className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider"
             style={{
-              background: filter === f ? "#C9A84C" : "hsl(240 12% 8%)",
-              color: filter === f ? "#030305" : "hsl(36 29% 70%)",
+              padding: "7px 14px", fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer",
+              background: filter === f ? "#FF90E8" : "#fff",
+              color: "#000",
+              border: "2px solid #000",
+              boxShadow: filter === f ? SHADOW_MD : SHADOW_SM,
+              transform: filter === f ? "translate(-1px,-1px)" : "none",
             }}>
             {f}
-            <span className="ml-1.5 opacity-60">
+            <span style={{ marginLeft: 6, opacity: .7 }}>
               ({f === "upcoming" ? events.filter((e) => (e.date || "") >= tStr).length
                 : f === "past" ? events.filter((e) => (e.date || "") < tStr).length
                 : events.length})
@@ -363,17 +289,16 @@ export default function EventsAdmin() {
         ))}
         <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
           placeholder="Search title / DJ / genre…"
-          className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg text-xs"
-          style={{ background: "hsl(240 12% 8%)", border: "1px solid hsl(240 8% 18%)", color: "#fff" }} />
+          style={{ flex: 1, minWidth: 200, padding: "7px 12px", fontSize: 12, background: "#fff", border: "2px solid #000", color: "#000" }} />
       </div>
 
       {/* List */}
       {loading ? (
-        <div className="text-center py-20 text-sm" style={{ color: "hsl(36 29% 55%)" }}>
+        <div style={{ textAlign: "center", padding: 80, fontSize: 14, color: "#888", fontWeight: 500 }}>
           Loading events from Firestore…
         </div>
       ) : filtered.length === 0 ? (
-        <div className="text-center py-20 text-sm" style={{ color: "hsl(36 29% 55%)" }}>
+        <div style={{ textAlign: "center", padding: 80, fontSize: 14, color: "#888", fontWeight: 500, border: "2px dashed #ccc" }}>
           {query ? `No events match "${query}"` : `No ${filter} events.`}
         </div>
       ) : (
@@ -390,8 +315,6 @@ export default function EventsAdmin() {
   );
 }
 
-// ─────────────────────────────── ROW ───────────────────────────────
-
 function EventRow({ ev, busy, onEdit, onTogglePublish, onDelete }: {
   ev: HodEvent; busy: string;
   onEdit: () => void; onTogglePublish: () => void; onDelete: () => void;
@@ -399,58 +322,48 @@ function EventRow({ ev, busy, onEdit, onTogglePublish, onDelete }: {
   const pct = (ev.capacity || 0) > 0 ? Math.round(((ev.sold || 0) / (ev.capacity || 1)) * 100) : 0;
   const isPub = !!ev.published;
   return (
-    <div className="rounded-lg p-3 flex items-center gap-3 flex-wrap"
-      style={{ background: "hsl(240 12% 8%)", border: `1px solid ${isPub ? "rgba(0,200,100,.25)" : "hsl(240 8% 18%)"}` }}>
+    <div style={{ padding: 12, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", background: "#fff", border: `2px solid ${isPub ? "#23A094" : "#000"}`, boxShadow: "2px 2px 0px rgba(0,0,0,.12)" }}>
       {ev.image ? (
-        <img src={ev.image} alt="" className="w-16 h-16 rounded object-cover shrink-0"
-          style={{ background: "#0a0a0a" }} />
+        <img src={ev.image} alt="" style={{ width: 64, height: 64, objectFit: "cover", flexShrink: 0, border: "2px solid #000" }} />
       ) : (
-        <div className="w-16 h-16 rounded shrink-0 flex items-center justify-center text-2xl"
-          style={{ background: ev.color || "#1a1a1a" }}>🎵</div>
+        <div style={{ width: 64, height: 64, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, background: ev.color || "#F4F4F0", border: "2px solid #000" }}>🎵</div>
       )}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="font-bold text-sm truncate">{ev.title}</div>
-          <span className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider"
-            style={{
-              background: isPub ? "rgba(0,200,100,.15)" : "rgba(245,158,11,.15)",
-              color: isPub ? "#00C864" : "#F59E0B",
-            }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{ev.title}</div>
+          <span style={{ fontSize: 10, padding: "2px 7px", fontWeight: 900, textTransform: "uppercase", letterSpacing: .5, background: isPub ? "#E8FFF5" : "#FFFBEB", color: isPub ? "#23A094" : "#F59E0B", border: `1px solid ${isPub ? "#23A094" : "#F59E0B"}` }}>
             {isPub ? "● LIVE" : "○ DRAFT"}
           </span>
         </div>
-        <div className="text-xs mt-1" style={{ color: "hsl(36 29% 60%)" }}>
+        <div style={{ fontSize: 12, color: "#666", marginBottom: 2 }}>
           {fmtDate(ev.date)} · {ev.time || "—"} · {ev.dj || "no DJ"} · {ev.genre || "—"}
         </div>
-        <div className="text-[11px] mt-1" style={{ color: "hsl(36 29% 50%)" }}>
-          Stag {inr(ev.stagPrice)} · Couple {inr(ev.couplePrice)} · Entry {inr(ev.entryOnlyPrice)} ·
-          T4 {inr(ev.table4Price)} · VVIP {inr(ev.vipPrice)}
+        <div style={{ fontSize: 11, color: "#888" }}>
+          Stag {inr(ev.stagPrice)} · Couple {inr(ev.couplePrice)} · Entry {inr(ev.entryOnlyPrice)} · T4 {inr(ev.table4Price)} · VVIP {inr(ev.vipPrice)}
         </div>
       </div>
-      <div className="text-right shrink-0">
-        <div className="font-bold" style={{ color: "#C9A84C" }}>
-          {ev.sold || 0}<span className="text-xs opacity-60">/{ev.capacity || 0}</span>
+      <div style={{ textAlign: "right", flexShrink: 0 }}>
+        <div style={{ fontWeight: 900, fontSize: 15, color: "#000" }}>
+          {ev.sold || 0}<span style={{ fontSize: 11, color: "#aaa" }}>/{ev.capacity || 0}</span>
         </div>
-        <div className="text-[10px]" style={{ color: "hsl(36 29% 55%)" }}>{pct}% sold</div>
+        <div style={{ fontSize: 10, color: "#888" }}>{pct}% sold</div>
       </div>
-      <div className="flex gap-1 shrink-0">
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
         <button onClick={onEdit} disabled={!!busy}
-          className="px-3 py-1.5 rounded text-xs font-bold"
-          style={{ background: "rgba(201,168,76,.15)", color: "#C9A84C", border: "1px solid rgba(201,168,76,.35)" }}>
+          style={{ padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", background: "#FFFBEB", color: "#000", border: "2px solid #F2C744", boxShadow: "2px 2px 0px #000" }}>
           ✎ Edit
         </button>
         <button onClick={onTogglePublish} disabled={busy === `pub-${ev.id}`}
-          className="px-3 py-1.5 rounded text-xs font-bold"
-          style={{
-            background: isPub ? "rgba(245,158,11,.15)" : "rgba(0,200,100,.15)",
-            color: isPub ? "#F59E0B" : "#00C864",
-            border: `1px solid ${isPub ? "rgba(245,158,11,.35)" : "rgba(0,200,100,.35)"}`,
+          style={{ padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+            background: isPub ? "#FFFBEB" : "#E8FFF5",
+            color: isPub ? "#F59E0B" : "#23A094",
+            border: `2px solid ${isPub ? "#F59E0B" : "#23A094"}`,
+            boxShadow: "2px 2px 0px rgba(0,0,0,.2)",
           }}>
           {busy === `pub-${ev.id}` ? "…" : isPub ? "Unpublish" : "Publish"}
         </button>
         <button onClick={onDelete} disabled={busy === `del-${ev.id}`}
-          className="px-3 py-1.5 rounded text-xs font-bold"
-          style={{ background: "rgba(239,68,68,.1)", color: "#EF4444", border: "1px solid rgba(239,68,68,.3)" }}>
+          style={{ padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", background: "#FFF0EE", color: "#EF4444", border: "2px solid #EF4444", boxShadow: "2px 2px 0px rgba(239,68,68,.3)" }}>
           🗑
         </button>
       </div>
@@ -458,7 +371,34 @@ function EventRow({ ev, busy, onEdit, onTogglePublish, onDelete }: {
   );
 }
 
-// ─────────────────────────────── FORM ───────────────────────────────
+// ─── FORM ───────────────────────────────────────────────────────────────────
+
+const inputCls = "w-full px-3 py-2 text-sm outline-none";
+const inpStyle: React.CSSProperties = {
+  background: "#fff", border: "2px solid #000", color: "#000",
+};
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: "#fff", border: "2px solid #000", padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 900, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12, color: "#555" }}>{title}</div>
+      <div className="space-y-3">{children}</div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: 4, color: "#555" }}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Row({ children }: { children: React.ReactNode }) {
+  return <div className="grid grid-cols-2 gap-3">{children}</div>;
+}
 
 function FormView({ form, setForm, editing, busy, onCancel, onSave, onPublish, onImageFile }: {
   form: Partial<HodEvent>; setForm: (f: Partial<HodEvent>) => void;
@@ -466,216 +406,160 @@ function FormView({ form, setForm, editing, busy, onCancel, onSave, onPublish, o
   onCancel: () => void; onSave: () => void; onPublish: () => void;
   onImageFile: (f: File) => void;
 }) {
-  const set = <K extends keyof HodEvent>(k: K, v: HodEvent[K]) =>
-    setForm({ ...form, [k]: v });
+  const set = <K extends keyof HodEvent>(k: K, v: HodEvent[K]) => setForm({ ...form, [k]: v });
   const setN = (k: keyof HodEvent, raw: string) => {
     const n = raw === "" ? undefined : Number(raw);
     setForm({ ...form, [k]: n as any });
   };
 
   return (
-    <div>
+    <div style={{ color: "#000" }}>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
-          <div className="text-lg font-bold" style={{ color: "#C9A84C" }}>
+          <div style={{ fontSize: 18, fontWeight: 900, color: "#000", textTransform: "uppercase" }}>
             {editing ? `✎ Edit: ${editing.title}` : "+ New Event"}
           </div>
-          <div className="text-xs" style={{ color: "hsl(36 29% 55%)" }}>
+          <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
             {editing
               ? `Saved changes appear on hodclub.in within seconds (${editing.sold || 0} bookings exist).`
               : "Filled? Save as Draft to preview, or Publish to go live immediately."}
           </div>
         </div>
         <button onClick={onCancel}
-          className="px-3 py-1.5 rounded text-xs font-bold"
-          style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)", border: "1px solid hsl(240 8% 18%)" }}>
+          style={{ padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", background: "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: "2px 2px 0px #000" }}>
           ← Back to list
         </button>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* LEFT — basic info */}
         <Section title="Basic Info">
           <Field label="Event Title *">
             <input type="text" value={form.title || ""} onChange={(e) => set("title", e.target.value)}
-              placeholder="e.g. NEON NIGHTS — DJ ARYAN" className={inputCls} />
+              placeholder="e.g. NEON NIGHTS — DJ ARYAN" className={inputCls} style={inpStyle} />
           </Field>
           <Row>
             <Field label="DJ Name">
               <input type="text" value={form.dj || ""} onChange={(e) => set("dj", e.target.value)}
-                placeholder="e.g. DJ Aryan" className={inputCls} />
+                placeholder="e.g. DJ Aryan" className={inputCls} style={inpStyle} />
             </Field>
             <Field label="Genre">
               <input type="text" value={form.genre || ""} onChange={(e) => set("genre", e.target.value)}
-                placeholder="e.g. Techno / House" className={inputCls} />
+                placeholder="e.g. Techno / House" className={inputCls} style={inpStyle} />
             </Field>
           </Row>
           <Row>
             <Field label="Date *">
               <input type="date" value={form.date || ""} onChange={(e) => set("date", e.target.value)}
-                className={inputCls} />
+                className={inputCls} style={inpStyle} />
             </Field>
             <Field label="Capacity">
               <input type="number" value={form.capacity ?? ""} onChange={(e) => setN("capacity", e.target.value)}
-                placeholder="150" className={inputCls} />
+                placeholder="150" className={inputCls} style={inpStyle} />
             </Field>
           </Row>
           <Row>
             <Field label="Start Time">
               <input type="text" value={form.time || ""} onChange={(e) => set("time", e.target.value)}
-                placeholder="9:00 PM" className={inputCls} />
+                placeholder="9:00 PM" className={inputCls} style={inpStyle} />
             </Field>
             <Field label="End Time">
               <input type="text" value={form.endTime || ""} onChange={(e) => set("endTime", e.target.value)}
-                placeholder="3:00 AM" className={inputCls} />
+                placeholder="3:00 AM" className={inputCls} style={inpStyle} />
             </Field>
           </Row>
           <Field label="Venue">
             <input type="text" value={form.venue || ""} onChange={(e) => set("venue", e.target.value)}
-              className={inputCls} />
+              className={inputCls} style={inpStyle} />
           </Field>
           <Field label="Description">
             <textarea value={form.description || ""} onChange={(e) => set("description", e.target.value)}
               placeholder="Describe the night, DJ style, special guests…"
-              rows={4} className={inputCls + " resize-y"} />
+              rows={4} className={inputCls + " resize-y"} style={inpStyle} />
           </Field>
         </Section>
 
-        {/* RIGHT — pricing + stock + image */}
-        <Section title="Pricing">
-          <Row>
-            <Field label="Cover (base) ₹">
-              <input type="number" value={form.price ?? ""} onChange={(e) => setN("price", e.target.value)}
-                placeholder="999" className={inputCls} />
-            </Field>
-            <Field label="Stag ₹">
-              <input type="number" value={form.stagPrice ?? ""} onChange={(e) => setN("stagPrice", e.target.value)}
-                placeholder="999" className={inputCls} />
-            </Field>
-          </Row>
-          <Row>
-            <Field label="Couple ₹">
-              <input type="number" value={form.couplePrice ?? ""} onChange={(e) => setN("couplePrice", e.target.value)}
-                placeholder="1499" className={inputCls} />
-            </Field>
-            <Field label="Group per-head ₹">
-              <input type="number" value={form.groupPerHeadPrice ?? ""} onChange={(e) => setN("groupPerHeadPrice", e.target.value)}
-                placeholder="500" className={inputCls} />
-            </Field>
-          </Row>
-          <Field label="Entry Only ₹ (door, NOT redeemable on F&B)">
-            <input type="number" value={form.entryOnlyPrice ?? ""} onChange={(e) => setN("entryOnlyPrice", e.target.value)}
-              placeholder="599" className={inputCls} />
-          </Field>
-          <Row>
-            <Field label="Table for 4 (GF) ₹">
-              <input type="number" value={form.table4Price ?? ""} onChange={(e) => setN("table4Price", e.target.value)}
-                placeholder="5000" className={inputCls} />
-            </Field>
-            <Field label="VVIP Table ₹">
-              <input type="number" value={form.vipPrice ?? ""} onChange={(e) => setN("vipPrice", e.target.value)}
-                placeholder="15000" className={inputCls} />
-            </Field>
-          </Row>
+        <div className="space-y-4">
+          <Section title="Pricing">
+            <Row>
+              <Field label="Cover (base) ₹">
+                <input type="number" value={form.price ?? ""} onChange={(e) => setN("price", e.target.value)}
+                  placeholder="999" className={inputCls} style={inpStyle} />
+              </Field>
+              <Field label="Entry Only ₹">
+                <input type="number" value={form.entryOnlyPrice ?? ""} onChange={(e) => setN("entryOnlyPrice", e.target.value)}
+                  placeholder="599" className={inputCls} style={inpStyle} />
+              </Field>
+            </Row>
+            <Row>
+              <Field label="Stag ₹">
+                <input type="number" value={form.stagPrice ?? ""} onChange={(e) => setN("stagPrice", e.target.value)}
+                  placeholder="999" className={inputCls} style={inpStyle} />
+              </Field>
+              <Field label="Couple ₹">
+                <input type="number" value={form.couplePrice ?? ""} onChange={(e) => setN("couplePrice", e.target.value)}
+                  placeholder="1499" className={inputCls} style={inpStyle} />
+              </Field>
+            </Row>
+            <Row>
+              <Field label="Group (total) ₹">
+                <input type="number" value={form.groupPrice ?? ""} onChange={(e) => setN("groupPrice", e.target.value)}
+                  placeholder="2999" className={inputCls} style={inpStyle} />
+              </Field>
+              <Field label="Group (per head) ₹">
+                <input type="number" value={form.groupPerHeadPrice ?? ""} onChange={(e) => setN("groupPerHeadPrice", e.target.value)}
+                  placeholder="500" className={inputCls} style={inpStyle} />
+              </Field>
+            </Row>
+            <Row>
+              <Field label="Table 4-pax ₹">
+                <input type="number" value={form.table4Price ?? ""} onChange={(e) => setN("table4Price", e.target.value)}
+                  placeholder="5000" className={inputCls} style={inpStyle} />
+              </Field>
+              <Field label="VVIP ₹">
+                <input type="number" value={form.vipPrice ?? ""} onChange={(e) => setN("vipPrice", e.target.value)}
+                  placeholder="15000" className={inputCls} style={inpStyle} />
+              </Field>
+            </Row>
+            <Row>
+              <Field label="GF4 Stock">
+                <input type="number" value={form.gf4Stock ?? ""} onChange={(e) => setN("gf4Stock", e.target.value)}
+                  placeholder="4" className={inputCls} style={inpStyle} />
+              </Field>
+              <Field label="VVIP Stock">
+                <input type="number" value={form.vvipStock ?? ""} onChange={(e) => setN("vvipStock", e.target.value)}
+                  placeholder="2" className={inputCls} style={inpStyle} />
+              </Field>
+            </Row>
+          </Section>
 
-          <SectionSub title="Nightly Stock (auto-resets at 6 AM)" />
-          <Row>
-            <Field label="GF Table-for-4 stock">
-              <input type="number" value={form.gf4Stock ?? ""} onChange={(e) => setN("gf4Stock", e.target.value)}
-                placeholder="4" className={inputCls} />
-            </Field>
-            <Field label="VVIP stock">
-              <input type="number" value={form.vvipStock ?? ""} onChange={(e) => setN("vvipStock", e.target.value)}
-                placeholder="2" className={inputCls} />
-            </Field>
-          </Row>
-
-          <SectionSub title="Poster Image" />
-          <Field label="Image URL or paste a link">
-            <input type="text" value={(form.image || "").startsWith("data:") ? "" : (form.image || "")}
-              onChange={(e) => set("image", e.target.value)}
-              placeholder="https://…/poster.jpg" className={inputCls} />
-          </Field>
-          <Field label="Or upload from device (auto-compressed to 700KB)">
-            <input type="file" accept="image/*"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) onImageFile(f); }}
-              className={inputCls} />
-          </Field>
-          {form.image && (
-            <div className="mt-2 flex items-center gap-2">
-              <img src={form.image} alt="poster preview" className="h-20 rounded"
-                style={{ background: "#0a0a0a" }} />
-              <button type="button" onClick={() => set("image", "")}
-                className="text-xs px-2 py-1 rounded"
-                style={{ background: "rgba(239,68,68,.1)", color: "#EF4444" }}>
-                Remove
-              </button>
+          <Section title="Poster Image">
+            <div>
+              {form.image && (
+                <img src={form.image} alt="Poster" style={{ width: "100%", maxHeight: 200, objectFit: "cover", marginBottom: 8, border: "2px solid #000" }} />
+              )}
+              <input type="file" accept="image/*" disabled={busy === "img"}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) onImageFile(f); }}
+                style={{ width: "100%", padding: 8, border: "2px solid #000", background: "#F4F4F0", color: "#000", cursor: "pointer", fontSize: 12 }} />
+              {busy === "img" && <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>⏳ Compressing image…</div>}
             </div>
-          )}
-
-          <SectionSub title="Card accent color" />
-          <Field label="Hex (e.g. #C9A84C)">
-            <input type="text" value={form.color || ""} onChange={(e) => set("color", e.target.value)}
-              placeholder="#C9A84C" className={inputCls} />
-          </Field>
-        </Section>
+          </Section>
+        </div>
       </div>
 
-      {/* Save bar */}
-      <div className="mt-6 flex gap-2 justify-end flex-wrap">
-        <button onClick={onCancel} disabled={!!busy}
-          className="px-4 py-2 rounded-lg text-sm font-bold"
-          style={{ background: "hsl(240 12% 10%)", color: "hsl(36 29% 70%)", border: "1px solid hsl(240 8% 18%)" }}>
+      <div style={{ display: "flex", gap: 12, marginTop: 20, flexWrap: "wrap" }}>
+        <button onClick={onSave} disabled={!!busy}
+          style={{ padding: "12px 24px", fontSize: 14, fontWeight: 900, cursor: "pointer", background: "#F4F4F0", color: "#000", border: "2px solid #000", boxShadow: "3px 3px 0px #000" }}>
+          💾 Save as Draft
+        </button>
+        <button onClick={onPublish} disabled={!!busy}
+          style={{ padding: "12px 24px", fontSize: 14, fontWeight: 900, cursor: "pointer", background: "#23A094", color: "#fff", border: "2px solid #000", boxShadow: "3px 3px 0px #000" }}>
+          🚀 Publish Live
+        </button>
+        <button onClick={onCancel}
+          style={{ padding: "12px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer", background: "#fff", color: "#000", border: "2px solid #000", boxShadow: "2px 2px 0px #000" }}>
           Cancel
         </button>
-        <button onClick={onSave} disabled={busy === "save"}
-          className="px-4 py-2 rounded-lg text-sm font-bold"
-          style={{ background: "rgba(201,168,76,.15)", color: "#C9A84C", border: "1px solid rgba(201,168,76,.4)" }}>
-          {busy === "save" ? "Saving…" : "Save as Draft"}
-        </button>
-        <button onClick={onPublish} disabled={busy === "save"}
-          className="px-4 py-2 rounded-lg text-sm font-bold"
-          style={{ background: "#00C864", color: "#030305" }}>
-          {busy === "save" ? "Saving…" : "💾 Save & Publish (LIVE)"}
-        </button>
       </div>
     </div>
   );
-}
-
-// ─────────────────────────────── small UI helpers ───────────────────────────────
-
-const inputCls = "w-full px-3 py-2 rounded-lg text-sm bg-[hsl(240,12%,8%)] text-white border border-[hsl(240,8%,18%)] focus:outline-none focus:border-[#C9A84C]";
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl p-4" style={{ background: "hsl(240 12% 6%)", border: "1px solid hsl(240 8% 13%)" }}>
-      <div className="text-[10px] font-bold tracking-widest mb-3" style={{ color: "#C9A84C" }}>
-        {title.toUpperCase()}
-      </div>
-      <div className="grid gap-3">{children}</div>
-    </div>
-  );
-}
-
-function SectionSub({ title }: { title: string }) {
-  return (
-    <div className="text-[10px] font-bold tracking-widest mt-2 pt-2"
-      style={{ color: "hsl(36 29% 55%)", borderTop: "1px solid hsl(240 8% 13%)" }}>
-      {title.toUpperCase()}
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <div className="text-[11px] font-semibold mb-1" style={{ color: "hsl(36 29% 65%)" }}>{label}</div>
-      {children}
-    </label>
-  );
-}
-
-function Row({ children }: { children: React.ReactNode }) {
-  return <div className="grid grid-cols-2 gap-3">{children}</div>;
 }
