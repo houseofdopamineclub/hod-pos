@@ -17,6 +17,7 @@ import {
   type VenueMenuTab,
 } from "@/lib/venue-menu";
 import { sha256 } from "@/lib/firestore-hod";
+import { HOD_MENU_ITEMS } from "@/lib/hod-menu";
 import type { StaffMember, MenuOverride } from "@/lib/types";
 
 // Same MGR PIN gate used elsewhere in AdminPage. Duplicated here so the
@@ -176,6 +177,81 @@ export default function MenuEditor({ currentStaff }: Props) {
     setSaving(false);
   };
 
+  // 🆕 2026-06-16 (Khushi) — BULK DISCOUNT moved here from Boss → OOS/Discount tab.
+  // Applies one %/clear to ALL menu items across EVERY tab — identical behaviour to
+  // the old AdminPage bulk button (scope = the entire HOD_MENU_ITEMS list). OOS items
+  // auto-skip; writes posMenuOverrides → live-syncs to Captain, Bar & hodclub.in.
+  const setBulkDiscount = async () => {
+    const targetItems = HOD_MENU_ITEMS;
+    const scopeLabel = `ALL ${targetItems.length} menu items`;
+    const input = window.prompt(
+      `💰 BULK DISCOUNT — apply to ${scopeLabel}\n\n` +
+      `Enter percent like "10%" or "20%" (max 50%).\n` +
+      `Empty / "0" / "clear" to REMOVE discount from all these items.\n\n` +
+      `⚠ This OVERWRITES any existing per-item discounts on these items.`,
+      "10%"
+    );
+    if (input === null) return;
+    const trimmed = input.trim().toLowerCase();
+    let discountPercent: number | undefined;
+    let clearing = false;
+    if (trimmed === "" || trimmed === "0" || trimmed === "clear") {
+      clearing = true;
+    } else {
+      const raw = trimmed.endsWith("%") ? trimmed.slice(0, -1) : trimmed;
+      const n = parseFloat(raw);
+      if (!isFinite(n) || n <= 0) { alert("❌ INVALID PERCENT."); return; }
+      if (n > 50) { alert("❌ DISCOUNT % CAPPED AT 50%."); return; }
+      discountPercent = Math.round(n * 100) / 100;
+    }
+    const reason = window.prompt(
+      `📝 REASON FOR THIS BULK ${clearing ? "CLEAR" : "DISCOUNT"}?\n` +
+      `(E.g. HAPPY HOUR 6-9PM, FRIDAY SPECIAL, FESTIVAL, MGMT CALL)`,
+      clearing ? "BULK CLEAR" : "HAPPY HOUR"
+    );
+    if (reason === null) return;
+    if (!(await requireManagerPin(
+      `BULK ${clearing ? "CLEAR DISCOUNT" : `SET ${discountPercent}% DISCOUNT`} on ${scopeLabel}`
+    ))) return;
+    let ok = 0, fail = 0, skipped = 0;
+    for (const item of targetItems) {
+      const key = menuOverrideKey(item.name);
+      const current = overrides[key];
+      if (current?.outOfStock) { skipped++; continue; }
+      try {
+        await setMenuOverride(item.name, {
+          outOfStock: current?.outOfStock || false,
+          discountPercent: clearing ? 0 : discountPercent,
+          discountAmount: 0,
+          discountReason: clearing ? "" : (reason.trim() || "BULK DISCOUNT"),
+          updatedBy: currentStaff?.name || "admin",
+        });
+        ok++;
+      } catch (e) {
+        console.error("[bulk discount] failed for", item.name, e);
+        fail++;
+      }
+    }
+    if (currentStaff) {
+      await logAudit({
+        action: "menu_discount_set",
+        staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+        details: {
+          bulk: true, scope: "all",
+          discountPercent: clearing ? 0 : discountPercent,
+          reason: reason.trim(), itemCount: ok, failCount: fail, oosSkipped: skipped,
+        },
+      });
+    }
+    alert(
+      `✅ BULK ${clearing ? "CLEAR" : "DISCOUNT"} DONE\n\n` +
+      `• APPLIED: ${ok} items\n` +
+      `• SKIPPED (OUT OF STOCK): ${skipped}\n` +
+      (fail > 0 ? `• ⚠ FAILED: ${fail} (CHECK CONSOLE / RETRY)\n` : "") +
+      `\nLIVE-SYNCING TO CAPTAIN, BAR & HODCLUB.IN NOW.`
+    );
+  };
+
   // ── Filter for the search box ────────────────────────────────────────
   const q = search.trim().toLowerCase();
   const visible = q
@@ -243,6 +319,12 @@ export default function MenuEditor({ currentStaff }: Props) {
           className="px-3 py-2 rounded text-xs"
           style={{ background: "#fff", color: INK, border: `2px solid ${INK}`, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase" }}>
           ↺ Restore Defaults
+        </button>
+        <button
+          onClick={setBulkDiscount}
+          className="px-3 py-2 rounded text-xs"
+          style={{ background: "#F2C744", color: INK, border: `2px solid ${INK}`, fontWeight: 900, letterSpacing: 0.3, textTransform: "uppercase" }}>
+          💰 Bulk Discount — All {HOD_MENU_ITEMS.length} Items
         </button>
         <button
           onClick={publish}

@@ -17,7 +17,7 @@ import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
   subscribeToDoorPricingSettings, updateDoorPricingSettings, type DoorPricingSettings,
-  subscribeToTablePricingSettings, updateTablePricingSettings, type TablePricingSettings, type TablePricingTierKey,
+  subscribeToTablePricingSettings, updateTablePricingSettings, type TablePricingSettings, type TablePricingTierKey, TABLE_PRICING_OVERRIDE_TABLES,
 } from "@/lib/firestore-hod";
 import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
@@ -89,6 +89,9 @@ export default function AdminPage() {
     dining: { price: "2500", start: "21:00" },
     rooftop: { price: "2500", start: "21:00" },
   });
+  const [tableOverridesDraft, setTableOverridesDraft] = useState<Record<string, string>>(
+    () => Object.fromEntries(TABLE_PRICING_OVERRIDE_TABLES.map((t) => [t.key, ""]))
+  );
   const [tablePricingSaving, setTablePricingSaving] = useState(false);
   const [tablePricingMsg, setTablePricingMsg] = useState("");
   const tablePricingSeededRef = useRef(false);
@@ -117,6 +120,13 @@ export default function AdminPage() {
             dining: { price: String(s.dining.price), start: _minToHHMM(s.dining.startMin) },
             rooftop: { price: String(s.rooftop.price), start: _minToHHMM(s.rooftop.startMin) },
           });
+          const ov = s.tableOverrides || {};
+          setTableOverridesDraft(
+            Object.fromEntries(TABLE_PRICING_OVERRIDE_TABLES.map((t) => {
+              const v = (ov as any)[t.key];
+              return [t.key, typeof v === "number" && v > 0 ? String(v) : ""];
+            }))
+          );
         }
       }),
     ];
@@ -217,77 +227,6 @@ export default function AdminPage() {
         details: { menuItemKey: key, itemName, discountPercent, discountAmount, reason: reason.trim() },
       });
     }
-  };
-
-  const setBulkDiscount = async () => {
-    const targetItems = filteredMenu;
-    const scopeLabel = menuSearch ? `${targetItems.length} FILTERED items` : `ALL ${targetItems.length} menu items`;
-    const input = window.prompt(
-      `💰 BULK DISCOUNT — apply to ${scopeLabel}\n\n` +
-      `Enter percent like "10%" or "20%" (max 50%).\n` +
-      `Empty / "0" / "clear" to REMOVE discount from all these items.\n\n` +
-      `⚠ This OVERWRITES any existing per-item discounts on these items.`,
-      "10%"
-    );
-    if (input === null) return;
-    const trimmed = input.trim().toLowerCase();
-    let discountPercent: number | undefined;
-    let clearing = false;
-    if (trimmed === "" || trimmed === "0" || trimmed === "clear") {
-      clearing = true;
-    } else {
-      const raw = trimmed.endsWith("%") ? trimmed.slice(0, -1) : trimmed;
-      const n = parseFloat(raw);
-      if (!isFinite(n) || n <= 0) { alert("❌ INVALID PERCENT."); return; }
-      if (n > 50) { alert("❌ DISCOUNT % CAPPED AT 50%."); return; }
-      discountPercent = Math.round(n * 100) / 100;
-    }
-    const reason = window.prompt(
-      `📝 REASON FOR THIS BULK ${clearing ? "CLEAR" : "DISCOUNT"}?\n` +
-      `(E.g. HAPPY HOUR 6-9PM, FRIDAY SPECIAL, FESTIVAL, MGMT CALL)`,
-      clearing ? "BULK CLEAR" : "HAPPY HOUR"
-    );
-    if (reason === null) return;
-    if (!(await requireManagerPinAdmin(
-      `BULK ${clearing ? "CLEAR DISCOUNT" : `SET ${discountPercent}% DISCOUNT`} on ${scopeLabel}`
-    ))) return;
-    let ok = 0, fail = 0, skipped = 0;
-    for (const item of targetItems) {
-      const key = menuOverrideKey(item.name);
-      const current = menuOverrides[key];
-      if (current?.outOfStock) { skipped++; continue; }
-      try {
-        await setMenuOverride(item.name, {
-          outOfStock: current?.outOfStock || false,
-          discountPercent: clearing ? 0 : discountPercent,
-          discountAmount: 0,
-          discountReason: clearing ? "" : (reason.trim() || "BULK DISCOUNT"),
-          updatedBy: currentStaff?.name || "admin",
-        });
-        ok++;
-      } catch (e) {
-        console.error("[bulk discount] failed for", item.name, e);
-        fail++;
-      }
-    }
-    if (currentStaff) {
-      await logAudit({
-        action: "menu_discount_set",
-        staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
-        details: {
-          bulk: true, scope: menuSearch ? `filtered:${menuSearch}` : "all",
-          discountPercent: clearing ? 0 : discountPercent,
-          reason: reason.trim(), itemCount: ok, failCount: fail, oosSkipped: skipped,
-        },
-      });
-    }
-    alert(
-      `✅ BULK ${clearing ? "CLEAR" : "DISCOUNT"} DONE\n\n` +
-      `• APPLIED: ${ok} items\n` +
-      `• SKIPPED (OUT OF STOCK): ${skipped}\n` +
-      (fail > 0 ? `• ⚠ FAILED: ${fail} (CHECK CONSOLE / RETRY)\n` : "") +
-      `\nLIVE-SYNCING TO CAPTAIN, BAR & HODCLUB.IN NOW.`
-    );
   };
 
   const ROLE_CHOICES: { value: StaffRole; label: string }[] = [
@@ -504,17 +443,9 @@ export default function AdminPage() {
               className="w-full px-4 py-2 text-sm mb-3 font-medium"
               style={{ background: "#fff", border: "2px solid #000", color: "#000" }}
             />
-            <div className="flex items-center gap-2 mb-3 flex-wrap">
-              <button onClick={setBulkDiscount} className="px-3 py-2 text-xs font-black uppercase"
-                style={{ background: "#FFFBEB", border: "2px solid #F2C744", color: "#000", boxShadow: SHADOW_MD }}>
-                💰 BULK DISCOUNT — {menuSearch ? `${filteredMenu.length} FILTERED` : `ALL ${HOD_MENU_ITEMS.length}`} ITEMS
-              </button>
-              <span className="text-xs font-medium" style={{ color: "#555" }}>
-                One-tap happy-hour: set/clear same % on every visible item. OOS items auto-skipped.
-              </span>
-            </div>
             <div className="text-xs mb-2 font-semibold" style={{ color: "#555" }}>
               💡 OOS + DISCOUNT CHANGES SYNC LIVE TO CAPTAIN, BAR &amp; CUSTOMER WALLET (HODCLUB.IN). MANAGER PIN REQUIRED.
+              <br />💰 BULK DISCOUNT (happy-hour) HAS MOVED → MENU EDITOR PAGE.
             </div>
             <div className="space-y-1.5 max-h-[70vh] overflow-y-auto">
               {filteredMenu.map((item) => {
@@ -933,6 +864,32 @@ export default function AdminPage() {
                           style={{ background: "#fff", border: "2px solid #000", color: "#000" }} />
                       </div>
                     </div>
+                    {(() => {
+                      const tabs = TABLE_PRICING_OVERRIDE_TABLES.filter((t) => t.tier === f.key);
+                      if (tabs.length === 0) return null;
+                      return (
+                        <div className="mt-3 pt-3" style={{ borderTop: "2px dashed #000" }}>
+                          <div className="text-[10px] font-black uppercase mb-2" style={{ color: "#555" }}>
+                            PER-TABLE PRICE <span style={{ fontWeight: 500 }}>· blank = use ₹{tablePricingDraft[f.key].price || "0"} above</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            {tabs.map((t) => (
+                              <div key={t.key}>
+                                <label className="block text-[10px] font-black uppercase mb-1" style={{ color: "#555" }}>{t.label}</label>
+                                <div className="flex items-center px-2" style={{ background: "#fff", border: "2px solid #000" }}>
+                                  <span className="text-sm font-bold" style={{ color: "#555" }}>₹</span>
+                                  <input type="number" inputMode="numeric" min={0}
+                                    placeholder={tablePricingDraft[f.key].price || "0"}
+                                    value={tableOverridesDraft[t.key] ?? ""}
+                                    onChange={(e) => setTableOverridesDraft((d) => ({ ...d, [t.key]: e.target.value }))}
+                                    className="w-full bg-transparent py-2 px-1 text-sm outline-none font-semibold" style={{ color: "#000" }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
@@ -947,7 +904,22 @@ export default function AdminPage() {
                     if (!Number.isFinite(startMin)) { setTablePricingMsg(`❌ Enter a valid start time for ${f.label}.`); return; }
                     (patch as any)[f.key] = { price, startMin };
                   }
-                  const summary = TP_TIERS.map((f) => `${f.label}: ₹${(patch as any)[f.key].price} from ${_fmt12(tablePricingDraft[f.key].start)}`).join("\n");
+                  // Per-table price overrides (price only; 0 = clear → use tier price).
+                  const overrides: Record<string, number> = {};
+                  for (const t of TABLE_PRICING_OVERRIDE_TABLES) {
+                    const raw = (tableOverridesDraft[t.key] ?? "").trim();
+                    if (raw === "") { overrides[t.key] = 0; continue; }
+                    const v = Math.round(Number(raw));
+                    if (!Number.isFinite(v) || v < 0) { setTablePricingMsg(`❌ Enter a valid price for ${t.label}.`); return; }
+                    overrides[t.key] = v;
+                  }
+                  patch.tableOverrides = overrides;
+                  const tierSummary = TP_TIERS.map((f) => `${f.label}: ₹${(patch as any)[f.key].price} from ${_fmt12(tablePricingDraft[f.key].start)}`).join("\n");
+                  const ovSummary = TABLE_PRICING_OVERRIDE_TABLES
+                    .filter((t) => overrides[t.key] > 0)
+                    .map((t) => `${t.label}: ₹${overrides[t.key]}`)
+                    .join("\n");
+                  const summary = tierSummary + (ovSummary ? "\n\nPER-TABLE:\n" + ovSummary : "");
                   const ok = await requireManagerPinAdmin("Save table cover pricing?\n\n" + summary);
                   if (!ok) return;
                   setTablePricingSaving(true); setTablePricingMsg("");

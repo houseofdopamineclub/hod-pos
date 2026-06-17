@@ -3612,6 +3612,24 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     else countBySrc.inhouse += 1;
   });
 
+  // 🆕 2026-06-17 (Khushi) — CANCELLED view. Cancelled bookings are filtered out
+  // of `active` (status !== "cancelled" above), so they never reach the list.
+  // Surface them in their own read-only chip so staff can see what dropped off
+  // (e.g. a Swiggy/Zomato/EazyDiner cancel). Same date + event scope as the live
+  // tables; group-hold child docs excluded so a group shows once. Newest first.
+  const cancelledList = reservations.filter((r) => {
+    if ((r as any).status !== "cancelled") return false;
+    if ((r as any).isGroupHold) return false;
+    if (!tableDates.has((r.date || "").slice(0, 10))) return false;
+    return eventId === "all" || !(r as any).eventId || (r as any).eventId === eventId;
+  });
+  cancelledList.sort((a, b) => {
+    const at = String((a as any).cancelledAt || a.date || "");
+    const bt = String((b as any).cancelledAt || b.date || "");
+    return bt.localeCompare(at);
+  });
+  countBySrc.cancelled = cancelledList.length;
+
   // 🆕 2026-05-27 v3.101 (Khushi) — in-app overlay shown after a successful
   // ARRIVED tap. Replaces the silent toast-only flow with an explicit "GUEST
   // ARRIVED ON <time> · <date>" confirmation so the door girl gets visible
@@ -3923,11 +3941,11 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
           ALL is reachable by re-tapping the active chip; a dedicated ALL chip
           is kept on the left so it's always one tap away. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-        {(["all", "inhouse", "zomato", "swiggy", "eazydiner"] as const).map((k) => {
-          const ss = k === "all" ? null : SRC_STYLES[k];
-          const c = ss?.color || "#000";
+        {(["all", "inhouse", "zomato", "swiggy", "eazydiner", "cancelled"] as const).map((k) => {
+          const ss = k === "all" || k === "cancelled" ? null : SRC_STYLES[k];
+          const c = k === "cancelled" ? "#E11D48" : (ss?.color || "#000");
           const on = aggFilter === k;
-          const label = k === "all" ? "ALL" : (ss?.label || k);
+          const label = k === "all" ? "ALL" : k === "cancelled" ? "CANCELLED" : (ss?.label || k);
           return (
             <button key={k}
               onClick={() => { setAggFilter((prev) => (prev === k ? "all" : k)); setReviewOnly(false); }}
@@ -3960,10 +3978,59 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         </button>
       )}
 
+      {/* 🆕 2026-06-17 (Khushi) — CANCELLED list. Read-only: shows every booking
+          the aggregator marked cancelled (name · date · time · pax · platform).
+          No tap actions, no money, no table writes — visibility only. Replaces
+          the normal interactive rows whenever the CANCELLED chip is active. */}
+      {aggFilter === "cancelled" && (
+        cancelledList.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 40, color: "#6B6B6B", fontSize: 13, fontWeight: 500 }}>
+            No cancelled bookings
+          </div>
+        ) : cancelledList.map((r) => {
+          const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
+          const aggName = (r.aggregator || r.source || "inhouse").toLowerCase();
+          const isAggregator = src !== "inhouse";
+          const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName.toUpperCase();
+          const when = `${r.date || "—"}${r.arrivalTime ? " · " + r.arrivalTime : ""}`;
+          return (
+            <div key={r._docId || r.bookingRef}
+              style={{ display: "flex", alignItems: "center", gap: 10,
+                padding: "12px 12px", marginBottom: 6, borderRadius: 8,
+                background: "#fff", border: "2px solid #E11D48",
+                fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+              {/* CANCELLED pill */}
+              <div style={{ flexShrink: 0, minWidth: 52, textAlign: "center",
+                padding: "8px 6px", borderRadius: 6,
+                background: "#FCE7EC", border: "2px solid #E11D48",
+                color: "#E11D48", fontSize: 10, fontWeight: 900, letterSpacing: .3, lineHeight: 1.2, textTransform: "uppercase" }}>
+                CANC
+              </div>
+              {/* Name + platform + when/pax */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: "#000",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: .2 }}>
+                    {r.customerName || "—"}
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 900, padding: "3px 7px", borderRadius: 6,
+                    background: "#fff", border: "2px solid #000", color: "#3D3D3D", letterSpacing: .4, textTransform: "uppercase" }}>
+                    {isAggregator ? aggLabel : "In-House"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: "#6B6B6B", marginTop: 3, letterSpacing: .3, fontVariantNumeric: "tabular-nums" }}>
+                  {when}{r.partySize ? ` · ${r.partySize} pax` : ""}
+                </div>
+              </div>
+            </div>
+          );
+        })
+      )}
+
       {/* 🔴 2026-05-16 (Khushi) — COMPACT ROWS mirroring captain mode:
           [table pill] [name + agg badge w/ discount + meta] [status pill] [📞 call]
           Tap the row → detail modal with full meta + Arrived/Reassign/WA/Cancel. */}
-      {filtered.map((r) => {
+      {aggFilter !== "cancelled" && filtered.map((r) => {
         // Canonical aggregator bucket (zomato/swiggy/eazydiner/inhouse) — drives
         // chip filter membership + styling. We keep `aggName` as the RAW brand
         // string so the badge can still show "Swiggy Dineout -30%" etc.
@@ -3974,6 +4041,11 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
         const arrived = !!r.actualArrivalTime;
         const needsReview = !!r.needsManualReview;
+        // 🆕 2026-06-17 (Khushi) — an UNMATCHED aggregator CANCELLATION surfaced for
+        // review (born-cancelled agg booking the Cloud Function couldn't match to a
+        // live booking). Show a loud red badge + red row border so door staff know to
+        // find the guest and free the right table by hand — NOT to seat them.
+        const isCancelReview = !!(r as any).isCancellationReview;
         // 🆕 2026-06-02 v3.181 (Khushi) — a corporate group master holds MULTIPLE
         // tables. Show "<n>🪑" in the pill + the full table list in the meta line
         // so one row clearly represents the whole group (not one table per row).
@@ -3990,7 +4062,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
             style={{ display: "flex", alignItems: "center", gap: 10,
               padding: "12px 12px", marginBottom: 6, borderRadius: 8,
               background: "#fff",
-              border: "2px solid #000",
+              border: isCancelReview ? "2px solid #E11D48" : "2px solid #000",
               cursor: "pointer", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", transition: "background .15s" }}>
             {/* Table id pill */}
             <div style={{ flexShrink: 0, minWidth: 52, textAlign: "center",
@@ -4019,10 +4091,16 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                     In-House
                   </span>
                 )}
-                {needsReview && (
+                {needsReview && !isCancelReview && (
                   <span style={{ fontSize: 10, fontWeight: 900, padding: "3px 7px", borderRadius: 6,
                     background: "#FFD700", color: "#000", letterSpacing: .4, textTransform: "uppercase" }}>
                     ⚠ Review
+                  </span>
+                )}
+                {isCancelReview && (
+                  <span style={{ fontSize: 10, fontWeight: 900, padding: "3px 7px", borderRadius: 6,
+                    background: "#E11D48", color: "#fff", letterSpacing: .4, textTransform: "uppercase" }}>
+                    ✕ Cancelled — Verify
                   </span>
                 )}
               </div>
@@ -4056,7 +4134,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
           </div>
         );
       })}
-      {filtered.length === 0 && (
+      {aggFilter !== "cancelled" && filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 40, color: "#6B6B6B", fontSize: 13, fontWeight: 500 }}>
           {query ? `No matches for "${query}"` : aggFilter !== "all" ? `No ${aggFilter} tables today` : "No table reservations today"}
         </div>

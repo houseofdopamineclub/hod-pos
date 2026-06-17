@@ -313,6 +313,13 @@ export interface HodTableReservation {
   captainName?: string;
   status?: string;
   needsManualReview?: boolean;
+  /** Free-text reason shown on a NEEDS-REVIEW row (e.g. why it needs attention). */
+  manualReviewReason?: string;
+  /** 🆕 2026-06-17 — TRUE when this NEEDS-REVIEW row is an UNMATCHED CANCELLATION
+   *  (an aggregator cancel email/SMS that could not be auto-matched to a booking).
+   *  Door staff must find the guest and free the right table by hand. Rendered with
+   *  a loud red "CANCELLED — VERIFY" badge, distinct from a normal ⚠ Review row. */
+  isCancellationReview?: boolean;
   aggregator?: string;
   aggregatorDiscount?: number;
   /** TRUE only when a captain explicitly edited the discount % via the
@@ -5798,10 +5805,24 @@ export interface TablePricingSettings {
   groundVvip: TierPricing;
   dining: TierPricing;
   rooftop: TierPricing;
+  // Per-table PRICE overrides (price only; start time stays per-tier). Keyed by
+  // table id (C1–C4, VIP1, VIP2). A value of 0 or a missing key means "no override
+  // → use the tier price". Customer site reads this first, falls back to tier price.
+  tableOverrides?: Record<string, number>;
   updatedAt?: any;
   updatedBy?: string;
 }
 export type TablePricingTierKey = "groundPremium" | "groundVvip" | "dining" | "rooftop";
+// Tables that support a per-table custom price (Ground floor only). Dining & Rooftop
+// stay one price each (their tier price). tier = which tier price is the fallback.
+export const TABLE_PRICING_OVERRIDE_TABLES: { key: string; label: string; tier: TablePricingTierKey }[] = [
+  { key: "C1", label: "C1", tier: "groundPremium" },
+  { key: "C2", label: "C2", tier: "groundPremium" },
+  { key: "C3", label: "C3", tier: "groundPremium" },
+  { key: "C4", label: "C4", tier: "groundPremium" },
+  { key: "VIP1", label: "VIP 1", tier: "groundVvip" },
+  { key: "VIP2", label: "VIP 2", tier: "groundVvip" },
+];
 
 const TABLE_PRICING_DOC = "tablePricing";
 const TABLE_PRICING_DEFAULTS: TablePricingSettings = {
@@ -5810,6 +5831,7 @@ const TABLE_PRICING_DEFAULTS: TablePricingSettings = {
   groundVvip: { price: 2500, startMin: 1260 },
   dining: { price: 2500, startMin: 1260 },
   rooftop: { price: 2500, startMin: 1260 },
+  tableOverrides: {},
 };
 const TABLE_PRICING_LS_KEY = "hod.tablePricing.v1";
 
@@ -5833,6 +5855,7 @@ function _tpCloneDefaults(): TablePricingSettings {
     groundVvip: { ...TABLE_PRICING_DEFAULTS.groundVvip },
     dining: { ...TABLE_PRICING_DEFAULTS.dining },
     rooftop: { ...TABLE_PRICING_DEFAULTS.rooftop },
+    tableOverrides: {},
   };
 }
 function _tpApplyTier(out: TablePricingSettings, key: TablePricingTierKey, src: any) {
@@ -5857,6 +5880,13 @@ function _tpMerge(...parts: Array<any>): TablePricingSettings {
     _tpApplyTier(out, "groundVvip", p);
     _tpApplyTier(out, "dining", p);
     _tpApplyTier(out, "rooftop", p);
+    // Per-table price overrides (price only). Later parts (Firestore) win per-key.
+    if (p.tableOverrides && typeof p.tableOverrides === "object") {
+      for (const k of Object.keys(p.tableOverrides)) {
+        const v = (p.tableOverrides as any)[k];
+        if (typeof v === "number" && v >= 0) (out.tableOverrides as any)[k] = v;
+      }
+    }
   }
   return out;
 }
