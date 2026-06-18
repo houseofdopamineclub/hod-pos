@@ -3040,6 +3040,23 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
               {detailGuest.eventTitle && (
                 <Row label="EVENT"><span style={{ color: "#000" }}>🎵 {detailGuest.eventTitle}</span></Row>
               )}
+              {/* 🆕 2026-06-18 v3.311 (Khushi) — show the EVENT NIGHT (when the
+                  guest is actually coming) so the card no longer looks "wrong":
+                  the SIGNED UP row below is the registration timestamp (often the
+                  night before), NOT the event date. eventDate is the selected
+                  event's real date (empty when viewing ALL). Fail-open: an
+                  unparseable/blank value falls back to the raw string, never a
+                  crash, and the row is hidden entirely when no event is selected. */}
+              {eventDate && (
+                <Row label="EVENT DATE">
+                  <span style={{ color: "#000" }}>{(() => {
+                    const _e = new Date(String(eventDate) + "T00:00:00");
+                    return isNaN(_e.getTime())
+                      ? String(eventDate)
+                      : _e.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+                  })()}</span>
+                </Row>
+              )}
               <Row label="NAME">{detailGuest.name || "—"}</Row>
               {(detailGuest as any).ref && (
                 <Row label="REF #"><span style={{ fontFamily: "monospace", color: "#000", letterSpacing: .5 }}>#{(detailGuest as any).ref}</span></Row>
@@ -3057,7 +3074,7 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
                 <span style={{ fontSize: 17, fontWeight: 900, color: "#000" }}>{desc.breakdown}</span>
               </Row>
               {(detailGuest as any).joinedAt && (
-                <Row label="ADDED">
+                <Row label="SIGNED UP">
                   {/* 🆕 2026-06-15 v3.298 (Khushi) — was showing the raw UTC ISO
                       string (slice+replace) → "09:47" instead of IST. Now converts
                       the stored UTC timestamp to Asia/Kolkata for display. Stored
