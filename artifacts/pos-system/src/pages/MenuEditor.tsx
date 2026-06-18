@@ -79,7 +79,16 @@ export default function MenuEditor({ currentStaff }: Props) {
   // displayed IN STOCK / OUT badge always reflects what Bar/Captain see.
   useEffect(() => subscribeToMenuOverrides(setOverrides), []);
 
-  const dirty = loaded && JSON.stringify(draft) !== JSON.stringify(remote?.categories || []);
+  // 🆕 2026-06-18 v3.311 (Khushi) — FALSE "unsaved changes" prompt fix. The
+  // baseline must mirror exactly what `draft` is loaded from: the remote doc
+  // when it exists, otherwise the SEEDED DEFAULT for the tab. Previously this
+  // compared against `[]` whenever a tab had never been published (remote ===
+  // null), so the seeded-default draft always looked "dirty" and switching
+  // away from NAB/SMOKE (and any other unpublished tab) always triggered the
+  // "Discard them and switch tabs?" confirm even with zero edits. Now `dirty`
+  // is true ONLY when the user has genuinely changed the draft.
+  const dirtyBaseline = remote ? (remote.categories || []) : defaultVenueMenuTab(tabId).categories;
+  const dirty = loaded && JSON.stringify(draft) !== JSON.stringify(dirtyBaseline);
 
   // ── Mutators ─────────────────────────────────────────────────────────
   const updateItem = (ci: number, ii: number, patch: Partial<VenueMenuItem>) => {
