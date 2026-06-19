@@ -171,3 +171,46 @@ export function centeredAlert(
     }
   });
 }
+
+// 🆕 2026-06-18 (Khushi) — APP-WIDE FIX: copying text from a field inside a
+// hand-rolled modal used to close it. Those modals close on a backdrop click
+// (`<div onClick={onClose}>`), but a text-selection drag that ends on the dim
+// backdrop — or the native copy context-menu click — lands a `click` whose
+// target IS the backdrop, firing onClose. This guard only closes when (a) the
+// click is on the backdrop itself (not bubbled from content) AND (b) there is
+// no active text selection AND (c) no selection was active within the last 400ms.
+// Fail-CLOSED: when unsure, the modal stays open so no in-progress edit is lost.
+//
+// 🆕 v3.340 — iOS/Android copy regression fix: the browser clears
+// window.getSelection() BEFORE firing the click on the context-menu dismiss,
+// so the original check (getSelection().length > 0) arrived too late and the
+// guard missed the copy action → modal closed → typed text lost.
+// Fix: track the last timestamp a non-empty selection existed via a
+// document-level `selectionchange` listener; refuse to close within 400ms.
+let _lastSelectionMs = 0;
+if (typeof document !== "undefined") {
+  document.addEventListener("selectionchange", () => {
+    try {
+      const s = window.getSelection();
+      if (s && s.toString().length > 0) _lastSelectionMs = Date.now();
+    } catch { /* ignore */ }
+  }, { passive: true });
+}
+
+export function closeOnBackdrop(onClose: () => void) {
+  return (e: { target: EventTarget | null; currentTarget: EventTarget | null }) => {
+    if (e.target !== e.currentTarget) return;
+    // Guard 1: selection cleared after copy — was there a selection within 400ms?
+    if (Date.now() - _lastSelectionMs < 400) return;
+    // Guard 2: selection still active at click time
+    try {
+      const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+      if (sel && String(sel).length > 0) return;
+    } catch {
+      // Fail-CLOSED: if we cannot tell whether text is selected, keep the modal
+      // open so an in-progress edit is never lost. User can tap Back / ✕ to close.
+      return;
+    }
+    onClose();
+  };
+}

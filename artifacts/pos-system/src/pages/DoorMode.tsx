@@ -6,7 +6,7 @@ import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, lookupBooking, subscribeToBookings, subscribeToGuestlist,
   subscribeToBookingsForNights, subscribeToGuestlistInRange,
-  subscribeToHodReservations, checkInGuest, reassignTable, cancelTableReservation,
+  subscribeToHodReservations, checkInGuest, reassignTable, reassignCorporateTables, cancelTableReservation,
   updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
   subscribeToHodEvents, subscribeToHodEventsRecent, type HodEvent,
@@ -51,6 +51,10 @@ import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable, 
 import WaitlistView from "@/components/WaitlistView";
 import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
 import { useToast } from "@/hooks/use-toast";
+
+// Module-level optimistic check-in set — populated immediately when any check-in
+// succeeds so list row badges flip without waiting for the Firestore snapshot.
+const _optimisticCheckedIn = new Set<string>();
 
 // 🆕 2026-05-27 v3.72 (Khushi LIVE-NIGHT) — in-app styled alert overlay.
 // Replaces native browser `alert()` (ugly grey "An embedded page at … says"
@@ -114,7 +118,7 @@ const EMAIL_CF_URL = "https://us-central1-hod-tickets.cloudfunctions.net/sendBoo
 
 import { ToastAction } from "@/components/ui/toast";
 import { QrScanner } from "@/components/QrScanner";
-import { centeredAlert, centeredPinPrompt } from "@/lib/centered-ui";
+import { centeredAlert, centeredPinPrompt, closeOnBackdrop } from "@/lib/centered-ui";
 import { sendWhatsAppTextMessage } from "@/lib/wa-send";
 
 // 🔄 2026-05-24 (Khushi) — REVERTED per-staff login back to shared name+password.
@@ -416,7 +420,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   };
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 24, width: "100%", maxWidth: 440, maxHeight: "92vh", overflowY: "auto", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
         <BackBtn onClick={onClose} />
         <div style={{ fontSize: 14, fontWeight: 900, color: "#000", letterSpacing: 2, marginBottom: 12 }}>💰 COVER CHARGE</div>
@@ -970,6 +974,13 @@ function CheckInPaymentModal({
       // move. (architect flagged 2026-05-21)
       const { checkedInAt, wasNew } = await checkInGuest(sourceKey, source, agentName);
 
+      // 🆕 v3.336 — Optimistic: fire onConfirmed immediately after STEP 1
+      // so the scan-modal badge flips to ✅ CHECKED IN without waiting for
+      // the wallet write + centeredAlert. centeredAlert renders into
+      // document.body (portal) so it survives CheckInModal unmounting.
+      // Wallet writes + alert continue below as background/async work.
+      onConfirmed({ checkedInAt, wasNew });
+
       // STEP 2 — wallet (fail-open: errors here do NOT block the check-in).
       // 🆕 2026-06-14 — ORPHAN-WALLET SAFETY NET (audit finding #1). The check-in
       // already succeeded; if the SEPARATE wallet write fails we now (a) retry it
@@ -1090,8 +1101,7 @@ function CheckInPaymentModal({
       } catch (alertErr) {
         console.warn("[CheckInPaymentModal] success alert failed (non-fatal)", alertErr);
       }
-
-      onConfirmed({ checkedInAt, wasNew });
+      // onConfirmed already fired optimistically after STEP 1 above.
     } catch (e: any) {
       setErr(e?.message || "Check-in failed");
       setBusy(false);
@@ -1106,7 +1116,7 @@ function CheckInPaymentModal({
   // Portaling to document.body lets `position:fixed` cover the full viewport,
   // dim the ticket modal cleanly, and centre the white check-in card.
   return createPortal(
-    <div onClick={() => { if (!busy) onClose(); }}
+    <div onClick={closeOnBackdrop(() => { if (!busy) onClose(); })}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, backdropFilter: "blur(4px)" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 440, background: "#FFFFFF", border: "2px solid #000", borderRadius: 14, padding: 22, maxHeight: "92vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,.45)" }}>
@@ -1221,7 +1231,7 @@ function CheckInPaymentModal({
   );
 }
 
-function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover, tableIdOverride }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null; tableIdOverride?: string }) {
+function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover, tableIdOverride, eventDate, eventDateById }: { booking: HodBooking; agentName: string; onDone: () => void; hideIdentity?: boolean; cover?: HodCover | null; tableIdOverride?: string; eventDate?: string; eventDateById?: Record<string, string> }) {
   // 🆕 2026-05-27 v3.51 (Khushi LIVE-NIGHT) — table bookings track arrival on
   // `tableReservations.actualArrivalTime` / `arrived` / `coverActivated`, NOT
   // on `booking.checkedIn`. v3.50 lookupBooking now passes `checkedIn` through
@@ -1296,23 +1306,53 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
     if (freeBusy) return;
     setFreeBusy(true);
     try {
-      const docId = booking.id || booking.ref;
-      const refKey = booking.ref || booking.id;
-      await ensureZeroBalanceCoverForGuest({
-        bookingRef: refKey,
-        sourceDocId: docId,
-        name: booking.name || "Guest",
-        phone: booking.phone || "",
-        source: "booking",
-        eventId: booking.eventId || "",
-        eventTitle: booking.eventTitle || "",
-        staffName: agentName,
-      });
-      // Mirror is best-effort inside ensureZeroBalance; call checkInGuest too so
-      // the bookings doc gets checkedInBy=agentName (mirror writes a generic
-      // "(bar wallet open)" suffix). Idempotent — already-checked-in returns wasNew=false.
-      await checkInGuest(docId, "booking", agentName).catch(() => {});
+      // 🆕 2026-06-18 v3.315 (Khushi) — source-aware FREE ENTRY. A scanned
+      // GUESTLIST now activates the identical ₹0-wallet + check-in as the
+      // search-row FREE ENTRY flow (handleFreeEntry), using the guestlist
+      // source + the SAME doc id the proven CHECK IN GUEST path uses (ciKey),
+      // so cover doc id === check-in id. Ladies-free BUY COVERS unchanged.
+      if (isGuestList) {
+        const gid = ciKey;
+        // 🆕 2026-06-18 v3.315 — origin-aware source. A guestlist signup that
+        // lives ONLY in the `bookings` collection (entryType "guestlist_*", no
+        // guestlist-collection doc) must check in via the booking source — the
+        // guestlist source silently no-ops when the guestlist doc is missing.
+        // `gid` (= ref) stays the cover key for BOTH origins (covers/{ref} ===
+        // the customer's ?wallet=REF link); checkInGuest("booking", ref) resolves
+        // via its ref-query fallback. Mirrors the search-row handleFreeEntry.
+        const glSource: "booking" | "guestlist" = (booking as any)._glSource === "booking" ? "booking" : "guestlist";
+        await ensureZeroBalanceCoverForGuest({
+          bookingRef: gid,
+          sourceDocId: gid,
+          name: booking.name || "Guest",
+          phone: booking.phone || "",
+          source: glSource,
+          eventId: booking.eventId || "",
+          eventTitle: booking.eventTitle || "",
+          staffName: agentName,
+        });
+        await checkInGuest(gid, glSource, agentName).catch(() => {});
+      } else {
+        const docId = booking.id || booking.ref;
+        const refKey = booking.ref || booking.id;
+        await ensureZeroBalanceCoverForGuest({
+          bookingRef: refKey,
+          sourceDocId: docId,
+          name: booking.name || "Guest",
+          phone: booking.phone || "",
+          source: "booking",
+          eventId: booking.eventId || "",
+          eventTitle: booking.eventTitle || "",
+          staffName: agentName,
+        });
+        // Mirror is best-effort inside ensureZeroBalance; call checkInGuest too so
+        // the bookings doc gets checkedInBy=agentName (mirror writes a generic
+        // "(bar wallet open)" suffix). Idempotent — already-checked-in returns wasNew=false.
+        await checkInGuest(docId, "booking", agentName).catch(() => {});
+      }
       setDone(true);
+      _optimisticCheckedIn.add(booking.ref || "");
+      _optimisticCheckedIn.add(booking.id || "");
       setShowFreeConfirm(false);
       toast({
         title: `🎁 Free entry: ${booking.name || "Guest"}`,
@@ -1364,6 +1404,9 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
   const handleModalConfirmed = ({ checkedInAt, wasNew }: { checkedInAt: string; wasNew: boolean }) => {
     setShowCheckInModal(false);
     setDone(true);
+    // Optimistic set so list row badges flip immediately without waiting for snapshot.
+    _optimisticCheckedIn.add(booking.ref || "");
+    _optimisticCheckedIn.add(booking.id || "");
     if (wasNew) {
       toast({
         title: `✅ Checked in: ${booking.name || "Guest"}`,
@@ -1441,7 +1484,14 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
         // and collected ₹999. So once the cover is activated, show
         // "✓ COVER ACTIVATED · ₹{coverActivated}" — that's the real money
         // taken. Only fall back to ticket amounts if cover is NOT yet active.
-        const coverActivated = Number(cover?.coverActivated || 0);
+        // 🆕 2026-06-18 v3.317 (Khushi) — DISPLAY ONLY: show the DOOR-activated
+        // portion, not door + bar top-ups. `coverActivated` on the doc is bumped
+        // by rechargeCover (bar top-up), so a guest who paid ₹500 at the door and
+        // later topped up ₹1,099 at the bar showed "₹1,599" here. Subtract
+        // topUpTotal (the bar top-up total) so this stays the door amount (₹500).
+        // The extra top-up + redemptions remain tracked in Reports (topUpTotal /
+        // coverUsed) — write-path is UNCHANGED. Clamp ≥0 (fail-open).
+        const coverActivated = Math.max(0, Number(cover?.coverActivated || 0) - Number(cover?.topUpTotal || 0));
         // 🆕 2026-05-26 v3.21 (Khushi) — ENTRY-ONLY tickets are a special case.
         // The entry charge (e.g. ₹599) is what the door collects at check-in
         // and is the BASELINE payment. If the door girl then ALSO activates
@@ -1456,17 +1506,36 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
         // way. So the non-redeemable ENTRY portion = total − coverActivated.
         // (Cover ₹0 → entryAmt = total, unchanged.) Was showing ₹799 ENTRY
         // for a ₹599 entry + ₹200 cover.
-        const entryAmt = isEntryOnly ? Math.max(0, (booking.total || 0) - coverActivated) : 0;
+        // 🆕 v3.318 — for an online entry-only booking the cover is collected
+        // separately at the door, so booking.total = ticket price only (e.g. ₹599).
+        // 🆕 v3.332 — distinguish online vs cash/walk-in:
+        //   • Cash/walk-in (isCash): door creates booking with total = entry + cover
+        //     combined → entryAmt = total − coverActivated (subtract to isolate entry).
+        //   • Online (paidOnline): booking.total = ticket price ONLY; cover activated
+        //     separately at the door → entryAmt = total as-is (never subtract).
+        //     The old `_rawTotal >= coverActivated ? _rawTotal − cover` formula gave
+        //     599 − 200 = 399 when it should be 599 (the 200 cover is a separate charge).
+        const _rawTotal = booking.total || 0;
+        // 🆕 v3.336b — entryFee field (stored on new walk-in bookings when cover
+        // is bundled) gives the exact non-redeemable entry portion. Fall back to
+        // _rawTotal for older bookings and online (Razorpay) bookings where
+        // total = ticket price only (cover is always a separate charge).
+        // NEVER subtract coverActivated from total — that wrongly reduces the
+        // display when cover is activated separately after booking creation.
+        const _entryFeeField = Number((booking as any).entryFee || 0);
+        const entryAmt = isEntryOnly
+          ? (_entryFeeField > 0 ? _entryFeeField : _rawTotal)
+          : 0;
         const paymentLabel = (() => {
           if (isEntryOnly && entryAmt > 0) {
             // Entry-only ticket: entry charge is the primary payment.
             // Treat as PAID once the guest is checked in OR the booking was paid online.
             const entryPaid = done || paidOnline > 0;
             if (entryPaid && coverActivated > 0) {
-              return { txt: `✓ PAID ₹${entryAmt.toLocaleString("en-IN")} ENTRY  +  ✓ COVER ₹${coverActivated.toLocaleString("en-IN")}`, color: "#fff", bg: "#23A094", bd: "#000" };
+              return { txt: `✓ ENTRY PAID · ₹${entryAmt.toLocaleString("en-IN")}  ·  COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#fff", bg: "#23A094", bd: "#000" };
             }
             if (entryPaid) {
-              return { txt: `✓ PAID ₹${entryAmt.toLocaleString("en-IN")} ENTRY`, color: "#fff", bg: "#23A094", bd: "#000" };
+              return { txt: `✓ ENTRY PAID · ₹${entryAmt.toLocaleString("en-IN")}`, color: "#fff", bg: "#23A094", bd: "#000" };
             }
             // Not yet checked in → original PAY AT VENUE / PAID ONLINE
             return payAtVenue > 0
@@ -1483,6 +1552,13 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
             const _physicallyArrived = !!(booking as any)._arrived || !!booking.checkedIn;
             if (_isPrePaidTable && !_physicallyArrived) {
               return { txt: `💳 PRE-PAID · ₹${coverActivated.toLocaleString("en-IN")} (AWAITING ARRIVAL)`, color: "#000", bg: "#FFD700", bd: "#000" };
+            }
+            // 🆕 v3.345 — "buy covers" walk-in: entry fee (₹25k) + cover (₹30k)
+            // collected separately. entryFee field is stored on the booking doc
+            // when entryTicket > 0 at creation. Show both amounts.
+            const _coverWalkinEntryFee = Number((booking as any).entryFee || 0);
+            if (_coverWalkinEntryFee > 0) {
+              return { txt: `✓ ENTRY PAID · ₹${_coverWalkinEntryFee.toLocaleString("en-IN")}  ·  COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#fff", bg: "#23A094", bd: "#000" };
             }
             return { txt: `✓ COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#fff", bg: "#23A094", bd: "#000" };
           }
@@ -1510,6 +1586,23 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
                 <span style={{ color: "#000" }}>🎵 {booking.eventTitle}</span>
               </Row>
             )}
+            {/* 🆕 2026-06-18 v3.315 — EVENT DATE row (guestlist scan parity with
+                the search-row modal). Sourced from the selected event chip's
+                date prop; v3.317 falls back to the guest's own event date
+                (resolved by eventId) so it shows even when ALL is selected. */}
+            {(eventDate || eventDateById?.[booking.eventId || ""]) && (() => {
+              const _ed = eventDate || eventDateById?.[booking.eventId || ""] || "";
+              return (
+              <Row label="EVENT DATE">
+                <span style={{ color: "#000" }}>{(() => {
+                  const _e = new Date(String(_ed) + "T00:00:00");
+                  return isNaN(_e.getTime())
+                    ? String(_ed)
+                    : _e.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+                })()}</span>
+              </Row>
+              );
+            })()}
             <Row label="NAME">{booking.name || "—"}</Row>
             {booking.ref && (
               <Row label="REF #">
@@ -1533,6 +1626,20 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
             <Row label="QUANTITY">
               <span style={{ fontSize: 17, fontWeight: 900, color: "#000" }}>{desc.breakdown}</span>
             </Row>
+            {/* 🆕 2026-06-18 v3.315 — SIGNED UP row (guestlist scan parity).
+                The registration timestamp (joinedAt, from bookedAt for
+                bookings-origin guestlists), rendered in IST like the search
+                modal. */}
+            {isGuestList && (booking as any).joinedAt && (
+              <Row label="SIGNED UP">
+                <span style={{ color: "#6B6B6B" }}>{(() => {
+                  const _d = new Date(String((booking as any).joinedAt));
+                  return isNaN(_d.getTime())
+                    ? String((booking as any).joinedAt).slice(0, 16).replace("T", " ")
+                    : _d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
+                })()}</span>
+              </Row>
+            )}
             {booking.tier && (
               <Row label="TIER">
                 <span style={{ color: "#000" }}>{booking.tier}</span>
@@ -1564,7 +1671,7 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
         // primary CTA to FREE ENTRY (matches the guestlist v3.99 pattern).
         // Everything else (Stag/Couple BUY COVERS, entry-only, tables, etc.)
         // keeps the existing CHECK IN GUEST → payment modal flow.
-        isLadiesFreeCovers ? (
+        (isLadiesFreeCovers || isGuestList) ? (
           <button onClick={() => setShowFreeConfirm(true)} disabled={freeBusy}
             style={{ width: "100%", padding: 16, borderRadius: 8, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", letterSpacing: .4, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", boxShadow: "none" }}>
             {freeBusy ? "ACTIVATING…" : "🎁 FREE ENTRY"}
@@ -1595,7 +1702,7 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
           BookingDetailModal (zIndex 100). Backdrop tap = cancel (gated
           by freeBusy so it can't dismiss mid-activation). */}
       {showFreeConfirm && (
-        <div onClick={() => { if (!freeBusy) setShowFreeConfirm(false); }}
+        <div onClick={closeOnBackdrop(() => { if (!freeBusy) setShowFreeConfirm(false); })}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, width: "100%", maxWidth: 360, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", boxShadow: "none" }}>
@@ -1604,7 +1711,7 @@ function LookupResult({ booking, agentName, onDone: _onDone, hideIdentity, cover
               {booking.name || "Guest"}
             </div>
             <div style={{ fontSize: 12, color: "#6B6B6B", textAlign: "center", marginBottom: 16, letterSpacing: .4 }}>
-              BUY COVERS · LADIES · FREE
+              {isGuestList ? "GUESTLIST · NO COVER" : "BUY COVERS · LADIES · FREE"}
             </div>
             <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, padding: 12, marginBottom: 16 }}>
               <div style={{ fontSize: 12, color: "#000", lineHeight: 1.55 }}>
@@ -1733,7 +1840,7 @@ function WalletQrModal({
   };
 
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, width: "100%", maxWidth: 380, color: "#000", textAlign: "center" }}>
@@ -1954,7 +2061,14 @@ function pickBookingTemplate(
     };
   }
   // ticket (default)
-  const entryLabel = entryLineForTicket(b);
+  // 🆕 v3.349 — buy-covers+entry walk-in: enrich entryLabel with breakdown
+  // so the approved Meta template param {{4}} shows "COVER × 9 | Entry ₹2,000 + Cover ₹2,500"
+  // (breakdown is in param, not fallback text, so it always delivers).
+  const _ef2 = Number((b as any).entryFee || 0);
+  const _cv2 = _ef2 > 0 && amount > _ef2 ? amount - _ef2 : 0;
+  const entryLabel = _ef2 > 0 && _cv2 > 0
+    ? `${entryLineForTicket(b)} | Entry ₹${fmtINR(_ef2)} + Cover ₹${fmtINR(_cv2)}`
+    : entryLineForTicket(b);
   return {
     name: paid ? "ticket_confirmed_paid" : "ticket_confirmed_unpaid",
     params: [name, eventTitle, dateNice, entryLabel, amountStr, link],
@@ -2022,11 +2136,18 @@ function buildBookingWhatsAppText(b: HodBooking, walletUrl: string): string {
   }
 
   // Default: ticket (stag / couple / ladies / regular event ticket)
+  // 🆕 v3.348 — "buy covers" walk-in with entry fee: show entry+cover breakdown
+  const _entryFee = Number((b as any).entryFee || 0);
+  const _coverAmt = _entryFee > 0 && (b.total || 0) > _entryFee ? (b.total || 0) - _entryFee : 0;
   const pay = paymentLine(b);
+  const entryBreakdown = _entryFee > 0 && _coverAmt > 0
+    ? `💰 Entry Fee: ₹${fmtINR(_entryFee)} (non-redeemable)\n🎫 Cover Wallet: ₹${fmtINR(_coverAmt)} (redeemable on F&B)\n`
+    : "";
   return (
     `Hi ${customerName}, your HOD ticket is booked! 🎟️\n\n` +
     meta +
     `🚪 Entry: ${entryLineForTicket(b)}\n` +
+    entryBreakdown +
     (pay ? pay + "\n" : "") +
     `\nShow your QR at the door — your wallet activates when you arrive at HOD.\n\n` +
     `View ticket: ${walletUrl}\n\n` +
@@ -2165,7 +2286,13 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
   //   • ₹0 wallet activated / ticket-only walk-through → "FREE ENTRY" (blue)
   //   • pre-paid online                 → "✓ PAID ONLINE ₹<amt>" (green)
   // Fallback (no cover doc, not checked in) → "Pay at venue".
-  const checkedIn = !!booking.checkedIn;
+  // 🆕 v3.336 — check optimistic set first so the row badge flips instantly
+  // after a scan check-in without waiting for the Firestore snapshot.
+  const _bid = (booking as any).id || "";
+  const _bref = (booking as any).ref || "";
+  const checkedIn = !!booking.checkedIn
+    || (_bid ? _optimisticCheckedIn.has(_bid) : false)
+    || (_bref ? _optimisticCheckedIn.has(_bref) : false);
   const pid = booking.paymentId || "";
   // 🔴 2026-05-23 (Khushi) — exclude free_/free_entry_ prefixes from "paid
   // online" too. Guestlist tickets booked via customer site get a synthetic
@@ -2178,7 +2305,7 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
     !pid.startsWith("comp_") &&
     !pid.startsWith("free_");
   const total = Number((booking as any).total || 0);
-  const coverAmt = Number(cover?.coverActivated || 0);
+  const coverAmt = Math.max(0, Number(cover?.coverActivated || 0) - Number(cover?.topUpTotal || 0));
   const isEntryOnly = isOnlyEntryBooking(booking);
   // 🔴 2026-05-23 (Khushi) — `_isGuestList` is only set when adapting from
   // the guestlist collection. When door staff SEARCHES by phone, the same
@@ -2199,7 +2326,7 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
   if (checkedIn) {
     // Cover wallet activated at the door (works for guestlist + tickets alike).
     if (coverAmt > 0) {
-      return <span style={goldPill}>✓ PAID ₹{coverAmt.toLocaleString("en-IN")}</span>;
+      return <span style={goldPill}>✓ COVER ACTIVATED · ₹{coverAmt.toLocaleString("en-IN")}</span>;
     }
     // Entry-only pass — cover not collected, entry was (walk-in or prepaid).
     if (isEntryOnly && total > 0) {
@@ -2264,7 +2391,7 @@ function describeBooking(b: HodBooking): { category: string; categoryColor: stri
 
   // ENTRY ONLY (door entry pass, non-redeemable)
   if (entryType === "entryonly" || entryType === "only_entry" || entryType === "entry_only") {
-    return { category: "🎟 ENTRY ONLY", categoryColor: "#FF5733", breakdown: `${qty || 1} × Entry pass` };
+    return { category: "🎟 ENTRY ONLY", categoryColor: "#FF5733", breakdown: `${guests || qty || 1} × Entry pass` };
   }
 
   // TABLE / VIP / GROUP TABLE — show actual guest count (no hardcoded
@@ -2335,7 +2462,7 @@ function BookingRow({ booking, cover, onOpen }: { booking: HodBooking; cover?: H
 }
 
 function BookingDetailModal({
-  booking, agentName, onClose, onCover, onShowQr, onSendWhatsApp,
+  booking, agentName, onClose, onCover, onShowQr, onSendWhatsApp, eventDate, eventDateById,
 }: {
   booking: HodBooking;
   agentName: string;
@@ -2343,6 +2470,8 @@ function BookingDetailModal({
   onCover: (b: HodBooking) => void;
   onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void;
   onSendWhatsApp?: (b: HodBooking) => void;
+  eventDate?: string;
+  eventDateById?: Record<string, string>;
 }) {
   const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
   // 🆕 2026-05-27 v3.67 (Khushi LIVE-NIGHT) — REASSIGN button surfaced on the
@@ -2399,7 +2528,7 @@ function BookingDetailModal({
     return unsub;
   }, [booking.ref, booking.id]);
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 18, boxShadow: "none" }}>
@@ -2417,7 +2546,7 @@ function BookingDetailModal({
           </div>
         </div>
 
-        <LookupResult booking={booking} agentName={agentName} onDone={onClose} hideIdentity cover={modalCover} tableIdOverride={reassignedTableId} />
+        <LookupResult booking={booking} agentName={agentName} onDone={onClose} hideIdentity cover={modalCover} tableIdOverride={reassignedTableId} eventDate={eventDate} eventDateById={eventDateById} />
 
         {/* 🆕 2026-05-26 (Khushi v3.15) — bigger buttons + Space Grotesk.
             🆕 2026-05-26 v3.23 (Khushi) — bumped marginTop 4→10 so the gap
@@ -2433,7 +2562,11 @@ function BookingDetailModal({
               lives on the TABLES tab row tap (✏️ Edit Cover Amount), not here.
               Cover already-activated also means the guest is on premises (Khushi
               rule), so the modal becomes view-only: SHOW QR + CALL only. */}
-          {!booking._isGuestList && Number(modalCover?.coverActivated || 0) <= 0 && (() => {
+          {/* 🆕 2026-06-18 v3.315 — ACTIVATE COVER now also shows for a scanned
+              GUESTLIST (was hidden via `!booking._isGuestList`), matching the
+              search-row guestlist modal which always offers it. Still hidden
+              once a cover is live (coverActivated > 0). */}
+          {Number(modalCover?.coverActivated || 0) <= 0 && (() => {
             // 🆕 2026-05-27 v3.63 (Khushi LIVE-NIGHT) — ENTRY ONLY bookings MUST go
             // through CHECK IN GUEST first so the ₹599 entry charge is recorded and
             // a ₹0-balance wallet is created. If door girl taps ACTIVATE COVER first
@@ -2750,6 +2883,7 @@ function BookingsListTab({ kind, agentName, query, eventId, eventDate, onCover, 
           onCover={onCover}
           onShowQr={onShowQr}
           onSendWhatsApp={(b) => sendBookingWhatsApp(b, onShowQr)}
+          eventDate={eventDate}
         />
       )}
 
@@ -2792,7 +2926,7 @@ function BookingsListTab({ kind, agentName, query, eventId, eventDate, onCover, 
   );
 }
 
-function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr }: { agentName: string; query: string; eventId: string; eventDate: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void }) {
+function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr, eventDateById }: { agentName: string; query: string; eventId: string; eventDate: string; onCover: (b: HodBooking) => void; onShowQr: (m: { bookingRef: string; walletUrl: string; customerName: string; reason: string }) => void; eventDateById?: Record<string, string> }) {
   const [guests, setGuests] = useState<HodGuestlistEntry[]>([]);
   const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [covers, setCovers] = useState<HodCover[]>([]);
@@ -3003,7 +3137,12 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
         // a wallet on a guestlist guest) and shows the actual amount.
         const desc = describeBooking(adapt(detailGuest));
         const cov = covers.find((c) => c.id === detailGuest.id || c.id === (detailGuest as any).ref) || null;
-        const coverActivated = Number(cov?.coverActivated || 0);
+        // 🆕 2026-06-18 v3.317 (Khushi) — DISPLAY ONLY: show the DOOR-activated
+        // portion (subtract bar top-ups). rechargeCover bumps coverActivated, so
+        // a ₹500 door cover topped up to ₹1,599 at the bar showed ₹1,599 here.
+        // Top-ups/redemptions stay tracked in Reports; write-path UNCHANGED.
+        const coverActivated = Math.max(0, Number(cov?.coverActivated || 0) - Number(cov?.topUpTotal || 0));
+        const guestEventDate = eventDate || eventDateById?.[detailGuest.eventId || ""] || "";
         const paymentLabel = coverActivated > 0
           ? { txt: `✓ COVER ACTIVATED · ₹${coverActivated.toLocaleString("en-IN")}`, color: "#23A094", bg: "#fff", bd: "#000" }
           : { txt: "🎁 GUEST LIST · FREE ENTRY", color: "#3D3D3D", bg: "#fff", bd: "#000" };
@@ -3015,10 +3154,11 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
         );
         const phoneClean = (detailGuest.phone || "").replace(/[^\d+]/g, "");
         return (
-        <div onClick={() => setDetail(null)}
+        <div onClick={closeOnBackdrop(() => setDetail(null))}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ width: "100%", maxWidth: 520, marginTop: 32, background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 18, boxShadow: "none", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
+            <BackBtn onClick={() => setDetail(null)} />
             {/* Header: name only (no duplicate badge, payment lives in list below) */}
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 26, fontWeight: 900, color: "#000", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: -.3, textTransform: "uppercase" }}>
@@ -3047,12 +3187,12 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
                   event's real date (empty when viewing ALL). Fail-open: an
                   unparseable/blank value falls back to the raw string, never a
                   crash, and the row is hidden entirely when no event is selected. */}
-              {eventDate && (
+              {guestEventDate && (
                 <Row label="EVENT DATE">
                   <span style={{ color: "#000" }}>{(() => {
-                    const _e = new Date(String(eventDate) + "T00:00:00");
+                    const _e = new Date(String(guestEventDate) + "T00:00:00");
                     return isNaN(_e.getTime())
-                      ? String(eventDate)
+                      ? String(guestEventDate)
                       : _e.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
                   })()}</span>
                 </Row>
@@ -3113,7 +3253,7 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr 
                 modal. ACTIVATE COVER button below remains untouched — door
                 girl can use that path if she wants to collect cover instead. */}
             {confirmFreeEntry && (
-              <div onClick={() => { if (busyId !== confirmFreeEntry.id) setConfirmFreeEntry(null); }}
+              <div onClick={closeOnBackdrop(() => { if (busyId !== confirmFreeEntry.id) setConfirmFreeEntry(null); })}
                 style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
                 <div onClick={(e) => e.stopPropagation()}
                   style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, width: "100%", maxWidth: 360, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", boxShadow: "none" }}>
@@ -3247,20 +3387,24 @@ const SRC_STYLES: Record<string, { label: string; color: string; bg: string; bor
   inhouse:      { label: "IN-HOUSE",    color: "#3D3D3D", bg: "#fff", border: "#000" },
 };
 
-function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
+function ReassignModal({ reservation, agentName, onClose, onReassigned, isCorporate }: {
   reservation: HodTableReservation;
   bookedTableIds?: Set<string>;
   agentName: string;
   onClose: () => void;
   onReassigned?: (tableId: string, section: string) => void;
+  // 🆕 2026-06-19 — when true, enable multi-table picking + call reassignCorporateTables.
+  isCorporate?: boolean;
 }) {
+  // Single-table pick (non-corporate)
   const [picked, setPicked] = useState("");
+  // Corporate multi-table pick — pre-seeded with current tables.
+  const corpInitial = isCorporate
+    ? ((reservation as any).tableIds as string[] | undefined) || (reservation.tableId ? [reservation.tableId] : [])
+    : [];
+  const [pickedIds, setPickedIds] = useState<string[]>(corpInitial);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  // 🆕 2026-05-27 v3.65 (Khushi LIVE-NIGHT) — keep modal open on success +
-  // show inline ✅ banner with the new table. Was auto-closing immediately so
-  // door girl couldn't visually confirm the move landed. Door girl now taps
-  // CLOSE (or backdrop) when she's done.
   const [successTable, setSuccessTable] = useState<{ id: string; section: string } | null>(null);
   // 🆕 2026-06-02 (Khushi) — replace the native <select> with the SAME live,
   // floor-wise grid picker the door/waitlist already use: GREEN = free,
@@ -3285,17 +3429,23 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
   const sectionLabelOf = (sec?: string) => sec ? (SECTION_LABELS[sec] || sec) : "";
 
   const nowMin = doorNowMinutesIST();
+  // 🆕 2026-06-19 — for corporate, "current" = ANY of the held tables (not just master tableId).
+  const corpCurrentIds = isCorporate
+    ? new Set<string>(((reservation as any).tableIds as string[] | undefined) || (reservation.tableId ? [reservation.tableId] : []))
+    : new Set<string>();
+
   const pickerGroups = DOOR_TABLE_OPTIONS.map((g) => ({
     floor: g.floor,
     label: g.label,
     tables: g.tables
       .map((id) => {
         const occupant = doorTableOccupantAt(id, nowMin, reservations);
-        const isCurrent = id === reservation.tableId;
-        const occByOther = !!occupant && (occupant as any)._docId !== reservation._docId;
+        // For corporate: a table is "current" if it's in the held set.
+        const isCurrent = isCorporate ? corpCurrentIds.has(id) : id === reservation.tableId;
+        // "occByOther" = occupied by a DIFFERENT booking (never flag our own tables as taken).
+        const occByOther = !!occupant && !isCurrent && (occupant as any)._docId !== reservation._docId;
         return { id, cap: doorTableCapacity(id), isProxy: !!doorProxyLabel(id), occupant, isCurrent, occByOther };
       })
-      // FREE first, then taken; within each, smaller capacity first (proxies last).
       .sort((a, b) => {
         const av = a.occByOther ? 1 : 0, bv = b.occByOther ? 1 : 0;
         if (av !== bv) return av - bv;
@@ -3305,27 +3455,47 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
   const freeCount = pickerGroups.reduce((n, g) => n + g.tables.filter((t) => !t.occByOther && !t.isCurrent).length, 0);
   const takenCount = pickerGroups.reduce((n, g) => n + g.tables.filter((t) => t.occByOther).length, 0);
 
+  // ── Submit ──────────────────────────────────────────────────────────────────
   const submit = async () => {
-    if (!picked) { setErr("Pick a table"); return; }
-    const t = ALL_TABLES.find((x) => x.id === picked);
-    if (!t) { setErr("Invalid table"); return; }
-    setBusy(true); setErr("");
-    try {
-      await reassignTable(reservation._docId, t.id, t.section, sectionLabelOf(t.section), agentName);
-      setSuccessTable({ id: t.id, section: sectionLabelOf(t.section) });
-      setBusy(false);
-      // v3.88 — notify parent so frozen booking prop's gates unlock.
-      try { onReassigned && onReassigned(t.id, sectionLabelOf(t.section)); } catch (_) {}
-    } catch (e: any) { setErr(e?.message || "Failed"); setBusy(false); }
+    if (isCorporate) {
+      if (!pickedIds.length) { setErr("Pick at least one table"); return; }
+      setBusy(true); setErr("");
+      try {
+        await reassignCorporateTables(reservation._docId, pickedIds, agentName);
+        setSuccessTable({ id: pickedIds.join(", "), section: "" });
+        setBusy(false);
+        try { onReassigned && onReassigned(pickedIds.join(", "), ""); } catch (_) {}
+      } catch (e: any) { setErr(e?.message || "Failed"); setBusy(false); }
+    } else {
+      if (!picked) { setErr("Pick a table"); return; }
+      const t = ALL_TABLES.find((x) => x.id === picked);
+      if (!t) { setErr("Invalid table"); return; }
+      setBusy(true); setErr("");
+      try {
+        await reassignTable(reservation._docId, t.id, t.section, sectionLabelOf(t.section), agentName);
+        setSuccessTable({ id: t.id, section: sectionLabelOf(t.section) });
+        setBusy(false);
+        try { onReassigned && onReassigned(t.id, sectionLabelOf(t.section)); } catch (_) {}
+      } catch (e: any) { setErr(e?.message || "Failed"); setBusy(false); }
+    }
   };
 
+  // "Currently" subtitle — shows all held tables for corporate.
+  const currentLabel = isCorporate
+    ? Array.from(corpCurrentIds).join(", ") || "—"
+    : (successTable?.id || reservation.tableId || "—");
+
+  const canSubmit = isCorporate ? pickedIds.length > 0 : !!picked;
+
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, width: "100%", maxWidth: 420, maxHeight: "85vh", overflow: "auto", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
         <BackBtn onClick={onClose} />
-        <div style={{ fontSize: 16, fontWeight: 900, color: "#000", marginBottom: 4 }}>🔄 Reassign Table</div>
+        <div style={{ fontSize: 16, fontWeight: 900, color: "#000", marginBottom: 4 }}>
+          🔄 {isCorporate ? "Reassign Corporate Tables" : "Reassign Table"}
+        </div>
         <div style={{ fontSize: 12, color: "#6B6B6B", marginBottom: 14 }}>
-          {reservation.customerName || "Guest"} · Currently: <b style={{ color: "#000" }}>{successTable?.id || reservation.tableId || "—"}</b>
+          {reservation.customerName || "Guest"} · Currently: <b style={{ color: "#000" }}>{currentLabel}</b>
         </div>
 
         {successTable ? (
@@ -3334,7 +3504,9 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
               <div style={{ fontSize: 38, marginBottom: 6 }}>✅</div>
               <div style={{ fontSize: 15, fontWeight: 900, color: "#23A094", letterSpacing: .4, marginBottom: 6 }}>REASSIGN SUCCESSFUL</div>
               <div style={{ fontSize: 13, color: "#000", lineHeight: 1.55 }}>
-                {(reservation.customerName || "Guest").toUpperCase()} moved to <b style={{ color: "#000" }}>{successTable.id}</b>{successTable.section ? <> on <b style={{ color: "#000" }}>{successTable.section}</b></> : null}.
+                {(reservation.customerName || "Guest").toUpperCase()} now holding{" "}
+                <b style={{ color: "#000" }}>{successTable.id}</b>
+                {successTable.section ? <> on <b style={{ color: "#000" }}>{successTable.section}</b></> : null}.
               </div>
             </div>
             <button onClick={onClose}
@@ -3344,10 +3516,23 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
           </>
         ) : (
           <>
-            <div style={{ fontSize: 11, color: "#6B6B6B", marginBottom: 6, fontWeight: 700, letterSpacing: ".5px" }}>SELECT AVAILABLE TABLE</div>
+            {isCorporate && (
+              <div style={{ background: "#FFF8E1", border: "2px solid #000", borderRadius: 6, padding: "8px 12px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: "#000", lineHeight: 1.5 }}>
+                🏢 CORPORATE MULTI-TABLE — tap to add / remove tables.
+                {pickedIds.length > 0 && (
+                  <span style={{ display: "block", marginTop: 4, color: "#23A094" }}>
+                    ✓ {pickedIds.length} selected: {pickedIds.join(", ")}
+                  </span>
+                )}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "#6B6B6B", marginBottom: 6, fontWeight: 700, letterSpacing: ".5px" }}>
+              {isCorporate ? "TAP TO ADD / REMOVE TABLES" : "SELECT AVAILABLE TABLE"}
+            </div>
             <div style={{ fontSize: 11, color: "#6B6B6B", marginBottom: 8, fontWeight: 600, lineHeight: 1.5 }}>
-              <span style={{ color: "#23A094", fontWeight: 900 }}>GREEN = free now</span> (tap to pick) ·{" "}
-              <span style={{ color: "#FF5733", fontWeight: 900 }}>RED 🔒 = taken</span> (shows pax). Live floor — updates in real time.
+              <span style={{ color: "#23A094", fontWeight: 900 }}>GREEN = free now</span> (tap to {isCorporate ? "add" : "pick"}) ·{" "}
+              {isCorporate && <><span style={{ color: "#FFD700", fontWeight: 900 }}>YELLOW = already held</span> (tap to remove) · </>}
+              <span style={{ color: "#FF5733", fontWeight: 900 }}>RED 🔒 = taken</span>. Live floor.
             </div>
             <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 12, letterSpacing: ".3px" }}>
               <span style={{ color: "#23A094" }}>✅ {freeCount} FREE</span>
@@ -3355,42 +3540,75 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
               <span style={{ color: "#FF5733" }}>🔒 {takenCount} TAKEN</span>
             </div>
 
-            {freeCount === 0 && (
-              <div style={{ textAlign: "center", padding: 16, border: "2px solid #000", borderRadius: 6, background: "#fff", color: "#FF5733", fontWeight: 900, fontSize: 13, marginBottom: 14 }}>
-                NO TABLES FREE RIGHT NOW<br/>
-                <span style={{ color: "#6B6B6B", fontWeight: 600, fontSize: 11 }}>Every other table is taken — wait for one to open.</span>
-              </div>
-            )}
-
             {pickerGroups.map((g) => (
               <div key={g.floor} style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 11, fontWeight: 900, color: "#6B6B6B", letterSpacing: ".5px", marginBottom: 6 }}>{g.label}</div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
                   {g.tables.map((t) => {
-                    const disabled = t.occByOther || t.isCurrent;
-                    const selected = picked === t.id;
-                    const title = t.occByOther && t.occupant
-                      ? `TAKEN — ${t.occupant.customerName || ""}${t.occupant.partySize ? " · " + t.occupant.partySize + " pax" : ""}`.trim()
-                      : t.isCurrent ? "Current table — pick a different one to move" : "Free — tap to pick";
-                    return (
-                      <button key={t.id} type="button" disabled={disabled}
-                        onClick={() => { setPicked(t.id); setErr(""); }} title={title}
-                        style={{
-                          padding: "9px 4px", borderRadius: 6,
-                          border: "2px solid #000",
-                          outline: selected ? "3px solid #FFD700" : "none", outlineOffset: selected ? "-5px" : 0,
-                          background: t.occByOther ? "#FF5733" : t.isCurrent ? "#E8E8E0" : selected ? "#FF90E8" : "#23A094",
-                          color: t.isCurrent ? "#6B6B6B" : t.occByOther ? "#fff" : selected ? "#000" : "#fff",
-                          cursor: disabled ? "not-allowed" : "pointer",
-                          fontWeight: 900, fontSize: 12, opacity: t.occByOther ? 0.9 : 1,
-                          display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
-                        }}>
-                        <span>{t.isProxy ? doorProxyLabel(t.id) : t.id}{t.occByOther ? " 🔒" : t.isCurrent ? "" : selected ? " ✓" : ""}</span>
-                        <span style={{ fontSize: 9, fontWeight: 700, opacity: 0.9 }}>
-                          {t.occByOther ? `${t.occupant?.partySize ?? "?"} pax` : t.isCurrent ? "CURRENT" : t.isProxy ? "flexible" : `${t.cap} seats`}
-                        </span>
-                      </button>
-                    );
+                    if (isCorporate) {
+                      // Corporate mode: YELLOW = currently held (tap to deselect),
+                      // PINK = newly selected, GREEN = free (tap to add), RED = taken by others.
+                      const isHeld = pickedIds.includes(t.id);
+                      const wasCurrent = corpCurrentIds.has(t.id);
+                      const disabled = t.occByOther; // only truly-other-occupied tables are blocked
+                      const title = t.occByOther
+                        ? `TAKEN — ${t.occupant?.customerName || ""}${t.occupant?.partySize ? " · " + t.occupant.partySize + " pax" : ""}`.trim()
+                        : wasCurrent ? (isHeld ? "Currently held — tap to remove" : "Was held — tap to re-add") : isHeld ? "Newly added — tap to remove" : "Free — tap to add";
+                      const bg = t.occByOther ? "#FF5733"
+                        : wasCurrent && isHeld ? "#FFD700"
+                        : isHeld ? "#FF90E8"
+                        : "#23A094";
+                      const color = t.occByOther ? "#fff" : "#000";
+                      return (
+                        <button key={t.id} type="button" disabled={disabled}
+                          onClick={() => {
+                            setErr("");
+                            setPickedIds((prev) =>
+                              prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id],
+                            );
+                          }} title={title}
+                          style={{
+                            padding: "9px 4px", borderRadius: 6, border: "2px solid #000",
+                            background: bg, color,
+                            cursor: disabled ? "not-allowed" : "pointer",
+                            fontWeight: 900, fontSize: 12, opacity: t.occByOther ? 0.9 : 1,
+                            display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
+                          }}>
+                          <span>{t.isProxy ? doorProxyLabel(t.id) : t.id}{t.occByOther ? " 🔒" : isHeld ? " ✓" : ""}</span>
+                          <span style={{ fontSize: 9, fontWeight: 700, opacity: 0.9 }}>
+                            {t.occByOther ? `${t.occupant?.partySize ?? "?"} pax`
+                              : wasCurrent && isHeld ? "HELD"
+                              : isHeld ? "ADDED"
+                              : t.isProxy ? "flexible" : `${t.cap} seats`}
+                          </span>
+                        </button>
+                      );
+                    } else {
+                      // Single-table mode (non-corporate) — original behaviour.
+                      const disabled = t.occByOther || t.isCurrent;
+                      const selected = picked === t.id;
+                      const title = t.occByOther && t.occupant
+                        ? `TAKEN — ${t.occupant.customerName || ""}${t.occupant.partySize ? " · " + t.occupant.partySize + " pax" : ""}`.trim()
+                        : t.isCurrent ? "Current table — pick a different one to move" : "Free — tap to pick";
+                      return (
+                        <button key={t.id} type="button" disabled={disabled}
+                          onClick={() => { setPicked(t.id); setErr(""); }} title={title}
+                          style={{
+                            padding: "9px 4px", borderRadius: 6, border: "2px solid #000",
+                            outline: selected ? "3px solid #FFD700" : "none", outlineOffset: selected ? "-5px" : 0,
+                            background: t.occByOther ? "#FF5733" : t.isCurrent ? "#E8E8E0" : selected ? "#FF90E8" : "#23A094",
+                            color: t.isCurrent ? "#6B6B6B" : t.occByOther ? "#fff" : selected ? "#000" : "#fff",
+                            cursor: disabled ? "not-allowed" : "pointer",
+                            fontWeight: 900, fontSize: 12, opacity: t.occByOther ? 0.9 : 1,
+                            display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
+                          }}>
+                          <span>{t.isProxy ? doorProxyLabel(t.id) : t.id}{t.occByOther ? " 🔒" : t.isCurrent ? "" : selected ? " ✓" : ""}</span>
+                          <span style={{ fontSize: 9, fontWeight: 700, opacity: 0.9 }}>
+                            {t.occByOther ? `${t.occupant?.partySize ?? "?"} pax` : t.isCurrent ? "CURRENT" : t.isProxy ? "flexible" : `${t.cap} seats`}
+                          </span>
+                        </button>
+                      );
+                    }
                   })}
                 </div>
               </div>
@@ -3403,9 +3621,9 @@ function ReassignModal({ reservation, agentName, onClose, onReassigned }: {
                 style={{ flex: 1, padding: 12, borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                 Cancel
               </button>
-              <button onClick={submit} disabled={busy || !picked}
-                style={{ flex: 1, padding: 12, borderRadius: 6, background: picked ? "#FF90E8" : "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: picked ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
-                {busy ? "Reassigning..." : "Reassign"}
+              <button onClick={submit} disabled={busy || !canSubmit}
+                style={{ flex: 1, padding: 12, borderRadius: 6, background: canSubmit ? "#FF90E8" : "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: canSubmit ? "pointer" : "not-allowed", opacity: busy ? 0.6 : 1 }}>
+                {busy ? "Reassigning..." : isCorporate ? `Reassign (${pickedIds.length} table${pickedIds.length !== 1 ? "s" : ""})` : "Reassign"}
               </button>
             </div>
           </>
@@ -4158,14 +4376,20 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
       )}
 
       {reassignFor && (
-        <ReassignModal reservation={reassignFor} bookedTableIds={bookedTableIds} agentName={agentName} onClose={() => setReassignFor(null)} />
+        <ReassignModal
+          reservation={reassignFor}
+          bookedTableIds={bookedTableIds}
+          agentName={agentName}
+          isCorporate={isCorporateTableRes(reassignFor)}
+          onClose={() => setReassignFor(null)}
+        />
       )}
 
       {/* 🆕 2026-05-27 v3.101 (Khushi) — in-app GUEST ARRIVED confirmation
           overlay. Shown after handleArrived succeeds. zIndex 10002 so it
           sits above the detail modal (9998) AND the reassign modal. */}
       {arrivedConfirm && (
-        <div onClick={() => setArrivedConfirm(null)}
+        <div onClick={closeOnBackdrop(() => setArrivedConfirm(null))}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 10002, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 24, width: "100%", maxWidth: 360, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", boxShadow: "none", textAlign: "center" }}>
@@ -4209,12 +4433,17 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
         const ss = SRC_STYLES[src] || SRC_STYLES.inhouse;
         const arrived = !!r.actualArrivalTime;
-        const tableLabel = r.tableId || "(unassigned)";
+        // 🆕 2026-06-19 — corporate bookings store ALL held tables in tableIds[];
+        // show them all (e.g. "FD15, FD16") instead of only the master tableId.
+        const _corpTables = (r as any).tableIds as string[] | undefined;
+        const tableLabel = (_corpTables && _corpTables.length > 1)
+          ? _corpTables.map((t: string) => doorProxyLabel(t) || t).join(", ")
+          : r.tableId || "(unassigned)";
         const isAggregator = src !== "inhouse";
         const aggName = (r.aggregator || r.source || "inhouse").toLowerCase();
         const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
         return (
-          <div onClick={() => setExpandedDocId(null)}
+          <div onClick={closeOnBackdrop(() => setExpandedDocId(null))}
             style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9998,
               display: "flex", alignItems: "flex-start", justifyContent: "center",
               padding: "20px 12px", overflowY: "auto" }}>
@@ -4490,10 +4719,9 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                   }}>
                   {arrived ? "🔒 Reassign" : "🔄 Reassign"}
                 </button>
-                {/* 🆕 Khushi 2026-06-02 — SHOW QR. Opens the scannable wallet QR
-                    so the door girl can let a guest scan to open their menu/tab
-                    on the spot (e.g. no phone on file / WhatsApp didn't land).
-                    Pink Gumroad accent. Always available — no arrival gate. */}
+                {/* 🆕 Khushi 2026-06-02 — SHOW QR. Hidden for corporate rows
+                    (their menu differs; no wallet). Show for all other rows. */}
+                {!isCorporateTableRes(r) && (
                 <button
                   onClick={() => {
                     const refId = r.bookingRef || r._docId;
@@ -4514,6 +4742,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                   }}>
                   📷 Show QR
                 </button>
+                )}
               </div>
 
               {/* 🆕 Khushi — CANCEL BOOKING. Manager-PIN gated via the in-app
@@ -4706,6 +4935,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
   );
   const [customAmName, setCustomAmName] = useState("");
   const [customAmPrice, setCustomAmPrice] = useState<number>(0);
+  const [amenitiesPayMode, setAmenitiesPayMode] = useState<"" | "cash" | "upi" | "card" | "split">("");
   const updateAm = (i: number, patch: Partial<AmRow>) =>
     setAmenities((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const removeAm = (i: number) =>
@@ -4794,6 +5024,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
     if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
     if (tab === "corporate" && !companyName.trim()) { setErr("Enter company name"); return; }
     if (tab === "corporate" && advanceAmount > 0 && !advanceMode) { setErr("Pick how the advance was paid"); return; }
+    if (amenitiesTotal > 0 && !amenitiesPayMode) { setErr("Select how add-ons were paid (Cash / UPI / Card / Split)"); return; }
     setBusy(true);
     try {
       let refId = "";
@@ -4801,6 +5032,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
       const sharedExtras = {
         email: email.trim() || undefined,
         amenities: includedAmenities.length ? includedAmenities : undefined,
+        ...(amenitiesTotal > 0 && amenitiesPayMode ? { amenitiesPaymentMode: amenitiesPayMode } : {}),
       };
       if (tab === "tables") {
         const unlockNow = shouldUnlockNow();
@@ -4875,8 +5107,9 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
       // messages as an ADDITIONAL non-redeemable charge. Corporate bookings have
       // no cover screen, so without this the valet amount was captured on the
       // doc but never shown back to the door girl or the guest.
+      const amPayLabel = amenitiesPayMode === "cash" ? "Cash" : amenitiesPayMode === "upi" ? "UPI" : amenitiesPayMode === "card" ? "Card" : amenitiesPayMode === "split" ? "Split" : "";
       const amenitiesLine = includedAmenities.length
-        ? `₹${amenitiesTotal.toLocaleString("en-IN")} · ${includedAmenities.map((a) => a.qty > 1 ? `${a.name} ×${a.qty}` : a.name).join(", ")}`
+        ? `₹${amenitiesTotal.toLocaleString("en-IN")} · ${includedAmenities.map((a) => a.qty > 1 ? `${a.name} ×${a.qty}` : a.name).join(", ")}${amPayLabel ? ` (Paid by ${amPayLabel})` : ""}`
         : "";
 
       // ── EMAIL (fire-and-forget) ──
@@ -5142,7 +5375,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
   }
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
       {/* 🔴 2026-05-20 (Khushi PREMIUM REDESIGN) — single hairline gold border,
           deeper black fill, subtle inner glow. Less "yellow box" — more
           "blacked-out lounge menu". */}
@@ -5258,9 +5491,15 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
                     colorScheme: "light",
                     fontFamily: "inherit",
                   } as React.CSSProperties} />
-                <div style={{ marginTop: 4, fontSize: 11, color: "#000", fontWeight: 700 }}>
-                  → {fmtPretty(bookingDate)}
-                </div>
+                {bookingDate && bookingDate < today ? (
+                  <div style={{ marginTop: 4, padding: "8px 10px", background: "#FFF0EE", border: "2px solid #FF5733", borderRadius: 6, color: "#FF5733", fontSize: 12, fontWeight: 800 }}>
+                    ⛔ Past date — please pick today or a future date
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 4, fontSize: 11, color: "#000", fontWeight: 700 }}>
+                    → {fmtPretty(bookingDate)}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -5513,8 +5752,12 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
             const title = occupied && occupant
               ? `BLOCKED — ${occupant.customerName || ""}${occupant.arrivalTime ? " @ " + occupant.arrivalTime : ""}${occupant.partySize ? " · " + occupant.partySize + " pax" : ""}${occupant.source ? " · " + occupant.source : ""}`.trim()
               : isCorpMulti ? "Available — tap to add / remove" : "Available — tap to assign";
+            // In corp multi-select: allow tapping to DE-select a table that is
+            // already selected even if it's now occupied (so the door girl can
+            // swap it out). Only block ADDING a new occupied table.
+            const disabledBtn = isCorpMulti ? (occupied && !isSelected) : occupied;
             return (
-              <button key={t} type="button" disabled={occupied}
+              <button key={t} type="button" disabled={disabledBtn}
                 onClick={() => {
                   if (isCorpMulti) {
                     setCorpTableIds((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
@@ -5523,9 +5766,9 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
                   }
                 }} title={title}
                 style={{ padding: "10px 12px", borderRadius: 8, fontSize: 13, fontWeight: 900,
-                  cursor: occupied ? "not-allowed" : "pointer",
+                  cursor: disabledBtn ? "not-allowed" : "pointer",
                   background: bg, border: `2px solid ${border}`, color,
-                  opacity: occupied ? 0.9 : 1, minWidth: 56 }}>
+                  opacity: disabledBtn ? 0.9 : 1, minWidth: 56 }}>
                 {doorProxyLabel(t) || t}{occupied ? " 🔒" : ""}
               </button>
             );
@@ -5692,6 +5935,31 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
           </>)}
         </div>
 
+        {/* 🆕 v3.351 — Payment mode for add-ons (shown when any add-on is selected) */}
+        {amenitiesTotal > 0 && (
+          <div style={{ marginBottom: 12, border: "2px solid #000", borderRadius: 8, padding: 12, background: "#FFFFFF" }}>
+            <div style={{ ...labelStyle, marginBottom: 8 }}>
+              💳 How were the add-ons paid? <span style={{ color: "#FF5733" }}>*</span>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              {(["cash", "upi", "card"] as const).map((m) => {
+                const labels: Record<string, string> = { cash: "💵 CASH", upi: "📱 UPI", card: "💳 CARD" };
+                const sel = amenitiesPayMode === m;
+                return (
+                  <button key={m} type="button" onClick={() => setAmenitiesPayMode(sel ? "" : m)}
+                    style={{ flex: 1, padding: "10px 4px", borderRadius: 6, border: `2px solid #000`, background: sel ? "#FF90E8" : "#FFFFFF", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5 }}>
+                    {labels[m]}
+                  </button>
+                );
+              })}
+            </div>
+            <button type="button" onClick={() => setAmenitiesPayMode(amenitiesPayMode === "split" ? "" : "split")}
+              style={{ width: "100%", padding: 10, borderRadius: 6, border: "2px solid #000", background: amenitiesPayMode === "split" ? "#FF90E8" : "#FFFFFF", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer" }}>
+              ➗ SPLIT PAYMENT
+            </button>
+          </div>
+        )}
+
         <div style={{ marginBottom: 14 }}>
           <div style={labelStyle}>Notes (optional)</div>
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Birthday, VIP, etc." style={inputStyle} />
@@ -5724,6 +5992,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
               { const pd = pastBookingDateErr(); if (pd) { setErr(pd); return; } }
               if (!arrival.trim()) { setErr("Enter arrival time"); return; }
               if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Email looks invalid — leave blank or fix"); return; }
+              if (amenitiesTotal > 0 && !amenitiesPayMode) { setErr("Select how add-ons were paid (Cash / UPI / Card / Split)"); return; }
               setBusy(true);
               try {
                 const refId = await createWalkInTableReservation({
@@ -5734,6 +6003,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
                   notes: notes.trim() || undefined, staffName: agentName,
                   email: email.trim() || undefined,
                   amenities: includedAmenities.length ? includedAmenities : undefined,
+                  ...(amenitiesTotal > 0 && amenitiesPayMode ? { amenitiesPaymentMode: amenitiesPayMode } : {}),
                   hasLinkedCover: true,
                 });
                 onClose();
@@ -5810,7 +6080,7 @@ const _actionBtn = (color: string): React.CSSProperties => ({
 function QrPopup({ url, title, onClose }: { url: string; title: string; onClose: () => void }) {
   const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=${encodeURIComponent(url)}`;
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, maxWidth: 380, width: "100%", textAlign: "center" }}>
         <BackBtn onClick={onClose} />
         <div style={{ fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", fontSize: 18, fontWeight: 900, color: "#000", marginBottom: 12 }}>{title}</div>
@@ -6073,7 +6343,10 @@ function UnifiedWalkInModal({
           paymentSplit: payMethod === "split"
             ? { cash: splitCash, upi: splitUpi, card: splitCard }
             : undefined,
-          ...(kind === "onlyentry" ? { entryType: "entryonly", qty: 1 } : {}),
+          ...(kind === "onlyentry" ? { entryType: "entryonly", qty: guests || 1 } : {}),
+          // 🆕 v3.336b — store the non-redeemable entry portion separately so
+          // the badge can show correct entry amount even when cover is bundled.
+          ...(entryTicket > 0 ? { entryFee: entryTicket } : {}),
         });
         savedRef = r.ref;
       }
@@ -6163,15 +6436,15 @@ function UnifiedWalkInModal({
       if (emailAddr) {
         setEmailStatus(`Sending to ${emailAddr}…`);
         try {
-          const totalStr = walletAmount > 0
-            ? `₹${walletAmount.toLocaleString("en-IN")} Paid`
-            : total > 0 ? `₹${total.toLocaleString("en-IN")} Paid` : "FREE";
+          const totalStr = total > 0 ? `₹${total.toLocaleString("en-IN")} Paid` : "FREE";
           const entryType = kind === "guestlist"
             ? "Guest List · Free Entry · ₹0 Wallet"
             : kind === "onlyentry"
             ? walletAmount > 0
               ? `Entry Only · ₹${entryTicket.toLocaleString("en-IN")} door fee + Cover Wallet ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`
               : `Entry Only · ₹${total.toLocaleString("en-IN")} (Non-redeemable door fee · wallet ₹0)`
+            : entryTicket > 0
+            ? `Entry ₹${entryTicket.toLocaleString("en-IN")} (non-redeemable) + Cover Wallet ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`
             : `Cover · ₹${walletAmount.toLocaleString("en-IN")} (Redeemable on F&B)`;
           fetch(EMAIL_CF_URL, {
             method: "POST",
@@ -6182,7 +6455,7 @@ function UnifiedWalkInModal({
               ref:          savedRef,
               event_title:  eventTitle || "Tonight at H.O.D",
               event_date:   TODAY_STR(),
-              event_time:   (linkToTable?.arrivalTime || "").trim(),
+              event_time:   (linkToTable?.arrivalTime || events.find(e => e.id === eventId)?.time || "").trim(),
               event_venue:  "Koramangala 7th Block, Bengaluru",
               entry_type:   entryType,
               qty:          guests || 1,
@@ -6207,12 +6480,14 @@ function UnifiedWalkInModal({
       // (entry fee) as `total` so pickBookingTemplate doesn't see ₹0 and bail,
       // and `entryType: "entryonly"` so detectWaCategory routes to entry_only_*
       // templates instead of ticket_confirmed_* (wrong param count → Meta rejects).
-      const waTotal = kind === "onlyentry" ? total : walletAmount;
+      // 🆕 v3.348 — for "buy covers" walk-ins (kind==="cover") with an entry fee,
+      // waTotal must be the FULL collected amount (entry+cover), not just walletAmount.
+      const waTotal = (kind === "onlyentry" || entryTicket > 0) ? total : walletAmount;
       const synthForWa: HodBooking = {
         id: savedRef, ref: savedRef, name: name.trim(), phone: waPhone,
         eventId: "", eventTitle: eventTitle || "Tonight at H.O.D",
         tier: "", type: kind === "guestlist" ? "stag" : "cover",
-        total: waTotal, guests, date: TODAY_STR(),
+        total: waTotal, guests, qty: guests || 1, date: TODAY_STR(),
         // The door girl ALREADY collected the money and confirmed the payment
         // mode, so the customer must NOT see "PAY AT VENUE". Mark this synthetic
         // booking PAID so WhatsApp template reads "✅ PAID". `isWalkIn` makes
@@ -6222,6 +6497,8 @@ function UnifiedWalkInModal({
         isWalkIn: true,
         _isGuestList: kind === "guestlist",
         ...(kind === "onlyentry" ? { entryType: "entryonly" } : {}),
+        // 🆕 v3.348 — pass entryFee so WA text can show entry+cover breakdown
+        ...(entryTicket > 0 && kind !== "onlyentry" ? { entryFee: entryTicket } : {}),
       } as any;
       let tpl = pickBookingTemplate(synthForWa, walletUrl);
       let fallbackText = buildBookingWhatsAppText(synthForWa, walletUrl);
@@ -6371,7 +6648,7 @@ function UnifiedWalkInModal({
 
     return (
       <>
-        <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+        <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 24, width: "100%", maxWidth: 420, textAlign: "center", marginTop: 24, marginBottom: 24 }}>
             {/* 🆕 2026-06-02 (Khushi) — top BACK button so the door girl can always
                 dismiss this screen even on a short tablet where the bottom Close
@@ -6403,10 +6680,20 @@ function UnifiedWalkInModal({
                     {linkToTable && (
                       <div style={rowS}><span style={lblS}>TABLE</span><span style={{ fontWeight: 800 }}>{linkToTable.tableId ? `${linkToTable.tableId}${linkToTable.floorLabel ? ` · ${linkToTable.floorLabel}` : ""}` : "Unassigned — Captain assigns"}</span></div>
                     )}
-                    {done.isCover && (
-                      <div style={rowS}><span style={lblS}>COVER (redeemable)</span><span style={{ fontWeight: 800 }}>₹{(done.coverAmount || 0).toLocaleString("en-IN")}</span></div>
-                    )}
-                    <div style={rowS}><span style={lblS}>TOTAL COLLECTED</span><span style={{ fontWeight: 900 }}>₹{(done.total || 0).toLocaleString("en-IN")}</span></div>
+                    {(() => {
+                      const _entryPaid = done.isCover ? Math.max(0, (done.total || 0) - (done.coverAmount || 0)) : 0;
+                      return (
+                        <>
+                          {_entryPaid > 0 && (
+                            <div style={rowS}><span style={lblS}>ENTRY PAID</span><span style={{ fontWeight: 800 }}>₹{_entryPaid.toLocaleString("en-IN")}</span></div>
+                          )}
+                          {done.isCover && (
+                            <div style={rowS}><span style={lblS}>COVER COLLECTED</span><span style={{ fontWeight: 800 }}>₹{(done.coverAmount || 0).toLocaleString("en-IN")}</span></div>
+                          )}
+                        </>
+                      );
+                    })()}
+                    <div style={rowS}><span style={lblS}>TOTAL PAID</span><span style={{ fontWeight: 900 }}>₹{(done.total || 0).toLocaleString("en-IN")}</span></div>
                     <div style={{ ...rowS, borderBottom: "none" }}><span style={lblS}>✉️ EMAIL</span><span style={{ fontWeight: 800, color: emailStatus === "Email failed — show QR" ? "#FF5733" : emailStatus === "No email entered" ? "#6B6B6B" : "#23A094" }}>{emailStatus}</span></div>
                   </div>
 
@@ -6444,7 +6731,7 @@ function UnifiedWalkInModal({
 
   // ── Main sheet ────────────────────────────────────────────────────────────
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.7)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.7)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 18, width: "100%", maxWidth: 440, marginTop: 24, marginBottom: 24, boxShadow: "none", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
         {/* Close button (top-right only — no title bar; the cards ARE the title) */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -6808,7 +7095,7 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
   const inp = { width: "100%", padding: 10, borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const };
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 22, width: "100%", maxWidth: 440, maxHeight: "90vh", overflow: "auto", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
           <button onClick={onBack} style={{ background: "transparent", border: "none", color: "#000", fontSize: 18, cursor: "pointer", padding: 0 }}>←</button>
@@ -6908,8 +7195,75 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
   );
 }
 
+function CancelledTablesTab({ query, tableResByDate }: {
+  query: string;
+  tableResByDate: Record<string, HodTableReservation[]>;
+}) {
+  const nightDate = getOperationalNightStr();
+  const q = query.toLowerCase().trim();
+  const seen = new Set<string>();
+  const rows: HodTableReservation[] = [];
+  for (const list of Object.values(tableResByDate)) {
+    for (const r of list) {
+      const id = r._docId || (r as any).bookingRef || "";
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if ((r as any).status !== "cancelled") continue;
+      if ((r.date || "").slice(0, 10) !== nightDate) continue;
+      if (q) {
+        const name = String((r as any).customerName || (r as any).companyName || "").toLowerCase();
+        const phone = String((r as any).phone || (r as any).customerPhone || "").toLowerCase();
+        const ref   = String((r as any).bookingRef || "").toLowerCase();
+        if (!name.includes(q) && !phone.includes(q) && !ref.includes(q)) continue;
+      }
+      rows.push(r);
+    }
+  }
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ textAlign: "center", color: "#888", fontSize: 13, fontWeight: 700, padding: "32px 0" }}>
+        {q ? "No cancelled bookings match your search." : "No cancellations tonight."}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {rows.map((r) => {
+        const name    = String((r as any).customerName || (r as any).companyName || "—");
+        const phone   = String((r as any).phone || (r as any).customerPhone || "");
+        const pax     = Number((r as any).partySize) || 0;
+        const tableId = String((r as any).tableId || (r as any).tableNumber || "");
+        const arrival = String((r as any).arrivalTime || (r as any).scheduledArrivalTime || "");
+        const ref     = String((r as any).bookingRef || "");
+        const src     = String((r as any).aggregator || (r as any).source || "In-house");
+        return (
+          <div key={r._docId || ref} style={{ background: "#fff", border: "2px solid #FF5733", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#000" }}>{name}</div>
+                {phone && <div style={{ fontSize: 12, color: "#555", marginTop: 2 }}>{phone}</div>}
+                {ref   && <div style={{ fontSize: 11, color: "#888", marginTop: 1, fontFamily: "monospace" }}>{ref}</div>}
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 900, background: "#FF5733", color: "#fff", padding: "3px 8px", borderRadius: 6, border: "1.5px solid #000", whiteSpace: "nowrap" }}>
+                ✕ CANCELLED
+              </span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {pax > 0     && <span style={{ fontSize: 11, fontWeight: 700, background: "#F4F4F0", border: "1.5px solid #000", borderRadius: 5, padding: "2px 7px" }}>{pax} pax</span>}
+              {tableId     && <span style={{ fontSize: 11, fontWeight: 700, background: "#F4F4F0", border: "1.5px solid #000", borderRadius: 5, padding: "2px 7px" }}>Table {tableId}</span>}
+              {arrival     && <span style={{ fontSize: 11, fontWeight: 700, background: "#F4F4F0", border: "1.5px solid #000", borderRadius: 5, padding: "2px 7px" }}>{arrival}</span>}
+              {src && src !== "inhouse" && src !== "In-house" && <span style={{ fontSize: 11, fontWeight: 700, background: "#F4F4F0", border: "1.5px solid #000", borderRadius: 5, padding: "2px 7px" }}>{src}</span>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: () => void }) {
-  const [tab, setTab] = useState<"all" | "tickets" | "guestlist" | "tables" | "corporate" | "onlyentry" | "waitlist">("all");
+  const [tab, setTab] = useState<"all" | "tickets" | "guestlist" | "tables" | "corporate" | "onlyentry" | "waitlist" | "cancelled">("all");
   // 🆕 2026-06-02 (Khushi) — LIVE waitlist count for the WAITLIST tab badge.
   // Track the operational-night date in state so the badge re-subscribes across
   // the overnight rollover (the door tablet stays open all night).
@@ -6977,6 +7331,11 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("all");
   const [allPickerOpen, setAllPickerOpen] = useState(false);
+  // 🆕 2026-06-18 v3.317 (Khushi) — eventId → event date map so the EVENT DATE
+  // row in the guestlist/scan modals can resolve a guest's own event date even
+  // when ALL is selected (eventDate prop empty). Read-only; events is small.
+  const eventDateById: Record<string, string> = {};
+  for (const _ev of events) eventDateById[_ev.id] = _ev.date || "";
 
   // 🆕 2026-06-14 — OFFLINE BANNER (audit finding #4). The door tablet runs all
   // night on venue wifi; if it drops, check-ins still queue locally (Firestore
@@ -7141,22 +7500,28 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     const tableSeen = new Set<string>();
     const allTables: HodTableReservation[] = [];
     Object.values(tableResByDate).forEach((rows) => rows.forEach((r) => {
-      if (!r._docId || tableSeen.has(r._docId)) return;
+      // 🆕 v3.333 — use _docId || bookingRef (matching LiveReportsModal.tablesForNight)
+      // so a table with bookingRef but no _docId is counted here too, not silently
+      // dropped (was the cause of TABLES chip showing 20 vs Live Reports 21).
+      const _tid = r._docId || (r as any).bookingRef || "";
+      if (!_tid || tableSeen.has(_tid)) return;
       if (!todayDates.has((r.date || "").slice(0, 10))) return;
       if (!(selectedEventId === "all" || !(r as any).eventId || (r as any).eventId === selectedEventId)) return;
-      tableSeen.add(r._docId); allTables.push(r);
+      tableSeen.add(_tid); allTables.push(r);
     }));
     // 🔴 2026-05-20 (Khushi) — GROUP merged into TICKETS; new CORPORATE tab
     // pulled out of tableReservations. Tables count now excludes corporate so
     // a reservation is only counted once across the dashboard.
     const activeTables = allTables.filter((r) => (r as any).status !== "cancelled");
+    const cancelledTables = allTables.filter((r) => (r as any).status === "cancelled");
     const tickets   = today.filter((b) => !isOnlyEntryBooking(b) && !isTableBooking(b) && inEvent(b)).length;
     const guestlist = todayGuestsInEvent.length + guestlistFromBookings.length;
     const tables    = activeTables.filter((r) => !isCorporateTableRes(r)).length;
     const corporate = activeTables.filter(isCorporateTableRes).length;
     const onlyentry = today.filter((b) => isOnlyEntryBooking(b) && inEvent(b)).length;
+    const cancelled = cancelledTables.length;
     return {
-      tickets, guestlist, tables, corporate, onlyentry,
+      tickets, guestlist, tables, corporate, onlyentry, cancelled,
       // 🔴 2026-05-20 (Khushi) — ALL tab count = sum of every category.
       all: tickets + guestlist + tables + corporate + onlyentry,
     };
@@ -7169,6 +7534,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     { key: "tables" as const,    label: "TABLES",         count: tabCounts.tables },
     { key: "corporate" as const, label: "CORPORATE",      count: tabCounts.corporate },
     { key: "onlyentry" as const, label: "ENTRY PASS",     count: tabCounts.onlyentry },
+    { key: "cancelled" as const, label: "CANCELLED",      count: tabCounts.cancelled },
     { key: "waitlist" as const,  label: "WAITLIST",       count: waitlistCount },
   ];
 
@@ -7277,7 +7643,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         </button>
 
         {lookupResult && (
-          <LookupResult booking={lookupResult} agentName={agentName} onDone={() => setLookupResult(null)} />
+          <LookupResult booking={lookupResult} agentName={agentName} onDone={() => setLookupResult(null)} eventDate={selectedEventDate} eventDateById={eventDateById} />
         )}
 
         {/* 🔴 SEARCH PANEL — 2026-05-19 (Khushi LIVE-NIGHT) REWRITE.
@@ -7422,6 +7788,12 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
               if (!r._docId || tableSeen.has(r._docId)) continue;
               tableSeen.add(r._docId);
               if ((r as any).status === "cancelled") continue;
+              // 🆕 v3.338 — skip hold docs (display-only occupancy markers for
+              // extra tables in a corporate multi-table booking). They share the
+              // same customerName/phone as the master doc so they match the
+              // search query but produce a duplicate row. The master doc already
+              // carries all pax/advance/ref; hold docs add nothing for the door.
+              if ((r as any).isGroupHold) continue;
               if (!matches((r as any).customerName, (r as any).phone, (r as any).bookingRef)) continue;
               // 🔴 2026-05-20 (Khushi) — corporate reservations route to the
               // CORPORATE tab, regular tables route to TABLES.
@@ -7474,7 +7846,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                         </div>
                       </div>
                       <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 6,
-                        background: "#fff", color: h.tone, border: "2px solid #000" }}>
+                        background: h.tone, color: "#000", border: "2px solid #000" }}>
                         {h.label}
                       </span>
                     </button>
@@ -7504,8 +7876,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
                             </div>
                           </div>
                           <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 6,
-                            background: "#fff",
-                            color: isAgg ? "#FF90E8" : "#3D3D3D",
+                            background: isAgg ? "#FF90E8" : "#3D3D3D",
+                            color: isAgg ? "#000" : "#fff",
                             border: "2px solid #000" }}>
                             {isAgg ? (r._aggregator || "AGG").toUpperCase() : "BOOKING"}
                           </span>
@@ -7633,10 +8005,11 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           onTableClick={(r, isCorp) => { setTab(isCorp ? "corporate" : "tables"); setTablesFocusDocId(r._docId!); }}
         />}
         {tab === "tickets"   && <TicketsTab        agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} />}
-        {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "guestlist" && <GuestlistTab      agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} eventDateById={eventDateById} />}
         {tab === "tables"    && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="non-corporate" />}
         {tab === "corporate" && <TablesTab         agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onShowQr={setQrModal} onCover={setCoverFor} focusDocId={tablesFocusDocId} onFocusConsumed={() => setTablesFocusDocId(null)} sourceFilter="corporate" />}
         {tab === "onlyentry" && <OnlyEntryTab      agentName={agentName} query={searchInput} eventId={selectedEventId} eventDate={selectedEventDate} onCover={setCoverFor} onShowQr={setQrModal} />}
+        {tab === "cancelled" && <CancelledTablesTab query={searchInput} tableResByDate={tableResByDate} />}
         {tab === "waitlist"  && <WaitlistView      date={CALENDAR_TODAY_STR()} />}
         </>)}
       </div>
@@ -7654,6 +8027,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
           onCover={(b) => setCoverFor(b)}
           onShowQr={setQrModal}
           onSendWhatsApp={(b) => sendBookingWhatsApp(b, setQrModal)}
+          eventDate={selectedEventDate}
+          eventDateById={eventDateById}
         />
       )}
       {walkInOpen && <NewWalkInModal agentName={agentName} onClose={() => setWalkInOpen(false)} onActivateCover={(b) => setCoverFor(b)} />}
@@ -8077,12 +8452,7 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     return ev ? (ev.title || "Event") : "Event";
   })();
 
-  const [searchQ, setSearchQ] = useState("");
-  const ql = searchQ.trim().toLowerCase();
-  const passSearch = (...fields: (string | undefined)[]) => {
-    if (!ql) return true;
-    return fields.some((f) => !!f && String(f).toLowerCase().includes(ql));
-  };
+  // No search filter in Live Reports — all tiles show full-night numbers.
 
   // Tables for picked night — Khushi 2026-05-20: previous logic double-counted
   // (showed 93 when door tab showed 47, admin showed 50) because BOTH
@@ -8107,7 +8477,6 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
         seen.add(id);
         if ((r as any).status === "cancelled") continue;
         if ((r.date || "").slice(0, 10) !== nightDate) continue;
-        if (!passSearch((r as any).customerName, (r as any).phone, (r as any).bookingRef, (r as any).companyName)) continue;
         out.push(r);
       }
     };
@@ -8116,12 +8485,34 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     return out;
   })();
 
+  // Cancelled tables for the same night (display-only — for the CANCELLATIONS tile)
+  const cancelledTablesForNight: HodTableReservation[] = (() => {
+    const seen = new Set<string>();
+    const out: HodTableReservation[] = [];
+    const consider = (list: HodTableReservation[] | undefined) => {
+      if (!list) return;
+      for (const r of list) {
+        const id = r._docId || (r as any).bookingRef || "";
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        if ((r as any).status !== "cancelled") continue;
+        if ((r.date || "").slice(0, 10) !== nightDate) continue;
+        out.push(r);
+      }
+    };
+    Object.values(tableResByDate).forEach(consider);
+    consider(pickedTables ?? undefined);
+    return out;
+  })();
+  const cancelledCount = cancelledTablesForNight.length;
+  const cancelledPax   = cancelledTablesForNight.reduce((s, r) => s + (Number((r as any).partySize) || 0), 0);
+
   // Bookings filtered to picked night
   const bookingsForNight = allBookings.filter((b) => {
     const d = (b.date || "").slice(0, 10);
     if (d !== nightDate) return false;
     if (selectedEventId !== "all" && b.eventId && b.eventId !== selectedEventId) return false;
-    return passSearch(b.name, b.phone, b.ref, b.eventTitle);
+    return true;
   });
 
   // Guestlist filtered to picked night
@@ -8134,7 +8525,7 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
       if (ja !== nightDate && et !== nightDate) return false;
     }
     if (selectedEventId !== "all" && g.eventId && g.eventId !== selectedEventId) return false;
-    return passSearch(g.name, g.phone, (g as any).ref);
+    return true;
   });
 
   // Split categories
@@ -8155,8 +8546,13 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     guestlistSeen.add(k);
     return true;
   });
-  const corporateTables = tablesForNight.filter(isCorporateTableRes);
+  // 🆕 v3.335 — exclude isGroupHold docs (extra-table hold rows created alongside
+  // the master for multi-table corporate groups). Hold docs have partySize=0 and
+  // are display-only occupancy markers — only the master should count as a booking.
+  const corporateTables = tablesForNight.filter((r) => isCorporateTableRes(r) && !(r as any).isGroupHold);
   const regularTables   = tablesForNight.filter((r) => !isCorporateTableRes(r));
+  // Total floor slots held by corporate (master + hold docs) — for reconciling with Boss Mode
+  const corpTablesHeld  = tablesForNight.filter((r) => isCorporateTableRes(r)).length;
 
   // PAX TOTALS — booking.guests for tickets/entry, partySize for tables,
   // 1 per guestlist entry.
@@ -8176,8 +8572,10 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     const at = (c as any).activatedAt || (c as any).createdAt;
     return inWindowIso(at);
   });
-  const totalCoversCollected = coversForNight.reduce((s, c) => s + (Number(c.coverActivated) || 0), 0);
-  const totalAmountRedeemed  = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number(c.coverBalance) || 0)), 0);
+  const totalCoversCollected = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number((c as any).topUpTotal) || 0)), 0);
+  const totalRecharges         = coversForNight.reduce((s, c) => s + (Number((c as any).topUpTotal) || 0), 0);
+  const totalAmountRedeemed    = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number(c.coverBalance) || 0)), 0);
+  const totalAmountNotRedeemed = coversForNight.reduce((s, c) => s + Math.max(0, Number(c.coverBalance) || 0), 0);
 
   // LUNCH / DINNER split for ALL tables (regular + corporate). Cutoff = 17:00.
   const allTablesForNight = [...regularTables, ...corporateTables];
@@ -8240,8 +8638,19 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   };
   const paidTicketBookings = ticketBookings.filter(isActuallyPaid);
   const paidEntryBookings  = entryBookings.filter(isActuallyPaid);
+  // totalPaidEntry kept for CSV export only (full entry collection incl. covers)
   const totalPaidEntry = paidTicketBookings.reduce((s, b) => s + (Number(b.total) || 0), 0)
                       + paidEntryBookings.reduce((s, b) => s + (Number(b.total) || 0), 0);
+  // 🆕 v3.346 — "buy covers" walk-ins (entryFee > 0 but entryType !== entryonly)
+  // also collect an entry fee at the door. Sum their entryFee separately and
+  // add to the entry collected total so ₹25k entry + ₹30k cover shows correctly.
+  const coverWalkinWithEntry = bookingsForNight.filter(
+    (b) => !isGuestlistBooking(b) && !isOnlyEntryBooking(b) && !isTableBooking(b) &&
+           Number((b as any).entryFee || 0) > 0 && isActuallyPaid(b)
+  );
+  const extraEntryFromCoverWalkins = coverWalkinWithEntry.reduce((s, b) => s + Number((b as any).entryFee || 0), 0);
+  // Entry-ONLY amount — entry-pass bookings + cover walk-ins that also paid an entry fee
+  const totalPaidEntryOnlyAmt = paidEntryBookings.reduce((s, b) => s + (Number(b.total) || 0), 0) + extraEntryFromCoverWalkins;
   const totalEntryOnly = entryBookings.length;
   // CHECK-INS across all sources
   const totalCheckedIn =
@@ -8269,11 +8678,19 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     push("  Pax (Guestlist)", guestlistPax);
     push("", "");
     push("TOTAL COVER CHARGES COLLECTED (Rs)", totalCoversCollected);
+    push("  Recharges by customers (Rs)", totalRecharges);
     push("TOTAL AMOUNT REDEEMED (Rs)", totalAmountRedeemed);
+    push("TOTAL NOT REDEEMED / Balance in wallets (Rs)", totalAmountNotRedeemed);
     push("", "");
-    push("TOTAL TABLES BOOKED", allTablesForNight.length);
+    push("TOTAL TABLES BOOKED (non-corporate)", regularTables.length);
     push("  Lunch (< 5pm)", lunchTables);
     push("  Dinner (>= 5pm)", dinnerTables);
+    push("  Table Pax", tablePax);
+    push("TOTAL TABLE CANCELLED", cancelledCount);
+    push("  Cancelled Pax", cancelledPax);
+    push("", "");
+    push("CORPORATE BOOKINGS", corporateTables.length);
+    push("  Corporate Pax", corpPax);
     push("", "");
     for (const k of aggSources) {
       const bk = aggBuckets[k];
@@ -8286,10 +8703,14 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
       }
     }
     push("", "");
-    push("CORPORATE BOOKINGS", corporateTables.length);
-    push("GUESTLIST / FREE ENTRY", guestlistPax);
-    push("TOTAL PAID ENTRY (Rs)", totalPaidEntry);
     push("TOTAL ENTRY-ONLY BOOKINGS", totalEntryOnly);
+    push("  Entry-only paid count", paidEntryBookings.length);
+    push("  Entry-only unpaid count", totalEntryOnly - paidEntryBookings.length);
+    push("  ENTRY COLLECTED (Rs)", totalPaidEntryOnlyAmt);
+    push("TOTAL TICKETS + COVERS (paid count)", paidTicketBookings.length);
+    push("  Tickets + Covers collected (Rs)", totalPaidEntry - totalPaidEntryOnlyAmt);
+    push("  Total paid entry incl. covers (Rs)", totalPaidEntry);
+    push("GUESTLIST / FREE ENTRY (pax)", guestlistPax);
     push("TOTAL CHECKED IN", totalCheckedIn);
 
     // UTF-8 BOM for Excel friendliness
@@ -8328,7 +8749,7 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   const fmtRs = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
 
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, overflow: "auto", padding: "12px 0", WebkitOverflowScrolling: "touch" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: 980, margin: "0 auto", background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 16, color: "#000" }}>
@@ -8360,10 +8781,6 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
           </div>
         </div>
 
-        {/* SEARCH */}
-        <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
-          placeholder="Search bookings (name, phone, ref) — narrows all tiles below"
-          style={{ width: "100%", padding: "10px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 14 }} />
 
         {/* TOP TILES */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
@@ -8378,6 +8795,11 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
               <PaxChip label="CORP PAX" n={corpPax} />
               <PaxChip label="ENTRY PAX" n={entryPax} />
               <PaxChip label="GUEST PAX" n={guestlistPax} />
+              {cancelledPax > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 6, background: "#FF5733", color: "#fff", border: "2px solid #000", whiteSpace: "nowrap" }}>
+                  ✕ CANCELLED PAX {cancelledPax}
+                </span>
+              )}
             </div>
           </Tile>
           {/* 🆕 2026-05-23 (Khushi) — strict count: only covers where money was
@@ -8387,13 +8809,32 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
             sub={(() => {
               const paid = coversForNight.filter((c) => (Number(c.coverActivated) || 0) > 0).length;
               return `${paid} cover${paid === 1 ? "" : "s"} activated`;
-            })()} />
+            })()}>
+            {totalRecharges > 0 && (
+              <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 4, paddingTop: 8 }}>
+                <div style={{ fontSize: 10, fontWeight: 900, color: "#B8860B", letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>RECHARGES BY CUSTOMERS</div>
+                <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{fmtRs(totalRecharges)}</div>
+                <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>Bar top-ups added to covers</div>
+              </div>
+            )}
+          </Tile>
           <Tile label="TOTAL AMOUNT REDEEMED" value={fmtRs(totalAmountRedeemed)} tone="#FF5733"
-            sub={`Wallet spend across all covers`} />
-          <Tile label="TOTAL TABLES BOOKED" value={allTablesForNight.length} tone="#000">
+            sub="Wallet spend across all covers">
+            <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 4, paddingTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 900, color: "#6B6B6B", letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>TOTAL NOT REDEEMED</div>
+              <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{fmtRs(totalAmountNotRedeemed)}</div>
+              <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>Balance left in customer wallets</div>
+            </div>
+          </Tile>
+          <Tile label="TOTAL TABLES BOOKED" value={regularTables.length} tone="#000">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
               <PaxChip label="LUNCH" n={lunchTables} />
               <PaxChip label="DINNER" n={dinnerTables} />
+            </div>
+            <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 6, paddingTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 900, color: "#FF5733", letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>TOTAL TABLE CANCELLED</div>
+              <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{cancelledCount}</div>
+              <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>{cancelledPax} pax cancelled</div>
             </div>
           </Tile>
         </div>
@@ -8452,10 +8893,36 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
 
         {/* BOTTOM TILES */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
-          <Tile label="CORPORATE BOOKINGS" value={corporateTables.length} tone="#000" sub={`${corpPax} pax`} />
+          <Tile label="CORPORATE BOOKINGS" value={corporateTables.length} tone="#000" sub={`${corpTablesHeld} tables · ${corpPax} pax`}>
+            {corporateTables.length > 0 && (
+              <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 6, paddingTop: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "2px 8px", fontSize: 10, fontWeight: 900, color: "#6B6B6B", letterSpacing: 0.5, textTransform: "uppercase", fontFamily: NUM_FONT, borderBottom: "1px solid #E5E5E5", paddingBottom: 4, marginBottom: 4 }}>
+                  <span>Company</span><span style={{ textAlign: "right" }}>Tables</span><span style={{ textAlign: "right" }}>Pax</span>
+                </div>
+                {corporateTables.map((r, i) => {
+                  const rAny = r as any;
+                  const rTables = Array.isArray(rAny.tableIds) ? rAny.tableIds.length : 1;
+                  return (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "2px 8px", fontSize: 11, fontWeight: 700, color: "#000", fontFamily: NUM_FONT, padding: "2px 0", borderBottom: i < corporateTables.length - 1 ? "1px solid #F0F0F0" : "none" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rAny.customerName || rAny.name || "—"}</span>
+                      <span style={{ textAlign: "right", fontWeight: 900 }}>{rTables}</span>
+                      <span style={{ textAlign: "right" }}>{Number(rAny.partySize) || 0}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Tile>
           <Tile label="GUESTLIST / FREE ENTRY" value={guestlistPax} tone="#000" sub="comp entries" />
-          <Tile label="TOTAL PAID ENTRY" value={fmtRs(totalPaidEntry)} tone="#000" sub={`${paidTicketBookings.length + paidEntryBookings.length} paid${(ticketBookings.length + entryBookings.length) > (paidTicketBookings.length + paidEntryBookings.length) ? ` · ${(ticketBookings.length + entryBookings.length) - (paidTicketBookings.length + paidEntryBookings.length)} unpaid` : ""}`} />
-          <Tile label="TOTAL ENTRY-ONLY" value={totalEntryOnly} tone="#000" sub="entry-pass bookings" />
+          <Tile label="TOTAL ENTRY-ONLY" value={totalEntryOnly} tone="#000" sub={`entry-pass bookings${paidEntryBookings.length < totalEntryOnly ? ` · ${totalEntryOnly - paidEntryBookings.length} unpaid` : ""}`}>
+            {totalPaidEntryOnlyAmt > 0 && (
+              <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 4, paddingTop: 8 }}>
+                <div style={{ fontSize: 10, fontWeight: 900, color: "#6B6B6B", letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>ENTRY COLLECTED</div>
+                <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{fmtRs(totalPaidEntryOnlyAmt)}</div>
+                <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>{paidEntryBookings.length} paid entries</div>
+              </div>
+            )}
+          </Tile>
           <Tile label="TOTAL CHECKED IN" value={totalCheckedIn} tone="#FF5733" sub="across all sources" />
         </div>
 

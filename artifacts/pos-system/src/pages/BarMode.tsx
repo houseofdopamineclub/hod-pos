@@ -20,7 +20,7 @@ import {
 import { db } from "@/lib/firebase";
 import { doc as fsDoc, getDoc as fsGetDoc, collection as fsCollection, query as fsQuery, where as fsWhere, limit as fsLimit, getDocs as fsGetDocs } from "firebase/firestore";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
+import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
 import {
   getNextToken, createBillDue, appendBillDue, subscribeBillDue, fetchBillDueForNight, clearBillDue, sendBillDueWhatsApp,
   type BillDueDoc, type BillDueItem, type NcRole, type NcPaymentMethod,
@@ -73,7 +73,7 @@ function VoidWalletBillModal({ tableId, customerName, refundAmount, walletBalanc
     catch (e: unknown) { setErr(e instanceof Error ? e.message : "Failed to void bill."); setBusy(false); }
   };
   return (
-    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onCancel)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#fff", border: "2px solid #000", borderRadius: 14, padding: 20, color: "#000" }}>
         <div style={{ fontSize: 17, fontWeight: 900, color: "#FF5733", marginBottom: 6 }}>🚫 VOID WALLET BILL</div>
         <div style={{ fontSize: 12, color: "#6B6B6B", marginBottom: 10 }}>
@@ -214,7 +214,7 @@ function DiscountModal({ current, onApply, onClose }: {
     onApply(pct);
   };
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.85)", zIndex: 100000, display: "flex", justifyContent: "center", alignItems: "center", padding: 16, backdropFilter: "blur(3px)", fontFamily: "'Space Grotesk',sans-serif" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 420, background: "#fff", border: "2px solid #000", borderRadius: 18, padding: 22, position: "relative", boxShadow: "none", color: "#000" }}>
@@ -2001,7 +2001,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
             squished at the bottom (Khushi bug 2026-05-15 PM). Portaling
             escapes that trap and lets it float over the entire viewport. */}
         {rechargeOpen && typeof document !== "undefined" && document.body && createPortal(
-          <div onClick={() => setRechargeOpen(false)}
+          <div onClick={closeOnBackdrop(() => setRechargeOpen(false))}
             style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.78)", zIndex: 99990, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 40, paddingBottom: 20, paddingLeft: 12, paddingRight: 12, backdropFilter: "blur(3px)", overflowY: "auto", fontFamily: "'Space Grotesk',sans-serif" }}>
             <div ref={rechargeRowRef} onClick={(e) => e.stopPropagation()}
               style={{ width: "100%", maxWidth: 460, maxHeight: "calc(100vh - 60px)", overflowY: "auto", background: "#fff", border: "2px solid #000", borderRadius: 18, padding: 22, position: "relative", boxShadow: "none"}}>
@@ -2542,7 +2542,7 @@ function BarBookingPreviewModal({ cover, onCancel, onOpen }: {
   })();
 
   return createPortal(
-    <div onClick={onCancel}
+    <div onClick={closeOnBackdrop(onCancel)}
       style={{ position: "fixed", inset: 0, background: "rgba(3,3,5,.97)", backdropFilter: "blur(14px) saturate(120%)", WebkitBackdropFilter: "blur(14px) saturate(120%)", zIndex: 9998, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "20px 12px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 540, position: "relative", fontFamily: "'Space Grotesk', sans-serif" }}>
@@ -3634,7 +3634,7 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 100010, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "32px 14px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: "100%", maxWidth: 980, background: "#F4F4F0", border: "2px solid #000", borderRadius: 16, padding: 20, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "none" }}>
@@ -4029,7 +4029,7 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
 
   // ── REVIEW SCREEN ──────────────────────────────────────────────────────
   return createPortal(
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "100%", maxWidth: 640, maxHeight: "94vh", overflowY: "auto", background: "#fff", border: "2px solid #000", borderRadius: 18, padding: 26, color: "#000" }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 18 }}>
           <div style={{ fontSize: 22, fontWeight: 900, color: "#000", letterSpacing: 0.5, textTransform: "uppercase" }}>🎁 NC — NO CHARGE</div>

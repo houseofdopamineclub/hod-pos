@@ -3505,6 +3505,7 @@ export async function createWalkInTicketBooking(input: {
   phone: string;
   guests: number;
   total: number;             // ₹ collected at the door (0 = comp)
+  entryFee?: number;         // non-redeemable entry portion when cover is bundled
   tier?: string;             // e.g. "Stag", "Couple", "Ladies"
   type?: string;             // mirrors customer-site `type` field
   eventId?: string;
@@ -3521,7 +3522,7 @@ export async function createWalkInTicketBooking(input: {
   paymentRef?: string;       // UPI txn ID / card auth / Razorpay paymentId
   paymentSplit?: { cash?: number; upi?: number; card?: number; online?: number };
 }): Promise<{ ref: string }> {
-  const { kind, name, email, phone, guests, total, tier, type, eventId, eventTitle,
+  const { kind, name, email, phone, guests, total, entryFee, tier, type, eventId, eventTitle,
     partySize, tableType, notes, staffName, paymentMethod, paymentRef, paymentSplit } = input;
   if (!name?.trim()) throw new Error("Enter customer name");
   if (!phone?.trim()) throw new Error("Enter phone number");
@@ -3589,6 +3590,7 @@ export async function createWalkInTicketBooking(input: {
     };
   }
   if (entryType) docPayload.entryType = entryType;
+  if (entryFee && entryFee > 0) docPayload.entryFee = Math.round(entryFee);
   if (kind === "group") {
     docPayload.bookMode = "group";
     if (tableType) docPayload.tableType = tableType;
@@ -3757,10 +3759,11 @@ export async function createAggregatorTableBooking(input: {
   externalRef?: string;        // e.g. Zomato booking ID, if known
   notes?: string;
   amenities?: BookingAmenity[];
+  amenitiesPaymentMode?: string;
   staffName: string;
 }): Promise<string> {
   const { aggregator, discountPercent, customerName, phone, email, partySize, date, arrivalTime,
-    tableId, floor, floorLabel, externalRef, notes, amenities, staffName } = input;
+    tableId, floor, floorLabel, externalRef, notes, amenities, amenitiesPaymentMode, staffName } = input;
   if (!aggregator || aggregator === "inhouse") throw new Error("Pick an aggregator");
   if (!customerName?.trim()) throw new Error("Enter customer name");
   if (!date) throw new Error("Pick a date");
@@ -3821,6 +3824,7 @@ export async function createAggregatorTableBooking(input: {
       email: (email || "").trim(),
       amenities: amenities || [],
       amenitiesTotal: sumAmenities(amenities),
+      ...(amenitiesPaymentMode ? { amenitiesPaymentMode } : {}),
       tabRounds: [],
       tabTotal: 0,
       status: "confirmed",
@@ -3848,6 +3852,7 @@ export async function createWalkInTableReservation(input: {
   floorLabel?: string;
   notes?: string;
   amenities?: BookingAmenity[];
+  amenitiesPaymentMode?: string;
   staffName: string;
   // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. Marks that this reservation
   // is paired with a cover/wallet so captain UI shows "wallet available" hint.
@@ -3866,7 +3871,7 @@ export async function createWalkInTableReservation(input: {
   unlockMenu?: boolean;
 }): Promise<string> {
   const { customerName, phone, email, partySize, date, arrivalTime,
-    tableId, floor, floorLabel, notes, amenities, staffName, hasLinkedCover,
+    tableId, floor, floorLabel, notes, amenities, amenitiesPaymentMode, staffName, hasLinkedCover,
     markArrived, unlockMenu } = input;
   if (!customerName?.trim()) throw new Error("Enter customer name");
   if (!date) throw new Error("Pick a date");
@@ -3938,6 +3943,7 @@ export async function createWalkInTableReservation(input: {
     email: (email || "").trim(),
     amenities: amenities || [],
     amenitiesTotal: sumAmenities(amenities),
+    ...(amenitiesPaymentMode ? { amenitiesPaymentMode } : {}),
     tabRounds: [],
     tabTotal: 0,
     status: "confirmed",
@@ -4201,6 +4207,7 @@ export async function createCorporateTableBooking(input: {
   floorLabel?: string;
   notes?: string;
   amenities?: BookingAmenity[];
+  amenitiesPaymentMode?: string;
   // 🔴 2026-05-20 (Khushi) — corporate groups often pay an ADVANCE before
   // the night. Captured here, stored on the reservation, and surfaced in
   // Captain/Admin so it can be deducted from the final bill.
@@ -4210,7 +4217,7 @@ export async function createCorporateTableBooking(input: {
   staffName: string;
 }): Promise<string> {
   const { customerName, phone, email, companyName, partySize, date, arrivalTime,
-    tableId, tableIds, floor, floorLabel, notes, amenities,
+    tableId, tableIds, floor, floorLabel, notes, amenities, amenitiesPaymentMode,
     advanceAmount, advanceMode, advanceRef, staffName } = input;
   if (!customerName?.trim()) throw new Error("Enter contact name");
   if (!companyName?.trim()) throw new Error("Enter company name");
@@ -4258,6 +4265,7 @@ export async function createCorporateTableBooking(input: {
     email: (email || "").trim(),
     amenities: amenities || [],
     amenitiesTotal: sumAmenities(amenities),
+    ...(amenitiesPaymentMode ? { amenitiesPaymentMode } : {}),
     advanceAmount: Math.max(0, Number(advanceAmount) || 0),
     advanceMode: advanceMode || "",
     advanceRef: (advanceRef || "").trim(),
@@ -4400,6 +4408,75 @@ export async function reassignTable(
     tableId: newTableId, floor: newFloor, floorLabel: newFloorLabel,
     reassignedFrom: oldTableId, reassignedAt: new Date().toISOString(), reassignedBy: captainName,
   });
+}
+
+// 🆕 2026-06-19 (Khushi) — corporate bookings hold N tables via a master doc +
+// hold docs. When the door girl taps REASSIGN on a corporate booking she can
+// pick a NEW set of tables. This function:
+//   1. Conflict-checks each newly added table (skips tables already held by us).
+//   2. Updates the master doc (tableId = first table, tableIds = full new set).
+//   3. Deletes ALL old hold docs for this group.
+//   4. Creates fresh hold docs for each extra table (same shape as createCorporateTableBooking).
+// Fail-safe: the settled-table guard prevents reassigning after a bill is paid.
+export async function reassignCorporateTables(
+  masterDocId: string,
+  newTableIds: string[],
+  staffName: string,
+): Promise<void> {
+  if (!newTableIds.length) throw new Error("Pick at least one table");
+  const masterSnap = await getDoc(doc(db, TABLE_RES_COL, masterDocId));
+  if (!masterSnap.exists()) throw new Error("Reservation not found");
+  const master = masterSnap.data() as Record<string, any>;
+  if (!master.isCorporateBooking) throw new Error("Not a corporate booking");
+  if (isTableBillSettled(master as any)) throw new Error("Cannot reassign a settled table");
+  const date = (master.date as string) || getOperationalNightStr();
+  const groupRef = (master.groupRef as string) || masterDocId;
+  const nowMin = doorNowMinutesIST();
+  // All doc ids belonging to this group — excluded from conflict checks.
+  const holdSnap = await getDocs(
+    query(collection(db, TABLE_RES_COL), where("groupRef", "==", groupRef), where("isGroupHold", "==", true)),
+  );
+  const groupDocIds = new Set([masterDocId, ...holdSnap.docs.map((d) => d.id)]);
+  const currentTableIds = new Set<string>(
+    ((master.tableIds as string[] | undefined) || (master.tableId ? [master.tableId as string] : [])),
+  );
+  // Conflict-check tables that are NEW to this group.
+  for (const tId of newTableIds) {
+    if (currentTableIds.has(tId)) continue;
+    const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tId), where("date", "==", date));
+    const existing = await getDocs(q2);
+    const others = existing.docs
+      .filter((d) => !groupDocIds.has(d.id))
+      .map((d) => ({ _docId: d.id, ...(d.data() as any) })) as HodTableReservation[];
+    if (doorTableOccupantAt(tId, nowMin, others)) throw new Error(`Table ${tId} is already occupied`);
+  }
+  const masterTable = newTableIds[0];
+  const nowIso = new Date().toISOString();
+  await updateDoc(doc(db, TABLE_RES_COL, masterDocId), {
+    tableId: masterTable, tableIds: newTableIds,
+    reassignedAt: nowIso, reassignedBy: staffName,
+  });
+  // Delete all old hold docs.
+  for (const hd of holdSnap.docs) await deleteDoc(doc(db, TABLE_RES_COL, hd.id));
+  // Create new hold docs for each extra table.
+  for (const tId of newTableIds.slice(1)) {
+    const holdRef = `${groupRef}-T-${tId.replace(/[^A-Za-z0-9]/g, "")}`;
+    await setDoc(doc(db, TABLE_RES_COL, holdRef), {
+      tableId: tId,
+      floor: master.floor || "", floorLabel: master.floorLabel || "",
+      date,
+      customerName: master.customerName || "", companyName: master.companyName || "",
+      phone: master.phone || "", partySize: 0,
+      arrivalTime: master.arrivalTime || "",
+      bookingRef: holdRef, groupRef,
+      bookedAt: nowIso, source: "corporate", bookMode: "group",
+      notes: master.notes || "", email: "",
+      amenities: [], amenitiesTotal: 0,
+      advanceAmount: 0, advanceMode: "", advanceRef: "", advancePaidAt: "",
+      tabRounds: [], tabTotal: 0, status: "confirmed",
+      createdBy: staffName, isCorporateBooking: true, isGroupHold: true,
+    });
+  }
 }
 
 export async function createProxyTable(
@@ -4795,7 +4872,27 @@ export async function lookupBooking(ref: string): Promise<HodBooking | null> {
 
   const q1 = query(collection(db, BOOKINGS_COL), where("ref", "==", ref), limit(1));
   const s1 = await getDocs(q1);
-  if (!s1.empty) return { id: s1.docs[0].id, ...s1.docs[0].data() } as HodBooking;
+  if (!s1.empty) {
+    const _d = s1.docs[0].data() as any;
+    // 🆕 2026-06-18 v3.315 (Khushi) — a GUESTLIST signup ALSO writes a bookings
+    // doc (entryType "guestlist_*"). This BOOKINGS query matches BEFORE the
+    // guestlist-collection branch below, so a SCANNED guestlist QR used to
+    // return WITHOUT `_isGuestList` — the door scan modal then showed the paid
+    // "CHECK IN GUEST" flow instead of the FREE-ENTRY guestlist modal. Tag the
+    // origin here so the scan modal matches the search-row guestlist modal
+    // exactly: `_isGuestList` flips the CTA to FREE ENTRY; `_glSource:"booking"`
+    // tells the FREE ENTRY handler to check in via the bookings collection (the
+    // guestlist collection has no doc for these); `_glDocId` mirrors adapt()
+    // (the bookings doc id) so cover-activation's check-in mirror is identical;
+    // `joinedAt` (from bookedAt) feeds the SIGNED UP row. Fail-open: a
+    // non-guestlist booking is byte-unchanged.
+    const _isGl = String(_d.entryType || "").startsWith("guestlist_");
+    return {
+      id: s1.docs[0].id,
+      ..._d,
+      ...(_isGl ? { _isGuestList: true, _glSource: "booking", _glDocId: s1.docs[0].id, joinedAt: _d.joinedAt || _d.bookedAt || "" } : {}),
+    } as HodBooking;
+  }
 
   const q2 = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", ref), limit(1));
   const s2 = await getDocs(q2);
@@ -4819,7 +4916,10 @@ export async function lookupBooking(ref: string): Promise<HodBooking | null> {
   }
 
   const glDoc = await getDoc(doc(db, GUESTLIST_COL, ref));
-  if (glDoc.exists()) return { id: glDoc.id, ...glDoc.data(), _isGuestList: true } as HodBooking;
+  if (glDoc.exists()) {
+    const _gd = glDoc.data() as any;
+    return { id: glDoc.id, ..._gd, _isGuestList: true, _glSource: "guestlist", _glDocId: glDoc.id } as HodBooking;
+  }
   return null;
 }
 

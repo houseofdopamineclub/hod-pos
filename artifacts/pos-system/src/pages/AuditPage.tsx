@@ -7,6 +7,7 @@ import {
 } from "@/lib/firestore-hod";
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { closeOnBackdrop } from "@/lib/centered-ui";
 
 const GOLD = "#C9A84C";
 const RED = "#EF4444";
@@ -175,7 +176,7 @@ function DetailModal({ ev, fmt, onClose }: { ev: AuditEvent; fmt: (iso: string) 
                      : ev.kind === "kot" ? `${ev.tableId}${ev.customerName ? ` · ${ev.customerName}` : ""}` : "";
   const money = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN")}`;
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", border: "3px solid #000", boxShadow: "6px 6px 0px #000", width: "100%", maxWidth: 460, maxHeight: "85vh", overflowY: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "2px solid #000", background: isBill ? "#F2C744" : "#6B9BE8" }}>
           <div style={{ minWidth: 0 }}>

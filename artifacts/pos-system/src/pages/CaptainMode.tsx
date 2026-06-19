@@ -54,7 +54,7 @@ import { useEffectiveMenu } from "@/lib/use-effective-menu";
 import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
-import { centeredPinPrompt, centeredAlert } from "@/lib/centered-ui";
+import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
 // Dynamic Link (those were shut down 2025-08-25).
@@ -325,7 +325,7 @@ function VoidBillModal({ tableId, customerName, billTotal, onCancel, onConfirm }
     catch (e: unknown) { setErr(e instanceof Error ? e.message : "Failed to void bill."); setBusy(false); }
   };
   return (
-    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 5000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={closeOnBackdrop(onCancel)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 5000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: "#fff", border: "2px solid #FF5733", borderRadius: 14, padding: 20, color: "#000" }}>
         <div style={{ fontSize: 20, fontWeight: 900, color: "#FF5733", marginBottom: 6 }}>🚫 VOID PRINTED BILL</div>
         <div style={{ fontSize: 14, color: "#6B6B6B", marginBottom: 10 }}>
@@ -1706,7 +1706,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           Black/red/gold gradient · ₹ amount HUGE · two big buttons. Sits at
           z-10001 (above MarkPaidModal 9999 + WalletScanModal 10000). */}
       {showCollectConfirm && (
-        <div onClick={() => setShowCollectConfirm(false)}
+        <div onClick={closeOnBackdrop(() => setShowCollectConfirm(false))}
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", backdropFilter: "blur(8px)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10001, padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()}
@@ -3836,7 +3836,7 @@ function BillPreviewModal({ r, captainName, snap, busy, onCancel, onConfirm }: {
     </div>
   );
   return (
-    <div onClick={() => { if (!busy) onCancel(); }}
+    <div onClick={closeOnBackdrop(() => { if (!busy) onCancel(); })}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ background: "#fff", border: "2px solid #000", borderRadius: 14, maxWidth: 460, width: "100%", maxHeight: "92vh", overflow: "auto", boxShadow: "none" }}>
@@ -3954,7 +3954,7 @@ function WhatsAppQrFallbackModal({ url, reason, customerName, tableId, onClose }
   };
 
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9999,
         display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()}
@@ -4207,7 +4207,7 @@ function BookingDetailModal({ r, captainName, playAlert, existingTables, allRese
   existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean; onClose: () => void;
 }) {
   return (
-    <div onClick={onClose}
+    <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0,
         background: "#F4F4F0",
         zIndex: 9998,
@@ -5397,7 +5397,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       )}
       {showTableQrModal && (
-        <div onClick={() => setShowTableQrModal(false)} style={{
+        <div onClick={closeOnBackdrop(() => setShowTableQrModal(false))} style={{
           position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.55)",
           display: "flex", alignItems: "flex-start", justifyContent: "center",
           padding: "60px 12px 24px", overflowY: "auto",

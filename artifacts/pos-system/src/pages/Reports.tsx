@@ -694,7 +694,12 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
     return m;
   }, [orphans]);
 
-  const tableRows = useMemo(() => reservations.map(r => buildTableRow(r, orphanByPhone)), [reservations, orphanByPhone]);
+  // 🔴 BUGFIX 2026-06-19 — subscription fetches today+next (midnight-straddle),
+  // but tomorrow's genuine bookings were leaking into today's report. Filter to
+  // today's date only so the count matches Live Reports.
+  const tableRows = useMemo(() => reservations
+    .filter(r => !today || !(r.date) || (r.date as string).slice(0, 10) === today)
+    .map(r => buildTableRow(r, orphanByPhone)), [reservations, orphanByPhone, today]);
   const bookingsById = useMemo(() => { const m = new Map<string, HodBooking>(); for (const b of bookings) m.set(b.id, b); return m; }, [bookings]);
   const guestByName = useMemo(() => { const m = new Map<string, HodGuestlistEntry>(); for (const g of guestlist) m.set((g.name || "").toLowerCase().trim(), g); return m; }, [guestlist]);
   const walletRows = useMemo(() => {
@@ -1558,7 +1563,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   <td style={{ padding: "6px 6px" }}>{w.agent || "—"}</td>
                   <td style={{ padding: "6px 6px", color: "#555" }}>{fmtTime(w.activatedAt)}</td>
                   <td style={{ padding: "6px 6px", color: w.checkedIn ? GREEN : "#ccc" }}>{w.checkedIn ? "✓" : "—"}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverActivated.toLocaleString()}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{Math.max(0, w.coverActivated - w.topUpTotal).toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: w.topUpTotal > 0 ? GOLD : "#ccc" }}>{w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverUsed.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: w.coverBalance > 0 ? GREEN : "#ccc", fontWeight: 800 }}>₹{w.coverBalance.toLocaleString()}</td>
