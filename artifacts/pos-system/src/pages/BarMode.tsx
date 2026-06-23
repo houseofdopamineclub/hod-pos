@@ -465,7 +465,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // must NEVER be routed into the "recharge wallet" flow. Instead a deficit triggers
   // a COLLECT-&-SEND payment screen (collect the exact bill cash/UPI/card → send the
   // order in one tap). Detect by the cover's walkin source.
-  const isWalkinCover = String((cv as any).source || "").toLowerCase().indexOf("walkin") !== -1;
+  // 🆕 2026-06-23 (Khushi) — FIX: "walkin_door_cover_table" is a FUNDED WALLET
+  // created via ACTIVATE COVER+TABLE in Door Mode. It contains "walkin" in the
+  // source string but the customer has a real prepaid balance and must get the
+  // RECHARGE flow, NOT the cash walk-in COLLECT-&-SEND flow. Exclude it here so
+  // RECHARGE shows for door-created table+cover guests; only bare "walkin" and
+  // "walkin_bar" (pure cash walk-ins with no pre-loaded balance) get COLLECT.
+  const _cvSrc = String((cv as any).source || "").toLowerCase();
+  const isWalkinCover = _cvSrc.indexOf("walkin") !== -1 && _cvSrc !== "walkin_door_cover_table";
   const isExpired = cv.expiresAt ? new Date(cv.expiresAt).getTime() < Date.now() : false;
 
   // The customer wallet writes new orders into tabRounds[status='preparing'] (current flow).

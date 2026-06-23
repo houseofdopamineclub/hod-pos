@@ -3404,9 +3404,37 @@ export async function createWalkInTable(
   const arrTime = arrivalTimeOverride.trim() || now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   const ref = mintHodRef("table");
 
-  const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tableId), where("date", "==", date), limit(1));
+  // Check for a TIME-SLOT conflict, not merely any same-day doc.
+  // A 3 PM booking on SMK4 must not block an 11 PM walk-in.
+  // Window: [arrTime − 30 min, arrTime + 120 min] — same as CaptainMode occupancy.
+  const _parseMin = (t?: string): number | null => {
+    if (!t) return null;
+    const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+    if (!m) return null;
+    let h = parseInt(m[1], 10); const mm = parseInt(m[2], 10);
+    const ap = m[3]?.toUpperCase();
+    if (ap === "PM" && h < 12) h += 12;
+    if (ap === "AM" && h === 12) h = 0;
+    return h * 60 + mm;
+  };
+  const _LEAD = 30; const _SLOT = 120;
+  const newMin = _parseMin(arrTime);
+  const q2 = query(collection(db, TABLE_RES_COL), where("tableId", "==", tableId), where("date", "==", date));
   const existing = await getDocs(q2);
-  if (!existing.empty) throw new Error(`Table ${tableId} is already occupied today`);
+  for (const snap of existing.docs) {
+    const d2 = snap.data();
+    if (isTableBillSettled(d2)) continue;
+    if (d2.isGroupHold) continue;
+    const exMin = _parseMin(d2.arrivalTime as string | undefined);
+    if (exMin === null || newMin === null) {
+      throw new Error(`Table ${tableId} is already occupied today`);
+    }
+    const exWinStart = exMin - _LEAD; const exWinEnd = exMin + _SLOT;
+    const nwWinStart = newMin - _LEAD; const nwWinEnd = newMin + _SLOT;
+    if (nwWinStart < exWinEnd && exWinStart < nwWinEnd) {
+      throw new Error(`Table ${tableId} is already booked at ${d2.arrivalTime} — time slot overlaps`);
+    }
+  }
 
   // Write covers doc FIRST so if rules/network reject it, the tableReservations
   // write below never runs and the captain sees the failure instead of getting
@@ -3761,9 +3789,14 @@ export async function createAggregatorTableBooking(input: {
   amenities?: BookingAmenity[];
   amenitiesPaymentMode?: string;
   staffName: string;
+  /** When true (same-day, arriving now): stamp actualArrivalTime + write the cover doc
+   *  so the customer menu unlocks immediately — same as createWalkInTableReservation. */
+  markArrived?: boolean;
+  unlockMenu?: boolean;
 }): Promise<string> {
   const { aggregator, discountPercent, customerName, phone, email, partySize, date, arrivalTime,
-    tableId, floor, floorLabel, externalRef, notes, amenities, amenitiesPaymentMode, staffName } = input;
+    tableId, floor, floorLabel, externalRef, notes, amenities, amenitiesPaymentMode, staffName,
+    markArrived, unlockMenu } = input;
   if (!aggregator || aggregator === "inhouse") throw new Error("Pick an aggregator");
   if (!customerName?.trim()) throw new Error("Enter customer name");
   if (!date) throw new Error("Pick a date");

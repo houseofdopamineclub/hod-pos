@@ -28,10 +28,13 @@ import { subscribeToEdcDefaultVendor } from "@/lib/firestore";
 const DOOR_MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
 const DOOR_DISCOUNT_PIN_DELTA = 5;
 async function requireDoorManagerPin(reason: string): Promise<boolean> {
-  const pin = window.prompt(`🔒 Manager PIN required\n\n${reason}\n\nEnter 4-digit Manager PIN:`);
+  const pin = await centeredPinPrompt(`🔒 Manager PIN required\n\n${reason}`, true);
   if (!pin) return false;
   const h = await sha256(pin.trim());
-  if (h !== DOOR_MANAGER_HASH) { alert("❌ Wrong Manager PIN."); return false; }
+  if (h !== DOOR_MANAGER_HASH) {
+    await centeredAlert("❌ Wrong Manager PIN", "The PIN you entered is incorrect. Ask the manager to enter the correct PIN.", "error", true);
+    return false;
+  }
   return true;
 }
 import { ALL_TABLES, SECTION_LABELS } from "@/lib/tables-config";
@@ -162,6 +165,13 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   const [existing, setExisting] = useState<HodCover | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 🆕 2026-06-23 (Khushi) — LOCK cover activation when orders are already
+  // running on this table. tabRounds present = captain has placed at least
+  // one order → activating cover now means the credit CANNOT attach to those
+  // existing rounds (Bar Mode skips rounds that pre-date the cover activation).
+  // Door girl gets a hard blocked screen instead of the activation form.
+  // Only applies to table bookings (_isTable flag from TablesTab synthetic booking).
+  const [ordersRunning, setOrdersRunning] = useState(false);
   const today = getOperationalNightStr();
   // 🔴 BUGFIX 2026-05-19 (Khushi LIVE-NIGHT) — bot-created tickets (e.g.
   // TICKET-AJAY-19MAY-776) store date as "19/05/2026" / "19-05-2026" /
@@ -262,6 +272,10 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           const isRealActivation = !!cv && ((cv.coverActivated || 0) > 0 || (cv.coverBalance || 0) > 0);
           setExisting(isRealActivation ? cv : null);
           if (cv) setEditAmt(String(cv.coverActivated || 0));
+          // 🆕 2026-06-23 (Khushi) — lock for tables with running orders
+          if ((booking as any)._isTable && Array.isArray(cv?.tabRounds) && cv.tabRounds.length > 0) {
+            setOrdersRunning(true);
+          }
         }
       } catch {}
       if (!cancelled) setLoading(false);
@@ -435,6 +449,17 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           </div>
         ) : loading ? (
           <div style={{ textAlign: "center", padding: 24, color: "#6B6B6B", fontSize: 12 }}>Checking cover status…</div>
+        ) : ordersRunning ? (
+          <div style={{ background: "#FF5733", border: "2px solid #000", borderRadius: 8, padding: 18, color: "#fff", textAlign: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 8 }}>🔒 COVER LOCKED</div>
+            <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.5 }}>
+              This table already has orders running.<br />
+              Cover credit CANNOT apply to existing rounds — the captain must offset manually at settlement.
+            </div>
+            <div style={{ marginTop: 14, fontSize: 12, fontWeight: 700, background: "rgba(0,0,0,0.18)", borderRadius: 6, padding: "10px 12px" }}>
+              If cover was supposed to be collected, ask the <strong>CAPTAIN</strong> to handle it at the bill — they can adjust the discount at settlement.
+            </div>
+          </div>
         ) : existing ? (
           <>
             <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, padding: 16, marginBottom: 12 }}>
@@ -486,6 +511,13 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           </>
         ) : (
           <>
+            {/* ⚠️ 2026-06-23 — Late-activation warning. Shown on ALL activations
+                so door staff always knows: activate cover BEFORE ordering.
+                If activated late, past rounds are NOT retroactively deducted
+                from the cover — captain must manually offset at settlement. */}
+            <div style={{ background: "#FFF3CD", border: "2px solid #856404", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#856404", lineHeight: 1.5 }}>
+              ⚠️ <strong>Activate cover BEFORE the guest orders.</strong> If activated after orders are placed, the cover credit will NOT auto-apply to existing rounds — the captain must manually offset it at bill settlement.
+            </div>
             <div style={{ fontSize: 13, fontWeight: 800, color: "#000", letterSpacing: 1.5, marginBottom: 8 }}>TONIGHT'S COVER (₹)</div>
             <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 1499" min={0} max={50000}
               style={{ width: "100%", padding: "16px 16px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", marginBottom: 16, boxSizing: "border-box", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }} />
@@ -2510,20 +2542,40 @@ function BookingDetailModal({
   // v3.91 — also read `_tableId` (lookupBooking sets this on TBL-/HODTAB
   // scanner results; `.tableId` is empty on the shim).
   const _liveTableIdRaw = reassignedTableId || String((booking as any).tableId || (booking as any)._tableId || "").trim();
+  // Lock Reassign only when arrived AND a table is actually assigned.
+  // If arrived but NO table: keep Reassign open so staff can still assign one
+  // (captain can't see an unassigned arrived guest on the floor map).
+  const _reassignLocked = _alreadyArrived && !!_liveTableIdRaw;
   // 🔴 2026-05-21 (Khushi) — Live cover lookup so the modal's PaidBadge
   // matches the row badge (was showing "FREE ENTRY" while row showed
   // "✓ PAID ₹999"). Subscribe to the tonight-wide covers feed and pick
   // the matching one by ref/bookingId. Fail-open: if subscription dies,
   // badge falls back to its legacy logic (paymentId / guestlist).
   const [modalCover, setModalCover] = useState<HodCover | null>(null);
+  // 🆕 v3.367 — covers whose `date` field was written in a different format
+  // (or via a code path that skips `date`) won't appear in the nightly
+  // subscribeToCoversForNight query (filtered by date==night). Keep a
+  // one-shot GET result as a stable fallback so the subscription never
+  // overwrites a found cover with null.
+  const _fallbackCoverRef = useRef<HodCover | null>(null);
   useEffect(() => {
+    const bookingRefKey = booking.ref || booking.id;
+    if (bookingRefKey) {
+      getCoverForBooking(bookingRefKey).then((c) => {
+        _fallbackCoverRef.current = c;
+        // Seed state now (subscription may have already fired with null).
+        setModalCover((prev) => prev ?? c);
+      }).catch(() => {});
+    }
     // 🔴 2026-05-22 — tonight-scoped feed (was reading WHOLE covers collection).
     const unsub = subscribeToCoversForNight(getOperationalNightStr(), (all) => {
       // Match EITHER booking identifier (ref or doc id) against EITHER cover
       // identifier (ref or bookingId) — covers all 4 cross-mapping cases.
       const keys = new Set([booking.ref, booking.id].filter(Boolean) as string[]);
-      const c = all.find((x) => (x.ref && keys.has(x.ref)) || (x.bookingId && keys.has(x.bookingId))) || null;
-      setModalCover(c);
+      const subCover = all.find((x) => (x.ref && keys.has(x.ref)) || (x.bookingId && keys.has(x.bookingId))) || null;
+      // Prefer subscription result (real-time); fall back to direct GET if
+      // the nightly feed misses this cover (date field mismatch).
+      setModalCover(subCover ?? _fallbackCoverRef.current);
     });
     return unsub;
   }, [booking.ref, booking.id]);
@@ -2579,9 +2631,27 @@ function BookingDetailModal({
             // CheckInPaymentModal.handleConfirm — so once `modalCover` exists,
             // check-in has happened and ACTIVATE COVER is safe to enable.
             const isEntryOnly = isOnlyEntryBooking(booking) && !booking.checkedIn && !modalCover;
+            // 🆕 2026-06-23 — Corporate table bookings do NOT get a walk-in cover
+            // (they pay an advance + settle the full bill at the table). The ACTIVATE
+            // COVER button is locked grey so door staff can't accidentally load a
+            // cover wallet that will never be used.
+            const isCorpBooking = (booking as any).source === "corporate" ||
+              (booking as any).isCorporateBooking === true ||
+              (booking as any).bookMode === "group";
+            const coverLocked = isEntryOnly || isCorpBooking;
+            const coverLockedReason = isCorpBooking
+              ? "CORPORATE BOOKING — no cover wallet. Guest settles the full bill at the table."
+              : "CHECK IN FIRST — entry charge must be collected before cover";
             return (
               <button
                 onClick={() => {
+                  if (isCorpBooking) {
+                    showAppAlert(
+                      "Corporate bookings do NOT get a cover wallet.\n\nThe guest pays an advance when booking and settles the remaining bill at the table — cover credit cannot apply.",
+                      "🔒 COVER LOCKED — Corporate Booking"
+                    );
+                    return;
+                  }
                   if (isEntryOnly) return;
                   // 🆕 v3.73 — table-assigned gate (mirror openCheckInModal).
                   const _isTbl = !!((booking as any)._isTable || (booking as any).tableType || (booking as any).bookMode === "group");
@@ -2602,19 +2672,22 @@ function BookingDetailModal({
                   // of this modal dismisses it.
                   onCover(booking);
                 }}
-                disabled={isEntryOnly}
-                title={isEntryOnly ? "CHECK IN GUEST FIRST — entry charge must be collected before cover" : undefined}
+                title={coverLockedReason}
                 style={{
                   padding: "16px 12px", borderRadius: 6,
-                  background: isEntryOnly ? "#fff" : "#FF90E8",
-                  border: isEntryOnly ? "2px dashed #000" : "2px solid #000",
-                  color: isEntryOnly ? "#6B6B6B" : "#000",
+                  background: coverLocked ? "#fff" : "#FF90E8",
+                  border: coverLocked ? "2px dashed #000" : "2px solid #000",
+                  color: coverLocked ? "#B0B0B0" : "#000",
                   fontSize: 15, fontWeight: 900,
-                  cursor: isEntryOnly ? "not-allowed" : "pointer",
+                  cursor: coverLocked ? "not-allowed" : "pointer",
                   letterSpacing: .4,
                   lineHeight: 1.15,
                 }}>
-                {isEntryOnly ? <>💰 ACTIVATE COVER<div style={{ fontSize: 9, fontWeight: 800, marginTop: 4, letterSpacing: .6 }}>CHECK IN FIRST</div></> : "💰 ACTIVATE COVER"}
+                {isCorpBooking
+                  ? <>💰 ACTIVATE COVER<div style={{ fontSize: 9, fontWeight: 800, marginTop: 4, letterSpacing: .6 }}>CORP BOOKING</div></>
+                  : isEntryOnly
+                    ? <>💰 ACTIVATE COVER<div style={{ fontSize: 9, fontWeight: 800, marginTop: 4, letterSpacing: .6 }}>CHECK IN FIRST</div></>
+                    : "💰 ACTIVATE COVER"}
               </button>
             );
           })()}
@@ -2655,27 +2728,23 @@ function BookingDetailModal({
               <style>{`@keyframes hod_reassign_pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,144,232,.85),0 0 0 0 rgba(255,144,232,.5);transform:scale(1)}50%{box-shadow:0 0 0 10px rgba(255,144,232,0),0 0 22px 4px rgba(255,144,232,.7);transform:scale(1.025)}}`}</style>
               <button
                 onClick={() => {
-                  if (_alreadyArrived) {
+                  if (_reassignLocked) {
                     showAppAlert("Reassign locked here — KOTs are tagged to this table.\n\nAsk the CAPTAIN to move the guest from Captain Mode (re-stamps active rounds).", "🪑 GUEST ALREADY ARRIVED AT THIS TABLE");
                     return;
                   }
                   setReassignOpen(true);
                 }}
-                disabled={_alreadyArrived}
-                title={_alreadyArrived ? "Guest already arrived — captain handles table moves" : "Move guest to a different table"}
+                disabled={_reassignLocked}
+                title={_reassignLocked ? "Guest already arrived — captain handles table moves" : (!_liveTableIdRaw ? "No table assigned yet — tap to assign one" : "Move guest to a different table")}
                 style={{
                   gridColumn: "1 / -1",
                   padding: "18px 12px", borderRadius: 6,
-                  background: _alreadyArrived
-                    ? "#fff"
-                    : (!_liveTableIdRaw
-                        ? "#FF90E8"
-                        : "#FF90E8"),
-                  border: _alreadyArrived ? "2px dashed #000" : "2px solid #000",
-                  color: _alreadyArrived ? "#6B6B6B" : "#000",
+                  background: _reassignLocked ? "#fff" : "#FF90E8",
+                  border: _reassignLocked ? "2px dashed #000" : "2px solid #000",
+                  color: _reassignLocked ? "#6B6B6B" : "#000",
                   fontSize: 16, fontWeight: 900, letterSpacing: .6,
-                  cursor: _alreadyArrived ? "not-allowed" : "pointer",
-                  animation: (!_alreadyArrived && !_liveTableIdRaw) ? "hod_reassign_pulse 1.1s ease-in-out infinite" : undefined,
+                  cursor: _reassignLocked ? "not-allowed" : "pointer",
+                  animation: (!_reassignLocked && !_liveTableIdRaw) ? "hod_reassign_pulse 1.1s ease-in-out infinite" : undefined,
                   textShadow: undefined,
                 }}>
                 🔄 REASSIGN TABLE
@@ -3385,6 +3454,7 @@ const SRC_STYLES: Record<string, { label: string; color: string; bg: string; bor
   zomato:       { label: "ZOMATO",      color: "#E23744", bg: "#fff", border: "#000" },
   whatsapp_bot: { label: "WA BOT",      color: "#23A094", bg: "#fff", border: "#000" },
   inhouse:      { label: "IN-HOUSE",    color: "#3D3D3D", bg: "#fff", border: "#000" },
+  others:       { label: "OTHERS",      color: "#7C3AED", bg: "#fff", border: "#000" },
 };
 
 function ReassignModal({ reservation, agentName, onClose, onReassigned, isCorporate }: {
@@ -3654,11 +3724,27 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   const [reviewOnly, setReviewOnly] = useState(false);
   const [reassignFor, setReassignFor] = useState<HodTableReservation | null>(null);
   const [arrBusy, setArrBusy] = useState("");
+  // 🆕 2026-06-23 (Khushi) — in-app confirm for aggregator ARRIVED button.
+  // Replaces the alien browser confirm() popup with a HOD-styled overlay.
+  const [aggArrivedPending, setAggArrivedPending] = useState<HodTableReservation | null>(null);
   const [cancelBusy, setCancelBusy] = useState("");
   // 🔴 2026-05-16 (Khushi): door tables redesign — compact rows mirroring
   // captain mode (BookingRow in CaptainMode.tsx ~2842). Selected row opens
   // a detail modal with the full meta + action buttons.
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+  // 🆕 v3.368 — cover lookup for the currently-expanded row so ACTIVATE COVER
+  // hides itself when the cover is already live (same fix as BookingDetailModal
+  // v3.367, which only covered the Tickets tab path). Direct GET — no nightly
+  // subscription needed (Tables tab doesn't have a covers feed).
+  const [expandedCover, setExpandedCover] = useState<HodCover | null>(null);
+  useEffect(() => {
+    if (!expandedDocId) { setExpandedCover(null); return; }
+    const row = reservations.find((x) => x._docId === expandedDocId);
+    const refKey = row ? (row.bookingRef || row._docId) : expandedDocId;
+    if (!refKey) return;
+    setExpandedCover(null);
+    getCoverForBooking(refKey).then((c) => setExpandedCover(c)).catch(() => setExpandedCover(null));
+  }, [expandedDocId]); // eslint-disable-line react-hooks/exhaustive-deps
   // 🔴 Khushi 16 May — Zomato/aggregator email parsers only reliably extract
   // the guest's name. Pax / arrival time / date must be hand-edited at the
   // door, so the modal has inline-editable inputs backed by these drafts.
@@ -3789,15 +3875,18 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   // 2026-05-18 — `whatsapp_bot` added as a 4th aggregator-style source so bot
   // bookings get the green WA BOT chip + auto cover-mint on arrival path
   // instead of being misclassified as in-house in the source filter chips.
-  const AGG_KEYS = new Set(["swiggy", "eazydiner", "zomato", "whatsapp_bot"]);
-  const canonicalAggKey = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse" => {
+  const AGG_KEYS = new Set(["swiggy", "eazydiner", "zomato", "whatsapp_bot", "others"]);
+  const canonicalAggKey = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "others" | "inhouse" => {
     const s = (raw || "").toLowerCase().trim();
-    if (!s) return "inhouse";
+    if (!s || s === "inhouse" || s === "in-house") return "inhouse";
     if (s.includes("zomato")) return "zomato";
     if (s.includes("swiggy")) return "swiggy";          // catches swiggy-dineout, swiggy-scenes
     if (s.includes("eazy") || s.includes("easydiner")) return "eazydiner";
     if (s.includes("whatsapp") || s === "wa_bot") return "whatsapp_bot";
-    return "inhouse";
+    // Magicpin, "others", and any future aggregator option that isn't one of the
+    // 4 named aggregators → "others" chip. This means new aggregators added to
+    // AGGREGATOR_OPTIONS automatically land in OTHERS without a code change.
+    return "others";
   };
   const effectiveSrc = (r: HodTableReservation) =>
     canonicalAggKey(r.aggregator || r.source || "inhouse");
@@ -3806,9 +3895,12 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     : aggFilter === "inhouse"
       ? active.filter((r) => !AGG_KEYS.has(effectiveSrc(r)))
       : active.filter((r) => effectiveSrc(r) === aggFilter);
+  // 🆕 2026-06-23 (Khushi) — also treat hasLinkedCover as arrived (menu unlocked
+  // for this table booking = guest IS here, even when actualArrivalTime not stamped).
+  const _isArrived = (r: typeof active[0]) => !!r.actualArrivalTime || !!(r as any).hasLinkedCover;
   const byArrival =
-    arrivalFilter === "arrived" ? byAgg.filter((r) => r.actualArrivalTime) :
-    arrivalFilter === "pending" ? byAgg.filter((r) => !r.actualArrivalTime) :
+    arrivalFilter === "arrived" ? byAgg.filter(_isArrived) :
+    arrivalFilter === "pending" ? byAgg.filter((r) => !_isArrived(r)) :
     byAgg;
   // 🆕 NEEDS REVIEW filter — when toggled on, show only rows flagged for manual
   // review. Fail-open: undefined flag → falsy → not in the review subset.
@@ -3818,7 +3910,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   // sit at the top. Within each group: earliest arrivalTime (slot) first so
   // the captain sees the next expected guest at the top.
   filtered.sort((a, b) => {
-    const ad = !!a.actualArrivalTime, bd = !!b.actualArrivalTime;
+    const ad = _isArrived(a), bd = _isArrived(b);
     if (ad !== bd) return ad ? 1 : -1;
     const at = String(a.arrivalTime || "");
     const bt = String(b.arrivalTime || "");
@@ -3827,7 +3919,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     return at.localeCompare(bt);
   });
 
-  const arrivedCount = active.filter((r) => r.actualArrivalTime).length;
+  const arrivedCount = active.filter(_isArrived).length;
   const pendingCount = active.length - arrivedCount;
   // 🆕 Count of rows still needing manual review (missing pax/time/phone etc).
   const reviewCount = active.filter((r) => r.needsManualReview).length;
@@ -3840,7 +3932,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   }, [reviewOnly, reviewCount]);
 
   // Per-aggregator booking counts for the chip badges + mini dashboard.
-  const countBySrc: Record<string, number> = { all: active.length, inhouse: 0, swiggy: 0, eazydiner: 0, zomato: 0 };
+  const countBySrc: Record<string, number> = { all: active.length, inhouse: 0, swiggy: 0, eazydiner: 0, zomato: 0, others: 0 };
   active.forEach((r) => {
     const s = effectiveSrc(r);
     if (AGG_KEYS.has(s)) countBySrc[s] = (countBySrc[s] || 0) + 1;
@@ -3872,7 +3964,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
   // + WhatsApp for aggregators). Backdrop tap = dismiss; OK button = dismiss.
   const [arrivedConfirm, setArrivedConfirm] = useState<{ name: string; arrTime: string; date: string; tableId: string } | null>(null);
 
-  const handleArrived = async (r: HodTableReservation) => {
+  const handleArrived = async (r: HodTableReservation, skipAggConfirm = false) => {
     // 🆕 2026-05-27 v3.71 (Khushi LIVE-NIGHT) — table-assigned gate at the door.
     // Same root cause as v3.68 captain ADD ORDER block: marking a guest
     // arrived without a table id leaves the cover orphaned — captain can't
@@ -3894,14 +3986,10 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     const isAggregator = src !== "inhouse";
     // Aggregator arrival mints a cover + sends WhatsApp = irreversible side effects.
     // Require explicit confirmation to prevent accidental fire.
-    if (isAggregator) {
-      const srcLabel = SRC_STYLES[src]?.label || src.toUpperCase();
-      const confirmed = confirm(
-        `Mark ${r.customerName || "guest"} as arrived?\n\n` +
-        `This will mint a wallet and send a WhatsApp to ${r.phone || "(no phone)"} ` +
-        `via ${srcLabel}. This action cannot be undone from the door tablet.`
-      );
-      if (!confirmed) return;
+    if (isAggregator && !skipAggConfirm) {
+      // Show in-app confirm instead of browser confirm() — no alien grey popup.
+      setAggArrivedPending(r);
+      return;
     }
     setArrBusy(r._docId);
     let arrTime = "";
@@ -4176,7 +4264,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
           ALL is reachable by re-tapping the active chip; a dedicated ALL chip
           is kept on the left so it's always one tap away. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-        {(["all", "inhouse", "zomato", "swiggy", "eazydiner", "cancelled"] as const).map((k) => {
+        {(["all", "inhouse", "zomato", "swiggy", "eazydiner", "others", "cancelled"] as const).map((k) => {
           const ss = k === "all" || k === "cancelled" ? null : SRC_STYLES[k];
           const c = k === "cancelled" ? "#E11D48" : (ss?.color || "#000");
           const on = aggFilter === k;
@@ -4274,7 +4362,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         const isAggregator = src !== "inhouse";
         const aggLabel = AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName.toUpperCase();
         const aggDiscount = (r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName);
-        const arrived = !!r.actualArrivalTime;
+        const arrived = !!r.actualArrivalTime || !!(r as any).hasLinkedCover;
         const needsReview = !!r.needsManualReview;
         // 🆕 2026-06-17 (Khushi) — an UNMATCHED aggregator CANCELLATION surfaced for
         // review (born-cancelled agg booking the Cloud Function couldn't match to a
@@ -4385,6 +4473,49 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         />
       )}
 
+      {/* 🆕 2026-06-23 (Khushi) — in-app AGGREGATOR ARRIVED confirm modal.
+          Replaces the alien browser confirm() popup so the tablet stays inside
+          the HOD UI. zIndex 10003 so it sits above everything else. */}
+      {aggArrivedPending && (() => {
+        const r = aggArrivedPending;
+        const src = (r.aggregator || r.source || "inhouse").toLowerCase();
+        const srcLabel = (SRC_STYLES as any)[src]?.label || src.toUpperCase();
+        const srcColor = (SRC_STYLES as any)[src]?.color || "#000";
+        return (
+          <div onClick={closeOnBackdrop(() => setAggArrivedPending(null))}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.80)", zIndex: 10003, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div onClick={(e) => e.stopPropagation()}
+              style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 24, width: "100%", maxWidth: 360, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", boxShadow: "none", textAlign: "center" }}>
+              <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: 1.5, marginBottom: 12, color: srcColor }}>🚶 MARK AS ARRIVED</div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: "#000", marginBottom: 2, textTransform: "uppercase", wordBreak: "break-word" }}>
+                {r.customerName || "Guest"}
+              </div>
+              {r.tableId && (
+                <div style={{ fontSize: 13, color: "#6B6B6B", letterSpacing: .5, marginBottom: 10 }}>TABLE {r.tableId}</div>
+              )}
+              <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, padding: 12, marginBottom: 4, marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, marginBottom: 4 }}>SOURCE</div>
+                <div style={{ fontSize: 15, fontWeight: 900, color: srcColor, letterSpacing: .5 }}>{srcLabel}</div>
+              </div>
+              <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: .3, margin: "10px 0 18px", lineHeight: 1.5 }}>
+                This will mint a wallet and send a WhatsApp to {r.phone || "(no phone)"}.
+                This action cannot be undone from the door tablet.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <button onClick={() => setAggArrivedPending(null)}
+                  style={{ padding: 14, borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                  CANCEL
+                </button>
+                <button onClick={() => { setAggArrivedPending(null); handleArrived(r, true); }}
+                  style={{ padding: 14, borderRadius: 6, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: .5, cursor: "pointer", textTransform: "uppercase" }}>
+                  ✓ YES, ARRIVED
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* 🆕 2026-05-27 v3.101 (Khushi) — in-app GUEST ARRIVED confirmation
           overlay. Shown after handleArrived succeeds. zIndex 10002 so it
           sits above the detail modal (9998) AND the reassign modal. */}
@@ -4432,7 +4563,7 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
         // Canonical bucket for styling; raw brand name for label lookups.
         const src = canonicalAggKey(r.aggregator || r.source || "inhouse");
         const ss = SRC_STYLES[src] || SRC_STYLES.inhouse;
-        const arrived = !!r.actualArrivalTime;
+        const arrived = !!r.actualArrivalTime || !!(r as any).hasLinkedCover;
         // 🆕 2026-06-19 — corporate bookings store ALL held tables in tableIds[];
         // show them all (e.g. "FD15, FD16") instead of only the master tableId.
         const _corpTables = (r as any).tableIds as string[] | undefined;
@@ -4540,8 +4671,11 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                         <div style={{ fontSize: 17, fontWeight: 900, color: arrived ? "#23A094" : "#FF5733", marginTop: 4, fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", letterSpacing: .6, textTransform: "uppercase", fontVariantNumeric: "tabular-nums" }}>
                           {/* 🆕 2026-05-27 v3.101 (Khushi) — was `✓ ${arrived}`
                               which rendered as "✓ TRUE" (arrived is a boolean).
-                              Now shows the actual stamped arrival time. */}
-                          {arrived ? `✓ ${r.actualArrivalTime}` : "PENDING"}
+                              Now shows the actual stamped arrival time.
+                              🆕 2026-06-23 — fallback to "ARRIVED" when
+                              actualArrivalTime is undefined (cover linked without
+                              markArrived tap — was showing "✓ undefined"). */}
+                          {arrived ? `✓ ${r.actualArrivalTime || "ARRIVED"}` : "PENDING"}
                         </div>
                       </div>
                     </div>
@@ -4637,55 +4771,121 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
                     {arrBusy === r._docId ? "Marking…" : "🚶 Arrived"}
                   </button>
                 )}
-                <button
-                  onClick={() => {
-                    if (!arrived) {
-                      alert("⚠️ Mark guest as 🚶 Arrived first, THEN activate cover.");
-                      return;
-                    }
-                    const refId = r.bookingRef || r._docId;
-                    // Synthetic HodBooking for CoverActivationModal. _isTable
-                    // is the critical flag — activateCoverForBooking branches
-                    // on it (skips bookings-coll mirror + eventTitle copy).
-                    const syntheticBooking: HodBooking = {
-                      id: refId,
-                      ref: refId,
-                      name: r.customerName || "Guest",
-                      phone: r.phone || "",
-                      date: r.date || "",
-                      total: 0,           // no online prepayment on tables
-                      paymentId: "",      // → activateCover treats paidOnline=0
-                      checkedIn: true,
-                      _isTable: true,
-                      _isGuestList: false,
-                      eventId: "",
-                      eventTitle: "",
-                      // 🆕 2026-06-02 v3.178 (Khushi) — carry the TABLE onto the
-                      // synthetic booking so activateCoverForBooking stamps
-                      // tableId/floorLabel onto the covers doc. Without these the
-                      // activated wallet showed a balance but NO table number.
-                      // activateCoverForBooking reads `_tableId||tableId` +
-                      // `_floorLabel||floorLabel` (firestore-hod.ts ~L916).
-                      _tableId: r.tableId || "",
-                      tableId: r.tableId || "",
-                      _floorLabel: r.floorLabel || r.floor || "",
-                      floorLabel: r.floorLabel || r.floor || "",
-                    } as HodBooking;
-                    onCover(syntheticBooking);
-                    setExpandedDocId(null);
-                  }}
-                  title={arrived ? "Charge a cover wallet (e.g. late arrival)" : "Mark Arrived first"}
-                  style={{
-                    padding: "15px 6px", borderRadius: 6,
-                    background: arrived ? "#FFD700" : "#fff",
-                    border: "2px solid #000",
-                    color: arrived ? "#000" : "#6B6B6B",
-                    fontSize: 15, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15, cursor: "pointer",
-                    opacity: arrived ? 1 : 0.7,
-                    boxShadow: "none",
-                  }}>
-                  💰 Activate Cover
-                </button>
+                {/* 🆕 2026-06-23 (Khushi) — ACTIVATE COVER locked for aggregator
+                    table bookings (Zomato/Swiggy/EazyDiner/Magicpin/etc.).
+                    Aggregator guests arrive with a pre-agreed discount rate and
+                    no walk-in cover is expected — the door girl should NOT be
+                    charging cover on aggregator tables. Show a locked button
+                    with a clear explanation instead of a silent disable. */}
+                {(() => {
+                  // Check BOTH aggregator + source fields — real ingest bookings
+                  // (Zomato/Swiggy from SMS bot) write source:"zomato" but may
+                  // not have the aggregator field; manual door entries write both.
+                  const _rawAggSrc = ((r as any).aggregator || (r as any).source || "").toLowerCase();
+                  const _isAggTable = !!(
+                    (r as any).isManualAggregatorEntry ||
+                    _rawAggSrc.includes("zomato") || _rawAggSrc.includes("swiggy") ||
+                    _rawAggSrc.includes("eazy")   || _rawAggSrc.includes("magicpin") ||
+                    _rawAggSrc === "others"
+                  );
+                  if (_isAggTable) {
+                    return (
+                      <button
+                        onClick={() => showAppAlert("Cover activation is BLOCKED for aggregator bookings (Zomato / Swiggy / EazyDiner / Magicpin etc.).\n\nAggregator guests pay via the aggregator platform — no walk-in cover should be charged here.\n\nIf this is exceptional, ask the manager to handle it in Captain Mode.", "🔒 COVER LOCKED — AGGREGATOR BOOKING")}
+                        style={{
+                          padding: "15px 6px", borderRadius: 6,
+                          background: "#fff", border: "2px dashed #000",
+                          color: "#6B6B6B", fontSize: 13, fontWeight: 900,
+                          letterSpacing: .3, lineHeight: 1.2, cursor: "pointer",
+                          boxShadow: "none",
+                        }}>
+                        🔒 COVER LOCKED<div style={{ fontSize: 9, fontWeight: 800, marginTop: 3, letterSpacing: .5 }}>AGGREGATOR BOOKING</div>
+                      </button>
+                    );
+                  }
+                  // 🆕 v3.369 — corporate bookings never get a cover wallet
+                  // (same rule as BookingDetailModal). Hard-lock the button.
+                  if (isCorporateTableRes(r)) {
+                    return (
+                      <button
+                        onClick={() => showAppAlert("Corporate bookings do NOT get a cover wallet.\n\nThe guest settles the full bill at the table.", "💰 CORP BOOKING — NO COVER")}
+                        style={{
+                          padding: "15px 6px", borderRadius: 6,
+                          background: "#fff", border: "2px dashed #000",
+                          color: "#6B6B6B", fontSize: 13, fontWeight: 900,
+                          letterSpacing: .3, lineHeight: 1.2, cursor: "not-allowed",
+                          boxShadow: "none",
+                        }}>
+                        🔒 ACTIVATE COVER<div style={{ fontSize: 9, fontWeight: 800, marginTop: 3, letterSpacing: .5 }}>CORP BOOKING</div>
+                      </button>
+                    );
+                  }
+                  // 🆕 v3.368 — if cover is already active, show locked button
+                  // (same guard as BookingDetailModal's modalCover check).
+                  const _coverAlreadyActive =
+                    Number(expandedCover?.coverActivated || 0) > 0 ||
+                    Number(expandedCover?.coverBalance   || 0) > 0;
+                  if (_coverAlreadyActive) {
+                    return (
+                      <button
+                        onClick={() => showAppAlert(
+                          `Cover of ₹${(expandedCover?.coverActivated || expandedCover?.coverBalance || 0).toLocaleString("en-IN")} is already active for this guest.\n\nTo top up or edit the cover, go to the guest's wallet link or ask the manager to adjust in Captain Mode.`,
+                          "✅ COVER ALREADY ACTIVE"
+                        )}
+                        style={{
+                          padding: "15px 6px", borderRadius: 6,
+                          background: "#F4F4F0", border: "2px dashed #23A094",
+                          color: "#23A094", fontSize: 13, fontWeight: 900,
+                          letterSpacing: .3, lineHeight: 1.2, cursor: "pointer",
+                          boxShadow: "none",
+                        }}>
+                        ✅ COVER ACTIVE<div style={{ fontSize: 9, fontWeight: 800, marginTop: 3, letterSpacing: .5 }}>₹{(expandedCover?.coverActivated || expandedCover?.coverBalance || 0).toLocaleString("en-IN")} WALLET</div>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      onClick={() => {
+                        if (!arrived) {
+                          alert("⚠️ Mark guest as 🚶 Arrived first, THEN activate cover.");
+                          return;
+                        }
+                        const refId = r.bookingRef || r._docId;
+                        const syntheticBooking: HodBooking = {
+                          id: refId,
+                          ref: refId,
+                          name: r.customerName || "Guest",
+                          phone: r.phone || "",
+                          date: r.date || "",
+                          total: 0,
+                          paymentId: "",
+                          checkedIn: true,
+                          _isTable: true,
+                          _isGuestList: false,
+                          eventId: "",
+                          eventTitle: "",
+                          _tableId: r.tableId || "",
+                          tableId: r.tableId || "",
+                          _floorLabel: r.floorLabel || r.floor || "",
+                          floorLabel: r.floorLabel || r.floor || "",
+                        } as HodBooking;
+                        onCover(syntheticBooking);
+                        setExpandedDocId(null);
+                      }}
+                      title={arrived ? "Charge a cover wallet (e.g. late arrival)" : "Mark Arrived first"}
+                      style={{
+                        padding: "15px 6px", borderRadius: 6,
+                        background: arrived ? "#FFD700" : "#fff",
+                        border: "2px solid #000",
+                        color: arrived ? "#000" : "#6B6B6B",
+                        fontSize: 15, fontWeight: 900, letterSpacing: .3, lineHeight: 1.15, cursor: "pointer",
+                        opacity: arrived ? 1 : 0.7,
+                        boxShadow: "none",
+                      }}>
+                      💰 Activate Cover
+                    </button>
+                  );
+                })()}
                 {/* 🆕 2026-05-27 v3.48 (Khushi LIVE-NIGHT) — Reassign locks
                     once the guest is ARRIVED. Once seated, KOTs are tagged to
                     their table and any reassignment from the door tablet
@@ -4828,9 +5028,14 @@ function doorTo12h(s: string): string {
 
 type TableBookingTab = "tables" | "aggregator" | "corporate";
 
-function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
+function NewTableBookingModal({ agentName, onClose, onActivateCoverTable, events: evList = [], selectedEventId: selEvId = "" }: {
   agentName: string;
   onClose: () => void;
+  // 🆕 2026-06-23 (Khushi) — pass through the currently-selected event so the
+  // confirmation email shows "MALABAR NIGHT AT H.O.D" instead of the generic
+  // "TABLE BOOKING (IN-HOUSE)" text. Optional (defaults to empty = fallback).
+  events?: Array<{ id: string; title: string }>;
+  selectedEventId?: string;
   // 🔴 2026-05-20 (Khushi) — COVER+TABLE flow. Door girl creates the table
   // AND opens the standard wallet layout to recharge cover. Parent opens
   // UnifiedWalkInModal pre-filled + linked to the just-created table ref.
@@ -5025,6 +5230,24 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
     if (tab === "corporate" && !companyName.trim()) { setErr("Enter company name"); return; }
     if (tab === "corporate" && advanceAmount > 0 && !advanceMode) { setErr("Pick how the advance was paid"); return; }
     if (amenitiesTotal > 0 && !amenitiesPayMode) { setErr("Select how add-ons were paid (Cash / UPI / Card / Split)"); return; }
+    if (tab === "tables" && !tableId) {
+      showAppAlert(
+        "Scroll up and pick a table from the ASSIGN TABLE grid, then tap CREATE BOOKING again.\n\nThe captain needs a table assigned so the guest appears on the floor map — if you create without one, they'll be invisible until you manually reassign later.",
+        "⚠️ No Table Selected"
+      );
+      return;
+    }
+    // Aggregator arriving NOW (same-day + arrival time ≤ now+30 min) must have a
+    // table assigned before creation — the menu unlocks immediately at create time
+    // so the captain needs to know which floor tile to open. For future-time
+    // aggregator bookings this guard is skipped (table can be assigned later).
+    if (tab === "aggregator" && shouldUnlockNow() && !tableId) {
+      showAppAlert(
+        "This guest is arriving RIGHT NOW — scroll up and pick a table from the ASSIGN TABLE grid before tapping CREATE BOOKING.\n\nThe menu unlocks immediately for arriving guests, so the captain needs a table assigned straight away.\n\nFor advance bookings (future time slot) you can create first and assign the table later.",
+        "⚠️ Assign Table First"
+      );
+      return;
+    }
     setBusy(true);
     try {
       let refId = "";
@@ -5050,6 +5273,9 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
         });
         summary = "TABLE BOOKING (IN-HOUSE)";
       } else if (tab === "aggregator") {
+        // Same-day arriving-now → unlock menu + stamp arrival immediately.
+        // Future-time aggregator bookings stay locked and unlock on ARRIVED scan.
+        const unlockNow = shouldUnlockNow();
         refId = await createAggregatorTableBooking({
           aggregator,
           discountPercent: aggDiscount,
@@ -5059,6 +5285,7 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
           floorLabel: floorOpt?.label || undefined,
           externalRef: externalRef.trim() || undefined,
           notes: notes.trim() || undefined, staffName: agentName,
+          markArrived: unlockNow, unlockMenu: unlockNow,
           ...sharedExtras,
         });
         const aggLabel = aggOptions.find((a) => a.value === aggregator)?.label || aggregator;
@@ -5162,13 +5389,17 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
                 to_email:     emailAddr,
                 to_name:      name.trim(),
                 ref:          refId,
-                event_title:  summary,
+                // 🆕 2026-06-23 (Khushi) — use the actual event name (e.g. "MALABAR
+                // NIGHT AT H.O.D") for BOTH in-house and aggregator bookings.
+                // Falls back to "Tonight at H.O.D" if no event is selected.
+                // (was: aggregator fell through to summary = "AGGREGATOR (ZOMATO DINING)")
+                event_title:  evList.find((e) => e.id === selEvId)?.title || "Tonight at H.O.D",
                 event_date:   bookingDate,
                 event_time:   arrivalTime,
                 event_venue:  "Koramangala 7th Block, Bengaluru",
                 entry_type:   `Table${tableId ? ` ${doorProxyLabel(tableId) || tableId}` : ""}${floorLabelStr ? ` · ${floorLabelStr}` : ""} · ${pax} guests`,
                 qty:          pax || 1,
-                total:        includedAmenities.length ? `Add-ons ₹${amenitiesTotal.toLocaleString("en-IN")}` : "Table Reservation",
+                total:        includedAmenities.length ? `Add-ons ₹${amenitiesTotal.toLocaleString("en-IN")}` : "No advance · Settle at venue",
                 phone:        cleanPhone,
                 club_name:    "HOD — House of Dopamine",
                 club_phone:   "+91 96864 44906",
@@ -5403,7 +5634,16 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
           border: "2px solid #000",
         }}>
           <button onClick={() => switchTab("tables")}     style={tabBtn(tab === "tables")}>Tables</button>
-          <button onClick={() => switchTab("aggregator")} style={tabBtn(tab === "aggregator")}>Aggregator</button>
+          <button onClick={async () => {
+            // 🆕 2026-06-23 (Khushi) — Manager PIN gate for AGGREGATOR tab.
+            // Prevents door girl from creating aggregator bookings for friends.
+            // PIN is only asked once when switching IN to the tab (not on every tap).
+            if (tab !== "aggregator") {
+              const ok = await requireDoorManagerPin("Aggregator booking creation needs manager approval.\n\nThis prevents the door team from creating aggregator bookings for personal use.");
+              if (!ok) return;
+            }
+            switchTab("aggregator");
+          }} style={tabBtn(tab === "aggregator")}>Aggregator</button>
           <button onClick={() => switchTab("corporate")}  style={tabBtn(tab === "corporate")}>Corporate</button>
         </div>
         <div style={{ fontSize: 11.5, color: "#6B6B6B", marginBottom: 18, textAlign: "center", fontWeight: 600, letterSpacing: 0.3 }}>
@@ -5678,8 +5918,13 @@ function NewTableBookingModal({ agentName, onClose, onActivateCoverTable }: {
         </div>
 
         <div style={{ marginBottom: 10 }}>
-          <div style={labelStyle}>Email (optional)</div>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="guest@example.com" style={inputStyle} />
+          <div style={labelStyle}>{tab === "corporate" ? "Contact Email" : "Email (optional)"}</div>
+          {tab === "corporate" && (
+            <div style={{ background: "#FFF8E1", border: "2px solid #F59E0B", borderRadius: 6, padding: "7px 10px", marginBottom: 6, fontSize: 11, fontWeight: 800, color: "#92400E", lineHeight: 1.5 }}>
+              📧 Enter to send booking confirmation email to the client.
+            </div>
+          )}
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={tab === "corporate" ? "client@company.com" : "guest@example.com"} style={inputStyle} />
         </div>
 
         <div style={{ marginBottom: 10 }}>
@@ -7056,6 +7301,12 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
       overrideReason = window.prompt(`Reason for ${discountPct}% discount on this ${aggregator} booking:`)?.trim() || "(no reason given)";
       needOverrideLog = true;
     }
+    // Same-day + arrival ≤ now+30 min → arriving NOW → must have a table + unlock menu.
+    const unlockNow = date === today && (doorParseClockToMinutes(arrivalTime) ?? Infinity) <= doorNowMinutesIST() + 30;
+    if (unlockNow && !tableId) {
+      setErr("Guest is arriving NOW — assign a table first so the captain can find them on the floor map");
+      return;
+    }
     setBusy(true);
     try {
       const t = tableId ? ALL_TABLES.find((x) => x.id === tableId) : undefined;
@@ -7065,6 +7316,7 @@ function AddAggregatorBookingModal({ agentName, onClose, onBack }: { agentName: 
         date, arrivalTime,
         tableId: t?.id, floor: t?.section, floorLabel: t ? (SECTION_LABELS[t.section] || t.section) : "",
         externalRef, notes, staffName: agentName,
+        markArrived: unlockNow, unlockMenu: unlockNow,
       });
       // Log the manager override to the freshly-created reservation. The
       // helper throws on failure (no silent drop) — caught below so the door
@@ -7517,7 +7769,10 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     const tickets   = today.filter((b) => !isOnlyEntryBooking(b) && !isTableBooking(b) && inEvent(b)).length;
     const guestlist = todayGuestsInEvent.length + guestlistFromBookings.length;
     const tables    = activeTables.filter((r) => !isCorporateTableRes(r)).length;
-    const corporate = activeTables.filter(isCorporateTableRes).length;
+    // 🆕 v3.369 — count unique corporate BOOKINGS (master docs only), not table
+    // docs. A multi-table corporate booking writes 1 master + N−1 hold docs
+    // (isGroupHold:true); counting all docs showed "5" when there were 2 bookings.
+    const corporate = activeTables.filter((r) => isCorporateTableRes(r) && !(r as any).isGroupHold).length;
     const onlyentry = today.filter((b) => isOnlyEntryBooking(b) && inEvent(b)).length;
     const cancelled = cancelledTables.length;
     return {
@@ -8036,6 +8291,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         agentName={agentName}
         onClose={() => setTableBookingOpen(false)}
         onActivateCoverTable={(ctx) => setCoverTableCtx(ctx)}
+        events={events}
+        selectedEventId={selectedEventId}
       />}
       {coverTableCtx && <UnifiedWalkInModal
         agentName={agentName}
@@ -8590,15 +8847,17 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
 
   // AGGREGATOR breakdown — for each source bucket, list every discount %
   // that appears and the count of tables + sum of pax at that discount.
-  const aggSources: Array<"zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse"> = ["zomato", "swiggy", "eazydiner", "whatsapp_bot", "inhouse"];
-  const aggLabels: Record<string, string> = { zomato: "ZOMATO", swiggy: "SWIGGY", eazydiner: "EAZYDINER", whatsapp_bot: "DINEOUT", inhouse: "IN-HOUSE" };
-  const canonical = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "inhouse" => {
+  const aggSources: Array<"zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "others" | "inhouse"> = ["zomato", "swiggy", "eazydiner", "whatsapp_bot", "others", "inhouse"];
+  const aggLabels: Record<string, string> = { zomato: "ZOMATO", swiggy: "SWIGGY", eazydiner: "EAZYDINER", whatsapp_bot: "DINEOUT", others: "OTHERS", inhouse: "IN-HOUSE" };
+  const canonical = (raw: string): "zomato" | "swiggy" | "eazydiner" | "whatsapp_bot" | "others" | "inhouse" => {
     const v = (raw || "inhouse").toLowerCase();
+    if (v === "inhouse" || v === "in-house") return "inhouse";
     if (v.includes("zomato")) return "zomato";
     if (v.includes("swiggy")) return "swiggy";
     if (v.includes("eazy") || v.includes("easy")) return "eazydiner";
     if (v.includes("dineout") || v.includes("whatsapp")) return "whatsapp_bot";
-    return "inhouse";
+    // Magicpin + any other aggregator that isn't one of the 4 named ones → "others"
+    return "others";
   };
   const aggBuckets: Record<string, { total: number; pax: number; byDiscount: Map<number, { tables: number; pax: number }> }> = {};
   for (const k of aggSources) aggBuckets[k] = { total: 0, pax: 0, byDiscount: new Map() };
@@ -8805,18 +9064,25 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
           {/* 🆕 2026-05-23 (Khushi) — strict count: only covers where money was
               actually collected (`coverActivated > 0`) are "activated".
               Stubs created at booking time (₹0) don't count. */}
-          <Tile label="COVER CHARGES COLLECTED" value={fmtRs(totalCoversCollected)} tone="#000"
+          {/* 🆕 v3.370 — COVER CHARGES tile redesigned: TOTAL AMOUNT COLLECTED
+               (door + recharges) is the hero number; breakdown table below. */}
+          <Tile label="TOTAL AMOUNT COLLECTED" value={fmtRs(totalCoversCollected + totalRecharges)} tone="#000"
             sub={(() => {
               const paid = coversForNight.filter((c) => (Number(c.coverActivated) || 0) > 0).length;
               return `${paid} cover${paid === 1 ? "" : "s"} activated`;
             })()}>
-            {totalRecharges > 0 && (
-              <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 4, paddingTop: 8 }}>
-                <div style={{ fontSize: 10, fontWeight: 900, color: "#B8860B", letterSpacing: 1, textTransform: "uppercase", fontFamily: NUM_FONT }}>RECHARGES BY CUSTOMERS</div>
-                <div style={{ ...NUM_STYLE, fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{fmtRs(totalRecharges)}</div>
-                <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>Bar top-ups added to covers</div>
+            <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 6, paddingTop: 8 }}>
+              {/* Row 1 — door collection */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingBottom: 6, borderBottom: "1px solid #F0F0F0" }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#555", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Collected at Door</div>
+                <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#000" }}>{fmtRs(totalCoversCollected)}</div>
               </div>
-            )}
+              {/* Row 2 — recharges */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#B8860B", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Recharges by Customers</div>
+                <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#B8860B" }}>{fmtRs(totalRecharges)}</div>
+              </div>
+            </div>
           </Tile>
           <Tile label="TOTAL AMOUNT REDEEMED" value={fmtRs(totalAmountRedeemed)} tone="#FF5733"
             sub="Wallet spend across all covers">

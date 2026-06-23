@@ -55,6 +55,7 @@ import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
+import { sendWhatsAppViaMetaShared } from "@/lib/wa-send";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
 // Dynamic Link (those were shut down 2025-08-25).
@@ -1830,7 +1831,9 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
     // E.164 caps total digits at 15. Catches paste accidents like extra digits.
     if (fullPhone.length > 15) { setError("Phone number too long — check the country code & number"); return; }
     if (!isProxy && !selectedTable) { setError("Select a table"); return; }
-    if (!isProxy && tableOccupantAt(selectedTable, nowMinutesIST(), allReservations)) { setError("Table already occupied right now!"); return; }
+    const _bookingMin = parseClockToMinutes(arrivalTime) ?? nowMinutesIST();
+    const _clash = tableOccupantAt(selectedTable, _bookingMin, allReservations);
+    if (!isProxy && _clash) { setError(`Table ${selectedTable} is already booked at ${_clash.arrivalTime || "that time"} — pick a different time or table`); return; }
     // D3 — when the captain types a customDiscount that exceeds the source's
     // implied discount by more than WALKIN_DISCOUNT_PIN_DELTA percentage points,
     // require a Manager PIN. This catches "in-house + 80% discount" abuse and
@@ -1870,6 +1873,26 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           by: captainName, valueBefore: impliedDisc, valueAfter: customDiscount,
           reason: overrideReason.trim() || "(no reason given)",
         });
+      }
+      // 🆕 2026-06-23 v3.377 — fire WhatsApp with menu/wallet link immediately
+      // on creation. Walk-in = guest is physically present RIGHT NOW so we
+      // send their digital menu link via WhatsApp the moment the booking lands.
+      // Best-effort fire-and-forget: a WA failure MUST NOT block table creation
+      // or closing the modal.
+      if (createdRef && fullPhone) {
+        const walletUrl = `https://hodclub.in/?wallet=${encodeURIComponent(createdRef)}`;
+        const tableDisplay = isProxy
+          ? `${proxyName} · ${proxyFloor}`
+          : selectedTable
+            ? `${selectedTable}${(() => { const g = TABLE_OPTIONS.find(o => o.tables.includes(selectedTable)); return g?.label ? ` · ${g.label}` : ""; })()}`
+            : "your table";
+        const waText =
+          `Hi ${customerName.trim()}, welcome to H.O.D! 🎉\n\n` +
+          `🪑 Table: ${tableDisplay}\n\n` +
+          `Your menu is now OPEN — tap to browse & order food and drinks directly from your table:\n` +
+          `${walletUrl}\n\n` +
+          `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
+        void sendWhatsAppViaMetaShared({ phone: fullPhone, fallbackText: waText });
       }
       // 🆕 2026-06-12 v3.270 (Khushi) — jump straight to the new table so the
       // captain can add an order immediately (no search-and-tap step). Best-effort:
@@ -2012,7 +2035,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           </div>
           <div>
             <div style={fieldLabel}>Arrival Time *</div>
-            <input type="time" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)}
+            <input type="time" value={arrivalTime} onChange={(e) => { setArrivalTime(e.target.value); setError(""); }}
               style={{ ...fieldInput, fontFamily: "inherit" }} />
           </div>
         </div>
@@ -2045,17 +2068,18 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
                   <div style={{ display: "inline-block", fontSize: 12, fontWeight: 900, color: "#000", background: "#FBF3D6", border: "2px solid #000", borderRadius: 6, padding: "3px 9px", marginBottom: 8, letterSpacing: .6, fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>{group.label}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                     {group.tables.map((t) => {
-                      // Walk-in is "now" — colour boxes by who occupies the
-                      // table at this minute. A 11pm booking should NOT make
-                      // the box red at 7pm.
-                      const occupant = tableOccupantAt(t, nowMinutesIST(), allReservations);
+                      // Colour by the SELECTED arrival time, not the current time.
+                      // A 3 PM unsettled booking should not red-out SMK4 for an
+                      // 11 PM slot — only colour red when the windows actually overlap.
+                      const _pickerMin = parseClockToMinutes(arrivalTime) ?? nowMinutesIST();
+                      const occupant = tableOccupantAt(t, _pickerMin, allReservations);
                       const occupied = !!occupant;
                       const isSelected = selectedTable === t;
                       const bg = isSelected ? "#FF90E8"
                         : occupied ? "#FF5733" : "#1B7A70";
                       const color = isSelected ? "#000" : "#fff";
                       return (
-                        <button key={t} onClick={() => !occupied && setSelectedTable(t)} disabled={occupied}
+                        <button key={t} onClick={() => { if (!occupied) { setSelectedTable(t); setError(""); } }} disabled={occupied}
                           title={occupant ? `Taken — ${occupant.customerName || ""} ${occupant.arrivalTime || ""}`.trim() : "Available now"}
                           style={{ padding: "7px 12px", borderRadius: 8, fontSize: 13, fontWeight: 800, cursor: occupied ? "not-allowed" : "pointer",
                             background: bg, border: "2px solid #000", color,
@@ -4501,25 +4525,17 @@ function FloorPlanView({
     return reservations.filter(r => {
       if ((r as any).status === "cancelled") return false;
       const id = (r.tableId || "").toUpperCase();
-      // 🆕 2026-05-27 v3.75 (Khushi LIVE-NIGHT) — include tableless rows here
-      // too. Pre-v3.75 we filtered them out (`if (!id) return false`) → a
-      // HODTAB customer who tapped GET BILL without a table assigned would
-      // be INVISIBLE to captain: not on the floor map (no tableId to match a
-      // tile), not in the off-map strip (filtered here), so the Bill Due
-      // KPI showed "2" but the screen below showed nothing. Now they
-      // surface in this strip with "(UNASSIGNED)" so captain can tap → see
-      // the booking → walk over to door girl to get a table assigned.
+      // No table assigned → surface so captain can assign one.
       if (!id) return true;
-      if (!allMapTableIds.has(id)) return true;
-      // 🆕 2026-06-12 v3.257 — same-table SHADOW guard: this reservation's
-      // tableId IS a floor tile, but it LOST the tile to another booking (see
-      // reservationByTableId scoring). If it still carries its OWN live
-      // activity (orders / bill / call / seated), surface it here so a second
-      // simultaneously-active booking on one table is NEVER hidden — otherwise
-      // its KOTs/bill would be invisible = an uncollected/unserved order.
+      // HOD_TABLES tile (regular floor SVG): captain accesses this booking via
+      // the floor tile + multi-slot picker (v3371). Never duplicate it here.
+      if (allMapTableIds.has(id)) return false;
+      // Proxy / extra table (no SVG floor tile): the off-map strip is the ONLY
+      // access point for the captain. Show the tile winner; show shadow bookings
+      // on the same proxy table only when they carry live activity.
       const winner = reservationByTableId.get(id);
-      if (winner && winner._docId !== r._docId && _occScore(r) > 0) return true;
-      return false;
+      if (winner && winner._docId === r._docId) return true;
+      return _occScore(r) > 0;
     });
   }, [reservations, allMapTableIds, reservationByTableId]);
 
@@ -4959,6 +4975,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [pendingFilter, setPendingFilter] = useState<"" | "pending" | "bill" | "calling" | "ready">("");
   const [customerSearch, setCustomerSearch] = useState("");
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  // 🆕 2026-06-23 — multi-slot table picker: when captain taps an ASSIGNED table
+  // that has >1 non-cancelled bookings for different time slots, we show a list
+  // of all slots first instead of auto-opening the "winner" reservation.
+  const [tableSlotPick, setTableSlotPick] = useState<{ tableId: string; slots: HodTableReservation[] } | null>(null);
   // 🆕 2026-06-12 v3.270 (Khushi) — after CREATE TABLE we want to open the new
   // table's detail/ADD-ORDER view straight away. The just-written reservation may
   // not be in the live `reservations` feed for a render or two (latency), so we
@@ -5935,7 +5955,19 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         pendingFilter={pendingFilter}
         activeWaiterCallTableIds={waiterCallTableIds}
         readyKDSResIds={readyKDSResIds}
-        onSelectReservation={(docId) => setSelectedDocId(docId)}
+        onSelectReservation={(docId) => {
+          const clicked = reservations.find(x => x._docId === docId);
+          if (!clicked) { setSelectedDocId(docId); return; }
+          const siblings = clicked.tableId ? reservations.filter(x =>
+            (x.tableId || "").toUpperCase() === clicked.tableId!.toUpperCase() &&
+            (x as any).status !== "cancelled"
+          ) : [];
+          if (siblings.length > 1) {
+            setTableSlotPick({ tableId: clicked.tableId!.toUpperCase(), slots: siblings });
+          } else {
+            setSelectedDocId(docId);
+          }
+        }}
         onSelectFreeTable={(tableId) => {
           if (isPastDate) { alert("⏪ Can't seat a walk-in on a past night. Switch the date to tonight first."); return; }
           setPendingOpenDocId(null); setWalkInPrefill(tableId); setShowWalkIn(true);
@@ -5955,6 +5987,97 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           onCreated={(docId) => { pendingOpenDeadlineRef.current = Date.now() + 6000; setPendingOpenDocId(docId); }}
           onClose={() => { setShowWalkIn(false); setWalkInPrefill(undefined); }} />
       )}
+
+      {/* 🆕 2026-06-23 — Multi-slot picker: shown when captain taps a table that
+          has ≥2 non-cancelled bookings for different time slots tonight. */}
+      {tableSlotPick && (() => {
+        // Helper: format any time to 12h "3:15 PM"
+        const fmtSlotTime = (t?: string): string => {
+          if (!t) return "—";
+          const m12 = t.match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+          if (m12) return `${m12[1]}:${m12[2]} ${m12[3].toUpperCase()}`;
+          const m24 = t.match(/^(\d{1,2}):(\d{2})$/);
+          if (!m24) return t;
+          let h = parseInt(m24[1]); const min = parseInt(m24[2]);
+          const period = h >= 12 ? "PM" : "AM";
+          if (h > 12) h -= 12; if (h === 0) h = 12;
+          return `${h}:${String(min).padStart(2, "0")} ${period}`;
+        };
+        const toMinSlot = (t?: string) => {
+          if (!t) return 9999;
+          const m12 = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
+          if (m12) {
+            let h = parseInt(m12[1]); const min = parseInt(m12[2]); const pm = m12[3].toUpperCase() === "PM";
+            if (pm && h !== 12) h += 12; if (!pm && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          const m24 = t.match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1]) * 60 + parseInt(m24[2]);
+          return 9999;
+        };
+        const sorted = tableSlotPick.slots.slice().sort((a, b) => toMinSlot(a.arrivalTime) - toMinSlot(b.arrivalTime));
+        return (
+          <div
+            onClick={(e) => { if (e.target === e.currentTarget) setTableSlotPick(null); }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 16px" }}>
+            {/* Centered card — avoids safe-area bottom-crop */}
+            <div style={{ background: "#fff", borderRadius: 20, border: "2.5px solid #000", width: "100%", maxWidth: 500, display: "flex", flexDirection: "column", maxHeight: "calc(100vh - 40px)", overflow: "hidden" }}>
+              {/* Header */}
+              <div style={{ padding: "18px 20px 14px", borderBottom: "2px solid #000", display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexShrink: 0 }}>
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: 21, color: "#000" }}>🪑 Table {tableSlotPick.tableId}</div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "#666", marginTop: 3 }}>{sorted.length} BOOKINGS TONIGHT · tap a row to open</div>
+                </div>
+                <button onClick={() => setTableSlotPick(null)} style={{ marginLeft: 12, background: "#F0F0F0", border: "2px solid #000", borderRadius: 10, width: 36, height: 36, fontSize: 18, cursor: "pointer", fontWeight: 900, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+              </div>
+              {/* Scrollable rows — overscrollBehavior contains scroll within this div */}
+              <div style={{ overflowY: "auto", flex: 1, overscrollBehavior: "contain" } as React.CSSProperties}>
+                {sorted.map((slot, idx) => {
+                  const name = (slot as any).customerName || (slot as any).name || "Guest";
+                  const rawRef = (slot as any).bookingRef || slot._docId.slice(-6).toUpperCase();
+                  const cleanRef = rawRef.replace(/-\d{8}-\d{4}$/, "").replace(/-\d{8}$/, "");
+                  const displayTime = fmtSlotTime(slot.arrivalTime);
+                  const isArrived = !!(slot.actualArrivalTime || (slot as any).hasLinkedCover);
+                  const hasBill = slot.paymentStatus === "bill_requested";
+                  const hasOrders = (slot.tabRounds || []).length > 0;
+                  let statusLabel = "PENDING";
+                  let statusBg = "#F3F3F3"; let statusBorder = "#CCC"; let statusTxt = "#555";
+                  if (hasBill) { statusLabel = "BILL DUE"; statusBg = "#FEE2E2"; statusBorder = "#DC2626"; statusTxt = "#DC2626"; }
+                  else if (hasOrders) { statusLabel = "ORDERING"; statusBg = "#FEF3C7"; statusBorder = "#D97706"; statusTxt = "#D97706"; }
+                  else if (isArrived) { statusLabel = "ARRIVED"; statusBg = "#D1FAE5"; statusBorder = "#059669"; statusTxt = "#059669"; }
+                  return (
+                    <button key={slot._docId}
+                      onClick={() => { setTableSlotPick(null); setSelectedDocId(slot._docId); }}
+                      style={{ display: "flex", alignItems: "center", width: "100%", padding: "15px 20px", background: "transparent", borderLeft: "none", borderRight: "none", borderTop: "none", borderBottom: idx < sorted.length - 1 ? "1.5px solid #EBEBEB" : "none", cursor: "pointer", textAlign: "left", gap: 14 }}>
+                      <div style={{ minWidth: 76, background: "#FF90B3", border: "2px solid #000", borderRadius: 10, padding: "7px 6px", textAlign: "center", fontWeight: 900, fontSize: 13, color: "#000", flexShrink: 0 }}>{displayTime}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 900, fontSize: 16, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
+                        <div style={{ fontWeight: 700, fontSize: 12, color: "#777", marginTop: 2 }}>REF: {cleanRef}</div>
+                      </div>
+                      <div style={{ fontWeight: 800, fontSize: 11, color: statusTxt, background: statusBg, border: `1.5px solid ${statusBorder}`, borderRadius: 8, padding: "4px 9px", whiteSpace: "nowrap", flexShrink: 0 }}>{statusLabel}</div>
+                      <span style={{ color: "#CCC", fontSize: 20, flexShrink: 0 }}>›</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Footer: + Add New Slot + Close */}
+              <div style={{ padding: "14px 20px 18px", borderTop: "2px solid #000", display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
+                {!isPastDate && (
+                  <button
+                    onClick={() => { setTableSlotPick(null); setWalkInPrefill(tableSlotPick!.tableId); setShowWalkIn(true); }}
+                    style={{ width: "100%", padding: "13px", borderRadius: 12, background: "#FF90B3", border: "2.5px solid #000", color: "#000", fontSize: 15, fontWeight: 900, cursor: "pointer", letterSpacing: 0.3 }}>
+                    + NEW BOOKING FOR THIS TABLE
+                  </button>
+                )}
+                <button onClick={() => setTableSlotPick(null)}
+                  style={{ width: "100%", padding: "12px", borderRadius: 12, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
+                  CLOSE
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {selectedDocId && (() => {
         const sel = reservations.find((x) => x._docId === selectedDocId);
