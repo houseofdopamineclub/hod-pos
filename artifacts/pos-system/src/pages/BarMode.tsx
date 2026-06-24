@@ -23,6 +23,7 @@ import { getOperationalNightStr } from "@/lib/utils-pos";
 import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
 import {
   getNextToken, createBillDue, appendBillDue, subscribeBillDue, fetchBillDueForNight, clearBillDue, sendBillDueWhatsApp,
+  computeNcBill,
   type BillDueDoc, type BillDueItem, type NcRole, type NcPaymentMethod,
 } from "@/lib/bill-due";
 // 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed from BarMode. Bartender
@@ -35,6 +36,10 @@ import {
 // constant in CaptainMode would also need an update here. Acceptable cost for
 // page-isolation; if ever rotated, search both files.
 const BAR_MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
+// 🆕 2026-06-24 (Khushi) — WAIVE (NC write-off) is gated by its OWN PIN (1919),
+// separate from the manager discount PIN. sha256("1919"). They cannot tap WAIVE
+// until this PIN is entered correctly.
+const BAR_WAIVE_HASH = "274dfec6e079fb08d6b5771537c54d3f0bd36c64c3d8ed0a4e6d2f201b489274";
 
 // 🆕 2026-06-24 (Khushi) — TEMPORARILY HIDE the Bar Mode discount UI. The
 // discount controls (recharge-overlay picker + SETTLE BILL discount % input)
@@ -3975,6 +3980,19 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   const [lines, setLines] = useState<NcItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 🆕 2026-06-24 (Khushi) — collapsible "PREVIOUS ON TAB" itemised dropdown.
+  const [showPrev, setShowPrev] = useState(false);
+  // 🆕 2026-06-24 (Khushi) — ROLE picker is now an in-app Gumroad dropdown
+  // (no native browser <select>); roleDdOpen toggles the inline list.
+  const [roleDdOpen, setRoleDdOpen] = useState(false);
+  // 🆕 2026-06-24 (Khushi) — after a successful log we STAY on the modal and
+  // show a persistent success panel (was a centeredAlert that a stray tap could
+  // dismiss instantly, then onClose closed the whole modal → "popup vanished").
+  const [loggedInfo, setLoggedInfo] = useState<{ due: number; name: string } | null>(null);
+  // 🆕 2026-06-24 (Khushi) — search box ABOVE Guest Name to find a person's
+  // OPEN NC tabs by name/phone and load one (so a repeat order is appended to
+  // the existing tab, not opened as a new row).
+  const [tabSearch, setTabSearch] = useState("");
   // Item picker state (mirrors BarMain ADD ORDER overlay — same UX).
   const [showPicker, setShowPicker] = useState(false);
   const [pickSearch, setPickSearch] = useState("");
@@ -4025,18 +4043,25 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   const existingItems: NcItem[] = (existingOpenRow?.items || []).map((it) => ({
     n: it.n, p: it.p || 0, qty: it.qty || 0, t: it.t === "food" ? "food" : "drink",
   }));
-  const existingTotal = existingItems.reduce((s, it) => s + it.p * it.qty, 0);
+  // 🆕 2026-06-24 (Khushi) — NC tabs now carry 10% SERVICE CHARGE + GST (food
+  // 5%, alcohol exempt) via the shared computeNcBill engine, exactly like every
+  // other bar bill. The flat ₹1000 comp is knocked off the tax-INCLUSIVE total.
+  // existingBill = the matched open tab's CURRENT state (for the running-tab
+  // banner); bill = the WHOLE tab once this round is added (existing + new).
+  const existingBill = computeNcBill(existingItems, COMP_CAP);
+  const existingTotal = existingBill.totalBill;   // tax-inclusive
   // 🆕 v3.188 (Khushi) — the existing tab's CURRENT amount DUE (after the flat
   // ₹1000 comp), recomputed from its items so it always reconciles with the
-  // BILL DUE tab. The old banner showed RUNNING TOTAL = gross (e.g. ₹1,492)
-  // which looked wrong next to the tab's net due (e.g. ₹919). Now the banner
-  // shows this net due. Any stale stored amountDue self-heals on the next
-  // append (appendBillDue rewrites amountDue from the combined items).
-  const existingDue = Math.max(0, existingTotal - Math.min(COMP_CAP, existingTotal));
+  // BILL DUE tab. Any stale stored amountDue self-heals on the next append
+  // (appendBillDue rewrites amountDue from the combined items, tax-inclusive).
+  const existingDue = existingBill.amountDue;
+  // newTotal stays RAW item value — it's the KOT round total (kitchen prep
+  // ticket shows item prices, not tax).
   const newTotal = lines.reduce((s, it) => s + it.p * it.qty, 0);
-  const grandTotal = existingTotal + newTotal;
-  const compApplied = Math.min(COMP_CAP, grandTotal);
-  const amountDue = Math.max(0, grandTotal - compApplied);
+  const bill = computeNcBill([...existingItems, ...lines], COMP_CAP);
+  const grandTotal = bill.totalBill;      // tax-inclusive grand total
+  const compApplied = bill.compApplied;
+  const amountDue = bill.amountDue;
 
   // 🆕 v3.188 (Khushi) — RUNNING TAB: don't make the bartender re-type phone /
   // approved-by for a repeat order. When an open tab is matched, carry its
@@ -4124,9 +4149,10 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
       if (!appended) {
         // Fresh row — comp is computed on THIS round only (existing tab was
         // settled or no longer matches). amountDue here may be ≤ the optimistic
-        // figure the PIN approved, which is safe.
-        const freshComp = Math.min(COMP_CAP, newTotal);
-        const freshDue = Math.max(0, newTotal - freshComp);
+        // figure the PIN approved, which is safe. Tax-inclusive via computeNcBill.
+        const freshBill = computeNcBill(newItemsForDoc, COMP_CAP);
+        const freshComp = freshBill.compApplied;
+        const freshDue = freshBill.amountDue;
         await createBillDue({
           customerName: name.trim(),
           customerPhone: phone.replace(/\D/g, ""),
@@ -4134,6 +4160,10 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           items: newItemsForDoc,
           amountDue: freshDue,
           compApplied: freshComp,
+          subtotal: freshBill.subtotal,
+          serviceCharge: freshBill.serviceCharge,
+          tax: freshBill.gst,
+          totalBill: freshBill.totalBill,
           staff: staffName,
           token,
         });
@@ -4145,23 +4175,56 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
       }
       // 3) Simple confirmation — the ACTUAL amount on the tab after the
       //    append/fresh-row decision (Khushi v3.184).
-      await centeredAlert(
-        "✅ NC LOGGED",
-        `₹${ledgerDue.toLocaleString("en-IN")} DUE`,
-        "success",
-        true,
-      );
-      onClose();
+      // 🆕 2026-06-24 (Khushi) — drop the white "LOGGING NC…" busy overlay
+      //    BEFORE the success popup so the popup sits on its own dark backdrop
+      //    instead of a blank white screen. centeredAlert mounts its overlay
+      //    synchronously, so nothing red can flash behind it.
+      setBusy(false);
+      // 🆕 2026-06-24 (Khushi) — STAY on the modal with a persistent success
+      // panel + explicit exit button (was a centeredAlert + onClose that a
+      // stray tap could dismiss instantly, closing the whole modal).
+      setLoggedInfo({ due: ledgerDue, name: name.trim() });
     } catch (e: any) {
       // 🔴 v3.116 — surface the actual error via a big in-app alert so the
       // bartender doesn't miss it on a screen full of items (was tiny red
       // inline text → easy to miss → row lost without anyone noticing).
       const msg = e?.message || "Failed to log NC. Try again.";
       setErr(msg);
+      setBusy(false);
       await centeredAlert("⚠️ NC NOT LOGGED", msg, "error", true);
     }
-    setBusy(false);
   };
+
+  // ── SUCCESS PANEL ──────────────────────────────────────────────────────
+  // 🆕 2026-06-24 (Khushi) — after logging an NC tab we STAY on this page and
+  // show a persistent confirmation (no auto-close, no tap-dismissable popup).
+  // "LOG ANOTHER NC" resets the form for the next guest; "CANCEL / EXIT" is
+  // the explicit way back to BAR/CASHIER.
+  if (loggedInfo) {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "'Space Grotesk',sans-serif" }}>
+        <div style={{ width: "100%", maxWidth: 460, background: "#fff", border: "2px solid #000", borderRadius: 18, padding: 28, textAlign: "center", color: "#000" }}>
+          <div style={{ fontSize: 54, lineHeight: 1, marginBottom: 10 }}>✅</div>
+          <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>NC LOGGED</div>
+          <div style={{ fontSize: 15, color: "#000", fontWeight: 700, marginBottom: 14 }}>{loggedInfo.name || "Guest"}</div>
+          <div style={{ display: "inline-block", background: loggedInfo.due > 0 ? "#FFE9C2" : "#D6F5EF", border: "2px solid #000", borderRadius: 10, padding: "12px 20px", fontSize: 22, fontWeight: 900, fontFamily: "'Space Grotesk', monospace", marginBottom: 22 }}>
+            ₹{loggedInfo.due.toLocaleString("en-IN")} DUE
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button type="button"
+              onClick={() => { setName(""); setPhone(""); setApprovedBy(""); setRole("DJ"); setLines([]); setErr(""); setShowPrev(false); setRoleDdOpen(false); setPickSearch(""); setPickGroup(GROUP_ORDER[0] || "spirits"); setTabSearch(""); setLoggedInfo(null); }}
+              style={{ flex: 1, padding: "15px 12px", borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.4, textTransform: "uppercase" }}>
+              ➕ Log Another NC
+            </button>
+            <button type="button" onClick={onClose}
+              style={{ flex: 1, padding: "15px 12px", borderRadius: 10, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.4, textTransform: "uppercase" }}>
+              ✕ Cancel / Exit
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // ── PICKER OVERLAY (same modal style as ADD ORDER) ─────────────────────
   if (showPicker) {
@@ -4250,10 +4313,18 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   return createPortal(
     <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "100%", maxWidth: 640, maxHeight: "94vh", overflowY: "auto", background: "#fff", border: "2px solid #000", borderRadius: 18, padding: 26, color: "#000" }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 18 }}>
-          <div style={{ fontSize: 22, fontWeight: 900, color: "#000", letterSpacing: 0.5, textTransform: "uppercase" }}>🎁 NC — NO CHARGE</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18, gap: 10 }}>
+          {/* 🆕 2026-06-24 (Khushi) — BACK button (returns to BAR/CASHIER) next
+              to the title; CANCEL stays top-right. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+            <button type="button" onClick={onClose}
+              style={{ background: "#fff", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, letterSpacing: 0.5, padding: "8px 12px", borderRadius: 6, cursor: "pointer", flexShrink: 0 }}>
+              ← BACK
+            </button>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#000", letterSpacing: 0.5, textTransform: "uppercase" }}>🎁 NC — NO CHARGE</div>
+          </div>
           <button type="button" onClick={onClose}
-            style={{ background: "transparent", border: "2px solid #000", color: "#6B6B6B", fontSize: 11, fontWeight: 800, letterSpacing: 1, padding: "8px 14px", borderRadius: 6, cursor: "pointer" }}>
+            style={{ background: "transparent", border: "2px solid #000", color: "#6B6B6B", fontSize: 11, fontWeight: 800, letterSpacing: 1, padding: "8px 14px", borderRadius: 6, cursor: "pointer", flexShrink: 0 }}>
             ✕ CANCEL
           </button>
         </div>
@@ -4263,6 +4334,57 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           <input type="text" name="username" autoComplete="username" tabIndex={-1} />
           <input type="password" name="password" autoComplete="new-password" tabIndex={-1} />
         </div>
+        {/* 🆕 2026-06-24 (Khushi) — SEARCH OPEN TABS. Type a name/phone to find a
+            guest's existing OPEN NC tab(s); tapping one loads their details so
+            the new round APPENDS to that tab instead of opening a fresh row. */}
+        {(() => {
+          const openTabs = (priorRows || []).filter((r) => r.status === "open");
+          const q = tabSearch.trim().toLowerCase();
+          const qDigits = tabSearch.replace(/\D/g, "");
+          const matches = q.length > 0
+            ? openTabs.filter((r) =>
+                (r.customerName || "").toLowerCase().includes(q) ||
+                (qDigits.length >= 3 && _digits(r.customerPhone || "").includes(qDigits)))
+            : [];
+          const dueOf = (r: BillDueDoc) =>
+            computeNcBill((r.items || []).map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0, t: it.t === "food" ? "food" as const : "drink" as const })), COMP_CAP).amountDue;
+          return (
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>🔍 Search Open Tabs</label>
+              <input value={tabSearch} onChange={(e) => setTabSearch(e.target.value)} placeholder="Type a name or phone to find an open tab…"
+                name="hod-nc-tabsearch" autoComplete="off" data-lpignore="true" data-1p-ignore="" data-form-type="other"
+                style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 600 }} />
+              {q.length > 0 && (
+                <div style={{ marginTop: 6, background: "#fff", border: "2px solid #000", borderRadius: 8, overflow: "hidden" }}>
+                  {matches.length === 0 ? (
+                    <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 700, color: "#6B6B6B" }}>
+                      No open tab for "{tabSearch.trim()}" — fill the form below to start a new one.
+                    </div>
+                  ) : matches.map((r, idx) => {
+                    const due = dueOf(r);
+                    return (
+                      <button key={r.id || `${r.customerName}-${idx}`} type="button"
+                        onClick={() => {
+                          setName(r.customerName || "");
+                          setPhone(r.customerPhone || "");
+                          setRole(((r.role as NcRole) || "DJ"));
+                          setApprovedBy(r.approvedBy || "");
+                          setTabSearch("");
+                        }}
+                        style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "11px 14px", background: "#fff", border: "none", borderBottom: idx < matches.length - 1 ? "1px solid #EEE" : "none", color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {(r.customerName || "GUEST").toUpperCase()}
+                          <span style={{ color: "#6B6B6B", fontWeight: 600 }}> · {r.role || "—"}{r.customerPhone ? ` · ${_digits(r.customerPhone)}` : ""}</span>
+                        </span>
+                        <span style={{ flexShrink: 0, fontFamily: "'Space Grotesk', monospace", fontWeight: 900, color: "#000" }}>DUE ₹{due.toLocaleString("en-IN")}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
           <div>
             <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Guest Name *</label>
@@ -4276,12 +4398,28 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           </div>
           <div>
             <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Role</label>
-            <select value={role} onChange={(e) => setRole(e.target.value as NcRole)} name="hod-nc-role" autoComplete="off"
-              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "#F4F4F0", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 700 }}>
-              {(["DJ","INFLUENCER","PROMOTER","MANAGER","OWNER","OTHER"] as NcRole[]).map((r) =>
-                <option key={r} value={r} style={{ background: "#fff" }}>{r}</option>
-              )}
-            </select>
+            {/* 🆕 2026-06-24 (Khushi) — native browser <select> REPLACED with an
+                in-app Gumroad dropdown (white card, 2px black border, pink
+                selected row). Inline-expanding so it can never be clipped by
+                the scrollable modal. */}
+            <button type="button" onClick={() => setRoleDdOpen((o) => !o)}
+              style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "#F4F4F0", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 800, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{role}</span>
+              <span style={{ fontSize: 11, transform: roleDdOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▼</span>
+            </button>
+            {roleDdOpen && (
+              <div style={{ marginTop: 6, background: "#fff", border: "2px solid #000", borderRadius: 8, overflow: "hidden" }}>
+                {(["DJ","INFLUENCER","PROMOTER","MANAGER","OWNER","OTHER"] as NcRole[]).map((r, idx, arr) => {
+                  const sel = role === r;
+                  return (
+                    <button key={r} type="button" onClick={() => { setRole(r); setRoleDdOpen(false); }}
+                      style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "11px 14px", background: sel ? "#FF90E8" : "#fff", border: "none", borderBottom: idx < arr.length - 1 ? "1px solid #EEE" : "none", color: "#000", fontSize: 14, fontWeight: sel ? 900 : 700, cursor: "pointer" }}>
+                      {r}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <div>
             <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>Approved By *</label>
@@ -4305,38 +4443,85 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           + ADD ITEMS FROM MENU
         </button>
 
-        {lines.length > 0 && (
-          <div style={{ background: "#F4F4F0", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+        {(lines.length > 0 || existingItems.length > 0) && (
+          // 🆕 2026-06-24 (Khushi) — Gumroad-style BILL TABLE: white card, 2px
+          // black frame, 1px black row dividers, ALL text black + bigger so the
+          // cashier can read it at a glance (was small grey #6B6B6B numbers).
+          // COMP / BILL DUE keep BLACK text on a light tint for the colour cue
+          // without losing contrast.
+          // 🆕 2026-06-24 (Khushi) — render the panel as soon as an OPEN TAB is
+          // selected (existingItems present), not only after a new round is
+          // added — so tapping a search result shows PREVIOUS ON TAB + BILL DUE
+          // immediately. Totals fall back to the existing tab when lines is empty.
+          <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+            {/* 🆕 2026-06-24 (Khushi) — PREVIOUS ON TAB is now a COLLAPSIBLE
+                dropdown that ITEMISES what's already on the tab (was a single
+                lump-sum line). Header shows raw subtotal of prior items so the
+                listed lines reconcile with SUBTOTAL below. */}
+            {existingItems.length > 0 && (() => {
+              const prevRaw = existingItems.reduce((s, it) => s + it.p * it.qty, 0);
+              const prevQty = existingItems.reduce((s, it) => s + it.qty, 0);
+              return (
+                <>
+                  <button type="button" onClick={() => setShowPrev((v) => !v)}
+                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 13, color: "#000", fontWeight: 800, background: "#EDEDE8", border: "none", borderRadius: 0, cursor: "pointer", letterSpacing: 0.3, textAlign: "left" }}>
+                    <span>{showPrev ? "▾" : "▸"} PREVIOUS ON TAB · {prevQty} ITEM{prevQty === 1 ? "" : "S"}</span>
+                    <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 800 }}>₹{prevRaw.toLocaleString("en-IN")}</span>
+                  </button>
+                  {showPrev && existingItems.map((it) => (
+                    <div key={`prev-${lineKey(it.n, it.p, it.t)}`} style={{ display: "flex", justifyContent: "space-between", padding: "7px 12px 7px 24px", borderBottom: "1px solid #000", fontSize: 13, color: "#000", background: "#FAFAF7" }}>
+                      <span style={{ fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" }}>{it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}</span>
+                      <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
+            {/* "ADDING THIS ROUND" header — only when there's a prior tab to
+                distinguish the new round from. */}
+            {existingItems.length > 0 && lines.length > 0 && (
+              <div style={{ padding: "8px 12px", borderBottom: "1px solid #000", fontSize: 12, fontWeight: 900, letterSpacing: 0.8, color: "#000", background: "#FFE3F4" }}>
+                ➕ ADDING THIS ROUND
+              </div>
+            )}
             {lines.map((it) => {
               const key = lineKey(it.n, it.p, it.t);
               return (
-                <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", fontSize: 13 }}>
-                  <span style={{ color: "#000" }}>
+                <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15 }}>
+                  <span style={{ color: "#000", fontWeight: 700 }}>
                     {it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}
                   </span>
                   <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <span style={{ color: "#000", fontWeight: 800 }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
+                    <span style={{ color: "#000", fontWeight: 800, fontFamily: "'Space Grotesk', monospace" }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
                     <button onClick={() => removeLine(key)}
                       title="Remove this line"
-                      style={{ background: "transparent", border: "none", color: "#FF5733", cursor: "pointer", fontSize: 16 }}>×</button>
+                      style={{ background: "transparent", border: "none", color: "#FF5733", cursor: "pointer", fontSize: 20, fontWeight: 900, lineHeight: 1 }}>×</button>
                   </span>
                 </div>
               );
             })}
-            {existingTotal > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", borderTop: "2px solid #000", marginTop: 8, paddingTop: 8, fontSize: 12, color: "#6B6B6B", fontWeight: 700 }}>
-                <span>PREVIOUS ON TAB</span><span>₹{existingTotal.toLocaleString("en-IN")}</span>
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: existingTotal > 0 ? 4 : 8, paddingTop: existingTotal > 0 ? 0 : 8, borderTop: existingTotal > 0 ? "none" : "2px solid #000", fontSize: 13, color: "#000", fontWeight: 800 }}>
-              <span>TOTAL</span><span>₹{grandTotal.toLocaleString("en-IN")}</span>
+            {/* 🆕 2026-06-24 (Khushi) — tax lines are now SMALLER + grey so the
+                eye can tell taxes apart from the TOTAL at a glance. */}
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
+              <span>SUBTOTAL</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.subtotal.toLocaleString("en-IN")}</span>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12, color: "#23A094", fontWeight: 800 }}>
-              <span>🎁 COMP (₹1000 MAX)</span><span>− ₹{compApplied.toLocaleString("en-IN")}</span>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
+              <span>SERVICE CHARGE (10%)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.serviceCharge.toLocaleString("en-IN")}</span>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 15, fontWeight: 900 }}>
-              <span style={{ color: "#6B6B6B" }}>💸 BILL DUE</span>
-              <span style={{ color: amountDue > 0 ? "#F59E0B" : "#23A094" }}>₹{amountDue.toLocaleString("en-IN")}</span>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "2px solid #000", fontSize: 12, color: "#555", fontWeight: 600 }}>
+              <span>GST</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.gst.toLocaleString("en-IN")}</span>
+            </div>
+            {/* 🆕 2026-06-24 (Khushi) — TOTAL BILL HIGHLIGHTED: bigger font +
+                gold tint so it stands out from the small grey tax lines. */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "13px 12px", borderBottom: "1px solid #000", fontSize: 20, color: "#000", fontWeight: 900, background: "#FCEFCB", letterSpacing: 0.3 }}>
+              <span>TOTAL BILL (incl. tax)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{grandTotal.toLocaleString("en-IN")}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15, color: "#000", fontWeight: 800, background: "#D6F5EF" }}>
+              <span>🎁 COMP (₹1000 MAX)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{compApplied.toLocaleString("en-IN")}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "13px 12px", fontSize: 18, fontWeight: 900, color: "#000", background: amountDue > 0 ? "#FFE9C2" : "#D6F5EF" }}>
+              <span>💸 BILL DUE</span>
+              <span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{amountDue.toLocaleString("en-IN")}</span>
             </div>
           </div>
         )}
@@ -4383,7 +4568,9 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
   // ledger row still exists for audit, just not surfaced as "to clear").
   const open = rows.filter((r) => r.status === "open" && (r.amountDue || 0) > 0);
   const cleared = rows.filter((r) => r.status !== "open" && (r.amountDue || 0) > 0);
-  const totalOpen = open.reduce((s, r) => s + (r.amountDue || 0), 0);
+  // 🆕 2026-06-24 (Khushi) — totalOpen is derived from the grouped (tax-inclusive)
+  // dues below so the header KPI exactly matches the sum of every group's BILL DUE.
+  // (Defined after `groups` so legacy rows recomputed there are reflected here.)
 
   // 🆕 v3.120 — GROUP open rows by phone (same guest = one row). Falls
   // back to name+role when phone missing. ONE MARK CLEARED button per
@@ -4401,6 +4588,10 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
     amountDue: number;
     totalBill: number;
     compValue: number;
+    // 🆕 2026-06-24 (Khushi) — tax breakdown so the settle modal shows SC + GST.
+    subtotal: number;
+    serviceCharge: number;
+    tax: number;
     perRowDue: Record<string, number>;
   };
   const groups: Group[] = (() => {
@@ -4410,28 +4601,37 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
       const key = cleanPhone.length >= 10 ? cleanPhone : `name:${r.customerName}|${r.role}`;
       let g = m.get(key);
       if (!g) {
-        g = { key, ids: [], customerName: r.customerName, customerPhone: r.customerPhone, role: r.role, tokens: [], approvedBys: [], staffs: [], items: [], amountDue: 0, totalBill: 0, compValue: 0, perRowDue: {} };
+        g = { key, ids: [], customerName: r.customerName, customerPhone: r.customerPhone, role: r.role, tokens: [], approvedBys: [], staffs: [], items: [], amountDue: 0, totalBill: 0, compValue: 0, subtotal: 0, serviceCharge: 0, tax: 0, perRowDue: {} };
         m.set(key, g);
       }
-      if (r.id) { g.ids.push(r.id); g.perRowDue[r.id] = r.amountDue || 0; }
       if (r.token && !g.tokens.includes(r.token)) g.tokens.push(r.token);
       if (r.approvedBy && !g.approvedBys.includes(r.approvedBy)) g.approvedBys.push(r.approvedBy);
       if (r.staff && !g.staffs.includes(r.staff)) g.staffs.push(r.staff);
       g.items.push(...(r.items || []));
-      g.amountDue += r.amountDue || 0;
-      // 🆕 v3.124 — totalBill = gross value (if nothing was comped), compValue = freebie value.
-      // 🆕 v3.184 — flat tab-level comp (`compApplied`) is authoritative when
-      // present; legacy rows fall back to summing per-item `free` line values.
-      let rowFreeVal = 0;
-      for (const it of (r.items || [])) {
-        const lineValue = (it.p || 0) * (it.qty || 0);
-        g.totalBill += lineValue;
-        if (it.free) rowFreeVal += lineValue;
-      }
-      g.compValue += (typeof r.compApplied === "number" ? r.compApplied : rowFreeVal);
+      // 🆕 2026-06-24 (Khushi) — tax-INCLUSIVE per-row bill. New rows persist the
+      // full tax breakdown (totalBill/subtotal/serviceCharge/tax/amountDue);
+      // legacy same-night rows (raw, pre-v3.388, no totalBill) are recomputed
+      // ENTIRELY via the shared NC bill engine — including amountDue/comp — so
+      // the displayed breakdown and the collected BILL DUE are ALWAYS the same
+      // number (display==collected). This retroactively applies SC + GST to any
+      // NC tab still open across the deploy; that set is tiny (only tabs open at
+      // the exact flip) and matches the intent to collect tax on every NC tab.
+      const hasTax = typeof r.totalBill === "number";
+      const rb = hasTax ? null : computeNcBill(r.items || []);
+      const rTotalBill = hasTax ? (r.totalBill || 0) : rb!.totalBill;
+      const rComp = hasTax ? (typeof r.compApplied === "number" ? r.compApplied : 0) : rb!.compApplied;
+      const rDue = hasTax ? (typeof r.amountDue === "number" ? r.amountDue : Math.max(0, rTotalBill - rComp)) : rb!.amountDue;
+      g.amountDue += rDue;
+      g.totalBill += rTotalBill;
+      g.compValue += rComp;
+      g.subtotal += hasTax ? (r.subtotal || 0) : rb!.subtotal;
+      g.serviceCharge += hasTax ? (r.serviceCharge || 0) : rb!.serviceCharge;
+      g.tax += hasTax ? (r.tax || 0) : rb!.gst;
+      if (r.id) { g.ids.push(r.id); g.perRowDue[r.id] = rDue; }
     }
     return Array.from(m.values());
   })();
+  const totalOpen = groups.reduce((s, g) => s + g.amountDue, 0);
 
   // 🆕 2026-05-27 v3.115 — payment method captured at settlement so the
   // morning Reports tab can split NC RECOVERED (cash/upi/card) vs NC
@@ -4478,11 +4678,11 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
   const onDiscChange = (v: string) => {
     setDiscInput(v);
     const raw = v.trim();
-    const n = raw === "" ? 0 : Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
+    const n = raw === "" ? 0 : Math.max(0, Math.min(50, parseInt(raw, 10) || 0));
     setDiscPct(n);
   };
   const applyDiscount = () => {
-    const n = Math.max(0, Math.min(100, parseInt(discInput, 10) || 0));
+    const n = Math.max(0, Math.min(50, parseInt(discInput, 10) || 0));
     setDiscPct(n);
     setDiscInput(String(n));
   };
@@ -4490,18 +4690,25 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
   const finalizeClear = async (g: Group, method: NcPaymentMethod) => {
     if (!g.ids.length) return;
     if (busyKey) return; // 🔴 v3.115 (architect fix) — hard re-entry guard.
-    const effPct = method === "waived" ? 100 : Math.max(0, Math.min(100, discPct));
-    const needPin = method === "waived" || effPct > 50;
+    const effPct = method === "waived" ? 100 : Math.max(0, Math.min(50, discPct));
+    const needPin = method === "waived" || effPct > 0;
     const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
     const verb = method === "waived" ? "WAIVE" : "SETTLE BILL";
     if (needPin) {
       const reason = method === "waived"
         ? `WRITE-OFF ₹${g.amountDue.toLocaleString("en-IN")} for ${g.customerName}`
         : `${effPct}% DISCOUNT on ₹${g.amountDue.toLocaleString("en-IN")} → collect ₹${finalAmt.toLocaleString("en-IN")} (${method.toUpperCase()}) for ${g.customerName}`;
-      const pin = await centeredPinPrompt(`Manager PIN to ${verb}. ${reason}.`, true);
-      if (!pin) return;
-      const h = await sha256(pin);
-      if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Bill stays OPEN.", "error", true); return; }
+      const promptLabel = method === "waived" ? "WAIVE PIN" : "Manager PIN";
+      // WAIVE requires its own PIN (1919); discounts require the manager PIN.
+      // Validate IN-PLACE so a wrong PIN shows "INCORRECT PIN" inside the prompt
+      // (it stays open); the prompt only resolves on the correct PIN or Cancel.
+      const okHash = method === "waived" ? BAR_WAIVE_HASH : BAR_MANAGER_HASH;
+      const pin = await centeredPinPrompt(
+        `${promptLabel} to ${verb}. ${reason}.`,
+        true,
+        async (entered) => (await sha256(entered)) === okHash,
+      );
+      if (!pin) return; // cancelled → bill stays OPEN
     }
     setBusyKey(g.key);
     setPendingClear(null);
@@ -4613,7 +4820,7 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
               {groups.map((g, idx) => {
                 const isBusy = busyKey === g.key;
                 const isPending = pendingClear?.key === g.key;
-                const effPct = Math.max(0, Math.min(100, discPct));
+                const effPct = Math.max(0, Math.min(50, discPct));
                 const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
                 return (
                 <div key={g.key}>
@@ -4689,7 +4896,7 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
       {/* 🆕 v3.124 — SETTLEMENT POPUP MODAL (separate from row, full breakdown) */}
       {pendingClear && (() => {
         const g = pendingClear;
-        const effPct = Math.max(0, Math.min(100, discPct));
+        const effPct = Math.max(0, Math.min(50, discPct));
         const finalAmt = Math.round(g.amountDue * (1 - effPct / 100));
         const discountSaved = g.amountDue - finalAmt;
         return (
@@ -4723,10 +4930,20 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                 ))}
               </div>
 
-              {/* BREAKDOWN BLOCK */}
+              {/* BREAKDOWN BLOCK — 🆕 2026-06-24 (Khushi) NC bills now show
+                  SERVICE CHARGE + GST clearly; TOTAL BILL is tax-inclusive. */}
               <div style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "#6B6B6B", fontWeight: 700 }}>
-                  <span>TOTAL BILL</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.totalBill.toLocaleString("en-IN")}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, color: "#6B6B6B", fontWeight: 700 }}>
+                  <span>SUBTOTAL</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.subtotal.toLocaleString("en-IN")}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, color: "#6B6B6B", fontWeight: 700 }}>
+                  <span>SERVICE CHARGE (10%)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.serviceCharge.toLocaleString("en-IN")}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, color: "#6B6B6B", fontWeight: 700 }}>
+                  <span>GST</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.tax.toLocaleString("en-IN")}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderTop: "1px solid #C9C9C9", marginTop: 2, fontSize: 13, color: "#000", fontWeight: 800 }}>
+                  <span>TOTAL BILL (incl. tax)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{g.totalBill.toLocaleString("en-IN")}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "#23A094", fontWeight: 700 }}>
                   <span>COMP GIVEN</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{g.compValue.toLocaleString("en-IN")}</span>
@@ -4749,22 +4966,22 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
               </div>
 
               {/* DISCOUNT INPUT — 🆕 v3.126 live-recompute, no APPLY needed.
-                  🆕 2026-06-24 (Khushi) — HIDDEN behind SHOW_BAR_DISCOUNT
-                  (misleading/unclear; to be revisited). discInput stays 0. */}
-              {SHOW_BAR_DISCOUNT && (
+                  🆕 2026-06-24 (Khushi) — UNHIDDEN for NC settle: discount on the
+                  BILL DUE (after comp), HARD-CAPPED at 50%, and ANY discount (even
+                  1%) requires a Manager PIN (needPin = effPct > 0 in finalizeClear).
+                  The recharge-wallet discount stays hidden (SHOW_BAR_DISCOUNT). */}
               <div style={{ marginBottom: 18 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>DISCOUNT %</div>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>DISCOUNT % · MAX 50% · MANAGER PIN</div>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <input type="number" min={0} max={100} value={discInput}
+                  <input type="number" min={0} max={50} value={discInput}
                     onChange={(e) => onDiscChange(e.target.value)}
                     onFocus={(e) => e.target.select()}
                     placeholder="0"
                     style={{ width: 140, padding: "14px 16px", borderRadius: 8, background: "#F4F4F0", border: "2px solid #000", color: "#000", fontSize: 22, fontWeight: 900, textAlign: "center", fontFamily: "'Space Grotesk', monospace" }} />
                   {discPct > 0 && (<div style={{ fontSize: 12, color: "#000", fontWeight: 800, letterSpacing: 0.5 }}>✓ {discPct}% LIVE</div>)}
-                  {discPct > 50 && (<div style={{ fontSize: 10, color: "#FACC15", fontWeight: 800, letterSpacing: 0.5 }}>⚠ MANAGER PIN</div>)}
+                  {discPct > 0 && (<div style={{ fontSize: 10, color: "#000", background: "#FACC15", padding: "3px 8px", borderRadius: 6, fontWeight: 900, letterSpacing: 0.5 }}>⚠ MANAGER PIN</div>)}
                 </div>
               </div>
-              )}
 
               {/* PAYMENT METHOD GRID — 🆕 v3.126 select-then-confirm (no auto-clear) */}
               <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>PAID BY</div>
@@ -4833,9 +5050,39 @@ function NcReportsTab({
 }) {
   const GOLD = "#FF90E8";
   void clearedAll;
+  // 🆕 2026-06-24 (Khushi) — COMP GIVEN must read the FLAT tab-level comp
+  // (`compApplied`, the ₹1000-max knocked off the whole NC bill) — that's the
+  // real comp model. The old per-item `free`-flag sum showed ₹0 because comps
+  // aren't given by marking single items free anymore. Legacy rows that predate
+  // `compApplied` fall back to summing per-item `free` line values.
   const compGiven = rows.reduce((s, r) => {
+    if (typeof r.compApplied === "number") return s + r.compApplied;
     const items = (r.items || []) as Array<{ qty?: number; p?: number; price?: number; free?: boolean }>;
     return s + items.filter((it) => it.free).reduce((ss, it) => ss + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+  }, 0);
+
+  // 🆕 2026-06-24 (Khushi) — TOTAL BILLED = the FULL NC bill (tax-inclusive
+  // grand total) across every NC tab logged tonight, BEFORE comp / waiver /
+  // recovery. Reads stored `totalBill` (set when SC + GST landed on NC tabs);
+  // legacy rows without it fall back to the raw item sum.
+  const totalBilled = rows.reduce((s, r) => {
+    if (typeof r.totalBill === "number") return s + r.totalBill;
+    const items = (r.items || []) as Array<{ qty?: number; p?: number; price?: number }>;
+    return s + items.reduce((ss, it) => ss + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+  }, 0);
+
+  // 🆕 2026-06-24 (Khushi) — DISCOUNT GIVEN = total ₹ knocked off via the NC
+  // settle DISCOUNT (not WAIVE, not COMP). Per cleared, non-waived row with a
+  // discountPct > 0: discount ₹ = BILL DUE (amountDue, after comp) − finalAmount
+  // collected. Waived rows are tracked separately under WAIVED; comp under
+  // COMP GIVEN — this card isolates true bartender/manager discounts.
+  const discountGiven = rows.reduce((s, r) => {
+    if (r.status === "open" || r.paymentMethod === "waived") return s;
+    const pct = typeof r.discountPct === "number" ? r.discountPct : 0;
+    if (pct <= 0) return s;
+    const due = r.amountDue || 0;
+    const final = typeof r.finalAmount === "number" ? r.finalAmount : due;
+    return s + Math.max(0, due - final);
   }, 0);
 
   const downloadCsv = () => {
@@ -4843,13 +5090,26 @@ function NcReportsTab({
       const s = v == null ? "" : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const cols = ["Time","Status","Guest","Phone","Role","Token","ApprovedBy","LoggedBy","ClearedBy","Method","Items","TotalBill","CompValue","Due","DiscountPct","FinalPaid"];
+    const cols = ["Time","Status","Guest","Phone","Role","Token","ApprovedBy","LoggedBy","ClearedBy","Method","Items","TotalBill","CompValue","Due","DiscountPct","DiscountValue","FinalPaid"];
     const lines = [cols.join(",")];
     for (const r of rows) {
       const items = (r.items || []) as Array<{ qty?: number; n?: string; name?: string; p?: number; price?: number; free?: boolean }>;
       const itemStr = items.map((it) => `${it.qty || 0}x ${it.n ?? it.name ?? ""}${it.free ? " (COMP)" : ""}`).join(" | ");
-      const totalBill = items.reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
-      const compVal = items.filter((it) => it.free).reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+      // 🆕 2026-06-24 (Khushi) — TotalBill = tax-INCLUSIVE total when stored
+      // (NC tabs now carry SC + GST); CompValue = the flat ₹1000-max comp
+      // (`compApplied`). Legacy rows fall back to raw item sum / per-item free.
+      const totalBill = typeof r.totalBill === "number"
+        ? r.totalBill
+        : items.reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+      const compVal = typeof r.compApplied === "number"
+        ? r.compApplied
+        : items.filter((it) => it.free).reduce((s, it) => s + (it.qty || 0) * (it.p ?? it.price ?? 0), 0);
+      // DiscountValue = ₹ knocked off via the settle DISCOUNT (cleared,
+      // non-waived, discountPct > 0); blank otherwise. Mirrors the KPI math.
+      const csvDiscPct = typeof r.discountPct === "number" ? r.discountPct : 0;
+      const discountVal = (r.status !== "open" && r.paymentMethod !== "waived" && csvDiscPct > 0)
+        ? Math.max(0, (r.amountDue || 0) - (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)))
+        : "";
       const ts = tsOf(r);
       lines.push([
         ts ? new Date(ts).toISOString() : "",
@@ -4867,6 +5127,7 @@ function NcReportsTab({
         compVal,
         r.amountDue || 0,
         typeof r.discountPct === "number" ? r.discountPct : "",
+        discountVal,
         typeof r.finalAmount === "number" ? r.finalAmount : "",
       ].map(esc).join(","));
     }
@@ -4891,9 +5152,11 @@ function NcReportsTab({
       <div style={{ display: "flex", gap: 12, margin: "18px 0 12px", flexWrap: "wrap", alignItems: "stretch" }}>
         {[
           { l: "LOGGED",      v: String(rows.length),                              c: "#000" },
+          { l: "TOTAL BILLED", v: `₹${totalBilled.toLocaleString("en-IN")}`,       c: "#000" },
           { l: "RECOVERED",   v: `₹${totalRecovered.toLocaleString("en-IN")}`,    c: "#23A094" },
           { l: "WAIVED",      v: `₹${totalWaived.toLocaleString("en-IN")}`,       c: "#F59E0B" },
           { l: "COMP GIVEN",  v: `₹${compGiven.toLocaleString("en-IN")}`,         c: GOLD },
+          { l: "DISCOUNT GIVEN", v: `₹${discountGiven.toLocaleString("en-IN")}`,  c: "#2563EB" },
         ].map((k) => (
           <div key={k.l} style={{ flex: "1 1 140px", padding: "14px 16px", background: "#fff", border: "2px solid #000", borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800 }}>{k.l}</div>
@@ -4944,7 +5207,7 @@ function NcReportsTab({
             return (
               <div key={id} style={{ borderTop: "2px solid #000"}}>
                 <button type="button" onClick={() => onToggleExpand(id)}
-                  style={{ width: "100%", display: "grid", gridTemplateColumns: "26px 0.7fr 0.5fr 1fr 0.6fr 0.9fr 0.7fr 0.8fr", gap: 10, padding: "16px 16px", alignItems: "center", background: isOpen ? "#FF90E8" : "transparent", border: "none", color: "#000", textAlign: "left", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif" }}>
+                  style={{ width: "100%", display: "grid", gridTemplateColumns: "26px 0.7fr 0.5fr 1fr 0.6fr 0.9fr 0.7fr 0.8fr", gap: 10, padding: "16px 16px", alignItems: "center", background: isOpen ? "#FFEAF7" : "transparent", border: "none", borderLeft: isOpen ? "5px solid #FF90E8" : "5px solid transparent", color: "#000", textAlign: "left", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif" }}>
                   <div style={{ color: "#000", fontSize: 16, fontWeight: 900 }}>{isOpen ? "▾" : "▸"}</div>
                   <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700 }}>{fmtTime(r)}</div>
                   <div>
@@ -4961,38 +5224,81 @@ function NcReportsTab({
                   <div style={{ fontSize: 13, fontWeight: 800, color: r.paymentMethod ? "#000" : "#6B6B6B", textTransform: "uppercase", letterSpacing: 0.6 }}>{r.paymentMethod || "—"}</div>
                   <div style={{ textAlign: "right", fontSize: 18, fontWeight: 900, color: amtColor, fontFamily: "'Space Grotesk', sans-serif", letterSpacing: 0.3 }}>₹{showAmt.toLocaleString("en-IN")}</div>
                 </button>
-                {isOpen && (
-                  <div style={{ padding: "16px 20px 18px 44px", background: "#fff", borderTop: "2px solid #000", display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 28 }}>
-                    <div>
-                      <div style={{ fontSize: 12, color: "#000", fontWeight: 800, letterSpacing: 1.2, marginBottom: 8 }}>ITEMS</div>
-                      {items.length === 0 && <div style={{ fontSize: 14, color: "#6B6B6B" }}>—</div>}
-                      {items.map((it, i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: it.free ? "#000" : "#6B6B6B", fontWeight: it.free ? 600 : 700 }}>
-                          <span>{it.qty || 0}× {it.n ?? it.name ?? ""}{it.free ? " · COMP" : ""}</span>
-                          <span style={{ color: it.free ? "#000" : "#6B6B6B" }}>{it.free ? "FREE" : `₹${((it.qty || 0) * (it.p ?? it.price ?? 0)).toLocaleString("en-IN")}`}</span>
+                {isOpen && (() => {
+                  const subtotalV = typeof r.subtotal === "number" ? r.subtotal : totalBill;
+                  const grand = typeof r.totalBill === "number" ? r.totalBill : totalBill;
+                  const comp = typeof r.compApplied === "number" ? r.compApplied : 0;
+                  const isWaived = r.paymentMethod === "waived";
+                  const money: [string, string, string][] = [
+                    ["Subtotal", `₹${subtotalV.toLocaleString("en-IN")}`, "#000"],
+                    ...((typeof r.serviceCharge === "number" ? [["Service charge (10%)", `₹${r.serviceCharge.toLocaleString("en-IN")}`, "#000"]] : []) as [string, string, string][]),
+                    ...((typeof r.tax === "number" ? [["GST", `₹${r.tax.toLocaleString("en-IN")}`, "#000"]] : []) as [string, string, string][]),
+                    ["Total bill", `₹${grand.toLocaleString("en-IN")}`, "#000"],
+                    ...((comp > 0 ? [["Comp", `− ₹${comp.toLocaleString("en-IN")}`, "#0B6E63"]] : []) as [string, string, string][]),
+                    ...((typeof r.discountPct === "number" && r.discountPct > 0 ? [["Discount", `${r.discountPct}%`, "#000"]] : []) as [string, string, string][]),
+                  ];
+                  const meta: [string, string][] = [
+                    ["Token", r.token || "—"],
+                    ["Approved by", r.approvedBy || "—"],
+                    ["Logged by", r.staff || "—"],
+                    ...((r.clearedBy ? [["Cleared by", r.clearedBy]] : []) as [string, string][]),
+                    ["Method", r.status === "open" ? "PENDING" : isWaived ? "WAIVED" : (r.paymentMethod ? r.paymentMethod.toUpperCase() : "—")],
+                    ...((r.clearedAt ? [["Cleared at", new Date(r.clearedAt).toLocaleString("en-IN")]] : []) as [string, string][]),
+                  ];
+                  const methodU = (r.paymentMethod || "").toUpperCase();
+                  const finalLabel = r.status === "open"
+                    ? "BILL DUE"
+                    : isWaived
+                    ? "WAIVED · ₹0 COLLECTED"
+                    : methodU ? `COLLECTED · ${methodU}` : "COLLECTED";
+                  const finalVal = r.status === "open" ? (r.amountDue || 0) : isWaived ? 0 : (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0));
+                  const finalColor = r.status === "open" ? "#7A5400" : isWaived ? "#000" : "#0B6E63";
+                  const finalBg = r.status === "open" ? "#FFE9A8" : isWaived ? "#E4E4E4" : "#C7EFE8";
+                  // 🆕 2026-06-24 (Khushi) — ONE single stacked table per NC tab
+                  // (was 3 separate cards). Order top→bottom: ITEMS → BILL →
+                  // DETAILS, each as a section inside one bordered card so the
+                  // whole tab reads as a single receipt.
+                  const blackHead: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto", gap: 10, padding: "10px 14px", background: "#000", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 1.2 };
+                  const sectionHead: React.CSSProperties = { padding: "10px 14px", background: "#F4F4F0", borderTop: "2px solid #000", borderBottom: "1px solid #000", fontSize: 11, fontWeight: 800, letterSpacing: 1.2, color: "#000" };
+                  const lineRow: React.CSSProperties = { display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 14px", borderTop: "1px solid #F0F0EC", fontSize: 13 };
+                  return (
+                    <div style={{ padding: "16px 16px 18px 44px", background: "#FBFBF9", borderTop: "2px solid #000" }}>
+                      <div style={{ border: "2px solid #000", borderRadius: 8, overflow: "hidden", background: "#fff", width: "100%" }}>
+                        {/* ITEMS */}
+                        <div style={blackHead}><span>ITEMS</span><span>AMOUNT</span></div>
+                        {items.length === 0 && <div style={{ padding: "10px 14px", fontSize: 13, color: "#6B6B6B", fontWeight: 600 }}>No items</div>}
+                        {items.map((it, i) => (
+                          <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, padding: "8px 14px", borderTop: i ? "1px solid #EDEDE8" : "none", fontSize: 13, alignItems: "center" }}>
+                            <span style={{ fontWeight: 700, color: "#000" }}>{it.qty || 0}× {it.n ?? it.name ?? ""}{it.free ? " · COMP" : ""}</span>
+                            <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 800, color: it.free ? "#0B6E63" : "#000" }}>{it.free ? "FREE" : `₹${((it.qty || 0) * (it.p ?? it.price ?? 0)).toLocaleString("en-IN")}`}</span>
+                          </div>
+                        ))}
+
+                        {/* BILL */}
+                        <div style={sectionHead}>BILL</div>
+                        {money.map(([k, v, c], i) => (
+                          <div key={i} style={{ ...lineRow, borderTop: i ? "1px solid #F0F0EC" : "none" }}>
+                            <span style={{ color: "#6B6B6B", fontWeight: 700 }}>{k}</span>
+                            <span style={{ color: c, fontWeight: 800, fontFamily: "'Space Grotesk', monospace" }}>{v}</span>
+                          </div>
+                        ))}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "11px 14px", borderTop: "2px solid #000", background: finalBg }}>
+                          <span style={{ color: finalColor, fontWeight: 900, fontSize: 13, letterSpacing: 0.5 }}>{finalLabel}</span>
+                          <span style={{ color: finalColor, fontWeight: 900, fontSize: 18, fontFamily: "'Space Grotesk', monospace" }}>₹{finalVal.toLocaleString("en-IN")}</span>
                         </div>
-                      ))}
+
+                        {/* DETAILS */}
+                        <div style={sectionHead}>DETAILS</div>
+                        {meta.map(([k, v], i) => (
+                          <div key={i} style={{ ...lineRow, borderTop: i ? "1px solid #F0F0EC" : "none" }}>
+                            <span style={{ color: "#6B6B6B", fontWeight: 700 }}>{k}</span>
+                            <span style={{ color: "#000", fontWeight: 800, textAlign: "right" }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <div>
-                      <div style={{ fontSize: 12, color: "#000", fontWeight: 800, letterSpacing: 1.2, marginBottom: 8 }}>BREAKDOWN</div>
-                      {[
-                        ["Token", r.token || "—"],
-                        ["Approved by", r.approvedBy || "—"],
-                        ["Logged by", r.staff || "—"],
-                        ["Total bill", `₹${totalBill.toLocaleString("en-IN")}`],
-                        ["Due", `₹${(r.amountDue || 0).toLocaleString("en-IN")}`],
-                        ...(typeof r.discountPct === "number" && r.discountPct > 0 ? [["Discount", `${r.discountPct}%`]] : []),
-                        ...(typeof r.finalAmount === "number" ? [["Final paid", `₹${r.finalAmount.toLocaleString("en-IN")}`]] : []),
-                        ...(r.clearedAt ? [["Cleared at", new Date(r.clearedAt).toLocaleString("en-IN")]] : []),
-                      ].map(([k, v], i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0", color: "#6B6B6B" }}>
-                          <span style={{ color: "#6B6B6B", fontWeight: 600 }}>{k}</span>
-                          <span style={{ fontWeight: 800 }}>{v}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             );
           })}

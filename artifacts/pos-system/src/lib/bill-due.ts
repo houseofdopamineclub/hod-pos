@@ -22,6 +22,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { getOperationalNightStr } from "./utils-pos";
+import { computeHodBreakdown, type HodOrderItem } from "./firestore-hod";
 
 // 🆕 2026-05-27 v3.115 — MANAGER added to the role list (Khushi: floor
 // managers eat/drink on the house too; need their own audit bucket).
@@ -69,9 +70,57 @@ export interface BillDueDoc {
    *  amountDue = (gross of all items) − compApplied. Legacy rows omit this
    *  and fall back to summing `free` line values. */
   compApplied?: number | null;
+  /** 🆕 2026-06-24 (Khushi) — NC tabs now carry SERVICE CHARGE + GST like every
+   *  other bill. These persist the tax breakdown so the settle modal, reports
+   *  and WhatsApp can show it. `totalBill` = tax-INCLUSIVE grand total (subtotal
+   *  + serviceCharge + tax), and amountDue = totalBill − compApplied. Legacy
+   *  rows (pre-v3.388) omit these and fall back to raw item math. */
+  subtotal?: number | null;
+  serviceCharge?: number | null;
+  tax?: number | null;       // GST (₹) — alcohol GST-exempt, food 5%
+  totalBill?: number | null; // tax-inclusive grand total (₹)
 }
 
 const COL = "billDue";
+
+/** 🆕 2026-06-24 (Khushi) — SINGLE SOURCE OF TRUTH for NC bill math. NC tabs
+ *  are billed exactly like any other bar bill: 10% service charge + GST (food
+ *  5%, alcohol exempt) via the shared `computeHodBreakdown` engine, then the
+ *  flat ₹1000 comp is knocked off the tax-INCLUSIVE total. So we genuinely
+ *  collect SC + tax on NC consumption (Khushi: "we will be collecting taxes
+ *  and service charges for nc too"), and the comp just reduces what's owed.
+ *
+ *  Item tax class mirrors the rest of the bar: `t==="food"` → GST-applicable;
+ *  any drink (no `alc` flag on NC items) → treated as alcohol → GST-exempt. */
+export interface NcBill {
+  subtotal: number;
+  serviceCharge: number;
+  gst: number;
+  cgst: number;
+  sgst: number;
+  roundOff: number;
+  totalBill: number;   // tax-inclusive grand total
+  compApplied: number;
+  amountDue: number;   // totalBill − compApplied
+}
+export function computeNcBill(items: BillDueItem[], compCap = 1000): NcBill {
+  const mapped: HodOrderItem[] = (items || []).map((it) => ({
+    n: it.n, p: it.p || 0, qty: it.qty || 0, cat: "",
+    t: it.t === "food" ? "food" : "drink",
+    // NC items don't carry an `alc` flag; mirror the bar default — food is
+    // GST-applicable, every drink is treated as alcohol (GST-exempt).
+    alc: it.t === "food" ? false : true,
+  }));
+  const b = computeHodBreakdown(mapped);
+  const totalBill = b.grandTotal;
+  const compApplied = Math.min(compCap, totalBill);
+  const amountDue = Math.max(0, totalBill - compApplied);
+  return {
+    subtotal: b.subtotal, serviceCharge: b.serviceCharge, gst: b.gst,
+    cgst: b.cgst, sgst: b.sgst, roundOff: b.roundOff,
+    totalBill, compApplied, amountDue,
+  };
+}
 
 /** Stable monotonic per-night token. Format `T-007` (zero-padded to 3).
  *  Resets at operational-night boundary (12pm → 12pm IST handled by
@@ -124,7 +173,7 @@ export async function appendBillDue(
   newItems: BillDueItem[],
   expect: { phoneKey: string; nameKey: string; role: NcRole },
   compCap = 1000,
-): Promise<{ ok: boolean; combined?: BillDueItem[]; amountDue?: number; compApplied?: number }> {
+): Promise<{ ok: boolean; combined?: BillDueItem[]; amountDue?: number; compApplied?: number; totalBill?: number; subtotal?: number; serviceCharge?: number; tax?: number }> {
   try {
     return await runTransaction(db, async (txn) => {
       const ref = doc(db, COL, id);
@@ -142,11 +191,21 @@ export async function appendBillDue(
         }
       }
       const combined: BillDueItem[] = [...(data.items || []), ...newItems];
-      const gross = combined.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
-      const compApplied = Math.min(compCap, gross);
-      const amountDue = Math.max(0, gross - compApplied);
-      txn.update(ref, { items: combined, amountDue, compApplied });
-      return { ok: true, combined, amountDue, compApplied };
+      // 🆕 2026-06-24 (Khushi) — tab-wide SC + GST via the shared NC bill engine.
+      const b = computeNcBill(combined, compCap);
+      txn.update(ref, {
+        items: combined,
+        amountDue: b.amountDue,
+        compApplied: b.compApplied,
+        subtotal: b.subtotal,
+        serviceCharge: b.serviceCharge,
+        tax: b.gst,
+        totalBill: b.totalBill,
+      });
+      return {
+        ok: true, combined, amountDue: b.amountDue, compApplied: b.compApplied,
+        totalBill: b.totalBill, subtotal: b.subtotal, serviceCharge: b.serviceCharge, tax: b.gst,
+      };
     });
   } catch (e) {
     // FAIL-SAFE: any transaction error → tell the caller to open a fresh row
@@ -235,10 +294,21 @@ export async function sendBillDueWhatsApp(
       const tot = (it.p || 0) * (it.qty || 0);
       return `• ${it.qty}× ${it.n}${it.free ? " (COMPED)" : ` — ₹${tot}`}`;
     }).join("\n");
+    // 🆕 2026-06-24 (Khushi) — clearly itemise SERVICE CHARGE + GST so the guest
+    // sees exactly what they're being taxed on (NC tabs now collect SC + tax).
+    const b = computeNcBill(items);
+    const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+    const taxLines =
+      `Subtotal: ${fmt(b.subtotal)}\n` +
+      `Service charge (10%): ${fmt(b.serviceCharge)}\n` +
+      `GST: ${fmt(b.gst)}\n` +
+      `Total bill: ${fmt(b.totalBill)}\n` +
+      (b.compApplied > 0 ? `Comp: −${fmt(b.compApplied)}\n` : "");
     const msg =
       `🍸 HOUSE OF DOPAMINE\n\n` +
       `Hi ${name || "Guest"} —\n\n` +
       `Tonight's NC tab${token ? ` (TOKEN ${token})` : ""}:\n${lines}\n\n` +
+      `${taxLines}` +
       `Amount due: ₹${amount.toLocaleString("en-IN")}\n\n` +
       `Please settle at the bar before you leave. 🙏`;
     const r = await fetch(`${WHATSAPP_CF_BASE}/sendWhatsAppText`, {

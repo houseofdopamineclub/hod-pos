@@ -38,7 +38,16 @@ function _mountOverlay(brutalist = false): HTMLDivElement {
   return overlay;
 }
 
-export function centeredPinPrompt(reason: string, brutalist = false): Promise<string | null> {
+// 🆕 2026-06-24 (Khushi) — optional `validate` callback. When supplied, the
+// modal verifies the entered PIN IN-PLACE: a wrong PIN shows "INCORRECT PIN"
+// inside the prompt and keeps it open (no separate popup that can be missed or
+// race the close); the promise only resolves the PIN once it's correct (or null
+// on Cancel). Callers that omit it keep the old resolve-on-any-PIN behavior.
+export function centeredPinPrompt(
+  reason: string,
+  brutalist = false,
+  validate?: (pin: string) => boolean | Promise<boolean>,
+): Promise<string | null> {
   return new Promise((resolve) => {
     try {
       if (typeof document === "undefined") {
@@ -99,12 +108,30 @@ export function centeredPinPrompt(reason: string, brutalist = false): Promise<st
         try { document.body.removeChild(overlay); } catch {}
         resolve(val);
       };
-      const submit = () => {
+      const submit = async () => {
         const v = (input.value || "").trim();
         if (v.length < 4) { errEl.textContent = "PIN must be at least 4 digits."; input.focus(); return; }
+        if (validate) {
+          ok.disabled = true;
+          try {
+            const valid = await validate(v);
+            if (!valid) {
+              ok.disabled = false;
+              errEl.textContent = "INCORRECT PIN — try again.";
+              input.value = "";
+              input.focus();
+              return;
+            }
+          } catch {
+            ok.disabled = false;
+            errEl.textContent = "Could not verify PIN. Try again.";
+            input.focus();
+            return;
+          }
+        }
         close(v);
       };
-      ok.onclick = submit;
+      ok.onclick = () => { void submit(); };
       cancel.onclick = () => close(null);
       overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
       input.addEventListener("keydown", (e: KeyboardEvent) => {

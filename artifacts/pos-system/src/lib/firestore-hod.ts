@@ -1340,60 +1340,97 @@ export async function ensureZeroBalanceCoverForGuest(input: {
 // Sequence is race-safe via a Firestore transaction on a per-night counter
 // doc at `posCounters/walkin-<YYYY-MM-DD>` — two bartenders tapping at the
 // same moment get distinct numbers, never the same.
+// 🆕 2026-06-24 (Khushi) — a walk-in counts as EMPTY (reusable) only if it has
+// NO order and NO money: no round carries items, no transactions, and every
+// money field is ₹0. Conservative on purpose — ANY sign of activity makes it
+// NOT empty, so a number with a real order/payment is never recycled.
+function _isEmptyWalkin(d: Record<string, unknown> | undefined): boolean {
+  if (!d) return false;
+  const rounds = Array.isArray(d.tabRounds) ? (d.tabRounds as Array<{ items?: unknown[] }>) : [];
+  const hasItems = rounds.some((r) => r && Array.isArray(r.items) && r.items.length > 0);
+  const pend = d.pendingOrder as { items?: unknown[] } | undefined;
+  const hasPending = !!pend && Array.isArray(pend.items) && pend.items.length > 0;
+  const txns = Array.isArray(d.transactions) ? (d.transactions as unknown[]) : [];
+  const money =
+    (Number(d.coverBalance) || 0) + (Number(d.coverUsed) || 0) +
+    (Number(d.coverPaid) || 0) + (Number(d.coverActivated) || 0) +
+    (Number(d.topUpTotal) || 0) + (Number(d.pendingTopUp) || 0);
+  return !hasItems && !hasPending && txns.length === 0 && money === 0;
+}
+
 export async function createBarWalkinCover(staffName: string): Promise<HodCover> {
   await authReady;
   const today = getOperationalNightStr();
   const expDate = getCoverExpiryFor(today);
   const counterRef = doc(db, "posCounters", `walkin-${today}`);
-  const seq = await runTransaction(db, async (txn) => {
+  const ymd = today.replace(/-/g, "");
+  // 🆕 2026-06-24 (Khushi) — RECLAIM an abandoned walk-in number instead of
+  // climbing 16→17→18 forever. If the MOST-RECENT walk-in for tonight is still
+  // EMPTY (created then CANCELLED, no order/no money) reuse that same number; if
+  // it already carries an order/payment (e.g. another bar tablet ordered on it)
+  // it is NOT empty, so skip it and bump to the next number. Race-safe: the
+  // counter doc serialises concurrent taps via the Firestore transaction.
+  // 🛡 The cover write lives INSIDE the transaction (not a later setDoc) so the
+  // reuse is atomic: because we READ the candidate walk-in doc in this txn, any
+  // concurrent order/payment landing on it makes Firestore RETRY the txn — on the
+  // retry we re-read it, see it is no longer empty, and bump to a fresh number
+  // instead of overwriting that now-active wallet back to ₹0.
+  const { docId, cover } = await runTransaction(db, async (txn) => {
     const snap = await txn.get(counterRef);
-    const next = ((snap.exists() ? (snap.data().seq as number) : 0) || 0) + 1;
-    txn.set(counterRef, { seq: next, updatedAt: new Date().toISOString() }, { merge: true });
-    return next;
+    const cur = (snap.exists() ? (snap.data().seq as number) : 0) || 0;
+    let seq = cur + 1;
+    if (cur > 0) {
+      const topRef = doc(db, COVERS_COL, `WALKIN-${ymd}-${cur}`);
+      const topSnap = await txn.get(topRef);
+      if (topSnap.exists() && _isEmptyWalkin(topSnap.data() as Record<string, unknown>)) {
+        seq = cur; // reuse the abandoned (empty) number
+      }
+    }
+    // ── all reads done; writes below (Firestore requires reads-before-writes) ──
+    const refStr = `WALKIN-${ymd}-${seq}`;
+    const cv: Record<string, unknown> = {
+      bookingId: refStr,
+      ref: refStr,
+      name: `WALKIN-${seq}`,
+      phone: "",
+      email: "",
+      eventId: "",
+      eventTitle: "",
+      coverPaid: 0,
+      coverActivated: 0,
+      coverBalance: 0,
+      pendingTopUp: 0,
+      coverUsed: 0,
+      diffAmount: 0,
+      diffMethod: "none",
+      paymentMethod: "walkin",
+      isGuestList: false,
+      isTableBooking: false,
+      activatedAt: new Date().toISOString(),
+      activatedBy: staffName,
+      transactions: [],
+      expiresAt: expDate.toISOString(),
+      checkedIn: true,
+      actualArrivalTime: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+      date: today,
+      topUpTotal: 0,
+      groupSize: 1,
+      coverDocId: refStr,
+      // 🔴 2026-05-25 (Khushi BUG FIX) — must start with "walkin" so Reports
+      // classifyWallet() treats it as a true walk-in (source:"walk-in",
+      // payChannel:""). Previously "bar_walkin" → did NOT match
+      // startsWith("walkin") → fell through to cover branch → "⚠ UNKNOWN"
+      // pay-channel badge on the wallet row. "walkin_bar" matches cleanly.
+      source: "walkin_bar",
+      // No payment was collected at creation — bartender will recharge after.
+      // Setting paymentId="walkin_bar_<seq>" stops the cover branch from
+      // tagging this as UNKNOWN if anything ever re-classifies it.
+      paymentId: `walkin_bar_${seq}`,
+    };
+    txn.set(counterRef, { seq, updatedAt: new Date().toISOString() }, { merge: true });
+    txn.set(doc(db, COVERS_COL, refStr), cv);
+    return { docId: refStr, cover: cv };
   });
-  const refStr = `WALKIN-${today.replace(/-/g, "")}-${seq}`;
-  const docId = refStr;
-  const ref = doc(db, COVERS_COL, docId);
-  const cover: Record<string, unknown> = {
-    bookingId: docId,
-    ref: refStr,
-    name: `WALKIN-${seq}`,
-    phone: "",
-    email: "",
-    eventId: "",
-    eventTitle: "",
-    coverPaid: 0,
-    coverActivated: 0,
-    coverBalance: 0,
-    pendingTopUp: 0,
-    coverUsed: 0,
-    diffAmount: 0,
-    diffMethod: "none",
-    paymentMethod: "walkin",
-    isGuestList: false,
-    isTableBooking: false,
-    activatedAt: new Date().toISOString(),
-    activatedBy: staffName,
-    transactions: [],
-    expiresAt: expDate.toISOString(),
-    checkedIn: true,
-    actualArrivalTime: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
-    date: today,
-    topUpTotal: 0,
-    groupSize: 1,
-    coverDocId: docId,
-    // 🔴 2026-05-25 (Khushi BUG FIX) — must start with "walkin" so Reports
-    // classifyWallet() treats it as a true walk-in (source:"walk-in",
-    // payChannel:""). Previously "bar_walkin" → did NOT match
-    // startsWith("walkin") → fell through to cover branch → "⚠ UNKNOWN"
-    // pay-channel badge on the wallet row. "walkin_bar" matches cleanly.
-    source: "walkin_bar",
-    // No payment was collected at creation — bartender will recharge after.
-    // Setting paymentId="walkin_bar_<seq>" stops the cover branch from
-    // tagging this as UNKNOWN if anything ever re-classifies it.
-    paymentId: `walkin_bar_${seq}`,
-  };
-  await setDoc(ref, cover);
   return { id: docId, ...cover } as HodCover;
 }
 
