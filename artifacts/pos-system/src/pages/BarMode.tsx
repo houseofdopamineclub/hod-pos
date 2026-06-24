@@ -8,7 +8,7 @@ import {
   logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, setCoverBillDiscount, updatePreparingRoundItems, createBarWalkinCover,
-  coverDocIdFor, subscribeToCoversForNight,
+  coverDocIdFor, subscribeToCoversForNight, getTabletFloor, setTabletFloor,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -2867,6 +2867,30 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // 🚶 2026-05-25 (Khushi GO-LIVE) — NEW WALK-IN button busy flag.
   const [walkinBusy, setWalkinBusy] = useState(false);
 
+  // 🆕 2026-06-24 (Khushi) — TWO BARS: main bar on GROUND, second bar on FIRST
+  // floor; guests redeem at either. Bar/Cashier KOTs + bills route to the
+  // tablet's saved floor (getTabletFloor). Captains share tablets and move
+  // between floors, so this toggle lets them flip the PRINT FLOOR live before
+  // printing — no reload, ZERO Firestore reads (localStorage only). Every bar
+  // print path (walk-in / NC KOT / NC bill / wallet KOT+BILL) already falls
+  // back to getTabletFloor() when the cover has no table, so flipping this
+  // is all that's needed to send the chit to the right bar's printer.
+  const [printFloor, setPrintFloor] = useState<TabletFloor>(() =>
+    getTabletFloor() === "first" ? "first" : "ground",
+  );
+  const setBarPrintFloor = (f: TabletFloor) => { setTabletFloor(f); setPrintFloor(f); };
+  // Normalize ONLY a never-set (null) tablet floor: the print helper silently
+  // defaults a null floor to "ff" (first), which would NOT match the "GROUND"
+  // the toggle shows on first load. Persist the displayed default once so what
+  // the bartender sees is exactly where it prints. We deliberately DON'T touch
+  // a saved "rooftop" value — that's a first-class deliberate setting other
+  // modes (Captain/Admin) share via the same key; only an explicit toggle tap
+  // changes it.
+  useEffect(() => {
+    if (getTabletFloor() === null) setTabletFloor(printFloor);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 🆕 2026-06-12 v3.259 (Khushi) — RECENT TRANSACTIONS panel below the search
   // box. Collapsed by default; tapping the header reveals tonight's most-recent
   // 10 wallet transactions, with a "View full transactions" toggle (all of the
@@ -3140,6 +3164,43 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
             Logout
           </button>
+        </div>
+      </div>
+
+      {/* 🆕 2026-06-24 (Khushi) — PRINT FLOOR selector. Two bars (ground + first);
+          captains share tablets & move between floors. Pick the bar you're at
+          BEFORE printing so KOTs + bills go to that bar's printer. Persists in
+          localStorage (zero reads); every bar print path reads getTabletFloor()
+          live, so flipping here instantly re-routes the next chit. */}
+      <div style={{
+        background: "#FBF3D6", borderBottom: "2px solid #000",
+        padding: "10px 16px", display: "flex", alignItems: "center",
+        gap: 10, flexWrap: "wrap",
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 900, color: "#000", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+          🖨 PRINT KOTs &amp; BILLS TO:
+        </div>
+        <div style={{ display: "flex", gap: 8, flex: 1, minWidth: 200 }}>
+          {([
+            { key: "ground", label: "🍸 GROUND FLOOR BAR" },
+            { key: "first", label: "🍸 FIRST FLOOR BAR" },
+          ] as { key: TabletFloor; label: string }[]).map((b) => {
+            const on = printFloor === b.key;
+            return (
+              <button key={b.key}
+                onClick={() => setBarPrintFloor(b.key)}
+                style={{
+                  flex: 1, padding: "9px 8px", borderRadius: 10,
+                  background: on ? "#FF90E8" : "#fff",
+                  border: "2px solid #000",
+                  color: "#000", fontSize: 12, fontWeight: 900, letterSpacing: 0.3,
+                  cursor: "pointer", whiteSpace: "nowrap",
+                  boxShadow: on ? "2px 2px 0 #000" : "none",
+                }}>
+                {on ? "✓ " : ""}{b.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -3660,6 +3721,29 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   const sumRedeemed = (l: HodCover[]) =>
     l.reduce((s, c) => s + Math.max(0, (c.coverActivated || 0) - (c.coverBalance || 0)), 0);
 
+  // 🆕 2026-06-24 (Khushi) — HIDDEN FOR NOW ("work on these values tomorrow").
+  // Flip to true to restore the two Door-mirrored hero boxes below. Logic +
+  // CSV rows stay intact; only the on-screen render is gated.
+  const SHOW_BAR_AMOUNT_BOXES = false;
+  // 🆕 2026-06-24 (Khushi) — HIDDEN FOR NOW ("we shall work on this later").
+  // The TOTAL PROFIT green tile understates real takings (strips service charge
+  // + a phantom discount); audit pending. Flip to true to restore. Computation
+  // (barProfit) stays intact below; only the on-screen render is gated.
+  const SHOW_BAR_PROFIT_TILE = false;
+
+  // 🆕 2026-06-24 (Khushi) — mirror Door Mode's TOTAL AMOUNT COLLECTED /
+  // TOTAL AMOUNT REDEEMED hero boxes into the bar report. SAME field math as
+  // DoorMode: coverActivated = total loaded onto the wallet; topUpTotal =
+  // customer recharges; initial collected = activated − recharges; redeemed =
+  // activated − balance; not redeemed = balance still sitting on the wallet.
+  // Scoped to ACTIVATED bar covers (wallets scanned + walk-ins).
+  const barRecharges = activated.reduce((s, c) => s + (Number((c as any).topUpTotal) || 0), 0);
+  const barInitialCollected = activated.reduce(
+    (s, c) => s + Math.max(0, (c.coverActivated || 0) - (Number((c as any).topUpTotal) || 0)), 0);
+  const barTotalCollected = barInitialCollected + barRecharges;
+  const barRedeemed = sumRedeemed(activated);
+  const barNotRedeemed = activated.reduce((s, c) => s + Math.max(0, c.coverBalance || 0), 0);
+
   // ── SALES + TOP ITEMS from tabRounds ──────────────────────────────
   // 🆕 2026-06-05 v3.225 (Khushi) — FOOD/DRINK CLASSIFICATION FIX.
   // The old code keyed only on `it.t` and DEFAULTED a missing tag to "drink"
@@ -3767,6 +3851,15 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   const netSales = Math.max(0, baseSales - discountTotal);
   const grossSales = billTotal + ncComp;
 
+  // 🆕 2026-06-24 (Khushi) — "TOTAL PROFIT" = NET sales + LEFTOVER wallet balance.
+  // Khushi confirmed the venue NEVER refunds and wallets EXPIRE after the event,
+  // so every rupee of unspent recharge (barNotRedeemed) is kept = breakage that
+  // belongs to the house. NET already nets out discounts. By design this figure
+  // EXCLUDES service charge & GST (those sit in GROSS) — it's "F&B revenue +
+  // free money from expired wallets". barNotRedeemed is the unspent balance on
+  // activated covers (walk-ins net to ~0, so it's effectively unspent recharge).
+  const barProfit = netSales + barNotRedeemed;
+
   // ── CSV export (mirrors Door Mode) ────────────────────────────────
   const downloadCsv = () => {
     const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -3779,6 +3872,11 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Walk-ins — collected", Math.round(sumCollected(walkins))],
       ["Walk-ins — redeemed", Math.round(sumRedeemed(walkins))],
       ["Total collected (wallet + walk-in)", Math.round(sumCollected(activated))],
+      ["Collected at bar (initial)", Math.round(barInitialCollected)],
+      ["Recharges by customers", Math.round(barRecharges)],
+      ["TOTAL AMOUNT COLLECTED", Math.round(barTotalCollected)],
+      ["TOTAL AMOUNT REDEEMED (wallet spend)", Math.round(barRedeemed)],
+      ["TOTAL NOT REDEEMED (balance in wallets)", Math.round(barNotRedeemed)],
       ["Liquor / drinks sales", Math.round(drinkSales)],
       ["Food sales", Math.round(foodSales)],
       ["Others (smoke / hookah)", Math.round(otherSales)],
@@ -3798,6 +3896,8 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Taxes", Math.round(taxTotal)],
       ["NET sales", Math.round(netSales)],
       ["GROSS sales", Math.round(grossSales)],
+      ["Leftover wallet balance (expired = profit)", Math.round(barNotRedeemed)],
+      ["TOTAL PROFIT (NET + leftover balance)", Math.round(barProfit)],
     ];
     topDrinks.forEach(([n, q], i) => rows.push([`Top drink #${i + 1}`, `${n} x${q}`]));
     topFood.forEach(([n, q], i) => rows.push([`Top food #${i + 1}`, `${n} x${q}`]));
@@ -3875,7 +3975,15 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
         {/* CONTROLS: date picker + CSV */}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
           <label style={{ fontSize: 12, fontWeight: 800, color: "#000", letterSpacing: 0.5 }}>NIGHT</label>
-          <input type="date" value={nightDate} onChange={(e) => setNightDate(e.target.value || getOperationalNightStr())}
+          {/* 🆕 2026-06-24 (Khushi) — grey out FUTURE nights: you can't pull a
+              report for a night that hasn't happened. max = current operational
+              night, so the native calendar disables every later date. Also clamp
+              on change as a belt-and-braces guard against typed/paste input. */}
+          <input type="date" value={nightDate} max={getOperationalNightStr()}
+            onChange={(e) => {
+              const v = e.target.value || getOperationalNightStr();
+              setNightDate(v > getOperationalNightStr() ? getOperationalNightStr() : v);
+            }}
             style={{ padding: "9px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 700, outline: "none" }} />
           <div style={{ flex: 1 }} />
           <button onClick={downloadCsv}
@@ -3888,6 +3996,43 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
           <div style={{ textAlign: "center", padding: "60px 20px", color: "#6B6B6B", fontSize: 16, fontWeight: 700 }}>Loading tonight's numbers…</div>
         ) : (
           <>
+            {/* 🆕 2026-06-24 (Khushi) — DOOR-MIRRORED HERO BOXES: TOTAL AMOUNT
+                COLLECTED + TOTAL AMOUNT REDEEMED, same layout/palette as Door
+                Mode's Live Reports (white card, 2px #000, gold recharge line,
+                orange redeemed headline, nested NOT REDEEMED block).
+                HIDDEN FOR NOW — gated on SHOW_BAR_AMOUNT_BOXES (revisit tomorrow). */}
+            {SHOW_BAR_AMOUNT_BOXES && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12, marginBottom: 12 }}>
+              {/* BOX 1 — TOTAL AMOUNT COLLECTED */}
+              <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL AMOUNT COLLECTED</div>
+                <div style={{ fontSize: 26, fontWeight: 900, color: "#000", marginTop: 6, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1, wordBreak: "break-word" }}>{fmtRs(barTotalCollected)}</div>
+                <div style={{ fontSize: 12, color: "#6B6B6B", marginTop: 5, fontWeight: 700 }}>{activated.length} cover{activated.length === 1 ? "" : "s"} activated</div>
+                <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 8, paddingTop: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingBottom: 6, borderBottom: "1px solid #F0F0F0" }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#555", letterSpacing: .3, textTransform: "uppercase" }}>Collected at Bar</div>
+                    <div style={{ fontSize: 18, fontWeight: 900, color: "#000", fontFamily: NUM_FONT }}>{fmtRs(barInitialCollected)}</div>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#B8860B", letterSpacing: .3, textTransform: "uppercase" }}>Recharges by Customers</div>
+                    <div style={{ fontSize: 18, fontWeight: 900, color: "#B8860B", fontFamily: NUM_FONT }}>{fmtRs(barRecharges)}</div>
+                  </div>
+                </div>
+              </div>
+              {/* BOX 2 — TOTAL AMOUNT REDEEMED */}
+              <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL AMOUNT REDEEMED</div>
+                <div style={{ fontSize: 26, fontWeight: 900, color: "#FF5733", marginTop: 6, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1, wordBreak: "break-word" }}>{fmtRs(barRedeemed)}</div>
+                <div style={{ fontSize: 12, color: "#6B6B6B", marginTop: 5, fontWeight: 700 }}>Wallet spend across all covers</div>
+                <div style={{ borderTop: "1.5px solid #E5E5E5", marginTop: 8, paddingTop: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 900, color: "#6B6B6B", letterSpacing: 1, textTransform: "uppercase" }}>TOTAL NOT REDEEMED</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: "#000", lineHeight: 1.1, fontFamily: NUM_FONT, marginTop: 2 }}>{fmtRs(barNotRedeemed)}</div>
+                  <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700 }}>Balance left in customer wallets</div>
+                </div>
+              </div>
+            </div>
+            )}
+
             {/* 🆕 v3.226 (Khushi) — POSITION SWAP: BILLS GENERATED to 3rd (top-line),
                 TOTAL COLLECTED to 6th (end of wallets row). */}
             {/* TOP-LINE: NET / GROSS / BILLS GENERATED */}
@@ -3897,6 +4042,25 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
               <StatTable label="BILLS GENERATED" count={billCount}
                 rows={[["Total Collected", fmtRs(billTotal)]]} />
             </div>
+
+            {/* 🆕 TOTAL PROFIT = NET sales + leftover (expired, non-refundable) wallet balance */}
+            {SHOW_BAR_PROFIT_TILE && (
+            <div style={{ background: "#C8F7DC", border: "2px solid #000", borderRadius: 10, padding: "16px 18px", marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: "#0A3D26", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL PROFIT</div>
+              <div style={{ fontSize: 34, fontWeight: 900, color: "#0A3D26", marginTop: 4, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1 }}>{fmtRs(barProfit)}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 12px", marginTop: 12, fontSize: 14, color: "#0A3D26" }}>
+                <div>NET sales <span style={{ color: "#3A6B52" }}>(food + drink, after discount)</span></div>
+                <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(netSales)}</div>
+                <div>+ Leftover balance <span style={{ color: "#3A6B52" }}>(expired, non-refundable wallets)</span></div>
+                <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(barNotRedeemed)}</div>
+                <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontWeight: 900 }}>= TOTAL PROFIT</div>
+                <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontFamily: NUM_FONT, fontWeight: 900, textAlign: "right" }}>{fmtRs(barProfit)}</div>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#3A6B52", marginTop: 10, lineHeight: 1.5 }}>
+                Wallets are non-refundable and expire after the event, so unspent recharges are kept as profit. Excludes service charge &amp; GST (those sit in GROSS SALES).
+              </div>
+            </div>
+            )}
 
             {/* WALLETS / WALK-INS / TOTAL COLLECTED — bold tables inside the box */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -4718,6 +4882,38 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
         const rowFinal = Math.round(rowDue * (1 - effPct / 100));
         await clearBillDue(id, staffName, method, effPct, rowFinal);
       }
+      // 🆕 2026-06-25 (Khushi) — PRINT THE BILL at settlement. The single
+      // "PRINT NC KOT" button only prints the kitchen chit; the guest's
+      // PRICED receipt is printed HERE, once comp + any settle discount /
+      // waive AND the payment method are final (so the paper matches what
+      // was actually collected). Best-effort + own try/catch → a printer
+      // error must NEVER block a settle (fail-open, house rule). Amounts
+      // mirror the BILL DUE panel: SUBTOTAL + 10% SC + GST = TOTAL BILL; the
+      // ₹1000 comp and any settle discount are folded into ONE `discount`
+      // line (= totalBill − finalAmt) so the printed lines always reconcile
+      // to the amount collected (finalAmt). NC tabs have no floor/table, so
+      // printBill defaults the printer to the bartender's saved tablet floor.
+      try {
+        const cgst = g.tax / 2;
+        const sgst = g.tax / 2;
+        const billDiscount = Math.max(0, g.totalBill - finalAmt);
+        // roundOff absorbs the residual between the INTEGER grand total
+        // (g.totalBill, row-level rounded) and the DECIMAL components
+        // (subtotal + SC + GST), so the printed line-items always reconcile
+        // exactly: subtotal + SC + cgst + sgst − discount + roundOff === total.
+        const roundOff = g.totalBill - (g.subtotal + g.serviceCharge + g.tax);
+        await printBill({
+          tableId: "NC",
+          floorLabel: `NC · ${g.role}`,
+          customerName: g.customerName,
+          staff: staffName,
+          items: g.items.map((it) => ({ n: it.n, p: it.p, qty: it.qty })),
+          amounts: { subtotal: g.subtotal, serviceCharge: g.serviceCharge, cgst, sgst, discount: billDiscount, roundOff, total: finalAmt },
+          paymentMethod: method === "waived" ? "WAIVED" : method.toUpperCase(),
+          billNumber: `NC-${g.tokens[0] || g.customerName.slice(0, 4).toUpperCase()}`,
+          token: g.tokens[0],
+        });
+      } catch { /* fail-open — the settle already succeeded; don't surface a print error as a settle failure */ }
       const msg = method === "waived"
         ? `${g.customerName} written off by ${staffName} (${g.ids.length} ${g.ids.length === 1 ? "tab" : "tabs"}).`
         : effPct > 0
@@ -5016,7 +5212,9 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                   cursor: selectedMethod && !busyKey ? "pointer" : "not-allowed",
                 }}>
                 {busyKey ? "SETTLING…" : selectedMethod
-                  ? `SETTLE BILL · ₹${finalAmt.toLocaleString("en-IN")} · ${selectedMethod === "waived" ? "WAIVE" : selectedMethod.toUpperCase()}`
+                  ? selectedMethod === "waived"
+                    ? `WAIVE · ₹${finalAmt.toLocaleString("en-IN")} · 🖨 PRINT BILL`
+                    : `SETTLE BILL + 🖨 PRINT · ₹${finalAmt.toLocaleString("en-IN")} · ${selectedMethod.toUpperCase()}`
                   : "SELECT PAYMENT METHOD"}
               </button>
             </div>
