@@ -36,6 +36,14 @@ import {
 // page-isolation; if ever rotated, search both files.
 const BAR_MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
 
+// 🆕 2026-06-24 (Khushi) — TEMPORARILY HIDE the Bar Mode discount UI. The
+// discount controls (recharge-overlay picker + SETTLE BILL discount % input)
+// were misleading/unclear, so we hide them for now and will revisit separately.
+// Set this back to `true` to restore the discount UI — all discount LOGIC and
+// state (barDiscPct, discInput, DiscountModal, math) is left fully intact, so
+// flipping the flag is the only change needed to bring it back.
+const SHOW_BAR_DISCOUNT = false;
+
 const BAR_BILL_VOID_REASONS: string[] = [
   "CUSTOMER REFUSED TO PAY",
   "DRINK POURED WRONG",
@@ -201,7 +209,9 @@ function DiscountModal({ current, onApply, onClose }: {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const pct = Math.max(0, Math.min(100, parseFloat(pctStr) || 0));
-  const needsMgr = pct > 50;
+  // 🆕 2026-06-24 (Khushi) — ANY non-zero discount now requires the Manager PIN
+  // (was: only > 50%). Setting 0% (removing a discount) never needs a PIN.
+  const needsMgr = pct > 0;
   const handleApply = async () => {
     setErr("");
     if (pct < 0 || pct > 100) { setErr("ENTER A % BETWEEN 0 AND 100"); return; }
@@ -224,7 +234,7 @@ function DiscountModal({ current, onApply, onClose }: {
           🏷️ APPLY DISCOUNT
         </div>
         <div style={{ fontSize: 12, color: "#6B6B6B", marginBottom: 14, fontWeight: 700, letterSpacing: .3 }}>
-          UP TO 50% — BARTENDER · ABOVE 50% — MANAGER PIN
+          ANY DISCOUNT REQUIRES MANAGER PIN
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 14 }}>
           {[0, 10, 20, 30, 40, 50].map((q) => {
@@ -243,15 +253,18 @@ function DiscountModal({ current, onApply, onClose }: {
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6 }}>OR ENTER CUSTOM %</div>
           <div style={{ display: "flex", alignItems: "center", background: "#fff", border: "2px solid #000", borderRadius: 12, padding: "4px 14px" }}>
-            <input type="number" value={pctStr} onChange={(e) => { setPctStr(e.target.value); setErr(""); if (parseFloat(e.target.value) <= 50) setPin(""); }} placeholder="0"
+            <input type="number" value={pctStr} onChange={(e) => { setPctStr(e.target.value); setErr(""); if (!(parseFloat(e.target.value) > 0)) setPin(""); }} placeholder="0"
               style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
             <span style={{ fontSize: 26, fontWeight: 900, color: "#000", marginLeft: 6 }}>%</span>
           </div>
         </div>
         {needsMgr && (
           <div style={{ marginBottom: 14, background: "#FF5733", border: "2px solid #000", borderRadius: 12, padding: 14 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: "#FF5733", letterSpacing: 1.2, marginBottom: 6 }}>
-              🔒 MANAGER PIN REQUIRED ({pct}% &gt; 50%)
+            {/* 🆕 2026-06-24 (Khushi) — label was #FF5733 text on a #FF5733 box
+                (invisible — "red screen with no text"). Now bold WHITE on red so
+                the instruction is clear the moment the banner appears. */}
+            <div style={{ fontSize: 14, fontWeight: 900, color: "#fff", letterSpacing: .4, marginBottom: 8, lineHeight: 1.3 }}>
+              🔒 ENTER MANAGER PIN TO APPLY {pct}% DISCOUNT
             </div>
             <input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={4}
               value={pin} onChange={(e) => { setPin(e.target.value.replace(/\D/g, "").slice(0, 4)); setErr(""); }}
@@ -275,8 +288,8 @@ function DiscountModal({ current, onApply, onClose }: {
   );
 }
 
-function WalletOverlay({ cover, staffName, onClose }: {
-  cover: HodCover; staffName: string; onClose: () => void;
+function WalletOverlay({ cover, staffName, onClose, openNonce }: {
+  cover: HodCover; staffName: string; onClose: () => void; openNonce?: number;
 }) {
   const [cv, setCv] = useState<HodCover>(cover);
   const [cart, setCart] = useState<Record<string, CartItem>>({});
@@ -329,6 +342,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // typed value (would feel buggy). If they haven't, the deficit auto-prefill
   // (below) is free to update as the cart changes.
   const [rcAmtTouched, setRcAmtTouched] = useState(false);
+  // 🆕 2026-06-24 (Khushi) — the GROSS amount the bartender typed BEFORE any
+  // discount, so picking a discount on a MANUALLY-typed amount reduces it
+  // correctly (and re-picking a different % always recomputes from the gross,
+  // never from an already-discounted value). Empty/0 until they type.
+  const [rcBaseAmt, setRcBaseAmt] = useState(0);
   // 2026-05-14 (Khushi UX) — collapse recharge panel by default so the items
   // list gets the full screen height. Auto-expands when balance is low or
   // bartender hits a deficit. Tap "💰 Recharge" header to toggle manually.
@@ -352,7 +370,24 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // SC defaults OFF; turning ON also requires Manager PIN (Khushi rule —
   // SC must be a deliberate decision, not a tap-by-accident).
   const [barDiscPct, setBarDiscPct] = useState(0);
+  // 🆕 2026-06-24 (Khushi) — when a non-zero discount preset is tapped we open
+  // the Manager-PIN DiscountModal SEEDED with that %. null = open with current.
+  const [discSeed, setDiscSeed] = useState<number | null>(null);
+  // 🆕 2026-06-24 v3.383 (Khushi) — in-app Gumroad dropdown open state (replaces
+  // the native browser <select> in the recharge modal's DISCOUNT picker).
+  const [discDdOpen, setDiscDdOpen] = useState(false);
   const [scOn, setScOn] = useState(true);
+  // 🆕 2026-06-24 (Khushi) — DISCOUNT must ALWAYS reset to 0% (and SC back ON)
+  // on EVERY scan/open of a customer wallet — even re-scanning the SAME customer
+  // who was given e.g. 5% on a previous scan. The overlay already remounts
+  // (key={cover.id}) for a DIFFERENT customer or after close→re-scan, but a
+  // same-id re-scan keeps the instance mounted, so this effect (keyed on the
+  // parent's openNonce, bumped on every open) force-resets the bartender's
+  // transient discount/SC to defaults. Any 5% must be a deliberate fresh action.
+  useEffect(() => {
+    setBarDiscPct(0);
+    setScOn(true);
+  }, [cover?.id, openNonce]);
   // Per-session token for KOT↔Bill pairing. Fresh per print. Displayed in
   // the success overlay so bartender can call it out to the runner / cashier.
   const [lastToken, setLastToken] = useState<string | null>(null);
@@ -434,15 +469,28 @@ function WalletOverlay({ cover, staffName, onClose }: {
       .catch(() => { if (_lastDiscWrite.current === key) _lastDiscWrite.current = null; });
   }, [cover?.id, cover?.ref, barDiscPct, scOn]);
 
-  // 🆕 2026-06-02 v3.195 (Khushi) — RECHARGE honors the DISCOUNT dropdown.
-  // She picked "discount lowers both" (pay ₹240 / credit ₹240 on a ₹300 + 20%).
-  // So the net recharge = entered amount minus the discount %, rounded. Service
-  // tax is NOT applied to a top-up (you don't tax adding money to a wallet).
-  // rcAmtNum = the RAW typed amount; rcNet = what the bartender collects AND
-  // what is credited to the wallet.
+  // 🆕 2026-06-02 v3.195 (Khushi) — RECHARGE honors the DISCOUNT dropdown
+  // ("discount lowers both": pay ₹240 / credit ₹240 on a ₹300 + 20%). NOTE: as of
+  // v3.384 the discount is applied ONCE — on the BILL (activeTotal / suggestedRecharge)
+  // — NOT a second time on the typed field (see below). Service tax is NOT applied
+  // to a top-up (you don't tax adding money to a wallet).
+  // 🆕 2026-06-24 v3.384 (Khushi) — the AMOUNT field is now the NET amount the
+  // bartender COLLECTS and CREDITS to the wallet (it auto-tracks the discounted
+  // suggestedRecharge below). The DISCOUNT dropdown already lowers the BILL itself
+  // (activeTotal / suggestedRecharge), so we must NOT subtract the discount AGAIN
+  // here — doing so double-counted it (collect ₹237 for a ₹250 bill → wallet left
+  // short). rcNet === the typed amount; same final ₹ as the old gross→net flow.
+  // 🆕 2026-06-24 (Khushi) — rcNet is AUTHORITATIVE from the GROSS base in the
+  // MANUAL path (rcAmtTouched): the bartender's typed amount lives in rcBaseAmt
+  // and the discount is applied here, so the COLLECTED+CREDITED net is always
+  // correct even if RECHARGE is tapped before the field visually snaps to the
+  // discounted value (blur/effect timing can't make us under/over-collect). The
+  // UNTOUCHED path keeps rcNet === the field, which already follows the
+  // discount-adjusted suggestedRecharge (no double-discount).
   const rcAmtNum = parseInt(rcAmt) || 0;
-  const rcDiscAmt = Math.round(rcAmtNum * (Math.min(100, Math.max(0, barDiscPct)) / 100));
-  const rcNet = Math.max(0, rcAmtNum - rcDiscAmt);
+  const rcNet = (rcAmtTouched && rcBaseAmt > 0)
+    ? Math.max(0, Math.round(rcBaseAmt * (1 - Math.max(0, barDiscPct) / 100)))
+    : Math.max(0, rcAmtNum);
 
   useEffect(() => {
     const unsub = subscribeToCover(cover.id, (fresh) => { if (fresh) setCv(fresh); });
@@ -584,12 +632,27 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // "balance went up" which could be a stale browser cache).
   const lastVerifiedOnlineTick = (() => {
     const cutoff = Date.now() - PENDING_TICK_LOOKBACK_MS;
+    // 🆕 2026-06-24 (Khushi) — once the bartender PRINTS KOT+BILL after this
+    // recharge, the money is consumed (balance deducted). The "✅ LAST RECHARGE
+    // OF ₹X VERIFIED BY CUSTOMER" badge must then DISAPPEAR. Previously it kept
+    // showing on a RE-SCAN, falsely implying the customer had recharged again.
+    // FIX: ignore any verified tick that PRE-DATES the most recent bill print.
+    // A genuine NEW recharge gets a newer timestamp → its badge shows again.
+    let lastBillPrintMs = cv.lastWalletBillPrintedAt ? new Date(cv.lastWalletBillPrintedAt).getTime() : 0;
+    for (const b of (cv.walletBillPrintLog || [])) {
+      if (b && b.at) { const t = new Date(b.at).getTime(); if (!isNaN(t) && t > lastBillPrintMs) lastBillPrintMs = t; }
+    }
     for (let i = _txs.length - 1; i >= 0; i--) {
       const t = _txs[i];
       if (!t || !t.timestamp) continue;
       const ts = new Date(t.timestamp).getTime();
       if (ts < cutoff) return null;
-      if ((t.type === "online_topup" || t.type === "diff_paid") && t.serverVerified === true) return t;
+      if ((t.type === "online_topup" || t.type === "diff_paid") && t.serverVerified === true) {
+        // consumed by a bill print at/after this recharge → no longer "safe to
+        // print", hide the badge so a re-scan doesn't look like a new recharge.
+        if (lastBillPrintMs && lastBillPrintMs >= ts) return null;
+        return t;
+      }
     }
     return null;
   })();
@@ -647,27 +710,55 @@ function WalletOverlay({ cover, staffName, onClose }: {
   // 2026-05-11 (Khushi) — pre-fill MUST equal the EXACT shortfall.
   // Customers refuse to pay even ₹10 extra. No round-up to ₹50.
   const suggestedRecharge = deficit > 0 ? Math.ceil(deficit) : 0;
+  // 🆕 2026-06-24 v3.382 (Khushi BUG FIX) — track the PREVIOUS suggested amount so
+  // the "deficit grew" auto-bump below only fires when the deficit ACTUALLY
+  // increased (new items added), NOT every time the bartender edits the field.
+  const prevSuggestedRef = useRef(0);
   useEffect(() => {
-    if (!rcAmtTouched && suggestedRecharge > 0 && (rcAmt === "" || rcAmt === "0")) {
-      setRcAmt(String(suggestedRecharge));
+    // 🆕 2026-06-24 v3.384 (Khushi) — while the bartender hasn't manually typed in
+    // the field (rcAmtTouched=false), the amount AUTO-FOLLOWS the suggested recharge
+    // in BOTH directions. So picking a discount (which lowers the bill, e.g. ₹263 →
+    // ₹250 at 5%) instantly updates the field — no RESET tap needed. It also clears
+    // to "" when the balance is sufficient (suggestedRecharge === 0).
+    if (!rcAmtTouched) {
+      const target = suggestedRecharge > 0 ? String(suggestedRecharge) : "";
+      if (rcAmt !== target) setRcAmt(target);
+      prevSuggestedRef.current = suggestedRecharge;
+      return;
     }
-    // Clear the auto-fill once balance is sufficient so the field doesn't
-    // confusingly stay populated after the deficit is gone.
-    if (!rcAmtTouched && suggestedRecharge === 0 && rcAmt !== "") {
-      setRcAmt("");
+    // Bartender HAS edited the field — never shrink their deliberate amount.
+    // 2026-05-15 (Khushi BUG FIX) — when deficit GROWS past what's currently typed
+    // (cash-and-carry: bartender pre-typed ₹500, customer added more items → deficit
+    // jumps to ₹884), bump the field up so the input matches the banner.
+    // 🆕 2026-06-24 v3.382 (Khushi BUG FIX) — gate this on an ACTUAL increase in
+    // suggestedRecharge (deficit grew). Without it, deleting a digit (or tapping
+    // RESET) instantly snapped the field back — the bartender could never lower it.
+    if (suggestedRecharge > prevSuggestedRef.current) {
+      const currentAmt = parseInt(rcAmt) || 0;
+      if (currentAmt < suggestedRecharge) {
+        setRcAmt(String(suggestedRecharge));
+        setRcAmtTouched(false);
+      }
     }
-    // 2026-05-15 (Khushi BUG FIX) — when deficit GROWS past what's currently
-    // typed (cash-and-carry: bartender pre-typed ₹500, customer added more
-    // items → deficit jumps to ₹884), bump the field up. This stops the
-    // misleading "pre-filled ₹884" banner showing alongside a stale ₹87
-    // in the input. Only bumps UP, never down — so bartender's deliberate
-    // larger amount is never shrunk.
-    const currentAmt = parseInt(rcAmt) || 0;
-    if (suggestedRecharge > 0 && currentAmt < suggestedRecharge) {
-      setRcAmt(String(suggestedRecharge));
-      setRcAmtTouched(false);
-    }
+    prevSuggestedRef.current = suggestedRecharge;
   }, [suggestedRecharge, rcAmtTouched]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 🆕 2026-06-24 (Khushi BUG FIX) — when the bartender MANUALLY typed an amount
+  // (rcAmtTouched=true) and then picks a DISCOUNT, the field must drop to the
+  // discounted net (e.g. type ₹250 → pick 10% → ₹225). Previously the field only
+  // auto-followed the discount while UNTOUCHED (the customer-scan flow prefills
+  // it, which is why that path always worked); an explicitly-typed amount was
+  // frozen because the prefill effect only ever bumps UP on a growing deficit.
+  // We snap the field from the GROSS base each time the discount changes, so
+  // re-picking a different % always recomputes from the original typed amount and
+  // picking "NO DISCOUNT (0%)" restores it. Only the manual path — FLOW A (items,
+  // untouched) is handled by the prefill effect above and is left untouched here.
+  useEffect(() => {
+    if (!rcAmtTouched || rcBaseAmt <= 0) return;
+    const net = Math.max(0, Math.round(rcBaseAmt * (1 - Math.max(0, barDiscPct) / 100)));
+    const target = String(net);
+    if (rcAmt !== target) setRcAmt(target);
+  }, [barDiscPct, rcAmtTouched]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 2026-05-15 (Khushi BUG FIX) — when the recharge modal OPENS, reset to a
   // clean state synced to the current deficit. Prevents leftover input from
@@ -675,6 +766,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
   useEffect(() => {
     if (rechargeOpen) {
       setRcAmtTouched(false);
+      setRcBaseAmt(0);
       setRcAmt(suggestedRecharge > 0 ? String(suggestedRecharge) : "");
     }
   }, [rechargeOpen]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -741,11 +833,30 @@ function WalletOverlay({ cover, staffName, onClose }: {
       const c = parseInt(rcSplit.cash) || 0;
       const u = parseInt(rcSplit.upi) || 0;
       const k = parseInt(rcSplit.card) || 0;
-      if (c < 0 || u < 0 || k < 0) { showToast("Split parts cannot be negative"); return; }
+      if (c < 0 || u < 0 || k < 0) { await centeredAlert("SPLIT INVALID", "Split parts cannot be negative.", "error", true); return; }
       const sum = c + u + k;
-      if (sum !== amt) { showToast(`Split must total ₹${amt} (currently ₹${sum})`); return; }
+      // 🆕 2026-06-24 (Khushi) — split that doesn't add up now shows a CLEAR
+      // in-app popup (NOT a browser alert, NOT a fleeting toast). e.g. ₹100 +
+      // ₹100 against a ₹250 recharge → "STILL TO COLLECT ₹50".
+      if (sum !== amt) {
+        const diff = amt - sum;
+        if (diff > 0) {
+          await centeredAlert(
+            `STILL TO COLLECT ₹${diff.toLocaleString("en-IN")}`,
+            `You've entered ₹${sum.toLocaleString("en-IN")} of ₹${amt.toLocaleString("en-IN")}. Collect ₹${diff.toLocaleString("en-IN")} more so the split adds up to ₹${amt.toLocaleString("en-IN")}.`,
+            "error", true,
+          );
+        } else {
+          await centeredAlert(
+            `₹${(-diff).toLocaleString("en-IN")} OVER`,
+            `You've entered ₹${sum.toLocaleString("en-IN")}, which is ₹${(-diff).toLocaleString("en-IN")} more than the ₹${amt.toLocaleString("en-IN")} due. Reduce a split amount.`,
+            "error", true,
+          );
+        }
+        return;
+      }
       const nonZero = [c, u, k].filter(v => v > 0).length;
-      if (nonZero < 2) { showToast("Split needs at least 2 methods"); return; }
+      if (nonZero < 2) { await centeredAlert("SPLIT NEEDS 2 METHODS", "A split payment must use at least 2 methods (e.g. some Cash + some UPI).", "error", true); return; }
       splitArg = {};
       if (c) splitArg.cash = c;
       if (u) splitArg.upi = u;
@@ -765,7 +876,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
       // 🆕 2026-06-05 v3.222 — pass the known local balance so rechargeCover can
       // return the optimistic new balance WITHOUT a server read (it now writes via
       // atomic increment/arrayUnion → resolves from cache, no growing round-trip).
-      const { newBalance: newBal, tx: rcTx } = await rechargeCover(cover.id, amt, rcMethod, staffName, splitArg, bal);
+      // 🆕 2026-06-24 (Khushi) — stamp the discount on THIS recharge so it is
+      // preserved per-transaction (a later recharge with a different % can never
+      // rewrite its history). `amt` is the NET; gross = the pre-discount figure
+      // (the bartender's typed gross when available, else derived from net+%).
+      const rcGross = barDiscPct > 0
+        ? ((!walkin && rcAmtTouched && rcBaseAmt > amt) ? Math.round(rcBaseAmt) : Math.round(amt / (1 - barDiscPct / 100)))
+        : amt;
+      const { newBalance: newBal, tx: rcTx } = await rechargeCover(
+        cover.id, amt, rcMethod, staffName, splitArg, bal,
+        { discountPct: barDiscPct, grossAmount: rcGross },
+      );
       // 🆕 2026-06-03 v3.217 (Khushi BUG) — COMPLETE optimistic update. Previously we
       // only patched coverBalance; the transactions array waited on the realtime
       // listener (which stalls on venue wifi). The "AWAIT TICK" gate reads
@@ -793,6 +914,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
       setLastRcTime(Date.now());
       setRcAmt("");
       setRcAmtTouched(false); // allow deficit auto-prefill to work again next time
+      setRcBaseAmt(0);
       setRcSplit({ cash: "", upi: "", card: "" });
       // 🔴 2026-05-25 (Khushi) — show an explicit OK-popup instead of a toast.
       // Bartender MUST click OK to continue. After OK, recharge panel auto-
@@ -1382,7 +1504,12 @@ function WalletOverlay({ cover, staffName, onClose }: {
               pinned and always reachable. */
           <div style={{ padding: "2px 16px 8px", background: "#fff", borderBottom: "2px solid #000", fontFamily: "'Space Grotesk',sans-serif", flex: "1 1 0", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
             {rounds.map((rd, idx) => {
-              const isServed = rd.status === "served";
+              // 🆕 2026-06-24 v3.384 (Khushi) — Bar Mode rounds ALWAYS display as
+              // "🟡 ORDERED" (uniform gold styling). Bar rounds have no captain
+              // "mark served" step, so a mixed SERVED/ORDERED list confused staff;
+              // this mirrors the customer wallet, which already keeps bar rounds on
+              // "Ordered". Forced false so label + colour + background are all uniform.
+              const isServed = false;
               // 🆕 2026-05-26 v3.35 (Khushi): round header must show the
               // tax-inclusive grand total next to status pill — "🟡 Ordered
               // ₹444" — while the per-item rows keep showing the BASE menu
@@ -1415,7 +1542,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                         <tr key={j}>
                           <td style={{ textAlign: "center", border: "1px solid #000", padding: "6px 6px", fontSize: 14, fontWeight: 800, color: "#000" }}>{it.qty}×</td>
                           <td style={{ border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 600, color: "#000" }}>{it.n}</td>
-                          <td style={{ textAlign: "right", border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 800, color: "#000", fontVariantNumeric: "tabular-nums" }}>₹{computeHodBreakdown([it]).grandTotal}</td>
+                          <td style={{ textAlign: "right", border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 800, color: "#000", fontVariantNumeric: "tabular-nums" }}>₹{Math.round((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1433,7 +1560,6 @@ function WalletOverlay({ cover, staffName, onClose }: {
               const allItems = rounds.flatMap(r => r.items || []);
               if (allItems.length === 0) return null;
               const b = computeHodBreakdownAdjusted(allItems, barDiscPct, scOn);
-              const fmt = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
               return (
                 <details style={{ borderTop: "2px solid #000", paddingTop: 8, marginTop: 6 }}>
                   <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", listStyle: "none", cursor: "pointer", padding: "2px 0" }}>
@@ -1448,22 +1574,26 @@ function WalletOverlay({ cover, staffName, onClose }: {
                     </span>
                   </summary>
                   <div style={{ fontSize: 12, lineHeight: 1.8, paddingTop: 6, marginTop: 6, borderTop: "2px solid #000", color: "#6B6B6B", fontFamily: "'Space Grotesk',sans-serif", fontVariantNumeric: "tabular-nums" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}><span>SUB TOTAL</span><span>{fmt(b.subtotal)}</span></div>
+                    {/* 🆕 2026-06-24 v3.381 (Khushi) — breakdown display now
+                        IDENTICAL to the customer wallet Bill Preview: SC shown
+                        whole (₹40), CGST/SGST each = GST/2 to 2dp (₹1.00 each),
+                        NO round-off line, GRAND TOTAL = rounded. Same numbers
+                        the guest sees on hodclub.in so staff + customer never
+                        compare two different-looking bills. Single math source
+                        (computeHodBreakdownAdjusted) unchanged — display only. */}
+                    <div style={{ display: "flex", justifyContent: "space-between" }}><span>SUB TOTAL</span><span>₹{Math.round(b.subtotal).toLocaleString("en-IN")}</span></div>
                     {b.discount > 0 && (
-                      <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>DISCOUNT ({b.discountPct}%)</span><span>−{fmt(b.discount)}</span></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>DISCOUNT ({b.discountPct}%)</span><span>−₹{Math.round(b.discount).toLocaleString("en-IN")}</span></div>
                     )}
-                    <div style={{ display: "flex", justifyContent: "space-between" }}><span>SERVICE CHARGE (10%)</span><span>{fmt(b.serviceCharge)}</span></div>
-                    {b.cgst > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between" }}><span>SERVICE CHARGE (10%)</span><span>₹{(b.serviceCharge || 0).toFixed(0)}</span></div>
+                    {b.gst > 0 && (
                       <>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>CGST (2.5%)</span><span>{fmt(b.cgst)}</span></div>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>SGST (2.5%)</span><span>{fmt(b.sgst)}</span></div>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>CGST (2.5%)</span><span>₹{((b.gst || 0) / 2).toFixed(2)}</span></div>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}><span>SGST (2.5%)</span><span>₹{((b.gst || 0) / 2).toFixed(2)}</span></div>
                       </>
                     )}
-                    {Math.abs(b.roundOff) >= 0.01 && (
-                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>ROUND OFF</span><span>{b.roundOff >= 0 ? "+" : ""}{fmt(b.roundOff)}</span></div>
-                    )}
                     <div style={{ display: "flex", justifyContent: "space-between", borderTop: "2px solid #000", marginTop: 6, paddingTop: 6, fontWeight: 900, color: "#000", fontSize: 13 }}>
-                      <span>GRAND TOTAL</span><span>₹{b.grandTotal.toLocaleString("en-IN")}</span>
+                      <span>GRAND TOTAL</span><span>₹{Math.round(b.grandTotal).toLocaleString("en-IN")}</span>
                     </div>
                   </div>
                 </details>
@@ -1481,7 +1611,6 @@ function WalletOverlay({ cover, staffName, onClose }: {
           sticky footer at the bottom now holds only the recharge portal
           trigger. Same dashed-gold list-row styling as v3.30. */}
       {Object.keys(cart).length > 0 && (() => {
-        const fmt = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
         // 🆕 2026-06-03 v3.214 (Khushi): PENDING ORDER card was loud PINK → now
         // EXACT Captain-style beige #FBF3D6 round card with a white bordered
         // Qty/Item/Amount table (mirrors CaptainMode round table).
@@ -1505,7 +1634,7 @@ function WalletOverlay({ cover, staffName, onClose }: {
                     <tr key={key}>
                       <td style={{ textAlign: "center", border: "1px solid #000", padding: "6px 6px", fontSize: 14, fontWeight: 800, color: "#000" }}>{it.qty}×</td>
                       <td style={{ border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 600, color: "#000" }}>{it.n}</td>
-                      <td style={{ textAlign: "right", border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 800, color: "#000", fontVariantNumeric: "tabular-nums" }}>₹{computeHodBreakdown([it]).grandTotal}</td>
+                      <td style={{ textAlign: "right", border: "1px solid #000", padding: "6px 8px", fontSize: 14, fontWeight: 800, color: "#000", fontVariantNumeric: "tabular-nums" }}>₹{Math.round((it.p || 0) * (it.qty || 0)).toLocaleString("en-IN")}</td>
                       <td style={{ textAlign: "center", border: "1px solid #000", padding: 4 }}>
                         <button onClick={() => removeFromCart(key)} title="Remove from cart"
                           style={{ width: 22, height: 22, borderRadius: "50%", background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer", padding: 0, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto" }}>×</button>
@@ -1525,23 +1654,24 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   </span>
                 </summary>
                 <div style={{ fontSize: 11, lineHeight: 1.7, paddingTop: 6, marginTop: 5, borderTop: "2px solid #000", color: "#6B6B6B" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}><span>Sub Total</span><span>{fmt(cartBreakdown.subtotal)}</span></div>
+                  {/* 🆕 2026-06-24 v3.381 (Khushi) — same Bill-Preview-identical
+                      formatting as the placed-rounds breakdown above: SC whole,
+                      CGST/SGST = GST/2 to 2dp, NO round-off line, total rounded.
+                      Keeps staging + placed bill visually identical. */}
+                  <div style={{ display: "flex", justifyContent: "space-between" }}><span>Sub Total</span><span>₹{Math.round(cartBreakdown.subtotal).toLocaleString("en-IN")}</span></div>
                   {cartBreakdown.discount > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>Discount ({cartBreakdown.discountPct}%)</span><span>−{fmt(cartBreakdown.discount)}</span></div>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "#16A34A", fontWeight: 800 }}><span>Discount ({cartBreakdown.discountPct}%)</span><span>−₹{Math.round(cartBreakdown.discount).toLocaleString("en-IN")}</span></div>
                   )}
-                  <div style={{ display: "flex", justifyContent: "space-between" }}><span>Service Charge (10%)</span><span>{fmt(cartBreakdown.serviceCharge)}</span></div>
-                  {cartBreakdown.cgst > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}><span>Service Charge (10%)</span><span>₹{(cartBreakdown.serviceCharge || 0).toFixed(0)}</span></div>
+                  {cartBreakdown.gst > 0 && (
                     <>
-                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>CGST (2.5%)</span><span>{fmt(cartBreakdown.cgst)}</span></div>
-                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>SGST (2.5%)</span><span>{fmt(cartBreakdown.sgst)}</span></div>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>CGST (2.5%)</span><span>₹{((cartBreakdown.gst || 0) / 2).toFixed(2)}</span></div>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}><span>SGST (2.5%)</span><span>₹{((cartBreakdown.gst || 0) / 2).toFixed(2)}</span></div>
                     </>
-                  )}
-                  {Math.abs(cartBreakdown.roundOff) >= 0.01 && (
-                    <div style={{ display: "flex", justifyContent: "space-between" }}><span>Round Off</span><span>{cartBreakdown.roundOff >= 0 ? "+" : ""}{fmt(cartBreakdown.roundOff)}</span></div>
                   )}
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginTop: 4, color: "#6B6B6B" }}>
                     <span>{Object.values(cart).reduce((s, i) => s + i.qty, 0)} item(s)</span>
-                    <span>Total {fmt(cartBreakdown.grandTotal)}</span>
+                    <span>Total ₹{Math.round(cartBreakdown.grandTotal).toLocaleString("en-IN")}</span>
                   </div>
                 </div>
               </details>
@@ -2020,15 +2150,17 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 {isWalkinCover ? "💳 COLLECT PAYMENT" : "➕ RECHARGE WALLET"}
               </div>
 
-              {/* GREEN BALANCE CARD — customer's available balance (hidden for a
-                  walk-in: there's no wallet balance, just the bill to collect). */}
+              {/* BALANCE CARD — 🆕 2026-06-24 v3.382 (Khushi): was a solid teal box
+                  with label+balance both #23A094 (invisible) and the name a faint
+                  grey — read as "just a green box". Now a clean white Gumroad card:
+                  label grey, NAME bold black (clearly visible), balance teal on white. */}
               {!isWalkinCover && (
-              <div style={{ background: "#23A094", border: "2px solid #000", borderRadius: 12, padding: "14px 16px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "none"}}>
+              <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 12, padding: "12px 14px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "none"}}>
                 <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: "#23A094", letterSpacing: 1.2, marginBottom: 4 }}>AVAILABLE BALANCE</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#6B6B6B" }}>{cv.name || cv.tableId || "WALLET"}</div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B", letterSpacing: 1.2, marginBottom: 4 }}>AVAILABLE BALANCE</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#000" }}>{cv.name || cv.tableId || "WALLET"}</div>
                 </div>
-                <div style={{ fontSize: 30, fontWeight: 900, color: "#23A094", textShadow: "none"}}>
+                <div style={{ fontSize: 28, fontWeight: 900, color: "#23A094", textShadow: "none"}}>
                   ₹{bal.toLocaleString("en-IN")}
                 </div>
               </div>
@@ -2039,10 +2171,14 @@ function WalletOverlay({ cover, staffName, onClose }: {
                 const currentAmt = parseInt(rcAmt) || 0;
                 const matches = currentAmt === suggestedRecharge;
                 return (
-                  <div style={{ background: "#FF5733", border: "2px solid #000", borderRadius: 10, padding: "10px 12px", marginBottom: 14, fontSize: 13, fontWeight: 800, color: "#fff", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  /* 🆕 2026-06-24 v3.382 (Khushi): was a big red (#FF5733) banner with
+                     white text — recoloured to soft PINK with black text and made
+                     more compact (smaller padding + font). RESET button stays solid
+                     pink so it still stands out as the tappable element. */
+                  <div style={{ background: "#FFD6EC", border: "2px solid #000", borderRadius: 9, padding: "7px 10px", marginBottom: 12, fontSize: 12, fontWeight: 800, color: "#000", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                     <span>⚠ SHORT ₹{Math.round(deficit).toLocaleString("en-IN")} · {matches ? `set to ₹${suggestedRecharge.toLocaleString("en-IN")}` : `tap RESET → ₹${suggestedRecharge.toLocaleString("en-IN")}`}</span>
                     <button onClick={() => { setRcAmt(String(suggestedRecharge)); setRcAmtTouched(false); }}
-                      style={{ padding: "6px 10px", borderRadius: 8, background: matches ? "#FF90E8" : "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap" }}>
+                      style={{ padding: "5px 10px", borderRadius: 7, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap" }}>
                       ↻ RESET
                     </button>
                   </div>
@@ -2059,7 +2195,23 @@ function WalletOverlay({ cover, staffName, onClose }: {
                   {isWalkinCover ? (
                     <div style={{ flex: 1, padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, fontVariantNumeric: "tabular-nums" }}>{Math.round(activeTotal).toLocaleString("en-IN")}</div>
                   ) : (
-                    <input type="number" value={rcAmt} onChange={(e) => { setRcAmt(e.target.value); setRcAmtTouched(true); }} placeholder="0"
+                    <input type="number" value={rcAmt}
+                      onChange={(e) => {
+                        // While TYPING show exactly what they enter (the GROSS) —
+                        // store it as the discount base. The discount is applied
+                        // (field → net) the moment they pick a % (effect above) or
+                        // blur the field (covers pick-discount-then-type).
+                        setRcAmt(e.target.value);
+                        setRcAmtTouched(true);
+                        setRcBaseAmt(parseInt(e.target.value) || 0);
+                      }}
+                      onBlur={() => {
+                        if (rcBaseAmt > 0 && barDiscPct > 0) {
+                          const net = Math.max(0, Math.round(rcBaseAmt * (1 - Math.max(0, barDiscPct) / 100)));
+                          if (rcAmt !== String(net)) setRcAmt(String(net));
+                        }
+                      }}
+                      placeholder="0"
                       style={{ flex: 1, background: "transparent", border: "none", padding: "12px 0", color: "#000", fontSize: 26, fontWeight: 900, outline: "none", minWidth: 0 }} />
                   )}
                 </div>
@@ -2110,32 +2262,60 @@ function WalletOverlay({ cover, staffName, onClose }: {
               {/* DISCOUNT — opt-in dropdown. Default 0% (no discount) so
                   bartender has to deliberately pick one per order. Presets up
                   to 50% apply on the spot; CUSTOM (> 50%) opens in-app
-                  Manager PIN modal. */}
+                  Manager PIN modal.
+                  🆕 2026-06-24 (Khushi) — HIDDEN behind SHOW_BAR_DISCOUNT
+                  (misleading/unclear; to be revisited). barDiscPct stays 0. */}
+              {SHOW_BAR_DISCOUNT && (
               <div style={{ marginBottom: 10 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6 }}>DISCOUNT (OPTIONAL)</div>
-                <select value={barDiscPct <= 50 ? String(barDiscPct) : "custom"}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v === "custom") { setBarDiscPct(0); requestDiscount(); return; }
-                    setBarDiscPct(Math.max(0, Math.min(50, parseInt(v) || 0)));
-                  }}
-                  style={{ width: "100%", boxSizing: "border-box", background: "#fff", border: "2px solid #000", borderRadius: 12, padding: "14px 14px", color: barDiscPct > 0 ? "#000" : "#000", fontSize: 16, fontWeight: 900, outline: "none", cursor: "pointer", appearance: "none", WebkitAppearance: "none", backgroundImage: "linear-gradient(45deg, transparent 50%, #000 50%), linear-gradient(135deg, #000 50%, transparent 50%)", backgroundPosition: "calc(100% - 18px) center, calc(100% - 12px) center", backgroundSize: "6px 6px, 6px 6px", backgroundRepeat: "no-repeat" }}>
-                  {[0, 5, 10, 15, 20, 25, 30, 40, 50].map((q) => (
-                    <option key={q} value={String(q)} style={{ background: "#fff", color: "#000" }}>
-                      {q === 0 ? "NO DISCOUNT (0%)" : `${q}%`}
-                    </option>
-                  ))}
-                  <option value="custom" style={{ background: "#fff", color: "#000" }}>CUSTOM % (MANAGER PIN)</option>
-                </select>
-                {/* 🆕 v3.195 (Khushi) — live discount breakdown so the bartender
-                    SEES the recharge change: ₹300 − 20% = ₹240 to collect. */}
-                {barDiscPct > 0 && rcAmtNum > 0 && (
-                  <div style={{ marginTop: 8, padding: "8px 12px", background: "#F4F4F0", border: "2px solid #000", borderRadius: 10, fontSize: 13, fontWeight: 900, color: "#000", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>₹{rcAmtNum.toLocaleString("en-IN")} − {barDiscPct}% (−₹{rcDiscAmt.toLocaleString("en-IN")})</span>
-                    <span style={{ color: "#23A094" }}>= ₹{rcNet.toLocaleString("en-IN")}</span>
+                {/* 🆕 2026-06-24 v3.383 (Khushi) — native browser <select> REPLACED
+                    with an in-app Gumroad dropdown (white card, 2px black border,
+                    pink-highlighted selected row). Options now include 35% + 45%.
+                    Inline-expanding (pushes content down) so it can never be
+                    clipped by the scrollable portal modal, and it carries no
+                    scroll-close listener (avoids the self-scroll-snap-shut bug). */}
+                <button type="button" onClick={() => setDiscDdOpen((o) => !o)}
+                  style={{ width: "100%", boxSizing: "border-box", background: "#fff", border: "2px solid #000", borderRadius: 12, padding: "14px 14px", color: "#000", fontSize: 16, fontWeight: 900, outline: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>{barDiscPct <= 0 ? "NO DISCOUNT (0%)" : `${barDiscPct}%`}</span>
+                  <span style={{ fontSize: 12, transform: discDdOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▼</span>
+                </button>
+                {discDdOpen && (
+                  <div style={{ marginTop: 6, background: "#fff", border: "2px solid #000", borderRadius: 12, overflow: "hidden" }}>
+                    {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50].map((q, idx, arr) => {
+                      const sel = barDiscPct === q;
+                      return (
+                        <button key={q} type="button"
+                          onClick={() => { setDiscDdOpen(false); if (q <= 0) { setBarDiscPct(0); } else { setDiscSeed(q); setDiscOpen(true); } }}
+                          style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "12px 14px", background: sel ? "#FF90E8" : "#fff", border: "none", borderBottom: idx < arr.length ? "1px solid #EEE" : "none", color: "#000", fontSize: 15, fontWeight: sel ? 900 : 700, cursor: "pointer" }}>
+                          {q === 0 ? "NO DISCOUNT (0%)" : `${q}%`}
+                        </button>
+                      );
+                    })}
+                    <button type="button"
+                      onClick={() => { setDiscDdOpen(false); setDiscSeed(null); requestDiscount(); }}
+                      style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "12px 14px", background: barDiscPct > 50 ? "#FF90E8" : "#fff", border: "none", borderTop: "2px solid #000", color: "#000", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
+                      🔒 CUSTOM % (MANAGER PIN)
+                    </button>
                   </div>
                 )}
+                {/* 🆕 2026-06-24 (Khushi) — once a discount is approved + applied,
+                    show a clear GREEN confirmation badge so the bartender knows it
+                    is live (white-on-green, 2px black border, Gumroad). */}
+                {barDiscPct > 0 && (
+                  <div style={{ marginTop: 8, background: "#23A094", border: "2px solid #000", borderRadius: 10, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: "#fff", fontSize: 14, fontWeight: 900, letterSpacing: .3 }}>✅ {barDiscPct}% DISCOUNT APPLIED</span>
+                    <button type="button" onClick={() => { setBarDiscPct(0); setDiscDdOpen(false); }}
+                      style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, padding: "4px 10px", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .3 }}>
+                      REMOVE
+                    </button>
+                  </div>
+                )}
+                {/* 🆕 2026-06-24 v3.384 (Khushi) — the confusing "₹263 − 5% (−₹13) =
+                    ₹250" breakdown box was REMOVED. The amount field now shows the
+                    net the bartender collects directly (auto-follows the discounted
+                    bill), so the gross→net box is redundant. */}
               </div>
+              )}
 
               {/* SERVICE TAX toggle — default ON. OFF needs Manager PIN. */}
               <button onClick={requestScToggle}
@@ -2166,11 +2346,11 @@ function WalletOverlay({ cover, staffName, onClose }: {
         {/* v3.114 — DISCOUNT modal (in-app, no browser popup). Quick chips
             0/10/20/30/40/50% one-tap; custom % input; above 50% reveals
             inline Manager PIN field (validated via BAR_MANAGER_HASH). */}
-        {discOpen && typeof document !== "undefined" && document.body && createPortal(
+        {SHOW_BAR_DISCOUNT && discOpen && typeof document !== "undefined" && document.body && createPortal(
           <DiscountModal
-            current={barDiscPct}
-            onApply={(pct) => { setBarDiscPct(pct); setDiscOpen(false); showToast(`✅ Discount set to ${pct}%`); }}
-            onClose={() => setDiscOpen(false)}
+            current={discSeed != null ? discSeed : barDiscPct}
+            onApply={(pct) => { setBarDiscPct(pct); setDiscOpen(false); setDiscSeed(null); showToast(`✅ Discount set to ${pct}%`); }}
+            onClose={() => { setDiscOpen(false); setDiscSeed(null); }}
           />,
           document.body
         )}
@@ -2672,6 +2852,10 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   const [guestHits, setGuestHits] = useState<HodGuestSearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [activeCover, setActiveCover] = useState<HodCover | null>(null);
+  // 🆕 2026-06-24 (Khushi) — bumped on EVERY wallet open/scan so WalletOverlay
+  // force-resets the bartender's discount to 0% + SC ON, even when re-scanning
+  // the SAME customer (same cover.id → overlay doesn't remount on its own).
+  const [scanNonce, setScanNonce] = useState(0);
   // 🆕 2026-05-26 (Khushi) — Captain-style booking preview FIRST, then wallet.
   const [previewCover, setPreviewCover] = useState<HodCover | null>(null);
   const [toast, setToast] = useState("");
@@ -2774,6 +2958,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
     // buttons (ADD ORDER, RECHARGE, SEND MENU, PRINT BILL, SETTLE, RELEASE).
     // The existing WalletOverlay already IS that box. Skip the preview and
     // open the wallet directly on every scan/click.
+    setScanNonce((n) => n + 1);
     setActiveCover(cover);
   };
 
@@ -2828,39 +3013,49 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   const txRows = txCovers
     .map((cv) => {
       const rounds = cv.tabRounds || [];
-      const billed = rounds.reduce((s, r) => s + (r.roundTotal || 0), 0);
       const redeemed = cv.coverUsed || 0;
       const balance = cv.coverBalance || 0;
       const topUp = cv.topUpTotal || 0;
-      // 🆕 2026-06-12 v3.261 (Khushi) — show the tax/SC/discount breakdown, not
-      // just the item lines. The round stores only items + roundTotal (the REAL
-      // charged grand total), so we re-derive subtotal/SC/GST from each round's
-      // items via the app's single source of truth (computeHodBreakdown — same
-      // food/drink/alc tax rules as the printed bill) and accumulate PER ROUND.
-      //
-      // Why per-round (not one aggregate breakdown): each round was charged with
-      // its own whole-rupee round-off, and a round with NO discount & SC-on has
-      // roundTotal === computeHodBreakdown(items).grandTotal to the rupee. So a
-      // per-round gap is ZERO for normal bills — no spurious "discount" from
-      // aggregate-level rounding drift. The gap is non-zero only when a real
-      // reduction was applied (bartender discount %, or an SC waiver). It is the
-      // amount actually taken off the bill; reconciles exactly:
-      //   Σ subtotal + Σ SC + Σ tax − Σ discount === billed.
-      let subtotal = 0, serviceCharge = 0, tax = 0, discount = 0;
-      for (const rd of rounds) {
-        const bd = computeHodBreakdown(rd.items || []);
-        subtotal += bd.subtotal;
-        serviceCharge += bd.serviceCharge;
-        tax += bd.gst;
-        discount += Math.max(0, Math.round(bd.grandTotal) - Math.round(rd.roundTotal || 0));
-      }
+      // 🆕 2026-06-24 (Khushi) — the BILLED total + tax breakdown shown here must
+      // be BYTE-IDENTICAL to the customer's wallet "BILL PREVIEW" (hodclub.in).
+      // The customer computes ONE aggregate over ALL items via
+      // hodComputeBreakdown(allItems, billDiscountPct, billScOn) and rounds the
+      // grand total ONCE. The old code summed each round's individually-rounded
+      // roundTotal, which drifted by ₹1 (e.g. bar ₹1249 vs customer ₹1250) and
+      // showed GST as a per-round sum. Mirror the customer EXACTLY:
+      // computeHodBreakdownAdjusted is the POS twin of the customer's
+      // hodComputeBreakdown (identical at disc=0 & SC-on, same alcohol-GST rules,
+      // same single whole-rupee round). Fail-open to 0% discount / SC-on.
+      // 🔁 2026-06-24 (Khushi) — REVERTED the self-order bill-gating. BILLED must
+      // count EVERY ordered round, including 'preparing' ones. On a bar cover a
+      // round stays 'preparing' from order until the bartender taps PRINT KOT+BILL,
+      // so excluding preparing showed ₹0 billed for a guest who had ordered ₹1332 of
+      // drinks (e.g. SANTHOSH S) — a money-leakage risk. Bill = all ordered items.
+      const _allItems = rounds
+        .flatMap((rd) => rd.items || []);
+      const _discPct = Number((cv as unknown as { billDiscountPct?: number }).billDiscountPct || 0);
+      const _scOn = (cv as unknown as { billScOn?: boolean }).billScOn !== false;
+      const _bd = computeHodBreakdownAdjusted(_allItems, _discPct, _scOn);
+      const subtotal = _bd.subtotal;
+      const serviceCharge = _bd.serviceCharge;
+      const tax = _bd.gst;
+      const discount = _bd.discount;
+      const billed = _bd.grandTotal;
+      // 🆕 2026-06-24 (Khushi) — when the wallet is fully drained (balance ₹0) the
+      // tab is SETTLED, so "Amount redeemed" must equal "Amount billed". The raw
+      // coverUsed tally under-counts vs the freshly-recomputed bill (per-round
+      // redemptions recorded on a different SC/GST/rounding basis), which looked
+      // like missing money (e.g. billed ₹1958 vs redeemed ₹1685 on a ₹0 balance).
+      // Safe because in the bartender recharge-to-cover flow a ₹0 balance always
+      // means paid-in-full. A non-zero balance keeps the real coverUsed figure.
+      const redeemedShown = (Math.round(balance) === 0 && billed > 0) ? billed : redeemed;
       let ms = 0;
       const bump = (iso?: string) => { if (iso) { const t = new Date(iso).getTime(); if (!isNaN(t) && t > ms) ms = t; } };
       bump(cv.activatedAt); bump(cv.lastActivatedAt); bump(cv.actualArrivalTime); bump(cv.lastWalletBillPrintedAt);
       rounds.forEach((r) => bump(r.placedAt));
       (cv.transactions || []).forEach((t) => bump(t.timestamp));
       (cv.walletBillPrintLog || []).forEach((b) => bump(b.at));
-      return { cv, rounds, billed, redeemed, balance, topUp, ms, subtotal, serviceCharge, tax, discount };
+      return { cv, rounds, billed, redeemed, redeemedShown, balance, topUp, ms, subtotal, serviceCharge, tax, discount };
     })
     // 🆕 2026-06-12 v3.260 (Khushi) — TABLE bookings are EXCLUDED. This panel is
     // for bar-served wallets only: bar covers, guestlist and entry covers. Table
@@ -2880,7 +3075,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
     L.push(["Date & Time", "Customer", "Phone", "Ref", "Subtotal Rs", "Discount Rs", "Service Charge Rs", "GST Tax Rs", "Amount Billed Rs", "Amount Redeemed Rs", "Available Balance Rs", "Items Ordered"].join(","));
     for (const r of txRows) {
       const items = r.rounds.flatMap((rd) => (rd.items || []).map((it) => `${it.qty}x ${it.n}`)).join("; ");
-      L.push([_txTime(r.ms), r.cv.name || "", r.cv.phone || "", r.cv.ref || "", Math.round(r.subtotal), Math.round(r.discount), Math.round(r.serviceCharge), Math.round(r.tax), Math.round(r.billed), Math.round(r.redeemed), Math.round(r.balance), items].map(esc).join(","));
+      L.push([_txTime(r.ms), r.cv.name || "", r.cv.phone || "", r.cv.ref || "", Math.round(r.subtotal), Math.round(r.discount), Math.round(r.serviceCharge), Math.round(r.tax), Math.round(r.billed), Math.round(r.redeemedShown), Math.round(r.balance), items].map(esc).join(","));
     }
     const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -2904,7 +3099,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             style={{ padding: "8px 12px", borderRadius: 10, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", textDecoration: "none", whiteSpace: "nowrap", letterSpacing: .3 }}>
             ← POS
           </Link>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 BAR</div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 0.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🍸 BAR/CASHIER</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           {/* 🍽 2026-05-25 v2 (Khushi) — always-visible food-ready badge.
@@ -3040,6 +3235,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             try {
               const cv = await createBarWalkinCover(staffName);
               showToast(`✅ ${cv.name} created — add items, then RECHARGE`);
+              setScanNonce((n) => n + 1);
               setActiveCover(cv);
             } catch (e) {
               showToast(`❌ Walk-in failed: ${(e as Error).message || "try again"}`);
@@ -3093,7 +3289,10 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             "View full transactions" shows the whole night; the ⬇ button exports
             CSV. Each row taps open into a bill-style breakdown. Auto-clears at the
             7 AM operational-night rollover. */}
-        <div style={{ marginBottom: 16, border: "2px solid #000", borderRadius: 12, overflow: "hidden" }}>
+        {/* 🆕 2026-06-24 (Khushi) — flex-column wrapper so SEARCH RESULTS (order 1)
+            render ABOVE the RECENT TRANSACTIONS panel (order 2). */}
+        <div style={{ display: "flex", flexDirection: "column" }}>
+        <div style={{ order: 2, marginBottom: 16, border: "2px solid #000", borderRadius: 12, overflow: "hidden" }}>
           <button onClick={() => setTxOpen((v) => !v)}
             style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: txOpen ? "#000" : "#F4F4F0", border: "none", cursor: "pointer" }}>
             <span style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.4, color: txOpen ? "#fff" : "#000" }}>
@@ -3125,13 +3324,25 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
                     🔒 VIEW ONLY — the real numbers can't be changed here.
                   </div>
 
-                  {txShown.map((r) => {
+                  {txShown.map((r, idx) => {
                     const open = !!txExpanded[r.cv.id];
                     const items = r.rounds.flatMap((rd) => rd.items || []);
+                    // 🆕 2026-06-24 (Khushi) — soft pastel tint per card so two
+                    // adjacent bills are easy to tell apart (header + body share
+                    // one colour family; accent stripe on the left edge).
+                    const TX_TINTS = [
+                      { head: "#FFE7F3", body: "#FFF4FA", edge: "#FF90E8" }, // pink
+                      { head: "#E2F6EF", body: "#F1FBF7", edge: "#23A094" }, // mint
+                      { head: "#EBE8FE", body: "#F6F4FF", edge: "#7C6CF0" }, // lavender
+                      { head: "#FFF1D2", body: "#FFFaEC", edge: "#F0B429" }, // butter
+                      { head: "#E4EFFF", body: "#F2F8FF", edge: "#4A90E2" }, // sky
+                      { head: "#FFEAdC", body: "#FFF6EF", edge: "#F2784B" }, // peach
+                    ];
+                    const tint = TX_TINTS[idx % TX_TINTS.length];
                     return (
-                      <div key={r.cv.id} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
+                      <div key={r.cv.id} style={{ border: "1.5px solid #000", borderLeft: `6px solid ${tint.edge}`, borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
                         <button onClick={() => setTxExpanded((m) => ({ ...m, [r.cv.id]: !m[r.cv.id] }))}
-                          style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: open ? "#FDF0C9" : "#fff", border: "none", cursor: "pointer" }}>
+                          style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: tint.head, border: "none", cursor: "pointer" }}>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontSize: 17, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.cv.name || r.cv.ref}</div>
                             <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, marginTop: 3 }}>
@@ -3147,7 +3358,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
                         </button>
 
                         {open && (
-                          <div style={{ padding: "12px 14px", background: "#F4F4F0", borderTop: "1.5px solid #000" }}>
+                          <div style={{ padding: "12px 14px", background: tint.body, borderTop: "1.5px solid #000" }}>
                             <div style={{ fontSize: 13, fontWeight: 900, color: "#000", letterSpacing: 0.4, marginBottom: 6 }}>ITEMS ORDERED</div>
                             {items.length === 0 ? (
                               <div style={{ fontSize: 14, color: "#6B6B6B", fontWeight: 700 }}>No items — recharge / wallet activity only.</div>
@@ -3177,11 +3388,11 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
                                 <span>GST / tax (5%)</span><span>₹{Math.round(r.tax)}</span>
                               </div>
                             </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#000", marginTop: 6, paddingTop: 6, borderTop: "1px solid #000" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 19, fontWeight: 900, color: "#000", marginTop: 8, paddingTop: 8, borderTop: "1px solid #000" }}>
                               <span>Amount billed</span><span>₹{Math.round(r.billed)}</span>
                             </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#000", marginTop: 4 }}>
-                              <span>Amount redeemed</span><span>₹{Math.round(r.redeemed)}</span>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 19, fontWeight: 900, color: "#000", marginTop: 6 }}>
+                              <span>Amount redeemed</span><span>₹{Math.round(r.redeemedShown)}</span>
                             </div>
                             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 900, color: "#23A094", marginTop: 4 }}>
                               <span>Available balance</span><span>₹{Math.round(r.balance)}</span>
@@ -3255,7 +3466,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         )}
 
         {results.length > 0 && (
-          <div>
+          <div style={{ order: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: "#6B6B6B", marginBottom: 10 }}>{results.length} result(s)</div>
             {results.map((cv) => {
               // 🔴 2026-05-25 (Khushi GO-LIVE) — Visual differentiation:
@@ -3311,6 +3522,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             })}
           </div>
         )}
+        </div>
 
         {/* guests without wallet hidden — bar mode only shows active wallets */}
 
@@ -3327,10 +3539,10 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         <BarBookingPreviewModal
           cover={previewCover}
           onCancel={() => setPreviewCover(null)}
-          onOpen={() => { setActiveCover(previewCover); setPreviewCover(null); }}
+          onOpen={() => { setScanNonce((n) => n + 1); setActiveCover(previewCover); setPreviewCover(null); }}
         />
       )}
-      {activeCover && <WalletOverlay key={activeCover.id} cover={activeCover} staffName={staffName} onClose={() => { setActiveCover(null); setResults([]); }} />}
+      {activeCover && <WalletOverlay key={activeCover.id} cover={activeCover} staffName={staffName} openNonce={scanNonce} onClose={() => { setActiveCover(null); setResults([]); }} />}
       {ncOpen && <NcModal staffName={staffName} priorRows={billDueRows} onClose={() => setNcOpen(false)} />}
 
       {/* 🆕 v3.114 (Khushi LIVE): in-app modal for "no wallet found" QR scans.
@@ -4536,7 +4748,10 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                 </div>
               </div>
 
-              {/* DISCOUNT INPUT — 🆕 v3.126 live-recompute, no APPLY needed */}
+              {/* DISCOUNT INPUT — 🆕 v3.126 live-recompute, no APPLY needed.
+                  🆕 2026-06-24 (Khushi) — HIDDEN behind SHOW_BAR_DISCOUNT
+                  (misleading/unclear; to be revisited). discInput stays 0. */}
+              {SHOW_BAR_DISCOUNT && (
               <div style={{ marginBottom: 18 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>DISCOUNT %</div>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -4549,6 +4764,7 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                   {discPct > 50 && (<div style={{ fontSize: 10, color: "#FACC15", fontWeight: 800, letterSpacing: 0.5 }}>⚠ MANAGER PIN</div>)}
                 </div>
               </div>
+              )}
 
               {/* PAYMENT METHOD GRID — 🆕 v3.126 select-then-confirm (no auto-clear) */}
               <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>PAID BY</div>

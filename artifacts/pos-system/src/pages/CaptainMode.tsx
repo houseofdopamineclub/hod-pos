@@ -95,9 +95,6 @@ const HIGH_DISCOUNT_PIN_THRESHOLD = 25;
 // D2 — waiving Service Charge on a tab above this rupee floor needs Manager PIN.
 // Below this, comped SC is treated as a routine kindness (small chai/water tabs).
 const SC_WAIVER_PIN_FLOOR = 1500;
-// D3 — at walk-in creation, if customDiscount exceeds the source's implied
-// discount by more than this many percentage points, Manager PIN is required.
-const WALKIN_DISCOUNT_PIN_DELTA = 5;
 // 🔴 2026-05-12 — D4: cap on every captain-typed discount field. Owners
 // asked for a hard ceiling so the bouncer/captain can never exceed 15% on
 // either in-house or aggregator tabs. Aggregator DEFAULTS (e.g. Zomato 30%)
@@ -1834,16 +1831,16 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
     const _bookingMin = parseClockToMinutes(arrivalTime) ?? nowMinutesIST();
     const _clash = tableOccupantAt(selectedTable, _bookingMin, allReservations);
     if (!isProxy && _clash) { setError(`Table ${selectedTable} is already booked at ${_clash.arrivalTime || "that time"} — pick a different time or table`); return; }
-    // D3 — when the captain types a customDiscount that exceeds the source's
-    // implied discount by more than WALKIN_DISCOUNT_PIN_DELTA percentage points,
-    // require a Manager PIN. This catches "in-house + 80% discount" abuse and
-    // captures a free-text reason logged to discountOverrideLog.
+    // D3 + ZERO TOLERANCE (Khushi 2026-06-24) — ANY captain-added discount
+    // beyond the source's platform-implied discount requires a Manager PIN,
+    // even 1%. In-house implied = 0 so every non-zero walk-in discount is
+    // gated; aggregator sources only need a PIN for amounts ABOVE the preset.
     const impliedDisc = getAggregatorDiscount(aggValue) || 0;
     let overrideReason = "";
-    if (customDiscount > impliedDisc + WALKIN_DISCOUNT_PIN_DELTA) {
+    if (customDiscount > impliedDisc) {
       const ok = await requireManagerPin(
         `Walk-in discount: ${customDiscount}% on source "${aggValue}"\n` +
-        `(implied ${impliedDisc}% + ${WALKIN_DISCOUNT_PIN_DELTA}pp tolerance)`
+        `(implied ${impliedDisc}%) — Manager approval required for ANY discount.`
       );
       if (!ok) { setError("Manager PIN required for this discount."); return; }
       overrideReason = window.prompt(`Reason for ${customDiscount}% walk-in discount:`) || "";
@@ -1868,7 +1865,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
       }
       // D3 — log the over-threshold walk-in discount approval (best-effort,
       // outside the create txn so a logging glitch can't block table creation).
-      if (createdRef && customDiscount > impliedDisc + WALKIN_DISCOUNT_PIN_DELTA) {
+      if (createdRef && customDiscount > impliedDisc) {
         await recordWalkInDiscountOverride(createdRef, {
           by: captainName, valueBefore: impliedDisc, valueAfter: customDiscount,
           reason: overrideReason.trim() || "(no reason given)",
@@ -2100,7 +2097,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
             in via the booking import path with their discount pre-stamped.
             Discount default is 0 and capped at WALKIN_DISCOUNT_MAX (10%) —
             anything higher needs a manager override on the bill. */}
-        <div style={fieldLabel}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%)</div>
+        <div style={fieldLabel}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%) <span style={{ color: "#FF5733", fontWeight: 800, fontSize: 11 }}>· MANAGER PIN REQUIRED</span></div>
         <input type="number" value={customDiscount || ""}
           onChange={(e) => setCustomDiscount(Math.min(WALKIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
           placeholder="0"
@@ -2979,11 +2976,11 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         }
         reason = window.prompt(`Reason for switching ${r.tableId} → "${value}":`)?.trim() || "(no reason)";
       }
-      // D3-extension — pre-bill custom discount overshooting the source's
-      // implied default by > +5pp also needs Manager PIN.
-      if (customDisc !== undefined && customDisc > impliedDisc + WALKIN_DISCOUNT_PIN_DELTA) {
+      // D3-extension + ZERO TOLERANCE (Khushi 2026-06-24) — ANY pre-bill custom
+      // discount beyond the source's implied default needs Manager PIN, even 1%.
+      if (customDisc !== undefined && customDisc > impliedDisc) {
         const ok = await requireManagerPin(
-          `Custom discount: ${customDisc}% on source "${value}"\n(implied ${impliedDisc}% + ${WALKIN_DISCOUNT_PIN_DELTA}pp tolerance)\nTable: ${r.tableId}`);
+          `Custom discount: ${customDisc}% on source "${value}"\n(implied ${impliedDisc}%) — Manager approval required for ANY discount.\nTable: ${r.tableId}`);
         if (!ok) return;
         managerOverride = true;
         kind = "captain-discount-edit";
@@ -2993,10 +2990,11 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     try {
       // Always logs to sourceOverrideLog now (any change pre or post-bill).
       await setReservationAggregator(r._docId, value, disc, { managerOverride, staffName: captainName, reason });
-      // If the captain typed a custom discount that triggered the +5pp PIN
-      // gate, ALSO write to discountOverrideLog so the Live Monitor's
-      // "OVERRIDES" tile sees it (sourceOverrideLog is for source swaps).
-      if (managerOverride && customDisc !== undefined && customDisc > impliedDisc + WALKIN_DISCOUNT_PIN_DELTA) {
+      // If the captain typed a custom discount beyond the implied rate (which
+      // triggered the Manager-PIN gate above), ALSO write to discountOverrideLog
+      // so the Live Monitor's "OVERRIDES" tile sees it (sourceOverrideLog is
+      // for source swaps).
+      if (managerOverride && customDisc !== undefined && customDisc > impliedDisc) {
         await recordWalkInDiscountOverride(r._docId, {
           by: captainName, valueBefore: impliedDisc, valueAfter: customDisc,
           reason: reason || "(no reason)", kind, sourceBefore: fromSource, sourceAfter: value,

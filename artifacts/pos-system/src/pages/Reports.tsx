@@ -151,6 +151,14 @@ interface WalletRow {
   billServiceCharge: number;
   billTax: number;
   billNumber: string;
+  // 🆕 2026-06-24 (Khushi) — PER-RECHARGE DISCOUNT RECONCILIATION. Summed from
+  // each recharge transaction's immutable stamp (tx.discountPct / tx.grossAmount),
+  // NOT recomputed from the single overwriteable cover.billDiscountPct field — so
+  // a 10% recharge followed by a 5% recharge keeps BOTH discounts on record and
+  // the totals reconcile. `rechargeGross` = total pre-discount; `rechargeDiscount`
+  // = total rupees discounted across all recharges (gross − net).
+  rechargeGross: number;
+  rechargeDiscount: number;
 }
 
 function fmtTime(iso?: string): string {
@@ -393,6 +401,19 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
   const recharged = Number(c.topUpTotal || 0);
   const used = Number(c.coverUsed || 0);
   const activated = Number(c.coverActivated || 0);
+  // 🆕 2026-06-24 (Khushi) — reconcile discount from the IMMUTABLE per-recharge
+  // stamps (tx.discountPct / tx.grossAmount), summing recorded transactions
+  // instead of recomputing from the single overwriteable billDiscountPct field.
+  let rechargeGross = 0, rechargeDiscount = 0;
+  for (const t of ((c.transactions || []) as Array<{ type?: string; amount?: number; grossAmount?: number; discountPct?: number }>)) {
+    const ty = String(t.type || "").toLowerCase();
+    if (!ty.includes("topup")) continue;
+    const net = Number(t.amount || 0);
+    if (net <= 0) continue;
+    const gross = Number(t.grossAmount) > net ? Number(t.grossAmount) : net;
+    rechargeGross += gross;
+    rechargeDiscount += (gross - net);
+  }
   const balance = Number(c.coverBalance ?? (activated + recharged - used));
   const cAny = c as any;
   const paymentId = String(linkedBooking?.paymentId || cAny.paymentId || "");
@@ -454,6 +475,7 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     checkedIn: !!c.checkedIn,
     arrival: c.actualArrivalTime || "",
     coverActivated: activated, topUpTotal: recharged, coverUsed: used, coverBalance: balance,
+    rechargeGross, rechargeDiscount,
     paymentMethod: resolvedPaymentMethod,
     tableId: c.tableId || "",
     walletBillPrints: c.walletBillPrintCount || 0,
@@ -737,10 +759,30 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
       const hasActivity = w.checkedIn || !!w.activatedAt || !!w.agent?.trim();
       return !hasIdentity && !hasMoney && !hasActivity;
     };
+    // 🆕 2026-06-24 (Khushi) — DROP EMPTY WALK-INS. A bar/cashier WALK-IN cover
+    // (WALKIN-1, WALKIN-2…) exists solely to take an order; one created but never
+    // used (no order redeemed, no bill printed, no money in/out) is just noise in
+    // the Admin Wallets report. Only surface a walk-in once it carries real
+    // activity: an order was placed/redeemed (coverUsed>0) OR a bill was printed
+    // (billTotal>0 / walletBillPrints>0) OR any money moved (activated/topup/
+    // balance>0). Scoped to source==="walk-in" ONLY — guestlist entries,
+    // entry-only paid covers, and online/table covers are untouched.
+    const isEmptyWalkin = (w: WalletRow): boolean => {
+      if (w.source !== "walk-in") return false;
+      const placedOrBilled =
+        (w.coverUsed || 0) > 0 ||
+        (w.billTotal || 0) > 0 ||
+        (w.walletBillPrints || 0) > 0 ||
+        (w.coverActivated || 0) > 0 ||
+        (w.topUpTotal || 0) > 0 ||
+        (w.coverBalance || 0) > 0;
+      return !placedOrBilled;
+    };
     const rows = covers
       .map(c => buildWalletRow(c, bookingsById, guestByName))
       .filter(w => !isTableCover(w, coverById.get(w.coverId)!))
       .filter(w => !isGhostCover(w))
+      .filter(w => !isEmptyWalkin(w))
       .filter(w => !today || !w.date || w.date === today || w.date === nextDay);
     // ── BUGFIX 2026-05-08: synthesize guestlist rows for entries that never
     // had a cover wallet activated. Without this, guestlist-typed bookings
@@ -795,6 +837,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         agent: "", activatedAt: "",
         checkedIn: !!b.checkedIn, arrival: "",
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
+        rechargeGross: 0, rechargeDiscount: 0,
         paymentMethod: (b as any).paymentMethod || (b.paymentId ? "online" : ""),
         tableId: "", walletBillPrints: 0, lastBillAt: "",
         billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
@@ -811,6 +854,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         source: "guestlist", payChannel: "", isGuestList: true, agent: g.checkedInBy || "",
         activatedAt: "", checkedIn: !!g.checkedIn, arrival: "",
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
+        rechargeGross: 0, rechargeDiscount: 0,
         paymentMethod: "", tableId: "", walletBillPrints: 0, lastBillAt: "",
         billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
       });
@@ -1026,6 +1070,10 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
       "Arrival Time": w.arrival,
       "Cover Activated ₹": w.coverActivated,
       "Recharged ₹": w.topUpTotal,
+      // 🆕 2026-06-24 (Khushi) — per-recharge discount reconciliation from the
+      // immutable tx stamps (NOT the single overwriteable billDiscountPct field).
+      "Recharge Gross ₹ (pre-discount)": w.rechargeGross,
+      "Recharge Discount ₹ (total given)": w.rechargeDiscount,
       "Redeemed ₹": w.coverUsed,
       "Balance ₹": w.coverBalance,
       "Payment Method": w.paymentMethod,
@@ -1564,7 +1612,10 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                   <td style={{ padding: "6px 6px", color: "#555" }}>{fmtTime(w.activatedAt)}</td>
                   <td style={{ padding: "6px 6px", color: w.checkedIn ? GREEN : "#ccc" }}>{w.checkedIn ? "✓" : "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{Math.max(0, w.coverActivated - w.topUpTotal).toLocaleString()}</td>
-                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.topUpTotal > 0 ? GOLD : "#ccc" }}>{w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.topUpTotal > 0 ? GOLD : "#ccc" }}
+                      title={w.rechargeDiscount > 0 ? `Recharge gross ₹${w.rechargeGross.toLocaleString()} · discount given ₹${w.rechargeDiscount.toLocaleString()} (per-transaction, never overwritten)` : "No recharge discount given"}>
+                    {w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}{w.rechargeDiscount > 0 ? <span style={{ color: GREEN, fontSize: 10, fontWeight: 800 }}> −₹{w.rechargeDiscount.toLocaleString()}</span> : null}
+                  </td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverUsed.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: w.coverBalance > 0 ? GREEN : "#ccc", fontWeight: 800 }}>₹{w.coverBalance.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", fontSize: 10, textTransform: "uppercase" }}>{w.paymentMethod || "—"}</td>

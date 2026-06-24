@@ -378,4 +378,11 @@
   .border.active-elevate:not(.no-active-interaction-elevate)::after { inset: -1px; }
 
   input[type="search"]::-webkit-search-cancel-button { @apply hidden; }
+
+  /* Khushi (2026-06-24) — remove the up/down spinner arrows on all number
+     inputs (Bar Mode amount / split / discount fields, etc.). Bartenders type
+     the value directly; the tiny steppers were easy to mis-tap on a tablet. */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }

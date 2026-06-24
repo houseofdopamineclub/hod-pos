@@ -279,6 +279,16 @@ export interface HodTransaction {
    *  window (recharge transaction was online but tick hadn't landed yet).
    *  Surfaces in the admin Pending Webhook tile + next-day leakage report. */
   pendingWebhookTick?: boolean;
+  /** 🆕 2026-06-24 (Khushi) — PER-TRANSACTION DISCOUNT TRUTH. The discount %
+   *  that was applied to THIS recharge at the moment it happened, stamped
+   *  immutably here so it can NEVER be overwritten by a later recharge that
+   *  picks a different discount (the old `cover.billDiscountPct` is a single
+   *  field — recharge #2's 5% used to wipe recharge #1's 10% everywhere,
+   *  including retroactively in Live Reports). Only set when > 0. `amount`
+   *  remains the NET collected/credited; `grossAmount` is the pre-discount
+   *  figure so reports can reconcile (discount given = grossAmount − amount). */
+  discountPct?: number;
+  grossAmount?: number;
 }
 
 export interface HodTableReservation {
@@ -1545,7 +1555,8 @@ export interface RechargeSplit { cash?: number; upi?: number; card?: number; }
 
 export async function rechargeCover(
   coverId: string, amount: number, method: RechargeMethod, staffName: string,
-  split?: RechargeSplit, currentBalance = 0
+  split?: RechargeSplit, currentBalance = 0,
+  meta?: { discountPct?: number; grossAmount?: number }
 ): Promise<{ newBalance: number; tx: HodTransaction }> {
   const ref = doc(db, COVERS_COL, coverId);
   let note: string;
@@ -1569,10 +1580,18 @@ export async function rechargeCover(
     note = `${label} recharge`;
     txType = `${method}_topup`;
   }
+  // 🆕 2026-06-24 (Khushi) — stamp the discount IMMUTABLY on THIS recharge so a
+  // later recharge with a different % can never rewrite its history. Only when a
+  // real discount was given (>0); grossAmount only when it genuinely exceeds the
+  // net (a discount existed). Keeps no-discount recharges byte-clean.
+  const _discPct = meta && Number(meta.discountPct) > 0 ? Number(meta.discountPct) : 0;
+  const _gross = meta && Number(meta.grossAmount) > amount ? Math.round(Number(meta.grossAmount)) : 0;
   const tx: HodTransaction = {
     amount, note, timestamp: new Date().toISOString(),
     type: txType, staff: staffName,
     ...(method === "split" && split ? { split } : {}),
+    ...(_discPct > 0 ? { discountPct: _discPct } : {}),
+    ...(_gross > 0 ? { grossAmount: _gross } : {}),
   } as HodTransaction;
   // 🆕 2026-06-05 v3.222 (Khushi BUG — "recharge → PRINT KOT+BILL appears 5→6→8-10s
   // later, growing every round; we want INSTANT on a busy multi-tablet night").
