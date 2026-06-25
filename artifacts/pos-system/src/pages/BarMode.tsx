@@ -5,7 +5,7 @@ import { useStaff } from "@/lib/staff-context";
 import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
-  logBarSession, printKOT, printBill, recordWalletBillPrint, voidWalletBill, printBillVoid, printKOTVoid,
+  logBarSession, printKOT, printBill, recordWalletBillPrint, runBillBookkeepingBg, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
   getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, setCoverBillDiscount, updatePreparingRoundItems, createBarWalkinCover,
   coverDocIdFor, subscribeToCoversForNight, getTabletFloor, setTabletFloor,
@@ -1006,19 +1006,26 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
     const tokenForPrint = getNextToken();
     setLastToken(tokenForPrint);
     setBillBusy(true);
+    // ⚡ 2026-06-25 — print the chit INSTANTLY. The bill number + audit log are
+    // pure bookkeeping (no money), so derive the number from live cover state
+    // and persist the canonical record in the BACKGROUND. Previously this
+    // awaited recordWalletBillPrint — a Firestore transaction needing a live
+    // server round-trip that crawls to its 15s timeout on slow venue wifi,
+    // delaying the print. Fail-open: a failed bg write loses one audit row.
+    const billBase = (cv.ref || cv.id.slice(-6)).toUpperCase();
+    const optBillNumber = `${billBase}-${prevCount + 1}`;
+    const optIsDuplicate = prevCount > 0 && !hasNewRoundSinceLastBill;
+    // 🆕 v3.224 — CASH & CARRY: a new round since the last bill makes this a
+    // FRESH cumulative bill, not a duplicate (hasNewRoundSinceLastBill); else
+    // LIVE REPORTS (latest NON-duplicate bill per wallet) would undercount it.
+    runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, {
+      by: staffName, total: finalAmount, itemCount: allItems.length,
+      billNumberBase: billBase,
+      hasNewRoundSinceLastBill,
+      subtotal: amts.subtotal, discount: amts.discount,
+      serviceCharge: amts.serviceCharge, tax: amts.cgst + amts.sgst,
+    }));
     try {
-      // Atomic record (count++, log, isDuplicate flag, BILL-N suffix).
-      const rec = await recordWalletBillPrint(cover.id, {
-        by: staffName, total: finalAmount, itemCount: allItems.length,
-        billNumberBase: (cv.ref || cv.id.slice(-6)).toUpperCase(),
-        // 🆕 v3.224 — CASH & CARRY: a new round since the last bill makes this
-        // a FRESH cumulative bill, not a duplicate. Without this the latest
-        // running-tab bill is flagged duplicate and LIVE REPORTS (which reads
-        // the latest NON-duplicate bill per wallet) would undercount it.
-        hasNewRoundSinceLastBill,
-        subtotal: amts.subtotal, discount: amts.discount,
-        serviceCharge: amts.serviceCharge, tax: amts.cgst + amts.sgst,
-      });
       const ok = await printBill({
         tableId: cv.tableId || cv.ref || "WALLET",
         floorLabel: cv.floorLabel || "Wallet",
@@ -1026,14 +1033,14 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         staff: staffName,
         items: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
         amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: amts.roundOff, total: finalAmount },
-        billNumber: rec.billNumber,
-        isDuplicate: rec.isDuplicate,
+        billNumber: optBillNumber,
+        isDuplicate: optIsDuplicate,
         tabletFloor: floor,
         token: tokenForPrint,
       });
       if (ok) {
         // B2/B9 — full-screen success overlay so bartender CANNOT miss it.
-        setBillDone({ billNumber: rec.billNumber, total: finalAmount, itemCount: allItems.length, isDuplicate: rec.isDuplicate });
+        setBillDone({ billNumber: optBillNumber, total: finalAmount, itemCount: allItems.length, isDuplicate: optIsDuplicate });
       } else {
         showToast("❌ Bill print failed — check Firestore.");
       }
@@ -1184,13 +1191,19 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           // 2026-05-15 (Khushi UX) — CASH & CARRY. Combined PRINT KOT+BILL
           // ALWAYS includes the round we just activated → by definition a
           // fresh round bill, never a duplicate of the prior one.
-          const recB = await recordWalletBillPrint(cover.id, {
+          // ⚡ 2026-06-25 — combined KOT+BILL is ALWAYS a fresh round → never a
+          // duplicate. Print the chit INSTANTLY off an optimistic bill number;
+          // persist the canonical record (count + audit log) in the background
+          // so this 2nd Firestore transaction can't add a 15s stall to the print.
+          const billBaseB = (cv.ref || cv.id.slice(-6)).toUpperCase();
+          const optBillNumberB = `${billBaseB}-${(cv.walletBillPrintCount || 0) + 1}`;
+          runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, {
             by: staffName, total: finalB, itemCount: billItems.length,
-            billNumberBase: (cv.ref || cv.id.slice(-6)).toUpperCase(),
+            billNumberBase: billBaseB,
             hasNewRoundSinceLastBill: true,
             subtotal: amtsB.subtotal, discount: amtsB.discount,
             serviceCharge: amtsB.serviceCharge, tax: amtsB.cgst + amtsB.sgst,
-          });
+          }));
           const okB = await printBill({
             tableId: cv.tableId || cv.ref || "WALLET",
             floorLabel: cv.floorLabel || "Wallet",
@@ -1198,13 +1211,13 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             staff: staffName,
             items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty })),
             amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB },
-            billNumber: recB.billNumber,
-            isDuplicate: recB.isDuplicate,
+            billNumber: optBillNumberB,
+            isDuplicate: false,
             tabletFloor: floorB,
             token: tokenForActivate,
           });
           if (okB) {
-            setBillDone({ billNumber: recB.billNumber, total: finalB, itemCount: billItems.length, isDuplicate: recB.isDuplicate, withKot: true });
+            setBillDone({ billNumber: optBillNumberB, total: finalB, itemCount: billItems.length, isDuplicate: false, withKot: true });
           } else {
             showToast("✅ KOT printed but ❌ bill print failed — try PRINT BILL");
             setActDone(true);

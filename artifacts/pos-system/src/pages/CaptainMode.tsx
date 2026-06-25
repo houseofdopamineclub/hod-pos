@@ -6,7 +6,7 @@ import {
   sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
-  recordBillPrint,
+  recordBillPrint, runBillBookkeepingBg,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
   createWalkInTable, addRoundToTable, reassignTable, createProxyTable,
   recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
@@ -1336,10 +1336,19 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           if (id.startsWith("C")) floor = "ground";
           else if (id.startsWith("T")) floor = "rooftop";
           else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
-          const rec = await recordBillPrint(reservation._docId, {
+          // ⚡ 2026-06-25 — print the settled bill INSTANTLY. recordBillPrint is a
+          // Firestore transaction that stalls on slow venue wifi; the bill number
+          // + audit log are bookkeeping (no money), so derive the number from live
+          // state and persist the record in the background (settlement is already
+          // saved above). Fail-open: a failed bg write loses one audit row.
+          const sBillBase = reservation._docId.slice(-6).toUpperCase();
+          const sPrevCount = reservation.billPrintCount || 0;
+          const sBillNumber = `${sBillBase}-${sPrevCount + 1}`;
+          const sIsDuplicate = sPrevCount > 0;
+          runBillBookkeepingBg(() => recordBillPrint(reservation._docId, {
             by: captainName, total: finalAmount, discountPct,
-            aggregator: aggName, billNumberBase: reservation._docId.slice(-6).toUpperCase(),
-          });
+            aggregator: aggName, billNumberBase: sBillBase,
+          }));
           await printBill({
             tableId: reservation.tableId, floorLabel: reservation.floorLabel,
             customerName: reservation.customerName, partySize: (reservation as any).partySize, staff: captainName,
@@ -1350,7 +1359,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               discount: discountAmt, roundOff: 0, total: finalAmount,
             },
             paymentMethod: methodLabel,
-            billNumber: rec.billNumber, isDuplicate: rec.isDuplicate, tabletFloor: floor,
+            billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
           });
         }
       } catch { /* best-effort — settlement is already saved, printer is secondary */ }
@@ -2467,6 +2476,13 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     reprintNumber: number; stale: boolean;
   }>(null);
   const [busy, setBusy] = useState("");
+  // ⚡ 2026-06-25 — OPTIMISTIC BILL-PRINTED LOCK. recordBillPrint now persists in
+  // the BACKGROUND so the chit prints instantly, which means live r.billPrintCount
+  // can lag a few seconds. The post-bill source/discount lock + Mark-Paid gate
+  // must NOT open during that lag, so we flip this local flag the instant a bill
+  // prints on THIS tablet and treat it as "bill printed" alongside billPrintCount.
+  const [justPrintedBill, setJustPrintedBill] = useState(false);
+  const lastPrintAtRef = useRef(0);
   const [qrFallback, setQrFallback] = useState<{ url: string; reason: string } | null>(null);
   // 🍳 2026-05-21 — KDS ready items for THIS table. Chef bumps in Kitchen Mode
   // → these populate within 1s → green banner below pulses with chime so
@@ -2876,8 +2892,8 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     if (!snap) { alert("No items to print on bill."); return; }
     // L6 — debounce/confirm rapid reprints (kept BEFORE the preview opens
     // so captain doesn't accidentally double-fire within 10s).
-    const prevCount = r.billPrintCount || 0;
-    const lastAt = r.lastBillPrintedAt ? new Date(r.lastBillPrintedAt).getTime() : 0;
+    const prevCount = (r.billPrintCount || 0) || (justPrintedBill ? 1 : 0);
+    const lastAt = Math.max(r.lastBillPrintedAt ? new Date(r.lastBillPrintedAt).getTime() : 0, lastPrintAtRef.current);
     if (prevCount > 0 && Date.now() - lastAt < BILL_REPRINT_DEBOUNCE_MS) {
       const secs = Math.ceil((BILL_REPRINT_DEBOUNCE_MS - (Date.now() - lastAt)) / 1000);
       if (!window.confirm(`⚠ A bill was just printed ${Math.ceil((Date.now()-lastAt)/1000)}s ago.\n\nReprint anyway? (Wait ${secs}s to skip this prompt.)`)) return;
@@ -2903,10 +2919,23 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     }
     setBusy("printbill");
     try {
-      const rec = await recordBillPrint(r._docId, {
+      // ⚡ 2026-06-25 — print the bill INSTANTLY. recordBillPrint is a Firestore
+      // transaction (live server round-trip, no cache) that stalls the chit on
+      // slow venue wifi; the bill number + audit log are bookkeeping (no money),
+      // so derive the number from live state and persist the record in the
+      // background. Fail-open: a failed bg write loses one audit row, not the bill.
+      // NOTE: this optimistic number/duplicate flag is NON-AUTHORITATIVE under
+      // concurrency — two tablets printing the same cover within the bg-write
+      // window can both derive the same suffix. Cosmetic only (audit label); the
+      // canonical order is the backend bill-print log, and no money depends on it.
+      const billBaseC = r._docId.slice(-6).toUpperCase();
+      const prevCountC = r.billPrintCount || 0;
+      const optBillNumberC = `${billBaseC}-${prevCountC + 1}`;
+      const optIsDuplicateC = prevCountC > 0;
+      runBillBookkeepingBg(() => recordBillPrint(r._docId, {
         by: captainName, total: snap.finalAmount, discountPct: snap.discountPct,
-        aggregator: snap.aggName, billNumberBase: r._docId.slice(-6).toUpperCase(),
-      });
+        aggregator: snap.aggName, billNumberBase: billBaseC,
+      }));
       const ok = await printBill({
         tableId: r.tableId, floorLabel: r.floorLabel,
         customerName: r.customerName, partySize: (r as any).partySize, staff: captainName,
@@ -2914,11 +2943,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         amounts: { subtotal: snap.subtotal, serviceCharge: snap.scAmt, cgst: snap.cgst, sgst: snap.sgst,
           discount: snap.discountAmt, roundOff: 0, total: snap.finalAmount },
         paymentMethod: (r as any).paymentMethod || (snap.discountPct > 0 ? snap.aggName : undefined),
-        billNumber: rec.billNumber, isDuplicate: rec.isDuplicate, tabletFloor: snap.floor,
+        billNumber: optBillNumberC, isDuplicate: optIsDuplicateC, tabletFloor: snap.floor,
       });
+      if (ok) {
+        // Engage the post-bill lock INSTANTLY (don't wait for the bg write) so a
+        // source/discount swap or no-print Mark-Paid can't slip through the lag.
+        setJustPrintedBill(true);
+        lastPrintAtRef.current = Date.now();
+      }
       const floorName = snap.floor === "ground" ? "GROUND FLOOR" : snap.floor === "first" ? "FIRST FLOOR" : "ROOFTOP";
       alert(ok
-        ? `🖨 Bill #${rec.billNumber} sent to: ${floorName} BILL PRINTER${rec.isDuplicate ? "\n\n⚠ DUPLICATE REPRINT" : ""}\n\n(Floor derived from table ${r.tableId})`
+        ? `🖨 Bill #${optBillNumberC} sent to: ${floorName} BILL PRINTER${optIsDuplicateC ? "\n\n⚠ DUPLICATE REPRINT" : ""}\n\n(Floor derived from table ${r.tableId})`
         : "❌ Bill print failed — check console / Firestore.");
     } catch (e: any) { alert("❌ Bill print failed: " + e.message); }
     setBusy("");
@@ -2942,7 +2977,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     // L1/L7 — once a bill is printed, ANY source/discount swap needs Manager PIN
     // (this also runs the post-bill audit-log path inside setReservationAggregator).
     const isAggregatorDowngradePost = sourceChanged && fromSource !== "inhouse" && value === "inhouse";
-    if ((r.billPrintCount || 0) > 0) {
+    if ((r.billPrintCount || 0) > 0 || justPrintedBill) {
       const ok = await requireManagerPin(
         `Bill already printed for ${r.tableId}.\nChanging source from "${fromSource}" (${fromDisc}%) → "${value}" (${disc}%) will FORCE A REPRINT and be logged for audit.` +
         (isAggregatorDowngradePost ? "\n\n⚠ DOWNGRADE FROM AGGREGATOR — extra Admin PIN required next." : ""));
@@ -3007,7 +3042,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
 
   // L9 — Mark Paid is gated on at least one bill print; manager can override.
   const handleOpenMarkPaid = async () => {
-    if ((r.billPrintCount || 0) === 0) {
+    if ((r.billPrintCount || 0) === 0 && !justPrintedBill) {
       const ok = await requireManagerPin(
         `No thermal bill has been printed for ${r.tableId}.\nMarking paid without a printed bill skips the audit chit.`);
       if (!ok) return;

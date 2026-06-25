@@ -3358,6 +3358,30 @@ export async function recordPendingPaymentScreenshot(
   });
 }
 
+// ⚡ 2026-06-25 (Khushi — "PRINT KOT+BILL is 15-30s slow, used to be instant")
+// ROOT CAUSE: the bill chit was gated behind recordWalletBillPrint /
+// recordBillPrint — Firestore TRANSACTIONS that REQUIRE a live server
+// round-trip (they read-modify-write, so they cannot resolve from the offline
+// cache). On stalled venue wifi / Android WebView each crawls to its 15s
+// timeout; the bar's combined KOT+BILL runs the money debit AND this
+// bookkeeping txn back-to-back → the 15s (one slow) / 30s (both slow) delay.
+// FIX: the bill NUMBER + audit log are pure bookkeeping (NOT money), so the
+// call sites derive the number optimistically from live state, print the chit
+// IMMEDIATELY, and persist the canonical record through this best-effort
+// background runner (a few spaced retries so the audit row still lands).
+// Fail-open: a permanently-failed write loses ONE audit row, never the print.
+export function runBillBookkeepingBg(fn: () => Promise<unknown>, attempts = 4): void {
+  let n = 0;
+  const go = () => {
+    fn().catch((e) => {
+      n += 1;
+      if (n < attempts) setTimeout(go, 1500 * n);
+      else console.warn("[bill-bookkeeping] background write gave up", e);
+    });
+  };
+  go();
+}
+
 export async function recordWalletBillPrint(
   coverId: string,
   entry: { by: string; total: number; itemCount: number; billNumberBase: string;
