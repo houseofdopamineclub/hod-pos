@@ -6,6 +6,7 @@ import {
   sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
+  setSettleRequest, clearSettleRequest,
   recordBillPrint, runBillBookkeepingBg,
   printKOT, printBill, AGGREGATOR_OPTIONS, getAggregatorDiscount,
   createWalkInTable, addRoundToTable, reassignTable, createProxyTable,
@@ -55,6 +56,7 @@ import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
+import { requestManagerDiscountOtp, verifyManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
 import { sendWhatsAppViaMetaShared } from "@/lib/wa-send";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
@@ -85,6 +87,12 @@ const MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6
 // 9999; rotate by computing sha256(newPin) and replacing this hash.
 const ADMIN_HASH = "888df25ae35772424a560c7152a1de794440e0ea5cfee62828333a456a506e05";
 const SERVICE_CHARGE_RATE = 0.10;
+// 🆕 2026-06-25 (Khushi) — aggregator refs (AGG-ND-ARJUN-20260625-1415) are too
+// long to read on the tablet. Strip the embedded 8-digit YYYYMMDD date block for
+// DISPLAY only (keeps platform + name + HHMM time → AGG-ND-ARJUN-1415). The
+// stored ref is never changed — this is purely a display shortener.
+const shortRef = (ref?: string | null): string =>
+  (ref || "").replace(/-\d{8}-/i, "-");
 // L6 — minimum gap between two thermal-bill prints for the same table; below
 // this we ask the captain to confirm so they can't waste paper hammering the button.
 const BILL_REPRINT_DEBOUNCE_MS = 10_000;
@@ -176,6 +184,31 @@ async function requireManagerPin(reason: string): Promise<boolean> {
   const h = await sha256(pin.trim());
   if (h !== MANAGER_HASH) { await centeredAlert("WRONG MANAGER PIN", "That PIN did not match. Action cancelled.", "error", true); return false; }
   return true;
+}
+
+/** 2026-06-25 (Khushi) — Manager approval for a captain discount via a one-time
+ *  WhatsApp OTP. The server mints a 6-digit code (10-min, single-use) and sends
+ *  it to the managers; the captain enters it here. The SAME box also accepts the
+ *  Manager PIN, which stays as a SILENT FALLBACK: if the code can't be delivered
+ *  (weak venue wifi) a manager who is present approves with the PIN. Returns true
+ *  only on a confirmed OTP or PIN. Fail-open: a stalled/failed send never blocks —
+ *  it just shows the "use the PIN" message. */
+async function requireManagerApproval(reason: string, ctx: OtpContext): Promise<boolean> {
+  const otp = await requestManagerDiscountOtp(ctx); // helper has its own timeout
+  const sent = otp.ok && otp.sentTo > 0;
+  const head = sent
+    ? `📲 A 6-digit code was sent to the manager's WhatsApp.\nEnter the CODE below — or the Manager PIN.\n\n`
+    : `⚠️ Couldn't send the WhatsApp code (network).\nEnter the Manager PIN to approve.\n\n`;
+  const entered = await centeredPinPrompt(head + reason, true, async (val) => {
+    const v = (val || "").trim();
+    if (!v) return false;
+    // PIN fallback first — local, instant, always works for a present manager.
+    if ((await sha256(v)) === MANAGER_HASH) return true;
+    // Otherwise verify the OTP server-side (single-use, 10-min expiry).
+    if (otp.otpId) return await verifyManagerDiscountOtp(otp.otpId, v);
+    return false;
+  });
+  return !!entered;
 }
 
 // V3 2026-05-10 — VOID BILL reasons. Distinct from item-void reasons because
@@ -423,6 +456,17 @@ function parseClockToMinutes(t?: string): number | null {
   if (ampm === "PM" && h < 12) h += 12;
   if (ampm === "AM" && h === 12) h = 0;
   return h * 60 + mm;
+}
+
+// 🆕 2026-06-25 (Khushi) — captain-created PROXY/EXTRA tables.
+// Each proxy now gets a FLOOR-UNIQUE stored id (`Proxy-${n}-${CODE}`) so two
+// floors can each hold their own "Proxy-1" without colliding on the floor map /
+// occupancy (both key by tableId). The DISPLAY label strips the floor code back
+// to the friendly "Proxy-N"; legacy plain "Proxy-N" ids still parse.
+const PROXY_FLOOR_CODE: Record<string, string> = { dance: "GR", dining: "DN", rooftop: "RF" };
+function proxyDisplayLabel(id: string): string | null {
+  const m = String(id || "").match(/^proxy-(\d+)/i);
+  return m ? `Proxy-${m[1]}` : null;
 }
 
 function nowMinutesIST(): number {
@@ -703,7 +747,11 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ background: "#fff", border: "1px solid #000", borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 21, fontWeight: 900, color: "#000", marginBottom: 4 }}>🔄 Reassign Table</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <button onClick={onClose} title="Back"
+            style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 12, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 22, fontWeight: 900, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>←</button>
+          <div style={{ fontSize: 21, fontWeight: 900, color: "#000" }}>🔄 Reassign Table</div>
+        </div>
         <div style={{ fontSize: 14, color: "#6B6B6B", marginBottom: 4 }}>
           Moving <b>{reservation.customerName}</b> from <span style={{ color: "#FF5733", fontWeight: 800 }}>{reservation.tableId}</span>
         </div>
@@ -1214,12 +1262,13 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         aggName !== "inhouse" && Number(discountPct) === Number(aggDiscount);
       const alreadyApprovedHere = discountApprovedPct === discountPct;
       if (!aggRateMatchAtCommit && !alreadyApprovedHere) {
-        const ok = await requireManagerPin(
+        const ok = await requireManagerApproval(
           `Confirm ${discountPct}% discount on ₹${tabTotal} tab\n` +
           `(value: ₹${discountAmt})\n\n` +
-          `Any non-zero discount needs a Manager PIN before billing.`,
+          `Any non-zero discount needs a Manager OTP/PIN before billing.`,
+          { by: captainName, tableId: reservation.tableId, discountPct, amount: tabTotal },
         );
-        if (!ok) { setError("Manager PIN required for this discount."); return; }
+        if (!ok) { setError("Manager approval required for this discount."); return; }
         setDiscountApprovedPct(discountPct);
         overrides.push({
           kind: "high-discount", valueBefore: 0, valueAfter: discountPct,
@@ -1349,7 +1398,10 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             by: captainName, total: finalAmount, discountPct,
             aggregator: aggName, billNumberBase: sBillBase,
           }));
-          await printBill({
+          // ⚡ 2026-06-25 — FIRE-AND-FORGET (see confirmAndPrint note). Don't block
+          // settlement-complete on the print job's SERVER ack; the job is queued
+          // durably the instant we call printBill. Settlement money is already saved.
+          printBill({
             tableId: reservation.tableId, floorLabel: reservation.floorLabel,
             customerName: reservation.customerName, partySize: (reservation as any).partySize, staff: captainName,
             items: printItems,
@@ -1360,9 +1412,13 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             },
             paymentMethod: methodLabel,
             billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
-          });
+          }).catch((e) => console.warn("[settle auto-print] bill print failed", e));
         }
       } catch { /* best-effort — settlement is already saved, printer is secondary */ }
+      // 🆕 2026-06-25 (Khushi) — bill is settled, so drop any pending
+      // "NOTIFY SUPERVISOR" flag (fire-and-forget, fail-open) so the SETTLE BILL
+      // tab stops blinking for this table.
+      clearSettleRequest(reservation._docId);
       onClose();
     } catch (e: any) { setError(e.message); }
     setSaving(false);
@@ -1666,8 +1722,9 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 const clamped = clampCaptainDiscount(raw);
                 if (clamped === null) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
                 if (clamped > 0) {
-                  const ok = await requireManagerPin(
+                  const ok = await requireManagerApproval(
                     `Apply ${clamped}% manual discount on this bill.\n\nManager approval is required for ANY discount (Khushi rule 26 May).`,
+                    { by: captainName, tableId: reservation.tableId, discountPct: clamped, amount: tabTotal },
                   );
                   if (!ok) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
                   setDiscountApprovedPct(clamped);
@@ -1770,8 +1827,12 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   );
 }
 
-function WalkInModal({ captainName, existingTables, allReservations, isPastDate, onClose, onCreated, prefillTable }: {
-  captainName: string; existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean; onClose: () => void;
+function WalkInModal({ captainName, existingTables, allReservations, isPastDate, isFutureDate, onClose, onCreated, prefillTable }: {
+  captainName: string; existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean;
+  // 🆕 2026-06-25 (Khushi) — when the dashboard date is a FUTURE operational
+  // night, any arrival time is valid (the whole night is ahead). On TONIGHT,
+  // an arrival time earlier than NOW is a past-time mistake and is blocked.
+  isFutureDate?: boolean; onClose: () => void;
   // 🆕 2026-06-12 v3.270 (Khushi) — after a successful CREATE TABLE, hand the new
   // reservation's docId (== bookingRef returned by createWalkInTable/createProxyTable)
   // back to the parent so it can open that table's detail/ADD-ORDER view straight
@@ -1814,8 +1875,33 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
   const [proxyFloor, setProxyFloor] = useState("dining");
 
   const discountPct = customDiscount;
-  const nextProxyNum = existingTables.filter(t => t.startsWith("Proxy-")).length + 1;
-  const proxyName = `Proxy-${nextProxyNum}`;
+  // 🆕 2026-06-25 (Khushi) — proxy auto-number is now PER-FLOOR, not a global
+  // count: Rooftop's first proxy is "Proxy-1" even if Dining already has one.
+  // Counted from the live night feed (isProxy on this floor, excl. cancelled).
+  const proxyFloorCode = PROXY_FLOOR_CODE[proxyFloor] || "XX";
+  const nextProxyNum = allReservations.filter(r =>
+    (r as any).isProxy
+    && ((r as any).floor || "").toLowerCase() === proxyFloor
+    && (r as any).status !== "cancelled"
+  ).length + 1;
+  const proxyName = `Proxy-${nextProxyNum}`;            // friendly label shown in UI + WhatsApp
+  const proxyTableId = `Proxy-${nextProxyNum}-${proxyFloorCode}`; // floor-unique stored id (no cross-floor collision)
+
+  // 🆕 2026-06-25 (Khushi) — PAST-TIME GUARD. On tonight's operational night a
+  // captain must not be able to seat a guest at a time that has already passed
+  // (e.g. picking 14:02 when it's 8 PM). We measure "minutes since the 7 AM IST
+  // operational-night start" so the late-night hours (00:00–07:00) correctly
+  // count as the FUTURE part of the same night, not the past. Future nights are
+  // exempt (the whole night is ahead); past nights are already blocked by
+  // isPastDate. Recomputed every render so it stays live while the modal is open.
+  const isPastTime = (() => {
+    if (isPastDate || isFutureDate) return false;       // only guard TONIGHT
+    const sel = parseClockToMinutes(arrivalTime);
+    if (sel === null) return false;                     // unparseable → don't block
+    const NIGHT_START = 420;                             // 07:00 IST
+    const elapsed = (m: number) => (m - NIGHT_START + 1440) % 1440;
+    return elapsed(sel) < elapsed(nowMinutesIST());
+  })();
 
   // Phone is required so we can send the wallet/menu link via WhatsApp. We
   // store it as digits-only with country code prefix (e.g. "919686444906" or
@@ -1832,6 +1918,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
 
   const create = async () => {
     if (isPastDate) { setError("⏪ Can't create a table on a past night. Switch the date to tonight first."); return; }
+    if (isPastTime) { setError(`⏰ Arrival time ${arrivalTime} is in the PAST. Pick the current time or later — you can't seat a guest for a time that's already gone.`); return; }
     if (!customerName.trim()) { setError("Enter customer name"); return; }
     if (!phoneDigits || phoneDigits.length < 7) { setError("Enter a valid phone number (min 7 digits)"); return; }
     // E.164 caps total digits at 15. Catches paste accidents like extra digits.
@@ -1860,7 +1947,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
       if (isProxy) {
         const floorOpt = TABLE_OPTIONS.find(g => g.floor === proxyFloor);
         createdRef = await createProxyTable(
-          proxyName, proxyFloor, floorOpt?.label || proxyFloor,
+          proxyTableId, proxyFloor, floorOpt?.label || proxyFloor,
           customerName.trim(), fullPhone, partySize, captainName,
           aggValue, discountPct, email.trim(), arrivalTime.trim()
         );
@@ -1887,18 +1974,51 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
       // or closing the modal.
       if (createdRef && fullPhone) {
         const walletUrl = `https://hodclub.in/?wallet=${encodeURIComponent(createdRef)}`;
-        const tableDisplay = isProxy
-          ? `${proxyName} · ${proxyFloor}`
-          : selectedTable
-            ? `${selectedTable}${(() => { const g = TABLE_OPTIONS.find(o => o.tables.includes(selectedTable)); return g?.label ? ` · ${g.label}` : ""; })()}`
-            : "your table";
+        const tableLabel = isProxy ? proxyName : (selectedTable || "Your table");
+        const floorLabel = isProxy
+          ? (TABLE_OPTIONS.find(g => g.floor === proxyFloor)?.label || proxyFloor || "")
+          : (TABLE_OPTIONS.find(o => o.tables.includes(selectedTable))?.label || "");
+        // 🆕 2026-06-25 (Khushi) — send the SAME booking-confirmation format the
+        // customer site (hodclub.in) sends for an online table reservation, via
+        // the approved `table_confirmed` template. Params (matching the live
+        // customer-site call): [name, dateNice, arrival, tableId, floorLabel,
+        // partySize, walletUrl].
+        let dateNice = getOperationalNightStr();
+        try {
+          dateNice = new Date(getOperationalNightStr() + "T00:00:00+05:30")
+            .toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
+        } catch { /* fall back to YYYY-MM-DD */ }
+        // arrivalTime is stored 24h ("HH:MM") — show 12h ("04:55 PM") in the message.
+        const arr12 = (() => {
+          const mm = parseClockToMinutes(arrivalTime);
+          if (mm === null) return arrivalTime.trim() || "FROM NOW";
+          const h = Math.floor(mm / 60), m = mm % 60;
+          const ap = h >= 12 ? "PM" : "AM";
+          const h12 = h % 12 === 0 ? 12 : h % 12;
+          return `${String(h12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${ap}`;
+        })();
         const waText =
-          `Hi ${customerName.trim()}, welcome to H.O.D! 🎉\n\n` +
-          `🪑 Table: ${tableDisplay}\n\n` +
-          `Your menu is now OPEN — tap to browse & order food and drinks directly from your table:\n` +
-          `${walletUrl}\n\n` +
-          `📍 House of Dopamine, Koramangala\n${HOD_LOCATION_URL}`;
-        void sendWhatsAppViaMetaShared({ phone: fullPhone, fallbackText: waText });
+          `Hi ${customerName.trim()}, your HOD table is booked! 🍽️\n\n` +
+          `📅 Date: ${dateNice}\n` +
+          `🕘 Arrival: ${arr12}\n` +
+          `🪑 Table: ${tableLabel}${floorLabel ? ` · ${floorLabel}` : ""}\n` +
+          `👥 Guests: ${partySize}\n\n` +
+          `Show your QR at the door — we will have your table ready.\n\n` +
+          `View reservation: ${walletUrl}\n\n` +
+          `See you tonight!\n\n` +
+          `📍 House of Dopamine, Koramangala`;
+        // A fresh walk-in has never messaged HOD (outside the 24h window) so a
+        // free-form text is silently dropped by Meta — fire the approved template
+        // first; the helper falls back to the free-form text if it's blocked.
+        void sendWhatsAppViaMetaShared({
+          phone: fullPhone,
+          template: {
+            name: "table_confirmed",
+            language: "en",
+            params: [customerName.trim(), dateNice, arr12, tableLabel, floorLabel || "your floor", String(partySize), walletUrl],
+          },
+          fallbackText: waText,
+        });
       }
       // 🆕 2026-06-12 v3.270 (Khushi) — jump straight to the new table so the
       // captain can add an order immediately (no search-and-tap step). Best-effort:
@@ -1947,10 +2067,14 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 20, padding: 24, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ background: "#FF90E8", border: "2px solid #000", borderRadius: 12, padding: "12px 14px", marginBottom: 16 }}>
-          <div style={{ fontSize: 21, fontWeight: 900, color: "#000", marginBottom: 2 }}>🚶 Seat Walk-In Guest</div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#000" }}>
-            {tablePrefilled ? "Fill in the guest details below — table already chosen." : "Create a new table for a walk-in customer"}
+        <div style={{ display: "flex", alignItems: "stretch", gap: 10, marginBottom: 16 }}>
+          <button onClick={onClose} title="Back"
+            style={{ flexShrink: 0, width: 48, borderRadius: 12, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 22, fontWeight: 900, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>←</button>
+          <div style={{ flex: 1, background: "#FF90E8", border: "2px solid #000", borderRadius: 12, padding: "12px 14px" }}>
+            <div style={{ fontSize: 21, fontWeight: 900, color: "#000", marginBottom: 2 }}>🚶 Seat Walk-In Guest</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#000" }}>
+              {tablePrefilled ? "Fill in the guest details below — table already chosen." : "Create a new table for a walk-in customer"}
+            </div>
           </div>
         </div>
 
@@ -2042,7 +2166,14 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           <div>
             <div style={fieldLabel}>Arrival Time *</div>
             <input type="time" value={arrivalTime} onChange={(e) => { setArrivalTime(e.target.value); setError(""); }}
-              style={{ ...fieldInput, fontFamily: "inherit" }} />
+              style={{ ...fieldInput, fontFamily: "inherit",
+                border: isPastTime ? "2px solid #FF5733" : (fieldInput as any).border,
+                background: isPastTime ? "#FFF0EC" : (fieldInput as any).background }} />
+            {isPastTime && (
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#FF5733", marginTop: 4, lineHeight: 1.35 }}>
+                ⏰ That time has already passed — pick now or later.
+              </div>
+            )}
           </div>
         </div>
 
@@ -2101,25 +2232,17 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           </>
         )}
 
-        {/* 🔴 2026-05-13 (Khushi spec, round 6) — Source/Aggregator picker
-            removed. Walk-ins are always in-house here; aggregator tabs come
-            in via the booking import path with their discount pre-stamped.
-            Discount default is 0 and capped at WALKIN_DISCOUNT_MAX (10%) —
-            anything higher needs a manager override on the bill. */}
-        <div style={fieldLabel}>Discount % (default 0 — max {WALKIN_DISCOUNT_MAX}%) <span style={{ color: "#FF5733", fontWeight: 800, fontSize: 11 }}>· MANAGER PIN REQUIRED</span></div>
-        <input type="number" value={customDiscount || ""}
-          onChange={(e) => setCustomDiscount(Math.min(WALKIN_DISCOUNT_MAX, Math.max(0, Number(e.target.value) || 0)))}
-          placeholder="0"
-          min={0} max={WALKIN_DISCOUNT_MAX}
-          style={{ ...fieldInput, marginBottom: 16 }} />
+        {/* 🔴 2026-06-25 (Khushi) — Discount field REMOVED from the Create Table /
+            Seat Walk-In modal. Captains should not set a discount at table
+            creation; any discount is applied later at Settle Bill (Manager-PIN
+            gated). customDiscount stays 0 so the create flow passes no discount. */}
 
         {error && <div style={{ fontSize: 14, fontWeight: 800, color: "#FF5733", marginBottom: 10 }}>{error}</div>}
 
-        <button onClick={create} disabled={saving}
-          style={{ width: "100%", padding: 14, borderRadius: 12, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 18, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
-          {saving ? "Creating..." : isProxy ? `📦 Create ${proxyName}` : "🪑 Create Table"}
+        <button onClick={create} disabled={saving || isPastTime}
+          style={{ width: "100%", padding: 14, borderRadius: 12, background: isPastTime ? "#E5E5E5" : "#FF90E8", border: "2px solid #000", color: isPastTime ? "#888" : "#000", fontSize: 18, fontWeight: 900, cursor: (saving || isPastTime) ? "not-allowed" : "pointer", marginBottom: 10, opacity: isPastTime ? 0.7 : 1 }}>
+          {saving ? "Creating..." : isPastTime ? "⏰ Past time — pick now or later" : isProxy ? `📦 Create ${proxyName}` : "🪑 Create Table"}
         </button>
-        <button onClick={onClose} style={{ width: "100%", padding: 13, borderRadius: 12, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .5 }}>← BACK</button>
       </div>
     </div>
   );
@@ -2458,9 +2581,18 @@ function AddOrderModal({ docId, tableId, captainName, isPastDate, onClose }: {
   );
 }
 
-function TableCard({ r, captainName, playAlert, existingTables, allReservations, isPastDate }: {
+function TableCard({ r, captainName, playAlert, existingTables, allReservations, isPastDate, canSettle = true, onSeatAnother }: {
   r: HodTableReservation; captainName: string; playAlert: (u: boolean) => void; existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean;
+  /** 🆕 2026-06-25 (Khushi) — when FALSE, this captain may only NOTIFY a
+   *  supervisor to settle; the Settle Bill button + mark-paid flow are blocked.
+   *  Defaults TRUE so any caller that hasn't threaded the prop keeps old behavior. */
+  canSettle?: boolean;
+  /** 🆕 2026-06-25 (Khushi) — opens the Seat Walk-In / Create Table modal
+   *  pre-filled with THIS table id, so the captain can create a fresh booking
+   *  for the same table's next time slot straight from the detail view. */
+  onSeatAnother?: (tableId: string) => void;
 }) {
+  const [notified, setNotified] = useState(false);
   const [editRound, setEditRound] = useState<{ round: HodTabRound; index: number } | null>(null);
   const [showPaid, setShowPaid] = useState(false);
   const [showAddOrder, setShowAddOrder] = useState(false);
@@ -2673,61 +2805,70 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
 
   const handleServe = async (roundIdx: number) => {
     if (isPastDate) { alert("⏪ Can't print KOT on a past night. Switch the date to tonight first."); return; }
+    // ⚡ 2026-06-25 — FULLY OPTIMISTIC KOT. The round we're printing is already in
+    // the live `r.tabRounds` prop, so we don't need to read it back. markRoundActivated
+    // (a getDoc + updateDoc + customer-wallet mirror) and printKOT (an addDoc) all
+    // resolve only on SERVER ack — awaiting them stacked 2-3 round-trips and stalled
+    // the chit 7-30s on the preview proxy / shaky venue wifi. Both are DISPLAY/print
+    // writes (no money): the status flip + chit are queued durably the instant we call
+    // them, so we fire-and-forget and confirm to the captain immediately.
+    const round = (r.tabRounds || [])[roundIdx];
+    if (!round) return;
+    if (busy === `serve-${roundIdx}`) return;
     setBusy(`serve-${roundIdx}`);
-    try {
-      await markRoundActivated(r._docId, roundIdx, captainName, r.bookingRef);
-      const round = (r.tabRounds || [])[roundIdx];
-      if (round) {
-        // Derive floor from TABLE ID, not tablet localStorage — matches bill logic
-        // and BarMode. Captain may use any tablet; routing must follow the table.
-        const tid = (r.tableId || "").toUpperCase();
-        let tableFloor: TabletFloor = "first";
-        if (tid.startsWith("C")) tableFloor = "ground";
-        else if (tid.startsWith("T")) tableFloor = "rooftop";
-        else if (tid.startsWith("FD") || tid.startsWith("SMK")) tableFloor = "first";
-        const floorName = tableFloor === "ground" ? "GROUND FLOOR"
-          : tableFloor === "rooftop" ? "ROOFTOP"
-          : "FIRST FLOOR";
-        const hasFood = (round.items || []).some((it) => it.t === "food");
-        const hasDrink = (round.items || []).some((it) => it.t !== "food");
-        // Rooftop has no bar → drinks made at FF bar (runners carry up)
-        const barLabel = tableFloor === "ground" ? "GF BAR"
-          : tableFloor === "rooftop" ? "FF BAR (no bar at RT)"
-          : "FF BAR";
-        const dests: string[] = [];
-        if (hasFood) dests.push("2F KITCHEN");
-        if (hasDrink) dests.push(barLabel);
-        const kotOk = await printKOT({
-          tableId: r.tableId, floorLabel: r.floorLabel, customerName: r.customerName,
-          customerPhone: (r as any).customerPhone || (r as any).phone,
-          bookingRef: r.bookingRef, reservationId: r._docId,
-          staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
-          tabletFloor: tableFloor,
-        });
-        if (!kotOk) {
-          alert(`❌ KOT print failed — check printer connection.\n\nTable floor: ${floorName}`);
-        } else {
-          alert(`🖨 KOT sent to: ${dests.join(" + ")}\n\nTable floor: ${floorName}\n(Derived from table ${r.tableId})`);
-        }
-        // 🍳 KDS — mirror food items to kitchen screen. Best-effort; paper KOT
-        // already fired so chef has a fallback if this write fails.
-        if (hasFood) {
-          writeKDSItemsFromKOT({
-            reservationId: r._docId,
-            coverDocId: (r as any).linkedCoverDocId || "",
-            tableId: r.tableId,
-            tableLabel: r.tableId,
-            floorLabel: floorName,
-            customerName: r.customerName || "",
-            bookingRef: r.bookingRef,
-            staff: captainName,
-            roundNum: round.roundNum,
-            items: round.items,
-          } as any).catch((e) => console.warn("[KDS] captain serve write failed", e));
-        }
-      }
-    } catch {}
-    setBusy("");
+    // Derive floor from TABLE ID, not tablet localStorage — matches bill logic
+    // and BarMode. Captain may use any tablet; routing must follow the table.
+    const tid = (r.tableId || "").toUpperCase();
+    let tableFloor: TabletFloor = "first";
+    if (tid.startsWith("C")) tableFloor = "ground";
+    else if (tid.startsWith("T")) tableFloor = "rooftop";
+    else if (tid.startsWith("FD") || tid.startsWith("SMK")) tableFloor = "first";
+    const floorName = tableFloor === "ground" ? "GROUND FLOOR"
+      : tableFloor === "rooftop" ? "ROOFTOP"
+      : "FIRST FLOOR";
+    const hasFood = (round.items || []).some((it) => it.t === "food");
+    const hasDrink = (round.items || []).some((it) => it.t !== "food");
+    // Rooftop has no bar → drinks made at FF bar (runners carry up)
+    const barLabel = tableFloor === "ground" ? "GF BAR"
+      : tableFloor === "rooftop" ? "FF BAR (no bar at RT)"
+      : "FF BAR";
+    const dests: string[] = [];
+    if (hasFood) dests.push("2F KITCHEN");
+    if (hasDrink) dests.push(barLabel);
+    // Fire the status flip in the background (display-only; durably queued).
+    markRoundActivated(r._docId, roundIdx, captainName, r.bookingRef)
+      .catch((e) => console.warn("[serve] markRoundActivated failed", e));
+    // Fire the chit in the background; only a genuine async failure pops a notice.
+    printKOT({
+      tableId: r.tableId, floorLabel: r.floorLabel, customerName: r.customerName,
+      customerPhone: (r as any).customerPhone || (r as any).phone,
+      bookingRef: r.bookingRef, reservationId: r._docId,
+      staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
+      tabletFloor: tableFloor,
+    }).then((ok) => {
+      if (!ok) alert(`⚠ KOT may not have reached the printer — check it or tap 🖨 PRINT KOT again.\n\nTable floor: ${floorName}`);
+    }).catch(() => {
+      alert(`⚠ KOT may not have reached the printer — check it or tap 🖨 PRINT KOT again.\n\nTable floor: ${floorName}`);
+    });
+    // 🍳 KDS — mirror food items to kitchen screen. Best-effort; paper KOT already
+    // fired so chef has a fallback if this write fails.
+    if (hasFood) {
+      writeKDSItemsFromKOT({
+        reservationId: r._docId,
+        coverDocId: (r as any).linkedCoverDocId || "",
+        tableId: r.tableId,
+        tableLabel: r.tableId,
+        floorLabel: floorName,
+        customerName: r.customerName || "",
+        bookingRef: r.bookingRef,
+        staff: captainName,
+        roundNum: round.roundNum,
+        items: round.items,
+      } as any).catch((e) => console.warn("[KDS] captain serve write failed", e));
+    }
+    alert(`🖨 KOT sent to: ${dests.join(" + ")}\n\nTable floor: ${floorName}\n(Derived from table ${r.tableId})`);
+    // Cooldown clear: block impatient double-taps, re-enable for a deliberate retry.
+    window.setTimeout(() => setBusy(""), 4000);
   };
 
   const handleServeAll = async () => {
@@ -2737,6 +2878,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       .filter(({ rd }) => rd.status === "preparing" || rd.status === "activated")
       .map(({ i }) => i);
     if (pendingIdxs.length === 0) return;
+    if (busy === "serve-all") return;
     setBusy("serve-all");
     // Derive floor from TABLE ID, not tablet localStorage — matches bill logic
     // and BarMode. Captain may use any tablet; routing must follow the table.
@@ -2748,60 +2890,59 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     const floorName = tableFloor === "ground" ? "GROUND FLOOR"
       : tableFloor === "rooftop" ? "ROOFTOP"
       : "FIRST FLOOR";
-    let okCount = 0, failCount = 0;
+    // ⚡ 2026-06-25 — FULLY OPTIMISTIC (same reasoning as handleServe). Fire every
+    // round's status flip + chit in the background and confirm immediately. The
+    // rounds are already in the live `r.tabRounds` prop, so no read-back is needed;
+    // both writes are display/print only (no money) and queue durably the instant
+    // they're called. A genuine async print failure pops a per-round notice.
     let anyFood = false, anyDrink = false;
-    try {
-      for (const idx of pendingIdxs) {
-        try {
-          // 🔴 2026-05-13 — match handleServe: Print KOT activates only,
-          // the captain marks served separately when food reaches the table.
-          await markRoundActivated(r._docId, idx, captainName, r.bookingRef);
-          const round = (r.tabRounds || [])[idx];
-          if (!round) continue;
-          if ((round.items || []).some((it) => it.t === "food")) anyFood = true;
-          if ((round.items || []).some((it) => it.t !== "food")) anyDrink = true;
-          const ok = await printKOT({
-            tableId: r.tableId, floorLabel: r.floorLabel, customerName: r.customerName,
-            customerPhone: (r as any).customerPhone || (r as any).phone,
-            bookingRef: r.bookingRef, reservationId: r._docId,
-            staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
-            tabletFloor: tableFloor,
-          });
-          if (ok) okCount++; else failCount++;
-          // 🍳 KDS — mirror food to kitchen screen (best-effort; paper KOT
-          // already handled by printKOT above).
-          if ((round.items || []).some((it) => it.t === "food")) {
-            writeKDSItemsFromKOT({
-              reservationId: r._docId,
-              coverDocId: (r as any).linkedCoverDocId || "",
-              tableId: r.tableId,
-              tableLabel: r.tableId,
-              floorLabel: floorName,
-              customerName: r.customerName || "",
-              bookingRef: r.bookingRef,
-              staff: captainName,
-              roundNum: round.roundNum,
-              items: round.items,
-            } as any).catch((e) => console.warn("[KDS] captain serveAll write failed", e));
-          }
-        } catch { failCount++; }
+    let sentCount = 0;
+    for (const idx of pendingIdxs) {
+      const round = (r.tabRounds || [])[idx];
+      if (!round) continue;
+      sentCount++;
+      if ((round.items || []).some((it) => it.t === "food")) anyFood = true;
+      if ((round.items || []).some((it) => it.t !== "food")) anyDrink = true;
+      markRoundActivated(r._docId, idx, captainName, r.bookingRef)
+        .catch((e) => console.warn("[serveAll] markRoundActivated failed", e));
+      printKOT({
+        tableId: r.tableId, floorLabel: r.floorLabel, customerName: r.customerName,
+        customerPhone: (r as any).customerPhone || (r as any).phone,
+        bookingRef: r.bookingRef, reservationId: r._docId,
+        staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
+        tabletFloor: tableFloor,
+      }).then((ok) => {
+        if (!ok) alert(`⚠ KOT for round ${round.roundNum} may not have reached the printer — retry that round if needed.\n\nTable floor: ${floorName}`);
+      }).catch(() => {
+        alert(`⚠ KOT for round ${round.roundNum} may not have reached the printer — retry that round if needed.\n\nTable floor: ${floorName}`);
+      });
+      // 🍳 KDS — mirror food to kitchen screen (best-effort; paper KOT already fired).
+      if ((round.items || []).some((it) => it.t === "food")) {
+        writeKDSItemsFromKOT({
+          reservationId: r._docId,
+          coverDocId: (r as any).linkedCoverDocId || "",
+          tableId: r.tableId,
+          tableLabel: r.tableId,
+          floorLabel: floorName,
+          customerName: r.customerName || "",
+          bookingRef: r.bookingRef,
+          staff: captainName,
+          roundNum: round.roundNum,
+          items: round.items,
+        } as any).catch((e) => console.warn("[KDS] captain serveAll write failed", e));
       }
-      // Rooftop has no bar → drinks made at FF bar (runners carry up)
-      const barLabel = tableFloor === "ground" ? "GF BAR"
-        : tableFloor === "rooftop" ? "FF BAR (no bar at RT)"
-        : "FF BAR";
-      const dests: string[] = [];
-      if (anyFood) dests.push("2F KITCHEN");
-      if (anyDrink) dests.push(barLabel);
-      if (failCount === 0) {
-        alert(`🖨 ${okCount} KOT${okCount > 1 ? "s" : ""} sent to: ${dests.join(" + ")}\n\nTable floor: ${floorName}\n(Derived from table ${r.tableId})`);
-      } else {
-        alert(`⚠ ${okCount} KOT${okCount > 1 ? "s" : ""} sent OK, ${failCount} failed.\n\nTable floor: ${floorName}\n\nCheck printer connection and retry failed rounds individually.`);
-      }
-    } catch (e: any) {
-      alert("❌ Print all failed: " + (e?.message || String(e)));
     }
-    setBusy("");
+    // Rooftop has no bar → drinks made at FF bar (runners carry up)
+    const barLabel = tableFloor === "ground" ? "GF BAR"
+      : tableFloor === "rooftop" ? "FF BAR (no bar at RT)"
+      : "FF BAR";
+    const dests: string[] = [];
+    if (anyFood) dests.push("2F KITCHEN");
+    if (anyDrink) dests.push(barLabel);
+    alert(`🖨 ${sentCount} KOT${sentCount > 1 ? "s" : ""} sent to: ${dests.join(" + ")}\n\nTable floor: ${floorName}\n(Derived from table ${r.tableId})`);
+    // Cooldown clear: keep the button locked briefly so an impatient double-tap
+    // can't enqueue duplicate chits, but re-enable for a deliberate retry.
+    window.setTimeout(() => setBusy(""), 4000);
   };
 
   const handleRelease = async () => {
@@ -2843,6 +2984,11 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     // "🙏 Thank you for visiting" on next refresh. Errors still surface.
     try {
       await releaseTable(r._docId, r, captainName);
+      // Best-effort: drop any pending settle-request flag so it can't linger as
+      // a phantom row if the table was released without a normal settle pass.
+      // (Release deletes the doc, so the list drops it anyway — this is belt &
+      // braces, fire-and-forget, fail-open.)
+      try { clearSettleRequest(r._docId); } catch {}
     } catch (e: any) {
       alert(`❌ Release failed: ${e?.message || String(e)}`);
     }
@@ -2936,7 +3082,14 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         by: captainName, total: snap.finalAmount, discountPct: snap.discountPct,
         aggregator: snap.aggName, billNumberBase: billBaseC,
       }));
-      const ok = await printBill({
+      // ⚡ 2026-06-25 — FIRE-AND-FORGET the print job. printBill is a plain addDoc
+      // whose Promise only resolves on SERVER ack; awaiting it stalled the chit
+      // 10-30s on the preview proxy / shaky venue wifi. The job is written to the
+      // tablet's durable offline queue the instant we call printBill and the floor
+      // print-agent pulls it from the server once it syncs — so we DON'T wait. UI
+      // confirms instantly; a genuine async failure pops a follow-up "tap again".
+      // Same fail-open pattern already used for printKOT in Bar mode. No money write.
+      printBill({
         tableId: r.tableId, floorLabel: r.floorLabel,
         customerName: r.customerName, partySize: (r as any).partySize, staff: captainName,
         items: snap.items.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
@@ -2944,17 +3097,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
           discount: snap.discountAmt, roundOff: 0, total: snap.finalAmount },
         paymentMethod: (r as any).paymentMethod || (snap.discountPct > 0 ? snap.aggName : undefined),
         billNumber: optBillNumberC, isDuplicate: optIsDuplicateC, tabletFloor: snap.floor,
+      }).then((ok) => {
+        if (!ok) alert("⚠ Bill may not have reached the printer — check the printer or tap 🖨 PRINT BILL again.");
+      }).catch(() => {
+        alert("⚠ Bill may not have reached the printer — check the printer or tap 🖨 PRINT BILL again.");
       });
-      if (ok) {
-        // Engage the post-bill lock INSTANTLY (don't wait for the bg write) so a
-        // source/discount swap or no-print Mark-Paid can't slip through the lag.
-        setJustPrintedBill(true);
-        lastPrintAtRef.current = Date.now();
-      }
+      // Engage the post-bill lock INSTANTLY so a source/discount swap or no-print
+      // Mark-Paid can't slip through the lag.
+      setJustPrintedBill(true);
+      lastPrintAtRef.current = Date.now();
       const floorName = snap.floor === "ground" ? "GROUND FLOOR" : snap.floor === "first" ? "FIRST FLOOR" : "ROOFTOP";
-      alert(ok
-        ? `🖨 Bill #${optBillNumberC} sent to: ${floorName} BILL PRINTER${optIsDuplicateC ? "\n\n⚠ DUPLICATE REPRINT" : ""}\n\n(Floor derived from table ${r.tableId})`
-        : "❌ Bill print failed — check console / Firestore.");
+      alert(`🖨 Bill #${optBillNumberC} sent to: ${floorName} BILL PRINTER${optIsDuplicateC ? "\n\n⚠ DUPLICATE REPRINT" : ""}\n\n(Floor derived from table ${r.tableId})`);
     } catch (e: any) { alert("❌ Bill print failed: " + e.message); }
     setBusy("");
     setPreviewBill(null);
@@ -3042,6 +3195,13 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
 
   // L9 — Mark Paid is gated on at least one bill print; manager can override.
   const handleOpenMarkPaid = async () => {
+    // 🆕 2026-06-25 (Khushi) — defense-in-depth: a captain without settle
+    // permission can never open the mark-paid flow; they NOTIFY instead.
+    if (!canSettle) {
+      setSettleRequest(r._docId, { by: captainName, floor: r.floorLabel || r.floor || "" });
+      setNotified(true);
+      return;
+    }
     if ((r.billPrintCount || 0) === 0 && !justPrintedBill) {
       const ok = await requireManagerPin(
         `No thermal bill has been printed for ${r.tableId}.\nMarking paid without a printed bill skips the audit chit.`);
@@ -3375,6 +3535,16 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
               <span>🕐 {r.arrivalTime}</span>
               <span>📱 {r.phone}</span>
             </div>
+            {/* 🆕 2026-06-25 (Khushi) — always-visible REFERENCE NUMBER so the
+                captain can see the booking ref on EVERY table — HOD-… (hodclub.in),
+                TBL-… (captain walk-in/in-house) or AGG-… (Swiggy/Zomato). */}
+            {(r.bookingRef || r.linkedCoverRef) && (
+              <div style={{ marginTop: 8 }}>
+                <span style={{ display: "inline-block", background: "#FBF3D6", border: "2px solid #000", borderRadius: 8, padding: "4px 10px", fontSize: 14, fontWeight: 900, color: "#000", letterSpacing: 0.5, fontFamily: "'Manrope','Space Grotesk',monospace" }}>
+                  REF: {shortRef(r.bookingRef || r.linkedCoverRef)}
+                </span>
+              </div>
+            )}
             {/* 2026-05-20 — COVER+TABLE LINKED-WALLET BADGE (Khushi spec).
                 Surfaces the linked wallet so captain knows BEFORE taking the
                 order that ₹X is pre-paid at the door. Two visual states:
@@ -3724,6 +3894,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
               🔄 {!String(r.tableId || "").trim() ? "Assign Table" : "Reassign Table"}
             </button>
           )}
+          {/* 🆕 2026-06-25 (Khushi) — Seat Walk-In / Create Table was MOVED out of
+              this booking-action row to the modal header (next to ✕ CLOSE), so it
+              reads as a separate "new booking for this table" action, not a
+              booking-management button. See BookingDetailModal header. */}
           <button onClick={sendWhatsApp}
             style={{ flex: 1, minWidth: 120, padding: "9px 12px", borderRadius: 9, background: "#F2C744", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
             📲 Send Menu
@@ -3754,10 +3928,25 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
             );
           })()}
           {!billSettled && !voided && (tabTotal > 0 || billReq) && (
-            <button onClick={handleOpenMarkPaid}
-              style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
-              💰 Settle Bill
-            </button>
+            canSettle ? (
+              <button onClick={handleOpenMarkPaid}
+                style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: ".5px", fontFamily: "inherit", textTransform: "uppercase" }}>
+                💰 Settle Bill
+              </button>
+            ) : (r.settleRequested || notified) ? (
+              <div
+                style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#E6F5F2", border: "2px solid #23A094", color: "#0B7", fontSize: 12, fontWeight: 900, letterSpacing: ".3px", fontFamily: "inherit", textTransform: "uppercase", textAlign: "center" }}>
+                ✅ Supervisor Notified
+              </div>
+            ) : (
+              <button onClick={() => {
+                setSettleRequest(r._docId, { by: captainName, floor: r.floorLabel || r.floor || "" });
+                setNotified(true);
+              }}
+                style={{ flex: 1, minWidth: 100, padding: "9px 12px", borderRadius: 9, background: "#F2C744", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: ".3px", fontFamily: "inherit", textTransform: "uppercase" }}>
+                🔔 Notify Supervisor To Settle Bill
+              </button>
+            )
           )}
           {!billSettled && !voided && (r.billPrintCount || 0) > 0 && (
             <button onClick={async () => {
@@ -4259,38 +4448,58 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   );
 }
 
-function BookingDetailModal({ r, captainName, playAlert, existingTables, allReservations, isPastDate, onClose }: {
+function BookingDetailModal({ r, captainName, playAlert, existingTables, allReservations, isPastDate, canSettle = true, onClose, onSeatAnother }: {
   r: HodTableReservation; captainName: string; playAlert: (u: boolean) => void;
-  existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean; onClose: () => void;
+  existingTables: string[]; allReservations: HodTableReservation[]; isPastDate?: boolean; canSettle?: boolean; onClose: () => void;
+  onSeatAnother?: (tableId: string) => void;
 }) {
   return (
     <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0,
         background: "#F4F4F0",
         zIndex: 9998,
-        display: "flex", alignItems: "flex-start", justifyContent: "center",
-        padding: "10px 8px", overflowY: "auto" }}>
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start",
+        padding: "10px 8px" }}>
       {/* 🆕 2026-06-03 v3.200 (Khushi) — the table detail used to render in a
           narrow 640px centred card; captains wanted it to FILL THE SCREEN so
           rounds + action buttons are big and easy to tap on the tablet. Now
           full-width (maxWidth 1280) + light #F4F4F0 backdrop (was a dark
           rgba(0,0,0,.55) scrim Khushi read as a "black background"). */}
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "100%", maxWidth: 1280, minHeight: "calc(100vh - 20px)", position: "relative" }}>
-        <button onClick={onClose}
-          style={{ position: "sticky", top: 0, marginLeft: "auto", display: "block",
-            padding: "10px 18px", borderRadius: 8, background: "#FF5733",
-            border: "2px solid #000", color: "#fff",
-            fontSize: 14, fontWeight: 900, cursor: "pointer", marginBottom: 8,
-            fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .5,
-            zIndex: 2 }}>
-          ✕ CLOSE
-        </button>
+        style={{ width: "100%", maxWidth: 1280, height: "calc(100vh - 20px)", position: "relative", display: "flex", flexDirection: "column" }}>
+        {/* 🆕 2026-06-25 (Khushi) — header row: Seat Walk-In / Create Table sits at
+            the TOP of the popup next to ✕ CLOSE, kept SEPARATE from the booking's
+            own action buttons (ADD ORDER / REASSIGN / SEND MENU / RELEASE) below.
+            It opens the WalkInModal pre-filled with THIS table so the captain can
+            book the same table's next slot without backing out. */}
+        {/* 🆕 2026-06-25 (Khushi) — header lives OUTSIDE the scroll area (flex
+            child, not sticky) and the booking content scrolls in its own body
+            below, so rounds can NEVER bleed through behind these buttons. */}
+        <div style={{ flexShrink: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, background: "#F4F4F0", paddingBottom: 10, borderBottom: "2px solid #000" }}>
+          {!!String(r.tableId || "").trim() && onSeatAnother && !isPastDate ? (
+            <button onClick={() => onSeatAnother(String(r.tableId || "").trim())}
+              style={{ padding: "10px 18px", borderRadius: 8, background: "#FF90E8",
+                border: "2px solid #000", color: "#000",
+                fontSize: 14, fontWeight: 900, cursor: "pointer",
+                fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .5 }}>
+              🚶 Seat Walk-In / Create Table
+            </button>
+          ) : <span />}
+          <button onClick={onClose}
+            style={{ padding: "10px 18px", borderRadius: 8, background: "#FF5733",
+              border: "2px solid #000", color: "#fff",
+              fontSize: 14, fontWeight: 900, cursor: "pointer",
+              fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: .5 }}>
+            ✕ CLOSE
+          </button>
+        </div>
         {/* 🆕 2026-05-20 (Khushi) — soft gold glow ONLY, no outer border.
             TableCard already paints its own 2px status-driven border; adding
             another here caused the dual-outline Khushi flagged. */}
-        <div style={{ boxShadow: "none", borderRadius: 16 }}>
-          <TableCard r={r} captainName={captainName} playAlert={playAlert} existingTables={existingTables} allReservations={allReservations} isPastDate={isPastDate} />
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+          <div style={{ boxShadow: "none", borderRadius: 16 }}>
+            <TableCard r={r} captainName={captainName} playAlert={playAlert} existingTables={existingTables} allReservations={allReservations} isPastDate={isPastDate} canSettle={canSettle} onSeatAnother={onSeatAnother} />
+          </div>
         </div>
       </div>
     </div>
@@ -4308,6 +4517,10 @@ function BookingDetailModal({ r, captainName, playAlert, existingTables, allRese
 // 🛟 FALLBACK: if floor-plan crashes, KPI tiles + search bar remain functional
 // and captain can still open tables via the orphan-calls strip + waiter-call
 // banner. Walk-in CTA above is unchanged so seating still works.
+// 🆕 2026-06-25 — shared known-floor set for proxy-on-map homing (used by both
+// proxyTiles and the off-map exclusion). Hoisted so we don't allocate per row.
+const KNOWN_FLOOR_KEYS = new Set<string>(["dance", "dining", "rooftop"]);
+
 type FloorTableStatus =
   | { state: "free" }
   | { state: "red"; r: HodTableReservation; ts: number; queue?: number }
@@ -4454,9 +4667,42 @@ function FloorPlanView({
 
   const floorData = HOD_TABLES[activeFloor];
 
+  // 🆕 2026-06-25 (Khushi) — PROXY / EXTRA tables now render as circles ON the
+  // floor map (named "Proxy-N") and behave like any real table (red/orange/
+  // green states, tap-to-open), instead of only living in the off-map strip.
+  // A proxy is matched to its floor by the `floor` field it was created with
+  // (dance/dining/rooftop). They're laid out in a band BELOW the room layout
+  // (the viewBox is extended at render time) so they never overlap real tiles.
+  const proxyTiles = useMemo<FloorTable[]>(() => {
+    const out: FloorTable[] = [];
+    const seen = new Set<string>();
+    reservations.forEach((r) => {
+      if ((r as any).status === "cancelled") return;
+      const id = r.tableId || "";
+      if (!/^proxy-/i.test(id)) return;
+      const fk = (r.floor || "").toLowerCase();
+      if (!KNOWN_FLOOR_KEYS.has(fk) || fk !== activeFloor) return; // legacy/unknown-floor proxies stay in off-map strip
+      const up = id.toUpperCase();
+      if (seen.has(up)) return;
+      seen.add(up);
+      out.push({ id, seats: r.partySize || 2, sh: "circle", cx: 0, cy: 0, r: 34 });
+    });
+    out.sort((a, b) => (parseInt(a.id.replace(/\D/g, ""), 10) || 0) - (parseInt(b.id.replace(/\D/g, ""), 10) || 0));
+    const parts = floorData.vb.split(/\s+/).map(Number);
+    const vbW = parts[2] || 500, vbH = parts[3] || 430;
+    const perRow = Math.max(1, Math.floor((vbW - 40) / 96));
+    out.forEach((t, i) => {
+      const col = i % perRow, row = Math.floor(i / perRow);
+      t.cx = 52 + col * 96;
+      t.cy = vbH + 74 + row * 84;
+    });
+    return out;
+  }, [reservations, activeFloor, floorData.vb]);
+  const renderTables = useMemo<FloorTable[]>(() => [...floorData.tables, ...proxyTiles], [floorData.tables, proxyTiles]);
+
   const statuses = useMemo(() => {
     const m = new Map<string, FloorTableStatus>();
-    floorData.tables.forEach((t) => {
+    renderTables.forEach((t) => {
       const r = reservationByTableId.get(t.id.toUpperCase());
       if (!r) { m.set(t.id, { state: "free" }); return; }
       // Waiter-call header taps mirror to customerCallRequest but can fail
@@ -4507,14 +4753,14 @@ function FloorPlanView({
     reds.sort((a, b) => (a[1] as any).ts - (b[1] as any).ts);
     reds.forEach(([id, s], i) => m.set(id, { ...(s as any), queue: i + 1 }));
     return m;
-  }, [floorData.tables, reservationByTableId, activeWaiterCallTableIds]);
+  }, [renderTables, reservationByTableId, activeWaiterCallTableIds]);
 
   // Filter-match set — tables matching the active KPI filter OR the search
   // query. When non-empty, non-matching tables get dimmed so the captain's eye
   // jumps straight to the action. Matched tables also get a dashed gold ring.
   const filterMatches = useMemo(() => {
     const s = new Set<string>();
-    floorData.tables.forEach((t) => {
+    renderTables.forEach((t) => {
       const st = statuses.get(t.id);
       if (!st || st.state === "free") return;
       const r = (st as any).r as HodTableReservation;
@@ -4541,7 +4787,7 @@ function FloorPlanView({
     return s;
   // 🆕 2026-05-26 v3.10 (code-review fix) — include readyKDSResIds so map
   // highlighting refreshes the moment chef bumps an item (was stale before).
-  }, [q, pendingFilter, statuses, floorData.tables, activeWaiterCallTableIds, readyKDSResIds]);
+  }, [q, pendingFilter, statuses, renderTables, activeWaiterCallTableIds, readyKDSResIds]);
   const hasActiveFilter = !!pendingFilter || !!q;
 
   // 🛟 Off-map reservations: any non-cancelled reservation whose tableId is NOT
@@ -4563,11 +4809,14 @@ function FloorPlanView({
       // HOD_TABLES tile (regular floor SVG): captain accesses this booking via
       // the floor tile + multi-slot picker (v3371). Never duplicate it here.
       if (allMapTableIds.has(id)) return false;
-      // Proxy / extra table (no SVG floor tile): the off-map strip is the ONLY
-      // access point for the captain. Show the tile winner; show shadow bookings
-      // on the same proxy table only when they carry live activity.
+      // 🆕 2026-06-25 (Khushi) — a Proxy-N with a valid floor now renders ON the
+      // floor map (see proxyTiles), so its WINNER must NOT also appear in the
+      // off-map strip (it would duplicate). Shadow bookings on the same proxy
+      // with their own live activity still surface here so nothing is hidden.
+      const isHomedProxy = /^proxy-/i.test(r.tableId || "") &&
+        KNOWN_FLOOR_KEYS.has((r.floor || "").toLowerCase());
       const winner = reservationByTableId.get(id);
-      if (winner && winner._docId === r._docId) return true;
+      if (winner && winner._docId === r._docId) return isHomedProxy ? false : true;
       return _occScore(r) > 0;
     });
   }, [reservations, allMapTableIds, reservationByTableId]);
@@ -4701,7 +4950,7 @@ function FloorPlanView({
         )}
         <text x={cx} y={cy - 2} textAnchor="middle" fontSize="11" fontWeight={900}
           fill={c.text} fontFamily="'Manrope','Space Grotesk',sans-serif" style={{ pointerEvents: "none" }}>
-          {t.id}
+          {proxyDisplayLabel(t.id) || t.id}
         </text>
         <text x={cx} y={cy + 12} textAnchor="middle" fontSize="10" fontWeight={800}
           fill={s.state === "green" && badge.startsWith("₹") ? "#000" : c.text}
@@ -4820,24 +5069,44 @@ function FloorPlanView({
         })}
       </div>
 
-      {/* Legend */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 10, fontWeight: 800, color: "#6B6B6B", padding: "0 2px 8px", letterSpacing: 0.4 }}>
-        <span><span style={{ display: "inline-block", width: 12, height: 12, background: "#fff", border: "2px solid #000", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />TABLE AVAILABLE</span>
-        <span style={{ color: "#FF5733" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#FF5733", border: "1.5px solid #FF5733", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />TAKE ORDER / BILL</span>
-        <span style={{ color: "#000" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#F59E0B", border: "1.5px solid #F59E0B", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />WAITING FOR F&amp;B</span>
-        <span style={{ color: "#23A094" }}><span style={{ display: "inline-block", width: 12, height: 12, background: "#23A094", border: "1.5px solid #23A094", borderRadius: 3, verticalAlign: "middle", marginRight: 5 }} />RUNNING TABLE</span>
+      {/* Legend — 🆕 2026-06-25 (Khushi) font bumped 10→14px + swatch 12→16px for tablet readability */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 14, fontWeight: 800, color: "#6B6B6B", padding: "0 2px 10px", letterSpacing: 0.4 }}>
+        <span><span style={{ display: "inline-block", width: 16, height: 16, background: "#fff", border: "2px solid #000", borderRadius: 3, verticalAlign: "middle", marginRight: 6 }} />TABLE AVAILABLE</span>
+        <span style={{ color: "#FF5733" }}><span style={{ display: "inline-block", width: 16, height: 16, background: "#FF5733", border: "1.5px solid #FF5733", borderRadius: 3, verticalAlign: "middle", marginRight: 6 }} />TAKE ORDER / BILL</span>
+        <span style={{ color: "#000" }}><span style={{ display: "inline-block", width: 16, height: 16, background: "#F59E0B", border: "1.5px solid #F59E0B", borderRadius: 3, verticalAlign: "middle", marginRight: 6 }} />WAITING FOR F&amp;B</span>
+        <span style={{ color: "#23A094" }}><span style={{ display: "inline-block", width: 16, height: 16, background: "#23A094", border: "1.5px solid #23A094", borderRadius: 3, verticalAlign: "middle", marginRight: 6 }} />RUNNING TABLE</span>
       </div>
 
       {/* SVG floor plan */}
       <div style={{ background: "#F4F4F0", borderRadius: 14, border: "2px solid #000", padding: 8 }}>
-        <svg viewBox={floorData.vb} style={{ width: "100%", height: "auto", display: "block" }}
-          xmlns="http://www.w3.org/2000/svg">
-          {/* Background (stairs, walls, BAR labels) copied verbatim from the
-              customer site so the captain sees the same room layout the guest
-              sees when booking. Static SVG — no event handlers. */}
-          <g dangerouslySetInnerHTML={{ __html: floorData.bg }} />
-          {floorData.tables.map(renderTable)}
-        </svg>
+        {(() => {
+          // 🆕 2026-06-25 (Khushi) — when proxy/extra tables exist on this floor,
+          // extend the viewBox downward to fit a "PROXY / EXTRA TABLES" band so
+          // the synthetic proxy circles never overlap the real room layout.
+          const parts = floorData.vb.split(/\s+/).map(Number);
+          const vx = parts[0] || 0, vy = parts[1] || 0, vbW = parts[2] || 500, vbH = parts[3] || 430;
+          const perRow = Math.max(1, Math.floor((vbW - 40) / 96));
+          const proxyRows = proxyTiles.length ? Math.ceil(proxyTiles.length / perRow) : 0;
+          const extH = proxyRows ? vbH + 30 + proxyRows * 84 + 12 : vbH;
+          const mapVb = proxyRows ? `${vx} ${vy} ${vbW} ${extH}` : floorData.vb;
+          return (
+            <svg viewBox={mapVb} style={{ width: "100%", height: "auto", display: "block" }}
+              xmlns="http://www.w3.org/2000/svg">
+              {/* Background (stairs, walls, BAR labels) copied verbatim from the
+                  customer site so the captain sees the same room layout the guest
+                  sees when booking. Static SVG — no event handlers. */}
+              <g dangerouslySetInnerHTML={{ __html: floorData.bg }} />
+              {proxyRows > 0 && (
+                <g>
+                  <line x1={10} y1={vbH + 16} x2={vbW - 10} y2={vbH + 16} stroke="#000" strokeWidth={1} strokeDasharray="4 4" />
+                  <text x={14} y={vbH + 36} fontSize="11" fontWeight={900} fill="#000"
+                    fontFamily="'Manrope','Space Grotesk',sans-serif">📦 PROXY / EXTRA TABLES</text>
+                </g>
+              )}
+              {renderTables.map(renderTable)}
+            </svg>
+          );
+        })()}
       </div>
 
       {/* 🛟 Off-map reservations strip — tables that exist in POS but have no
@@ -4898,7 +5167,7 @@ function FloorPlanView({
                     <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       {r.tableId ? (
                         <span style={{ fontSize: 10, fontWeight: 900, color: "#0B6B5E", background: "#D7F2EC", border: "1.5px solid #23A094", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
-                          {r.tableId}
+                          {proxyDisplayLabel(r.tableId || "") || r.tableId}
                         </span>
                       ) : (
                         <span style={{ fontSize: 10, fontWeight: 900, color: "#B91C1C", background: "#FFF1F0", border: "1.5px solid #E11900", borderRadius: 5, padding: "2px 7px", letterSpacing: 0.4, textTransform: "uppercase", whiteSpace: "nowrap" }}>
@@ -4927,6 +5196,10 @@ function FloorPlanView({
 }
 
 function CaptainDashboard({ captainName }: { captainName: string }) {
+  // 🆕 2026-06-25 (Khushi) — LOGOUT from Captain. Clearing the global staff
+  // session makes the parent CaptainMode effect detect stillCaptain=false and
+  // drop back to the login screen (it also nukes the local hod_captain_* keys).
+  const { logout } = useStaff();
   // 🆕 2026-06-08 — default to the OPERATIONAL NIGHT (rolls 7AM IST), NOT the
   // UTC/calendar date. Just after midnight the calendar date is already the next
   // day while the night is still the previous date; defaulting to UTC made the
@@ -4941,6 +5214,22 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // operational-night helper. Threaded down to FloorPlanView → TableCard and the
   // walk-in / add-order modals; KOT + add-order buttons grey out, handlers hard-block.
   const isPastDate = date < getOperationalNightStr();
+  // 🆕 2026-06-25 (Khushi) — limit the date picker to a ±3-day window around
+  // tonight's operational night; every other future/past date is greyed out
+  // (native min/max) + clamped on change (typed entry can bypass min/max).
+  // Computed EACH render (NOT a mount-time useMemo) so the window shifts with
+  // the 7AM-IST operational-night rollover on an always-on venue tablet — the
+  // live reservation feed re-renders the dashboard continuously, keeping it fresh.
+  const dateBounds = (() => {
+    const base = getOperationalNightStr(); // YYYY-MM-DD
+    const [y, m, d] = base.split("-").map(Number);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const mk = (off: number) => {
+      const dt = new Date(y, m - 1, d + off);
+      return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
+    };
+    return { min: mk(-3), max: mk(3) };
+  })();
   // 🆕 2026-05-20 (Khushi) — floor filter retired; the new FloorPlanView has
   // 3 floor tabs of its own. Kept as "" so existing filter logic below is a no-op.
   const floor = "";
@@ -5031,6 +5320,46 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const billCountRef = useRef(0);
   const callingCountRef = useRef(0);
   const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 🆕 2026-06-25 (Khushi) — ROLE-BASED SETTLEMENT (authorized side). Admins &
+  // managers always qualify; a plain captain qualifies only with the per-staff
+  // canSettle permission set in Boss → Staff. Only authorized captains see the
+  // SETTLE BILL tab + the live "Settle Bill" button on a table card.
+  const { currentStaff, hasRole } = useStaff();
+  const canSettle = hasRole("admin", "manager") || !!currentStaff?.canSettle;
+  const [settleTabOpen, setSettleTabOpen] = useState(false);
+  // Waiting list rides the EXISTING all-floors reservation feed (zero new
+  // listeners): any table a normal captain flagged via "NOTIFY SUPERVISOR".
+  // Drops once the bill is settled (flag cleared) or the doc is released.
+  const settleRequests = useMemo(() => {
+    return (allReservations || [])
+      .filter((x) => x.settleRequested && !(x.paymentStatus === "paid" && (!!x.paymentMode || !!x.paidAt)))
+      .map((x) => {
+        const items = (x.tabRounds || []).flatMap((rd) => rd.items || []);
+        const amount = items.length ? computeHodBreakdown(items).grandTotal : 0;
+        return { r: x, amount };
+      })
+      .sort((a, b) => (a.r.settleRequestedAt || "").localeCompare(b.r.settleRequestedAt || ""));
+  }, [allReservations]);
+  // BEEP on a NEW request (count rose), only for authorized captains. The
+  // baseline is primed on the FIRST loaded snapshot (allReservations non-empty)
+  // so a pre-existing backlog at login / date-switch / hydration NEVER beeps —
+  // only genuinely new requests raised while the captain is watching.
+  const prevSettleCountRef = useRef(0);
+  const settleBaselineSetRef = useRef(false);
+  useEffect(() => {
+    const n = settleRequests.length;
+    if (!settleBaselineSetRef.current) {
+      if ((allReservations || []).length > 0) {
+        settleBaselineSetRef.current = true;
+        prevSettleCountRef.current = n;
+      }
+      return;
+    }
+    if (canSettle && n > prevSettleCountRef.current) {
+      try { playAlert(true); } catch {}
+    }
+    prevSettleCountRef.current = n;
+  }, [settleRequests.length, canSettle, playAlert, allReservations]);
   // 🔔 2026-05-20 (Khushi bug) — Calling tile must also count active waiterCalls
   // (header "Call Waiter" button), not just tableReservations.customerCallRequest.
   // The mirror to customerCallRequest can fail silently (prod rules / no
@@ -5294,6 +5623,27 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     return list;
   }, [reservations, pendingFilter, customerSearch, waiterCallTableIds, readyKDSResIds]);
 
+  // 🆕 2026-06-25 (Khushi) — SEARCH RESULTS dropdown. Typing a guest name (or
+  // phone / table / ref) surfaces matching bookings ACROSS ALL FLOORS as a
+  // tappable list — each row shows the guest, table + floor, ref, and arrival
+  // time/date. Tapping a row opens that exact booking's detail (works whether
+  // it sits on Ground/Dance, Dining, or Rooftop). Rides the already-subscribed
+  // `reservations` feed — ZERO extra Firestore reads. Cancelled rows excluded.
+  const searchMatches = useMemo(() => {
+    const q = customerSearch.trim().toLowerCase();
+    if (!q) return [] as HodTableReservation[];
+    return reservations
+      .filter((r) => (r as any).status !== "cancelled")
+      .filter((r) =>
+        [r.customerName, r.phone, r.tableId, r.bookingRef, (r as any).linkedCoverRef]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(q)
+      )
+      .slice(0, 25);
+  }, [reservations, customerSearch]);
+
   // 🆕 2026-06-12 v3.266 (Khushi) — CAPTAIN · TABLE TRANSACTIONS data shaping.
   // Mirrors Bar Mode's RECENT TRANSACTIONS but for TABLE bookings. Reuses the
   // ALREADY-subscribed `allReservations` feed (the floor-map data) → ZERO extra
@@ -5537,11 +5887,22 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
           <div style={{ fontSize: 13, color: "#6B6B6B" }}>👤 {captainName}</div>
           <div style={{ fontSize: 13, background: alertBadge.bg, border: `1px solid ${alertBadge.color}40`, color: alertBadge.color, padding: "4px 10px", borderRadius: 20 }}>{alertBadge.text}</div>
+          {/* 🆕 2026-06-25 (Khushi) — LOGOUT button (was missing on Captain). */}
+          <button onClick={() => logout()}
+            title="Log out of Captain Mode"
+            style={{ padding: "6px 12px", borderRadius: 10, background: "#fff", border: "1.5px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", whiteSpace: "nowrap", letterSpacing: .3, boxShadow: "2px 2px 0px #000" }}>
+            ⎋ LOGOUT
+          </button>
         </div>
       </div>
 
       <div style={{ padding: "10px 16px", background: "#fff", borderBottom: "2px solid #000", display: "flex", gap: 8, alignItems: "center" }}>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+        <input type="date" value={date} min={dateBounds.min} max={dateBounds.max}
+          onChange={(e) => {
+            let v = e.target.value;
+            if (v) { if (v < dateBounds.min) v = dateBounds.min; else if (v > dateBounds.max) v = dateBounds.max; }
+            setDate(v);
+          }}
           style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
         {/* 🆕 2026-06-07 (Khushi) — LIVE REPORTS button (parity with Bar / Door). */}
         <button onClick={() => setReportsOpen(true)}
@@ -5563,7 +5924,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           tab next to BILL DUE. Tap it to filter the floor map + list down to
           tables with bumped-but-not-picked-up food. Tile auto-pulses green
           (custom class — distinct from calling's red pulse-red). */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 6, padding: "10px 16px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${canSettle ? 7 : 6},1fr)`, gap: 6, padding: "10px 16px" }}>
         {/* 🆕 2026-06-03 v3.207 (Khushi) — KPI tiles are WHITE by default; the
             color only fills in when a tile is SELECTED (active filter). Selected
             colors: Calling + Bill Due → RED (no purple/blue), Tables pink,
@@ -5574,6 +5935,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           { label: "Calling", value: calling, filter: "calling" as const, tint: "#FF5733", fg: "#fff", kind: "red" as const, pulse: calling > 0 },
           { label: "Pending", value: pending, filter: "pending" as const, tint: "#F2C744", fg: "#000", kind: "default" as const, pulse: pending > 0 },
           { label: "Bill Due", value: billDue, filter: "bill" as const, tint: "#FF5733", fg: "#fff", kind: "default" as const, pulse: billDue > 0 },
+          ...(canSettle ? [{ label: "Settle Bill", value: settleRequests.length, filter: "__settle__" as const, tint: "#FF5733", fg: "#fff", kind: "settle" as const, pulse: settleRequests.length > 0 }] : []),
           { label: "Food Ready", value: readyGroups.length, filter: "ready" as const, tint: "#23A094", fg: "#fff", kind: "green" as const, pulse: readyGroups.length > 0 },
         ].map((s) => {
           // 🆕 2026-06-15 v3.301 (Khushi) — (1) the TABLES tile (the "show all"
@@ -5581,15 +5943,28 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           // active, so the selected tab is always visible. (2) BILL DUE + PENDING
           // now BLINK red (pulse-red) whenever their count > 0, matching CALLING —
           // so an open bill or a preparing order is impossible to miss.
-          const pulseClass = s.pulse ? (s.kind === "green" ? "hod-tile-ready" : "pulse-red") : "";
-          const isActive = pendingFilter === s.filter;
+          // 🆕 2026-06-25 (Khushi) — the SETTLE BILL tile must be a FILLED red
+          // that BLINKS (not a faint shadow glow) whenever a request is waiting,
+          // so it's impossible to miss. pulse-red-fill animates the background +
+          // forces white text below; other tiles keep the shadow-glow pulse.
+          const settleBlinking = s.kind === "settle" && s.pulse;
+          const pulseClass = s.pulse ? (s.kind === "green" ? "hod-tile-ready" : settleBlinking ? "pulse-red-fill" : "pulse-red") : "";
+          const isActive = s.kind === "settle" ? settleTabOpen : pendingFilter === s.filter;
+          // 🆕 2026-06-25 (Khushi) — the SETTLE tile turns alarm-RED (+ pulse) ONLY
+          // when a bill is actually waiting (settleBlinking). Merely OPENING the
+          // empty settle tab no longer paints it red — it shows a neutral pink
+          // "selected" fill so an empty list never looks like a pending alarm.
+          const settleEmptyActive = s.kind === "settle" && isActive && !s.pulse;
+          const filled = isActive || settleBlinking;
+          const tileBg = !filled ? "#fff" : settleEmptyActive ? "#FFD6EF" : s.tint;
+          const tileFg = !filled ? "#000" : settleEmptyActive ? "#000" : s.fg;
           return (
-            <div key={s.label} onClick={() => setPendingFilter(prev => prev === s.filter ? "" : s.filter)}
+            <div key={s.label} onClick={() => { if (s.kind === "settle") { setPendingFilter(""); setSettleTabOpen(o => !o); return; } setSettleTabOpen(false); setPendingFilter(prev => prev === s.filter ? "" : (s.filter as typeof prev)); }}
               className={pulseClass}
-              style={{ background: isActive ? s.tint : "#fff", border: `${isActive ? 3 : 2}px solid #000`, borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s", transform: isActive ? "scale(1.03)" : "none" }}>
-              <div style={{ fontSize: 22, fontWeight: 900, color: isActive ? s.fg : "#000" }}>{s.value}</div>
-              <div style={{ fontSize: 10, color: isActive ? s.fg : "#000", marginTop: 2, fontWeight: 800, letterSpacing: .5 }}>
-                {s.kind === "red" && "🔔 "}{s.kind === "green" && "🍽 "}{s.label}
+              style={{ background: tileBg, border: `${isActive ? 3 : 2}px solid #000`, borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s", transform: isActive ? "scale(1.03)" : "none" }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: tileFg }}>{s.value}</div>
+              <div style={{ fontSize: 10, color: tileFg, marginTop: 2, fontWeight: 800, letterSpacing: .5 }}>
+                {s.kind === "red" && "🔔 "}{s.kind === "green" && "🍽 "}{s.kind === "settle" && "💰 "}{s.label}
               </div>
             </div>
           );
@@ -5602,7 +5977,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           const qrCount = tableCallRequests.length;
           const qrActive = qrCount > 0;
           return (
-            <div onClick={() => setShowTableQrModal(true)}
+            <div onClick={() => { setSettleTabOpen(false); setPendingFilter(""); setShowTableQrModal(true); }}
               className={qrActive ? "pulse-red" : ""}
               style={{ background: qrActive ? "#FF5733" : "#fff", border: "2px solid #000", borderRadius: 10, padding: 10, textAlign: "center", cursor: "pointer", transition: "all .2s" }}>
               <div style={{ fontSize: 22, fontWeight: 900, color: qrActive ? "#fff" : "#000" }}>{qrCount}</div>
@@ -5613,6 +5988,51 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           );
         })()}
       </div>
+      {/* 🆕 2026-06-25 (Khushi) — SETTLE list, opened by the square 💰 Settle KPI
+          tile above (next to Bill Due). Visible ONLY to authorized captains
+          (canSettle / admin / manager). The tile blinks red + BEEPs (effect above)
+          whenever a normal captain has flagged a table "NOTIFY SUPERVISOR TO SETTLE
+          BILL". Lists waiting tables across ALL floors; tapping a row opens that
+          table's card to settle + release, which clears the flag. Rides the
+          existing all-floors reservation feed → ZERO new listeners. */}
+      {canSettle && settleTabOpen && (
+        <div style={{ padding: "0 16px 4px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {settleRequests.length === 0 ? (
+              <div style={{ padding: "16px", textAlign: "center", color: "#6B6B6B", fontSize: 13, fontWeight: 700, background: "#fff", border: "2px solid #000", borderRadius: 10 }}>
+                No tables are waiting to be settled.
+              </div>
+            ) : settleRequests.map(({ r: req, amount }) => {
+              const mins = req.settleRequestedAt
+                ? Math.max(0, Math.floor((Date.now() - new Date(req.settleRequestedAt).getTime()) / 60000))
+                : null;
+              const floorTxt = req.settleRequestFloor || req.floorLabel || req.floor || "";
+              return (
+                <button key={req._docId}
+                  onClick={() => { setSettleTabOpen(false); setSelectedDocId(req._docId); }}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                    width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: 10,
+                    background: "#fff", border: "2px solid #FF5733", cursor: "pointer",
+                  }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 15, fontWeight: 900, color: "#000", letterSpacing: 0.3 }}>
+                      🪑 {req.tableId}{floorTxt ? ` · ${floorTxt}` : ""}{req.customerName ? ` · ${req.customerName}` : ""}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, marginTop: 2 }}>
+                      Requested by {req.settleRequestedBy || "captain"}{mins === null ? "" : mins === 0 ? " · just now" : ` · ${mins}m ago`}
+                    </div>
+                  </div>
+                  <div style={{ flexShrink: 0, textAlign: "right" }}>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: "#FF5733", fontVariantNumeric: "tabular-nums" }}>₹{amount.toLocaleString("en-IN")}</div>
+                    <div style={{ fontSize: 11, fontWeight: 900, color: "#23A094", letterSpacing: 0.5 }}>SETTLE ›</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {pendingFilter && (
         <div style={{ padding: "0 16px", marginBottom: 4 }}>
           <button onClick={() => setPendingFilter("")}
@@ -5712,6 +6132,50 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             ✕
           </button>
         )}
+        {/* 🆕 2026-06-25 (Khushi) — tappable SEARCH RESULTS dropdown. Floats over
+            the content below the box; each row → opens that booking's detail. */}
+        {customerSearch.trim() && (
+          <div style={{ position: "absolute", left: 16, right: 16, top: "100%", marginTop: 6, zIndex: 40, background: "#fff", border: "2px solid #000", borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.18)", maxHeight: 340, overflowY: "auto" }}>
+            {searchMatches.length === 0 ? (
+              <div style={{ padding: "18px 14px", textAlign: "center", fontSize: 13, fontWeight: 700, color: "#6B6B6B" }}>
+                No matching booking tonight.
+              </div>
+            ) : (
+              searchMatches.map((r, i) => {
+                const ref = r.bookingRef || (r as any).linkedCoverRef || "";
+                const fmtDate = (d?: string) => {
+                  if (!d) return "";
+                  const [y, m, day] = d.split("-").map(Number);
+                  if (!y || !m || !day) return d;
+                  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m - 1] || "";
+                  return `${day} ${mon}`;
+                };
+                return (
+                  <button
+                    key={r._docId}
+                    onClick={() => { setSelectedDocId(r._docId); setCustomerSearch(""); }}
+                    style={{ width: "100%", textAlign: "left", display: "block", padding: "11px 14px", background: "#fff", border: "none", borderTop: i === 0 ? "none" : "1px solid #EEE", cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 15, fontWeight: 900, color: "#000", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        👤 {r.customerName || "—"}
+                      </span>
+                      {ref && (
+                        <span style={{ flexShrink: 0, background: "#FBF3D6", border: "1.5px solid #000", borderRadius: 7, padding: "2px 7px", fontSize: 11, fontWeight: 900, color: "#000", letterSpacing: 0.3, fontFamily: "'Manrope','Space Grotesk',monospace" }}>
+                          {shortRef(ref)}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12.5, fontWeight: 700, color: "#6B6B6B", marginTop: 4 }}>
+                      <span>🪑 {r.tableId || "—"}{r.floorLabel ? ` · ${r.floorLabel}` : ""}</span>
+                      {r.arrivalTime && <span>🕐 {r.arrivalTime}</span>}
+                      {r.date && <span>📅 {fmtDate(r.date)}</span>}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
       </div>
 
       {/* 🆕 2026-06-12 v3.266 (Khushi) — TABLE TRANSACTIONS panel. Mirror of Bar
@@ -5770,7 +6234,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                       return (
                         <button key={t.key} onClick={() => { setTxFilter(t.key); setTxFull(false); }}
                           style={{ flex: 1, padding: "9px 6px", borderRadius: 9, border: "2px solid #000", cursor: "pointer",
-                            background: active ? "#000" : "#fff", color: active ? "#fff" : "#000",
+                            background: active ? "#FF90E8" : "#fff", color: "#000",
                             fontSize: 12, fontWeight: 900, letterSpacing: 0.2, whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
                           {t.label}
                         </button>
@@ -5789,15 +6253,15 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                     const open = !!txExpanded[r._docId];
                     const pill = _txStatusPill(row.status, r.paymentMode);
                     return (
-                      <div key={r._docId} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
+                      <div key={r._docId} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 12, overflow: "hidden", borderLeft: open ? "5px solid #FF90E8" : "1.5px solid #000", boxShadow: "3px 3px 0px #000" }}>
                         <button onClick={() => setTxExpanded((m) => ({ ...m, [r._docId]: !m[r._docId] }))}
-                          style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: open ? "#FDF0C9" : "#fff", border: "none", cursor: "pointer" }}>
+                          style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: open ? "#FFEAF7" : "#fff", border: "none", cursor: "pointer" }}>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontSize: 17, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                               🪑 {r.tableId || "—"}{r.customerName ? ` · ${r.customerName}` : ""}
                             </div>
                             <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, marginTop: 3 }}>
-                              {r.phone || "—"}{r.bookingRef ? ` · ${r.bookingRef}` : ""}
+                              {r.phone || "—"}{r.bookingRef ? ` · ${shortRef(r.bookingRef)}` : ""}
                             </div>
                             <div style={{ fontSize: 13, color: "#6B6B6B", marginTop: 2 }}>{_txTime(row.ms)}</div>
                             <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 5 }}>
@@ -5966,6 +6430,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         </div>
       )}
 
+
       <div style={{ padding: "10px 16px 0" }}>
         <button onClick={() => {
           if (isPastDate) { alert("⏪ Can't seat a walk-in on a past night. Switch the date to tonight first."); return; }
@@ -6016,6 +6481,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           existingTables={allTableIds}
           allReservations={allReservations}
           isPastDate={isPastDate}
+          isFutureDate={date > getOperationalNightStr()}
           prefillTable={walkInPrefill}
           onCreated={(docId) => { pendingOpenDeadlineRef.current = Date.now() + 6000; setPendingOpenDocId(docId); }}
           onClose={() => { setShowWalkIn(false); setWalkInPrefill(undefined); }} />
@@ -6113,7 +6579,11 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       })()}
 
       {selectedDocId && (() => {
-        const sel = reservations.find((x) => x._docId === selectedDocId);
+        // 🆕 2026-06-25 — fall back to allReservations so a SETTLE BILL tab tap on
+        // an OFF-floor table (the floor-scoped `reservations` may not hold it)
+        // still opens its card instead of silently closing.
+        const sel = reservations.find((x) => x._docId === selectedDocId)
+          || allReservations.find((x) => x._docId === selectedDocId);
         if (!sel) { setSelectedDocId(null); return null; }
         return (
           <BookingDetailModal
@@ -6123,7 +6593,9 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             existingTables={allTableIds}
             allReservations={allReservations}
             isPastDate={isPastDate}
+            canSettle={canSettle}
             onClose={() => setSelectedDocId(null)}
+            onSeatAnother={(tableId) => { setSelectedDocId(null); setPendingOpenDocId(null); setWalkInPrefill(tableId); setShowWalkIn(true); }}
           />
         );
       })()}

@@ -76,6 +76,8 @@ function initDb() {
       // streaming (WebChannel) transport, leaving realtime listeners stalled
       // ~30s ("hung in between"). Auto-detect and fall back to long-polling so
       // covers/wallets/KOTs keep flowing on flaky venue networks.
+      // 🔁 2026-06-25 — REVERTED a v3.394 experiment that FORCED long-polling:
+      // it made the preview WORSE (~30s). Auto-detect is the better default here.
       experimentalAutoDetectLongPolling: true,
       localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
     });

@@ -322,6 +322,15 @@ export interface HodTableReservation {
   paidAt?: string;
   captainName?: string;
   status?: string;
+  /** 🆕 2026-06-25 (Khushi) — role-based settlement. A normal captain (no
+   *  canSettle permission) taps "NOTIFY SUPERVISOR TO SETTLE BILL", which sets
+   *  this flag; authorized captains see it in the SETTLE BILL tab (pulsing red +
+   *  beep) and settle + release. Cleared on settle/release. Display/flag only —
+   *  never a money field. */
+  settleRequested?: boolean;
+  settleRequestedBy?: string;
+  settleRequestedAt?: string;
+  settleRequestFloor?: string;
   needsManualReview?: boolean;
   /** Free-text reason shown on a NEEDS-REVIEW row (e.g. why it needs attention). */
   manualReviewReason?: string;
@@ -2052,6 +2061,41 @@ export async function markRoundServed(docId: string, roundIndex: number, booking
   if (rounds[roundIndex]) rounds[roundIndex].status = "served";
   await updateDoc(doc(db, TABLE_RES_COL, docId), { tabRounds: rounds });
   await _mirrorRoundsToCovers(rounds, bookingRef, (data as { linkedCoverDocId?: string }).linkedCoverDocId);
+}
+
+// 🆕 2026-06-25 (Khushi) — ROLE-BASED SETTLEMENT.
+// A normal captain (no canSettle permission) cannot collect a bill; instead they
+// tap "NOTIFY SUPERVISOR TO SETTLE BILL", which raises this flag on the table's
+// reservation doc. Authorized captains (canSettle / admin / manager) already
+// subscribe to the live reservation feed, so the flag surfaces in the blinking
+// SETTLE BILL tab with ZERO new listeners (cost-safe). Both writes are
+// fire-and-forget + fail-open: a failed flag write must never block a guest or
+// throw at the staff — the worst case is the supervisor is not auto-notified and
+// is told verbally instead.
+export function setSettleRequest(docId: string, info: { by: string; floor?: string }): void {
+  if (!docId) return;
+  try {
+    const ref = doc(db, TABLE_RES_COL, docId);
+    void updateDoc(ref, {
+      settleRequested: true,
+      settleRequestedBy: info.by || "",
+      settleRequestedAt: new Date().toISOString(),
+      settleRequestFloor: info.floor || "",
+    }).catch((e) => console.warn("[setSettleRequest] non-fatal", e));
+  } catch (e) {
+    console.warn("[setSettleRequest] threw (non-fatal)", e);
+  }
+}
+
+export function clearSettleRequest(docId: string): void {
+  if (!docId) return;
+  try {
+    const ref = doc(db, TABLE_RES_COL, docId);
+    void updateDoc(ref, { settleRequested: false }).catch((e) =>
+      console.warn("[clearSettleRequest] non-fatal", e));
+  } catch (e) {
+    console.warn("[clearSettleRequest] threw (non-fatal)", e);
+  }
 }
 
 // 🔴 2026-05-13 — Khushi: Print KOT used to call markRoundServed which

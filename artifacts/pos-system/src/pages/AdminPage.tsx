@@ -13,6 +13,7 @@ import {
   subscribeToEdcDefaultVendor, setEdcDefaultVendor, type EdcDefaultVendor,
 } from "@/lib/firestore";
 import { FEATURES } from "@/lib/feature-flags";
+import { centeredPinPrompt } from "@/lib/centered-ui";
 import { getTabletFloor, setTabletFloor, type TabletFloor, sha256,
   listSuspendedCaptainsToday, unlockCaptainVoids, type CaptainVoidStats,
   CaptainVoidStatsRulesError,
@@ -100,6 +101,12 @@ export default function AdminPage() {
   const [menuSearch, setMenuSearch] = useState("");
   const [newStaff, setNewStaff] = useState<{ name: string; phone: string; empId: string; pin: string; role: StaffRole; access: StaffRole[] }>({ name: "", phone: "", empId: "", pin: "", role: "captain", access: [] });
   const [editStaff, setEditStaff] = useState<StaffMember | null>(null);
+  // 🆕 2026-06-25 (Khushi) — VIEW STAFF PIN. The Edit modal shows the staff's
+  // current PIN masked; tapping 👁 View asks for the OWNER PIN before revealing.
+  // revealedPin: null = hidden (masked), string = shown. Reset whenever a
+  // different staff row is opened (or the modal closes → editStaff null).
+  const [revealedPin, setRevealedPin] = useState<string | null>(null);
+  useEffect(() => { setRevealedPin(null); }, [editStaff?.id]);
   const [staffMsg, setStaffMsg] = useState("");
   const [edcDefaultVendor, setEdcDefaultVendorState] = useState<EdcDefaultVendor | null>(null);
   const [edcSaving, setEdcSaving] = useState(false);
@@ -259,10 +266,12 @@ export default function AdminPage() {
     access: StaffRole[],
     onToggle: (r: StaffRole) => void,
     onAll: (on: boolean) => void,
+    onDemotePrimary?: () => void,
   ) => {
     const ownerAllowed = hasRole("admin");
     const modes = ACCESS_MODES.filter((m) => !m.ownerOnly || ownerAllowed);
     const allOn = modes.every((m) => m.role === primary || access.includes(m.role));
+    const primaryIsElevated = isElevatedRole(primary) && !!onDemotePrimary;
     return (
       <div className="mt-3">
         <div className="flex items-center justify-between mb-1">
@@ -276,20 +285,35 @@ export default function AdminPage() {
           {modes.map((m) => {
             const isPrimary = m.role === primary;
             const on = isPrimary || access.includes(m.role);
+            // 🆕 2026-06-25 (Khushi) — a person's ELEVATED main role (Boss/Owner
+            // or Manager) used to be a LOCKED chip you couldn't untick, which
+            // looked broken ("can't uncheck boss access"). Now tapping it DEMOTES
+            // the person to Captain (clears the elevated role). Non-elevated main
+            // roles (e.g. Captain) stay locked — you change those via the Role
+            // dropdown (a person must always have one base role).
+            const demotable = isPrimary && primaryIsElevated;
+            const locked = isPrimary && !demotable;
             return (
-              <button type="button" key={m.role} disabled={isPrimary} onClick={() => !isPrimary && onToggle(m.role)}
+              <button type="button" key={m.role} disabled={locked}
+                title={demotable ? "Tap to remove this access (demotes to Captain)" : undefined}
+                onClick={() => { if (demotable) onDemotePrimary?.(); else if (!isPrimary) onToggle(m.role); }}
                 className="text-[11px] px-2.5 py-1 font-semibold"
                 style={{
                   background: on ? "#E8FFF5" : "#F4F4F0",
                   color: on ? "#23A094" : "#555",
                   border: `2px solid ${on ? "#23A094" : "#ccc"}`,
-                  cursor: isPrimary ? "default" : "pointer",
+                  cursor: locked ? "default" : "pointer",
                 }}>
-                {on ? "✓ " : ""}{m.label}{isPrimary ? " (role)" : ""}
+                {on ? "✓ " : ""}{m.label}{demotable ? " ✕ TAP TO REMOVE" : isPrimary ? " (role)" : ""}
               </button>
             );
           })}
         </div>
+        {primaryIsElevated && (
+          <div className="text-[10px] font-semibold mt-1.5" style={{ color: "#B45309" }}>
+            ⓘ {roleLabel(primary)} is this person's MAIN role. Tap the green “{ACCESS_MODES.find(m => m.role === primary)?.label}” chip above (or change the Role dropdown) to remove it — they'll become a Captain.
+          </div>
+        )}
       </div>
     );
   };
@@ -337,7 +361,7 @@ export default function AdminPage() {
     if (!hasRole("admin") && (isElevatedRole(role) || roles.some(isElevatedRole))) {
       setStaffMsg("❌ ONLY OWNERS CAN ASSIGN MANAGER / OWNER ACCESS"); return;
     }
-    const patch: Partial<StaffMember> = { name, phone: editStaff.phone || "", role, roles };
+    const patch: Partial<StaffMember> = { name, phone: editStaff.phone || "", role, roles, canSettle: !!editStaff.canSettle };
     if (newPin) patch.pin = newPin;
     try {
       await updateStaffMember(editStaff.id, patch);
@@ -650,10 +674,53 @@ export default function AdminPage() {
                     <input placeholder="Phone" value={editStaff.phone || ""} inputMode="tel"
                       onChange={(e) => setEditStaff(p => p && ({...p, phone: e.target.value.replace(/[^\d+]/g, "").slice(0,15)}))}
                       className="w-full px-3 py-2 text-sm" style={inpStyle} />
+                    {/* 🆕 2026-06-25 (Khushi) — CURRENT PIN (masked) + 👁 View.
+                        Tapping View asks for the OWNER PIN before revealing, so a
+                        forgotten PIN can be looked up without resetting it. The
+                        field below is only for CHANGING the PIN. */}
+                    {(() => {
+                      const OWNER_VIEW_PIN = "33333"; // owner master PIN — change here when the owner updates it
+                      const origPin = allStaff.find(s => s.id === editStaff.id)?.pin || "";
+                      const shown = revealedPin !== null;
+                      return (
+                        <div className="flex items-center gap-2 px-3 py-2" style={{ background: "#F4F4F0", border: "2px solid #000", boxShadow: SHADOW_SM }}>
+                          <span className="text-[11px] font-black uppercase shrink-0" style={{ color: "#555" }}>Current PIN</span>
+                          <span className="flex-1 font-mono text-base font-bold tracking-widest" style={{ color: "#000" }}>
+                            {shown ? (origPin || "—") : (origPin ? "•".repeat(origPin.length) : "—")}
+                          </span>
+                          <button type="button"
+                            onClick={async () => {
+                              if (shown) { setRevealedPin(null); return; }
+                              if (!origPin) { setStaffMsg("❌ NO PIN ON RECORD FOR THIS STAFF"); return; }
+                              const entered = await centeredPinPrompt(
+                                `Enter the OWNER PIN to view ${editStaff?.name}'s PIN.`, true,
+                                (pin) => pin === OWNER_VIEW_PIN || (hasRole("admin") && !!currentStaff?.pin && pin === currentStaff.pin),
+                              );
+                              if (entered) {
+                                setRevealedPin(origPin);
+                                // 🆕 Accountability — log every PIN reveal (fail-open).
+                                if (currentStaff) {
+                                  try {
+                                    await logAudit({
+                                      action: "staff_pin_revealed",
+                                      staffId: currentStaff.id || "", staffName: currentStaff.name, staffRole: currentStaff.role,
+                                      details: { viewedStaffId: editStaff?.id, viewedStaffName: editStaff?.name },
+                                    });
+                                  } catch (auditErr) { console.warn("audit log failed (non-fatal)", auditErr); }
+                                }
+                              }
+                            }}
+                            className="px-3 py-1 text-[11px] font-black uppercase shrink-0"
+                            style={{ background: shown ? "#FF90E8" : "#fff", color: "#000", border: "2px solid #000", boxShadow: SHADOW_SM, cursor: "pointer" }}>
+                            {shown ? "🙈 Hide" : "👁 View"}
+                          </button>
+                        </div>
+                      );
+                    })()}
                     <input placeholder="New 5-digit PIN (leave blank to keep)" value={editStaff.pin} inputMode="numeric"
                       onChange={(e) => setEditStaff(p => p && ({...p, pin: e.target.value.replace(/\D/g, "").slice(0,5)}))} maxLength={5}
                       className="w-full px-3 py-2 text-sm font-mono" style={inpStyle} />
-                    <select value={editStaff.role} onChange={(e) => setEditStaff(p => p && ({...p, role: e.target.value as StaffRole, roles: (p.roles || []).filter(r => r !== (e.target.value as StaffRole))}))}
+                    <select value={editStaff.role} onChange={(e) => setEditStaff(p => { if (!p) return p; const next = e.target.value as StaffRole; return {...p, role: next, roles: (p.roles || []).filter(r => r !== next && r !== p.role)}; })}
                       className="w-full px-3 py-2 text-sm font-semibold" style={inpStyle}>
                       {roleChoices.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                     </select>
@@ -661,7 +728,31 @@ export default function AdminPage() {
                       editStaff.role,
                       (editStaff.roles || []).filter(r => r !== editStaff.role),
                       (r) => setEditStaff(p => { if (!p) return p; const cur = (p.roles || []).filter(x => x !== p.role); const next = cur.includes(r) ? cur.filter(x => x !== r) : [...cur, r]; return {...p, roles: next}; }),
-                      (on) => setEditStaff(p => { if (!p) return p; const ownerAllowed = hasRole("admin"); const all = ACCESS_MODES.filter(m => (!m.ownerOnly || ownerAllowed) && m.role !== p.role).map(m => m.role); return {...p, roles: on ? all : []}; })
+                      (on) => setEditStaff(p => { if (!p) return p; const ownerAllowed = hasRole("admin"); const all = ACCESS_MODES.filter(m => (!m.ownerOnly || ownerAllowed) && m.role !== p.role).map(m => m.role); return {...p, roles: on ? all : []}; }),
+                      // 🆕 demote elevated main role → Captain (strip ALL elevated tiers from roles[]).
+                      () => setEditStaff(p => p && ({ ...p, role: "captain", roles: (p.roles || []).filter(r => !isElevatedRole(r)) })),
+                    )}
+                    {/* 🆕 2026-06-25 (Khushi) — per-staff "Can settle bills". Admins &
+                        managers always can, so the toggle is only meaningful for a
+                        plain captain. OFF = captain may only NOTIFY a supervisor. */}
+                    {(() => {
+                      const alwaysCan = editStaff.role === "admin" || editStaff.role === "manager"
+                        || (editStaff.roles || []).some(r => r === "admin" || r === "manager");
+                      const on = alwaysCan || !!editStaff.canSettle;
+                      return (
+                        <button type="button"
+                          disabled={alwaysCan}
+                          onClick={() => setEditStaff(p => p && ({ ...p, canSettle: !p.canSettle }))}
+                          className="w-full px-3 py-2 text-xs font-black uppercase flex items-center justify-between"
+                          style={{ background: on ? "#23A094" : "#F4F4F0", color: on ? "#fff" : "#000", border: "2px solid #000", boxShadow: SHADOW_SM, cursor: alwaysCan ? "not-allowed" : "pointer", opacity: alwaysCan ? 0.85 : 1 }}>
+                          <span>💰 Can settle bills</span>
+                          <span>{on ? "✅ ON" : "OFF"}</span>
+                        </button>
+                      );
+                    })()}
+                    {(editStaff.role === "admin" || editStaff.role === "manager"
+                      || (editStaff.roles || []).some(r => r === "admin" || r === "manager")) && (
+                      <div className="text-[10px] font-semibold" style={{ color: "#555" }}>Admins &amp; managers can always settle bills.</div>
                     )}
                   </div>
                   {staffMsg && <div className="text-xs mt-2 font-semibold" style={{ color: staffMsg.startsWith("✅") ? "#23A094" : "#FF5733" }}>{staffMsg}</div>}

@@ -201,6 +201,13 @@ export interface StaffMember {
    * using `role`. Admin role implicitly grants access to every mode.
    */
   roles?: StaffRole[];
+  /**
+   * 🆕 2026-06-25 (Khushi) — per-staff "Can settle bills" permission. When TRUE
+   * (or role is admin/manager, which always can), a captain may SETTLE BILL and
+   * sees the blinking SETTLE BILL tab in Captain Mode. When falsy, a captain can
+   * only "NOTIFY SUPERVISOR TO SETTLE BILL" and cannot collect/settle.
+   */
+  canSettle?: boolean;
   phone?: string;
   active: boolean;
   createdAt?: Timestamp;

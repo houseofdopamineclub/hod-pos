@@ -243,6 +243,15 @@
 }
 .pulse-red { animation: pulse-red 1.2s ease-in-out infinite; }
 
+/* 2026-06-25 (Khushi) — SETTLE BILL KPI tile: a FILLED red that BLINKS the
+   background (not just a shadow glow), so a waiting settle request is
+   impossible to miss. Pairs with white text set inline on the tile. */
+@keyframes pulse-red-fill {
+  0%, 100% { background-color: #FF3B1F; box-shadow: 0 0 0 0 rgba(184,50,39,.6); }
+  50%      { background-color: #B3170A; box-shadow: 0 0 0 10px rgba(184,50,39,0); }
+}
+.pulse-red-fill { animation: pulse-red-fill 1s ease-in-out infinite; }
+
 /* 2026-05-20 (Khushi) — Print-KOT pending-action pulse (green).
    Used on the captain's "🖨 PRINT KOT" button so it visibly demands
    attention the moment a round is created (customer-self-order or
