@@ -56,7 +56,7 @@ import type { MenuItem, MenuOverride } from "@/lib/types";
 import { formatINR, getOperationalNightStr } from "@/lib/utils-pos";
 import { WaiterCallBanner } from "@/components/WaiterCallBanner";
 import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
-import { requestManagerDiscountOtp, verifyManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
+import { getManagerDiscountOtp, clearManagerDiscountOtp, verifyManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
 import { sendWhatsAppViaMetaShared } from "@/lib/wa-send";
 // Shared with DoorMode so a single edit updates every WhatsApp message that
 // includes the venue location. Plain Google Maps URL — never a Firebase
@@ -194,20 +194,44 @@ async function requireManagerPin(reason: string): Promise<boolean> {
  *  only on a confirmed OTP or PIN. Fail-open: a stalled/failed send never blocks —
  *  it just shows the "use the PIN" message. */
 async function requireManagerApproval(reason: string, ctx: OtpContext): Promise<boolean> {
-  const otp = await requestManagerDiscountOtp(ctx); // helper has its own timeout
+  // getManagerDiscountOtp REUSES this table's live code (one code per approval
+  // session) so the captain never gets two OTPs where only one verifies.
+  const otp = await getManagerDiscountOtp(ctx); // helper has its own timeout
   const sent = otp.ok && otp.sentTo > 0;
   const head = sent
     ? `📲 A 6-digit code was sent to the manager's WhatsApp.\nEnter the CODE below — or the Manager PIN.\n\n`
     : `⚠️ Couldn't send the WhatsApp code (network).\nEnter the Manager PIN to approve.\n\n`;
+  // Track whether approval came via the WhatsApp OTP (vs the silent PIN fallback)
+  // so we can show the OTP-specific success popup Khushi asked for.
+  let verifiedViaOtp = false;
   const entered = await centeredPinPrompt(head + reason, true, async (val) => {
     const v = (val || "").trim();
     if (!v) return false;
     // PIN fallback first — local, instant, always works for a present manager.
     if ((await sha256(v)) === MANAGER_HASH) return true;
     // Otherwise verify the OTP server-side (single-use, 10-min expiry).
-    if (otp.otpId) return await verifyManagerDiscountOtp(otp.otpId, v);
+    if (otp.otpId) {
+      const okv = await verifyManagerDiscountOtp(otp.otpId, v);
+      // Burned server-side on success — drop the cache so the NEXT discount on
+      // this table mints a fresh code instead of reusing a now-dead one.
+      if (okv) {
+        clearManagerDiscountOtp(ctx);
+        verifiedViaOtp = true;
+      }
+      return okv;
+    }
     return false;
   });
+  // OTP-verified success screen: a clear ✅ tick + a nudge to tap CONFIRM
+  // PAYMENT next, so the captain knows the code worked and what to do.
+  if (entered && verifiedViaOtp) {
+    await centeredAlert(
+      "OTP VERIFIED",
+      "Manager approval confirmed.\n\nNow tap the CONFIRM PAYMENT button to proceed.",
+      "success",
+      true, // Gumroad-brutalist theme
+    );
+  }
   return !!entered;
 }
 
@@ -1048,9 +1072,36 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // Legacy display field — keep `tabTotal` name for the UI label, but it now
   // means the items subtotal (pre-tax), not the stored grandTotal.
   const tabTotal = subtotal;
-  const aggName = reservation.aggregator || "inhouse";
+  // 🔴 BUG FIX 2026-06-25 (Khushi) — MUST fall back to `source` (NOT just
+  // `aggregator`) to match EVERY other call site (table card badge, void,
+  // reports). Swiggy/Zomato bookings store the platform in `source` while
+  // `aggregator` is empty; reading `aggregator` alone resolved to "inhouse",
+  // so the settle modal showed Cash/Card/UPI + the discount field and fired
+  // the Manager-PIN popup on an aggregator bill the captain never discounted.
+  const aggName = reservation.aggregator || (reservation as any).source || "inhouse";
   const aggDiscount = reservation.aggregatorDiscount ?? getAggregatorDiscount(aggName);
-  const isAggregator = aggName !== "inhouse" && aggDiscount > 0;
+  // 🆕 2026-06-25 (Khushi) — an aggregator booking is identified by its PLATFORM
+  // name alone, NOT by a non-zero discount. A Swiggy/Zomato table booked at 0%
+  // (no platform discount) is STILL an aggregator settle — the guest already
+  // paid the platform — so it must show the "Paid by {platform}" channel and
+  // block wallet redemption, never fall back to Cash/Card/UPI.
+  const isAggregator = aggName !== "inhouse";
+  // 🆕 2026-06-25 (Khushi) — short platform name for the "Paid by …" button on
+  // aggregator bills (the customer settled on the platform, not at the venue).
+  const aggShortName = (() => {
+    // 🔴 2026-06-25 (Khushi) — match by KEYWORD, not an exact value, so EVERY
+    // platform variant maps to its brand name: plain "swiggy", "swiggy-dineout",
+    // "swiggy-scenes" → Swiggy; "zomato"/"zomato-district" → Zomato; etc. The
+    // booking's source can be the bare brand ("swiggy") which no exact case
+    // caught, so it fell back to the generic "Aggregator". Khushi: show the
+    // actual brand (Swiggy/Zomato/...) on the "Paid by …" button, never "Aggregator".
+    const n = (aggName || "").toLowerCase();
+    if (n.includes("swiggy")) return "Swiggy";
+    if (n.includes("zomato") || n.includes("district")) return "Zomato";
+    if (n.includes("eazy")) return "EazyDiner";
+    if (n.includes("magicpin") || n.includes("magic")) return "Magicpin";
+    return AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || "Aggregator";
+  })();
 
   const [payMethod, setPayMethod] = useState<string>(isAggregator ? "aggregator" : "cash");
   // Pre-fill manual discount with whatever the captain set on the table card (Apply panel),
@@ -1073,6 +1124,12 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const [splitCash, setSplitCash] = useState<number>(0);
   const [splitCard, setSplitCard] = useState<number>(0);
   const [splitUpi, setSplitUpi] = useState<number>(0);
+  // 🆕 2026-06-25 (Khushi) — COMPLIMENTARY settle. Captain taps Complimentary →
+  // gives a reason + who approved it → Manager OTP/PIN gate (same as discounts).
+  // Settles ₹0 collected; the comped GROSS is recorded for Reports.
+  const [compReason, setCompReason] = useState("");
+  const [compApprovedBy, setCompApprovedBy] = useState("");
+  const [compApproved, setCompApproved] = useState(false);
 
   // 🔴 2026-05-12 — Aggregator bills no longer have the discount baked into
   // the printed customer bill. The customer already saw the discount on
@@ -1117,6 +1174,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const payable = Math.max(0, Math.round((finalAmount - walletPaidSoFar) * 100) / 100);
   const [showWalletScan, setShowWalletScan] = useState(false);
   const [undoBusy, setUndoBusy] = useState<string | null>(null);
+  // 🆕 2026-06-25 — if a wallet redemption lands while Complimentary is
+  // selected, drop back to a normal method (complimentary can't mix with
+  // wallet) so confirm() can't get stuck on the "undo wallet" error.
+  useEffect(() => {
+    if (walletPaidSoFar > 0 && payMethod === "complimentary") {
+      setPayMethod(isAggregator ? "aggregator" : "cash");
+    }
+  }, [walletPaidSoFar, payMethod, isAggregator]);
   const [walletErr, setWalletErr] = useState("");
   // Q6 — aggregator BOOKINGS block wallet redemption entirely (separate
   // accounting — Zomato/Swiggy/EazyDiner already collected/discounted at the
@@ -1223,6 +1288,77 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
 
   const confirm = async () => {
     if (finalAmount <= 0) { setError("Invalid amount"); return; }
+    // 🆕 2026-06-25 (Khushi) — COMPLIMENTARY: comp the WHOLE bill to ₹0. Needs a
+    // reason, who approved it, and a Manager OTP/PIN (same gate as discounts).
+    // Self-contained money path: records amountPaid 0 + the comped gross value.
+    if (payMethod === "complimentary") {
+      if (walletPaidSoFar > 0) { setError("Undo the wallet redemption(s) before marking this bill complimentary."); return; }
+      if (!compReason.trim()) { setError("Enter a reason for the complimentary bill."); return; }
+      if (!compApprovedBy.trim()) { setError("Enter who approved the complimentary bill."); return; }
+      if (!compApproved) {
+        const ok = await requireManagerApproval(
+          `COMPLIMENTARY — comp the WHOLE ₹${finalAmount} bill to ₹0.\n` +
+          `Reason: ${compReason.trim()}\nApproved by: ${compApprovedBy.trim()}\n\n` +
+          `Manager OTP/PIN required to give a complimentary bill.`,
+          { by: captainName, tableId: reservation.tableId, amount: finalAmount },
+        );
+        if (!ok) { setError("Manager approval required for a complimentary bill."); return; }
+        setCompApproved(true);
+      }
+      setSaving(true);
+      try {
+        await markTablePaid(reservation._docId, {
+          amount: 0,
+          method: "complimentary",
+          captainName,
+          complimentary: true,
+          complimentaryReason: compReason.trim(),
+          complimentaryApprovedBy: compApprovedBy.trim(),
+          complimentaryValue: finalAmount,
+          serviceChargeAmount: scAmt || undefined,
+          serviceChargeApplied: serviceCharge,
+          taxAmount: taxAmt || undefined,
+        }, reservation.bookingRef);
+        // Best-effort print: comped bill (₹0 due, COMPLIMENTARY stamp). Fire-and-
+        // forget — settlement is already saved, a printer failure must not block.
+        try {
+          const printItems = allItems
+            .filter((it) => it && (it.qty || 0) > 0)
+            .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0 }));
+          if (printItems.length > 0) {
+            const id = (reservation.tableId || "").toUpperCase();
+            let floor: TabletFloor = "first";
+            if (id.startsWith("C")) floor = "ground";
+            else if (id.startsWith("T")) floor = "rooftop";
+            else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
+            const sBillBase = reservation._docId.slice(-6).toUpperCase();
+            const sPrevCount = reservation.billPrintCount || 0;
+            const sBillNumber = `${sBillBase}-${sPrevCount + 1}`;
+            const sIsDuplicate = sPrevCount > 0;
+            runBillBookkeepingBg(() => recordBillPrint(reservation._docId, {
+              by: captainName, total: 0, discountPct: 0,
+              aggregator: aggName, billNumberBase: sBillBase,
+            }));
+            printBill({
+              tableId: reservation.tableId, floorLabel: reservation.floorLabel,
+              customerName: reservation.customerName, partySize: (reservation as any).partySize, staff: captainName,
+              items: printItems,
+              amounts: {
+                subtotal: discBreakdown.subtotal, serviceCharge: scAmt,
+                cgst: discBreakdown.cgst, sgst: discBreakdown.sgst,
+                discount: discountAmt, roundOff: 0, total: 0,
+              },
+              paymentMethod: "COMPLIMENTARY",
+              billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
+            }).catch((e) => console.warn("[comp settle print] failed", e));
+          }
+        } catch { /* best-effort — settlement already saved */ }
+        clearSettleRequest(reservation._docId);
+        onClose();
+      } catch (e: any) { setError(e.message || String(e)); }
+      setSaving(false);
+      return;
+    }
     if (splitMode) {
       if (splitTotal !== payable) {
         setError(`Split total ₹${splitTotal} must equal remaining ₹${payable} (off by ₹${Math.abs(splitDiff)}).`);
@@ -1425,15 +1561,24 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   };
 
   const methods = payMethod === "aggregator"
-    ? [{ key: "aggregator", label: `Via ${AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || aggName}` }]
+    ? [{ key: "aggregator", label: `💼 Paid by ${aggShortName}` }]
     : [{ key: "cash", label: "💵 Cash" }, { key: "card", label: "💳 Card" }, { key: "upi", label: "📱 UPI" }];
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ background: "#fff", border: "1px solid #000", borderRadius: 20, padding: 24, width: "100%", maxWidth: 380, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 21, fontWeight: 900, color: "#000", marginBottom: 4 }}>Mark Table Paid</div>
-        <div style={{ fontSize: 14, color: "#6B6B6B", marginBottom: 20 }}>
-          {reservation.tableId} · {reservation.customerName}
+      <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 20, padding: 24, width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+        {/* 🆕 2026-06-25 (Khushi) — Gumroad header: ← BACK + title, 2px frame. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18, paddingBottom: 14, borderBottom: "2px solid #000" }}>
+          <button onClick={onClose}
+            style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.4 }}>
+            ← BACK
+          </button>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#000", lineHeight: 1.1 }}>💸 Settle Bill</div>
+            <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {reservation.tableId} · {reservation.customerName}
+            </div>
+          </div>
         </div>
 
         {/* ── 2026-05-20 — COVER+TABLE LINKED WALLET BANNER (Khushi spec) ──
@@ -1646,14 +1791,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                     background: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#FBF3D6" : "#fff",
                     borderColor: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B",
                     color: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B" }}>
-                  {ch === "aggregator" ? `Pay via ${aggName}` : "Pay In-House"}
+                  {ch === "aggregator" ? `💼 Paid by ${aggShortName}` : "Pay In-House"}
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        {payMethod !== "aggregator" && payable > 0 && (
+        {payMethod !== "aggregator" && payMethod !== "complimentary" && payable > 0 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ fontSize: 13, color: "#6B6B6B" }}>Payment Method · ₹{payable} owed</span>
@@ -1717,25 +1862,61 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 // will re-prompt unless the captain re-approves the new value.
                 setDiscountApprovedPct(null);
               }}
-              onBlur={async (e) => {
+              onBlur={(e) => {
+                // 🔴 BUG FIX 2026-06-25 (Khushi) — DO NOT fire the Manager-OTP/PIN
+                // prompt on blur. It used to pop a SEPARATE approval here AND again
+                // in confirm(), so after a successful OTP + pay the blur-triggered
+                // prompt (rendered at app level) lingered on screen even after the
+                // bill was PAID. The ONE authoritative approval now lives in
+                // confirm() at commit time. On blur we only NORMALISE the value.
                 const raw = Number(e.target.value) || 0;
                 const clamped = clampCaptainDiscount(raw);
-                if (clamped === null) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
-                if (clamped > 0) {
-                  const ok = await requireManagerApproval(
-                    `Apply ${clamped}% manual discount on this bill.\n\nManager approval is required for ANY discount (Khushi rule 26 May).`,
-                    { by: captainName, tableId: reservation.tableId, discountPct: clamped, amount: tabTotal },
-                  );
-                  if (!ok) { setManualDiscount(0); setDiscountApprovedPct(null); return; }
-                  setDiscountApprovedPct(clamped);
-                } else {
-                  setDiscountApprovedPct(null);
-                }
-                setManualDiscount(clamped);
+                setManualDiscount(clamped === null ? 0 : clamped);
+                setDiscountApprovedPct(null);
               }}
               placeholder={`max ${CAPTAIN_DISCOUNT_MAX}%`} min={0} max={CAPTAIN_DISCOUNT_MAX}
               style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "#fff", border: "1px solid #000", color: "#000", fontSize: 17, outline: "none", marginBottom: 16, boxSizing: "border-box" }} />
           </>
+        )}
+
+        {/* 🆕 2026-06-25 (Khushi) — COMPLIMENTARY: comp the whole bill to ₹0.
+            Needs a reason + who approved + Manager OTP/PIN. Hidden once a wallet
+            redemption is on the bill (undo it first). */}
+        {walletPaidSoFar === 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <button onClick={() => {
+                if (payMethod === "complimentary") { setPayMethod(isAggregator ? "aggregator" : "cash"); setError(""); return; }
+                setPayMethod("complimentary"); setSplitMode(false); setError("");
+              }}
+              style={{ width: "100%", padding: 12, borderRadius: 12, fontSize: 15, fontWeight: 900, cursor: "pointer",
+                background: payMethod === "complimentary" ? "#FF90E8" : "#fff",
+                border: "2px solid #000", color: "#000", letterSpacing: 0.3 }}>
+              🎁 {payMethod === "complimentary" ? "COMPLIMENTARY — SELECTED" : "MARK COMPLIMENTARY (₹0)"}
+            </button>
+            {payMethod === "complimentary" && (
+              <div style={{ marginTop: 10, padding: 14, borderRadius: 12, background: "#FFF0FA", border: "2px solid #FF90E8" }}>
+                <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, letterSpacing: 0.4 }}>
+                  WHOLE BILL COMPED · {formatINR(finalAmount)} → ₹0
+                </div>
+                <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 600, marginBottom: 12 }}>
+                  Manager OTP/PIN required before confirming.
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#000", marginBottom: 4 }}>Reason</div>
+                <input value={compReason} onChange={(e) => { setCompReason(e.target.value); setCompApproved(false); }}
+                  placeholder="e.g. owner's guest, service recovery"
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 15, outline: "none", boxSizing: "border-box", marginBottom: 12 }} />
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#000", marginBottom: 4 }}>Approved by</div>
+                <input value={compApprovedBy} onChange={(e) => { setCompApprovedBy(e.target.value); setCompApproved(false); }}
+                  placeholder="manager name"
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 15, outline: "none", boxSizing: "border-box" }} />
+                {compApproved && (
+                  <div style={{ marginTop: 12, padding: "6px 10px", borderRadius: 8, background: "#E6F5F2", border: "2px solid #23A094", fontSize: 12, fontWeight: 900, color: "#23A094", textAlign: "center" }}>
+                    ✅ MANAGER APPROVED
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {error && <div style={{ fontSize: 14, color: "#FF5733", marginBottom: 10 }}>{error}</div>}

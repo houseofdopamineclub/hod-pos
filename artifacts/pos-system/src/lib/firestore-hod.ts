@@ -2591,6 +2591,14 @@ export async function markTablePaid(
      *  slice. Cash collected = amount − walletPaidAmount. Pass `undefined` (not
      *  0) to keep doc clean when no wallet redemption happened. */
     walletPaidAmount?: number;
+    /** 🆕 2026-06-25 (Khushi) — COMPLIMENTARY settle. When true the whole bill
+     *  is comped: `amount` (amountPaid) is 0, but `complimentaryValue` records
+     *  the GROSS that was given away so Reports can total comps. Requires a
+     *  manager OTP/PIN (gated client-side) + a reason + who approved it. */
+    complimentary?: boolean;
+    complimentaryReason?: string;
+    complimentaryApprovedBy?: string;
+    complimentaryValue?: number;
   },
   bookingRef?: string
 ): Promise<void> {
@@ -2598,6 +2606,12 @@ export async function markTablePaid(
     paymentStatus: "paid", paymentMode: payment.method, amountPaid: payment.amount,
     paidAt: new Date().toISOString(), captainName: payment.captainName,
   };
+  if (payment.complimentary) {
+    upd.complimentary = true;
+    upd.complimentaryReason = payment.complimentaryReason || "";
+    upd.complimentaryApprovedBy = payment.complimentaryApprovedBy || "";
+    if (payment.complimentaryValue !== undefined) upd.complimentaryValue = payment.complimentaryValue;
+  }
   if (payment.walletPaidAmount !== undefined && payment.walletPaidAmount > 0) {
     upd.walletPaidAmount = payment.walletPaidAmount;
   }
