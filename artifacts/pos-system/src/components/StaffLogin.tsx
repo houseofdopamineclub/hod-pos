@@ -24,7 +24,7 @@ interface Props {
   emoji?: string;
   /** Called after successful login. */
   onSuccess?: () => void;
-  /** Opt-in Gumroad-brutalist styling (Door Mode only). Other modes keep the dark-gold look. */
+  /** @deprecated No longer affects theme — every login is Gumroad now (2026-06-25). Kept for call-site backward-compat. */
   brutalist?: boolean;
 }
 
@@ -146,32 +146,22 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
   const selectedStaff = allStaff.find((s) => !!s.id && s.id.toUpperCase() === staffId.trim().toUpperCase());
   const buttonDisabled = isLocked && !isOverrideStaff(selectedStaff);
 
-  // 🎨 2026-06-02 (Khushi) — Door Mode opts into the Gumroad-brutalist look via
-  // `brutalist`. All other modes (Bar/Captain/Kitchen/Admin) pass nothing and
-  // keep the original dark-gold theme untouched.
-  const t = brutalist
-    ? {
-        pageBg: "#F4F4F0",
-        backBg: "#FF90E8", backBorder: "2px solid #000", backColor: "#000",
-        formBg: "#FFFFFF", formBorder: "2px solid #000", formRadius: 8,
-        titleFont: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
-        titleColor: "#000", subColor: "#6B6B6B", loadingColor: "#6B6B6B",
-        inputBg: "#FFFFFF", inputBorder: "2px solid #000", inputColor: "#000", inputRadius: 6,
-        errColor: "#FF5733", lockColor: "#FF5733",
-        btnOn: "#FF90E8", btnOnColor: "#000", btnBorder: "2px solid #000",
-        btnOff: "#B0B0B0", btnOffColor: "#6B6B6B", footColor: "#6B6B6B",
-      }
-    : {
-        pageBg: "#0A0A0A",
-        backBg: "rgba(255,255,255,.06)", backBorder: "1px solid rgba(201,168,76,.4)", backColor: "#C9A84C",
-        formBg: "rgba(255,255,255,.04)", formBorder: "1px solid rgba(255,255,255,.08)", formRadius: 20,
-        titleFont: "'Playfair Display',serif",
-        titleColor: "#C9A84C", subColor: "rgba(255,255,255,.5)", loadingColor: "rgba(255,255,255,.6)",
-        inputBg: "rgba(255,255,255,.06)", inputBorder: "1px solid rgba(255,255,255,.08)", inputColor: "#fff", inputRadius: 12,
-        errColor: "#EF4444", lockColor: "#F59E0B",
-        btnOn: "linear-gradient(135deg,#C9A84C,#A07830)", btnOnColor: "#000", btnBorder: "none",
-        btnOff: "rgba(255,255,255,.1)", btnOffColor: "rgba(255,255,255,.4)", footColor: "rgba(255,255,255,.35)",
-      };
+  // 🎨 2026-06-25 (Khushi) — ONE Gumroad theme for EVERY staff login. The old
+  // dark-gold theme is removed entirely: Bar/Captain/Kitchen/Admin used to fall
+  // back to it (the "black & gold" screen Khushi wanted gone). Now every mode
+  // shows the same Gumroad-brutalist look. The `brutalist` prop is kept for
+  // backward-compat but no longer changes the theme — it's always Gumroad.
+  const t = {
+    pageBg: "#F4F4F0",
+    backBg: "#FF90E8", backBorder: "2px solid #000", backColor: "#000",
+    formBg: "#FFFFFF", formBorder: "2px solid #000", formRadius: 8,
+    titleFont: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
+    titleColor: "#000", subColor: "#6B6B6B", loadingColor: "#6B6B6B",
+    inputBg: "#FFFFFF", inputBorder: "2px solid #000", inputColor: "#000", inputRadius: 6,
+    errColor: "#FF5733", lockColor: "#FF5733",
+    btnOn: "#FF90E8", btnOnColor: "#000", btnBorder: "2px solid #000",
+    btnOff: "#B0B0B0", btnOffColor: "#6B6B6B", footColor: "#6B6B6B",
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: t.pageBg, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, position: "relative" }}>
@@ -180,14 +170,14 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
           was opened by mistake. Fixed top-left, takes you to the POS mode
           picker at "/". No logout side-effect — login flow simply aborts. */}
       <Link href="/"
-        style={{ position: "absolute", top: 16, left: 16, padding: "10px 14px", borderRadius: brutalist ? 6 : 10, background: t.backBg, border: t.backBorder, color: t.backColor, fontWeight: 800, fontSize: 13, textDecoration: "none", letterSpacing: 0.5, cursor: "pointer", zIndex: 10 }}>
+        style={{ position: "absolute", top: 16, left: 16, padding: "10px 14px", borderRadius: 6, background: t.backBg, border: t.backBorder, color: t.backColor, fontWeight: 800, fontSize: 13, textDecoration: "none", letterSpacing: 0.5, cursor: "pointer", zIndex: 10 }}>
         ← BACK
       </Link>
       {/* form with autoComplete=off + a hidden honeypot field block the "save password" prompt across Chrome/Safari/Edge */}
       <form
         autoComplete="off"
         onSubmit={(e) => { e.preventDefault(); tryLogin(); }}
-        style={{ background: t.formBg, border: t.formBorder, borderRadius: t.formRadius, padding: "32px 28px", width: "100%", maxWidth: 380, textAlign: "center", fontFamily: brutalist ? t.titleFont : undefined }}
+        style={{ background: t.formBg, border: t.formBorder, borderRadius: t.formRadius, padding: "32px 28px", width: "100%", maxWidth: 380, textAlign: "center", fontFamily: t.titleFont }}
       >
         {/* hidden honeypot — diverts browser password manager autofill */}
         <input type="text" name="username" autoComplete="username" style={{ display: "none" }} />
@@ -256,7 +246,7 @@ export function StaffLogin({ allowedRoles, title, subtitle, emoji = "🪩", onSu
             <button
               type="submit"
               disabled={buttonDisabled}
-              style={{ width: "100%", padding: 14, borderRadius: brutalist ? 6 : 12, background: buttonDisabled ? t.btnOff : t.btnOn, border: t.btnBorder, color: buttonDisabled ? t.btnOffColor : t.btnOnColor, fontSize: 15, fontWeight: 900, cursor: buttonDisabled ? "not-allowed" : "pointer" }}
+              style={{ width: "100%", padding: 14, borderRadius: 6, background: buttonDisabled ? t.btnOff : t.btnOn, border: t.btnBorder, color: buttonDisabled ? t.btnOffColor : t.btnOnColor, fontSize: 15, fontWeight: 900, cursor: buttonDisabled ? "not-allowed" : "pointer" }}
             >
               {buttonDisabled ? `🔒 LOCKED (${lockMinLeft} MIN)` : (isLocked && isOverrideStaff(selectedStaff) ? "🔓 ENTER (MGR OVERRIDE)" : "ENTER")}
             </button>

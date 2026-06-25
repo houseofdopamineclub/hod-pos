@@ -3725,11 +3725,14 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // Flip to true to restore the two Door-mirrored hero boxes below. Logic +
   // CSV rows stay intact; only the on-screen render is gated.
   const SHOW_BAR_AMOUNT_BOXES = false;
-  // 🆕 2026-06-24 (Khushi) — HIDDEN FOR NOW ("we shall work on this later").
-  // The TOTAL PROFIT green tile understates real takings (strips service charge
-  // + a phantom discount); audit pending. Flip to true to restore. Computation
-  // (barProfit) stays intact below; only the on-screen render is gated.
-  const SHOW_BAR_PROFIT_TILE = false;
+  // 🆕 2026-06-25 (Khushi) — RESTORED as "TOTAL EARNINGS" = NET SALES + leftover
+  // wallet (her ask: unspent recharge is non-refundable so it's ours after the
+  // event). Kept as a SEPARATE line (not folded into NET SALES — that would make
+  // NET look bigger than GROSS). By design EXCLUDES service charge & GST (SC has
+  // its own tile; GST is remitted) — flip to a "+ service charge" basis only if
+  // Khushi later asks. The earlier audit caveat (NET depends on discounts being
+  // recorded correctly) still applies — the breakdown shows NET so it's checkable.
+  const SHOW_BAR_PROFIT_TILE = true;
 
   // 🆕 2026-06-24 (Khushi) — mirror Door Mode's TOTAL AMOUNT COLLECTED /
   // TOTAL AMOUNT REDEEMED hero boxes into the bar report. SAME field math as
@@ -3756,6 +3759,9 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   const FOOD_NAMES = new Set(
     (MENU_ITEMS as any[]).filter((m) => m.group === "food").map((m) => normName(String(m.name || "")))
   );
+  // 🆕 2026-06-25 (Khushi) — NC tabs (billDue ledger) for this night. Hoisted
+  // here so NC food/drink items fold into the SAME sales/top-5 loop as bar tabs.
+  const nc = ncRows.filter((r) => r.operationalNight === nightDate);
   let drinkSales = 0, foodSales = 0, otherSales = 0;
   const drinkQty: Record<string, number> = {};
   const foodQty: Record<string, number> = {};
@@ -3778,6 +3784,20 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
           drinkQty[name] = (drinkQty[name] || 0) + (it.qty || 0);
         }
       }
+    }
+  }
+  // 🆕 2026-06-25 (Khushi) — NC items count toward FOOD/DRINK sales + TOP-5,
+  // exactly like a bar tab (the food/drink WAS served on the NC tab). Raw item
+  // value (before tax); NC items carry no `cat`, so smoke/food keys off name.
+  for (const r of nc) {
+    for (const it of (r.items || [])) {
+      const line = (it.p || 0) * (it.qty || 0);
+      const name = it.n || "—";
+      const isSmoke = SMOKE_RE.test(name);
+      const isFood = (it as any).t === "food" || FOOD_NAMES.has(normName(name));
+      if (isSmoke) { otherSales += line; }
+      else if (isFood) { foodSales += line; foodQty[name] = (foodQty[name] || 0) + (it.qty || 0); }
+      else { drinkSales += line; drinkQty[name] = (drinkQty[name] || 0) + (it.qty || 0); }
     }
   }
   const top5 = (m: Record<string, number>): [string, number][] =>
@@ -3809,7 +3829,7 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   }
 
   // ── NC from billDue ledger ────────────────────────────────────────
-  const nc = ncRows.filter((r) => r.operationalNight === nightDate);
+  // (`nc` is hoisted above the sales loop so NC items fold into FOOD/DRINK.)
   const ncCompOf = (r: BillDueDoc) =>
     typeof r.compApplied === "number"
       ? r.compApplied
@@ -3829,13 +3849,58 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // from DISCOUNT APPLIED entirely. The discount ₹ on a cleared NC row =
   // amountDue (after comp) − finalAmount (what was actually collected). We
   // surface it as its own line and roll it into the discount total/count.
+  // ⚠️ exclude OPEN (no settlement yet) and WAIVED (finalAmount 0 → the whole
+  // amountDue would mis-read as "discount" and double-count against the new
+  // Waived line). Mirrors NcReportsTab's discountGiven.
   const ncDiscountRows = nc.filter(
-    (r) => typeof r.finalAmount === "number" && (r.amountDue || 0) - (r.finalAmount as number) > 0);
+    (r) => r.status !== "open" && r.paymentMethod !== "waived" &&
+      typeof r.finalAmount === "number" && (r.amountDue || 0) - (r.finalAmount as number) > 0);
   const ncDiscountCount = ncDiscountRows.length;
   const ncDiscount = ncDiscountRows.reduce(
     (s, r) => s + ((r.amountDue || 0) - (r.finalAmount as number)), 0);
   const discountCountAll = discountCount + ncDiscountCount;
   const discountTotalAll = discountTotal + ncDiscount;
+
+  // 🆕 2026-06-25 (Khushi) — NC flows through EVERY report box like a normal bar
+  // bill. SALES SIDE (item value, SC, tax, gross, bills generated) counts ALL NC
+  // rows (open + cleared) — the food/drink was served & a bill exists.
+  // GIVEN-AWAY timing differs by TYPE, and that's what makes GROSS reconcile:
+  //  • COMP is applied at tab CREATION (the structural ₹1000-off that defines an
+  //    NC tab), so it counts on EVERY row (open + cleared). On an open tab the
+  //    comp is already committed; the rest of the bill sits in NC DUE.
+  //  • DISCOUNT + WAIVE are settlement-time decisions → SETTLED rows only.
+  //  • COLLECTED (cash) → settled, non-waived rows only.
+  // Per NC row this reconciles EXACTLY: totalBill = collected + comp + waive +
+  // discount + due. Open row: comp + amountDue(=due) = totalBill. Cleared
+  // non-waived+disc: comp + finalAmount(=collected) + (amountDue−finalAmount)(=disc)
+  // = totalBill. Cleared waived: comp + amountDue(=waive) = totalBill. NC DUE
+  // stays = amountDue (the realistic post-comp collectible), never the full bill.
+  const ncClearedRows = nc.filter((r) => r.status !== "open");
+  // Full tax-inclusive NC bill value → GROSS + BILLS GENERATED. Stored totalBill
+  // (SC+GST landed on NC tabs); legacy rows fall back to raw item sum.
+  const ncTotalBill = nc.reduce((s, r) =>
+    s + (typeof r.totalBill === "number"
+      ? r.totalBill
+      : (r.items || []).reduce((ss: number, it: any) => ss + (it.qty || 0) * (it.p ?? it.price ?? 0), 0)), 0);
+  const ncBillCount = nc.length;
+  // NC service charge + GST → SERVICE CHARGE + TAXES tiles (legacy rows = 0).
+  const ncSC = nc.reduce((s, r) => s + (typeof r.serviceCharge === "number" ? r.serviceCharge : 0), 0);
+  const ncTax = nc.reduce((s, r) => s + (typeof r.tax === "number" ? r.tax : 0), 0);
+  scTotal += ncSC;
+  taxTotal += ncTax;
+  // NC cash actually collected (after comp/discount/waive) → TOTAL COLLECTED.
+  // Settled, non-waived rows only; waived collects ₹0.
+  const ncCollectedRows = ncClearedRows.filter((r) => r.paymentMethod !== "waived");
+  const ncCollectedCount = ncCollectedRows.length;
+  const ncCollected = ncCollectedRows.reduce(
+    (s, r) => s + (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)), 0);
+  // NC WAIVED (manager wrote off) = bill due (after comp) on waived rows.
+  const ncWaived = ncClearedRows
+    .filter((r) => r.paymentMethod === "waived")
+    .reduce((s, r) => s + (r.amountDue || 0), 0);
+  // TOTAL NC GIVEN AWAY = comp + waived + discount (disjoint buckets — no
+  // double-count; all are tax-inclusive reductions off the full NC bill).
+  const ncGivenTotal = ncComp + ncWaived + ncDiscount;
 
   // ── NET / GROSS ───────────────────────────────────────────────────
   // 🆕 2026-06-05 v3.225 (Khushi confirmed): NET vs GROSS must DIFFER.
@@ -3849,7 +3914,10 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // (the infamous "NET 3554 == GROSS 3554"). billTotal already carries SC+tax,
   // so it reflects the true cash figure retroactively.
   const netSales = Math.max(0, baseSales - discountTotal);
-  const grossSales = billTotal + ncComp;
+  // GROSS = actual wallet money redeemed (avoids the recompute ₹1 drift) + the
+  // FULL tax-inclusive NC bill value. (Was billTotal + ncComp.) NET picks up NC
+  // automatically — NC item value already folds into baseSales above.
+  const grossSales = barRedeemed + ncTotalBill;
 
   // 🆕 2026-06-24 (Khushi) — "TOTAL PROFIT" = NET sales + LEFTOVER wallet balance.
   // Khushi confirmed the venue NEVER refunds and wallets EXPIRE after the event,
@@ -3880,10 +3948,18 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Liquor / drinks sales", Math.round(drinkSales)],
       ["Food sales", Math.round(foodSales)],
       ["Others (smoke / hookah)", Math.round(otherSales)],
-      ["Bills generated (count)", billCount],
-      ["Bills generated (amount)", Math.round(billTotal)],
+      ["Bills generated — wallet (count)", billCount],
+      ["Bills generated — wallet (amount)", Math.round(barRedeemed)],
+      ["Bills generated — NC (count)", ncBillCount],
+      ["Bills generated — NC (amount, incl tax)", Math.round(ncTotalBill)],
+      ["Bills generated — TOTAL (amount)", Math.round(barRedeemed + ncTotalBill)],
+      ["NC collected after payment (settled)", Math.round(ncCollected)],
+      ["TOTAL collected incl NC (cash taken)", Math.round(barTotalCollected + ncCollected)],
       ["NC total (count)", ncCount],
-      ["NC total — comp given", Math.round(ncComp)],
+      ["NC given away — total (comp + waived + discount)", Math.round(ncGivenTotal)],
+      ["NC given away — waived", Math.round(ncWaived)],
+      ["NC given away — comp", Math.round(ncComp)],
+      ["NC given away — discount", Math.round(ncDiscount)],
       ["NC due (count)", ncDueCount],
       ["NC due (amount)", Math.round(ncDue)],
       ["Discount applied — wallet bills (count)", discountCount],
@@ -3892,12 +3968,14 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Discount applied — NC tabs (amount)", Math.round(ncDiscount)],
       ["Discount applied — TOTAL (count)", discountCountAll],
       ["Discount applied — TOTAL (amount)", Math.round(discountTotalAll)],
-      ["Service charge", Math.round(scTotal)],
-      ["Taxes", Math.round(taxTotal)],
+      ["Service charge (wallet + NC)", Math.round(scTotal)],
+      ["  of which NC service charge", Math.round(ncSC)],
+      ["Taxes (wallet + NC)", Math.round(taxTotal)],
+      ["  of which NC taxes", Math.round(ncTax)],
       ["NET sales", Math.round(netSales)],
       ["GROSS sales", Math.round(grossSales)],
       ["Leftover wallet balance (expired = profit)", Math.round(barNotRedeemed)],
-      ["TOTAL PROFIT (NET + leftover balance)", Math.round(barProfit)],
+      ["TOTAL EARNINGS (NET sales + leftover wallet)", Math.round(barProfit)],
     ];
     topDrinks.forEach(([n, q], i) => rows.push([`Top drink #${i + 1}`, `${n} x${q}`]));
     topFood.forEach(([n, q], i) => rows.push([`Top food #${i + 1}`, `${n} x${q}`]));
@@ -3938,8 +4016,12 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // 🆕 2026-06-05 v3.225 (Khushi) — STAT TABLE inside the box. The headline
   // count sits at the top; the MONEY rows (the data she actually reads) render
   // as a BOLD, larger, DARK table — no more light-grey sub text.
-  const StatTable = ({ label, count, rows }: {
+  const StatTable = ({ label, count, rows, accentIdx, note }: {
     label: string; count: number | string; rows: [string, string][];
+    // 🆕 2026-06-25 (Khushi) — accentIdx highlights ONE row (e.g. the TOTAL NC
+    // GIVEN line) in bold amber so it reads as the sum of the rows below it;
+    // note renders a small caption under the table explaining that sum.
+    accentIdx?: number; note?: string;
   }) => (
     <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -3947,13 +4029,18 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
         <div style={{ fontSize: 24, fontWeight: 900, color: "#000", fontFamily: NUM_FONT, lineHeight: 1 }}>{count}</div>
       </div>
       <div style={{ marginTop: 10, border: "2px solid #000", borderRadius: 8, overflow: "hidden" }}>
-        {rows.map(([k, v], i) => (
-          <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 11px", background: i % 2 ? "#F4F4F0" : "#fff", borderTop: i > 0 ? "1px solid #000" : "none" }}>
-            <span style={{ fontSize: 12.5, fontWeight: 800, color: "#000", letterSpacing: 0.3, textTransform: "uppercase" }}>{k}</span>
-            <span style={{ fontSize: 18, fontWeight: 900, color: "#000", fontFamily: NUM_FONT, whiteSpace: "nowrap" }}>{v}</span>
+        {rows.map(([k, v], i) => {
+          const acc = accentIdx === i;
+          return (
+          <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 11px", background: acc ? "#FFE3A3" : (i % 2 ? "#F4F4F0" : "#fff"), borderTop: i > 0 ? "1px solid #000" : "none" }}>
+            <span style={{ fontSize: acc ? 13.5 : 12.5, fontWeight: 900, color: acc ? "#7C2D12" : "#000", letterSpacing: 0.3, textTransform: "uppercase" }}>{k}</span>
+            <span style={{ fontSize: acc ? 20 : 18, fontWeight: 900, color: acc ? "#B45309" : "#000", fontFamily: NUM_FONT, whiteSpace: "nowrap" }}>{v}</span>
           </div>
-        ))}
+        );})}
       </div>
+      {note && (
+        <div style={{ fontSize: 10.5, color: "#6B6B6B", fontWeight: 700, marginTop: 7, letterSpacing: 0.2, lineHeight: 1.4 }}>{note}</div>
+      )}
     </div>
   );
 
@@ -4037,27 +4124,27 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
                 TOTAL COLLECTED to 6th (end of wallets row). */}
             {/* TOP-LINE: NET / GROSS / BILLS GENERATED */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
-              <Tile label="NET SALES" value={fmtRs(netSales)} sub="Food + drink value (before SC & tax), minus discount" />
-              <Tile label="GROSS SALES" value={fmtRs(grossSales)} sub="What guests actually paid (incl. service charge + tax)" />
-              <StatTable label="BILLS GENERATED" count={billCount}
-                rows={[["Total Collected", fmtRs(billTotal)]]} />
+              <Tile label="NET SALES" value={fmtRs(netSales)} sub="Food + drink value before SC & tax (wallet + NC), minus discount" />
+              <Tile label="GROSS SALES" value={fmtRs(grossSales)} sub="Total value of all bills incl. SC + tax (wallet + NC)" />
+              <StatTable label="BILLS GENERATED" count={billCount + ncBillCount}
+                rows={[["Wallet Bills", fmtRs(barRedeemed)], ["NC Bills", fmtRs(ncTotalBill)], ["Total", fmtRs(barRedeemed + ncTotalBill)]]} />
             </div>
 
-            {/* 🆕 TOTAL PROFIT = NET sales + leftover (expired, non-refundable) wallet balance */}
+            {/* 🆕 TOTAL EARNINGS = NET sales + leftover (expired, non-refundable) wallet balance */}
             {SHOW_BAR_PROFIT_TILE && (
             <div style={{ background: "#C8F7DC", border: "2px solid #000", borderRadius: 10, padding: "16px 18px", marginBottom: 12 }}>
-              <div style={{ fontSize: 11, color: "#0A3D26", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL PROFIT</div>
+              <div style={{ fontSize: 11, color: "#0A3D26", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL EARNINGS <span style={{ color: "#3A6B52", fontWeight: 700 }}>(incl. leftover wallet)</span></div>
               <div style={{ fontSize: 34, fontWeight: 900, color: "#0A3D26", marginTop: 4, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1 }}>{fmtRs(barProfit)}</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 12px", marginTop: 12, fontSize: 14, color: "#0A3D26" }}>
                 <div>NET sales <span style={{ color: "#3A6B52" }}>(food + drink, after discount)</span></div>
                 <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(netSales)}</div>
-                <div>+ Leftover balance <span style={{ color: "#3A6B52" }}>(expired, non-refundable wallets)</span></div>
+                <div>+ Leftover wallet balance <span style={{ color: "#3A6B52" }}>(expired, non-refundable)</span></div>
                 <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(barNotRedeemed)}</div>
-                <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontWeight: 900 }}>= TOTAL PROFIT</div>
+                <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontWeight: 900 }}>= TOTAL EARNINGS</div>
                 <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontFamily: NUM_FONT, fontWeight: 900, textAlign: "right" }}>{fmtRs(barProfit)}</div>
               </div>
               <div style={{ fontSize: 11.5, color: "#3A6B52", marginTop: 10, lineHeight: 1.5 }}>
-                Wallets are non-refundable and expire after the event, so unspent recharges are kept as profit. Excludes service charge &amp; GST (those sit in GROSS SALES).
+                Wallets are non-refundable and expire after the event, so unspent recharges (the leftover balance) are kept by the house. This adds that money on top of your food &amp; drink sales. Excludes the 10% service charge &amp; GST (service charge has its own tile; GST is paid to the government).
               </div>
             </div>
             )}
@@ -4068,14 +4155,14 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
                 rows={[["Total Collected", fmtRs(sumCollected(scanned))], ["Total Redeemed", fmtRs(sumRedeemed(scanned))]]} />
               <StatTable label="WALK-INS" count={walkins.length}
                 rows={[["Total Collected", fmtRs(sumCollected(walkins))], ["Total Redeemed", fmtRs(sumRedeemed(walkins))]]} />
-              <StatTable label="TOTAL COLLECTED" count={activated.length}
-                rows={[["Wallet + Walk-in", fmtRs(sumCollected(activated))]]} />
+              <StatTable label="TOTAL COLLECTED" count={activated.length + ncCollectedCount}
+                rows={[["Wallet + Walk-in", fmtRs(barTotalCollected)], ["NC (after payment)", fmtRs(ncCollected)], ["Total", fmtRs(barTotalCollected + ncCollected)]]} />
             </div>
 
             {/* SALES */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
-              <Tile label="LIQUOR / DRINKS SALES" value={fmtRs(drinkSales)} />
-              <Tile label="FOOD SALES" value={fmtRs(foodSales)} />
+              <Tile label="LIQUOR / DRINKS SALES" value={fmtRs(drinkSales)} sub="Item value before tax (wallet + NC)" />
+              <Tile label="FOOD SALES" value={fmtRs(foodSales)} sub="Item value before tax (wallet + NC)" />
               <Tile label="OTHERS (SMOKE / HOOKAH)" value={fmtRs(otherSales)}
                 sub={otherSales === 0 ? "₹0 until smoke items are added to the menu" : undefined} />
             </div>
@@ -4089,16 +4176,18 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
             {/* NC + DEDUCTIONS — 🆕 v3.226 (Khushi): NC TOTAL / NC DUE / DISCOUNT
                 APPLIED now render as bold tables inside the box (count + money row). */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 4 }}>
-              <StatTable label="NC TOTAL" count={ncCount} rows={[["Comp Given", fmtRs(ncComp)]]} />
+              <StatTable label="NC GIVEN AWAY" count={ncCount}
+                accentIdx={0} note="Total NC Given = Waived + Comp + Discount"
+                rows={[["Total NC Given", fmtRs(ncGivenTotal)], ["Waived", fmtRs(ncWaived)], ["Comp Given", fmtRs(ncComp)], ["Discount Given", fmtRs(ncDiscount)]]} />
               <StatTable label="NC DUE" count={ncDueCount} rows={[["Still Owed", fmtRs(ncDue)]]} />
               <StatTable label="DISCOUNT APPLIED" count={discountCountAll}
                 rows={[["Wallet Bills", fmtRs(discountTotal)], ["NC Tabs", fmtRs(ncDiscount)], ["Total", fmtRs(discountTotalAll)]]} />
-              <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} />
-              <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} />
+              <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} sub="Wallet + NC" />
+              <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} sub="Wallet + NC" />
             </div>
 
             <div style={{ marginTop: 16, padding: 12, background: "#fff", border: "2px solid #000", borderRadius: 8, fontSize: 11.5, color: "#6B6B6B", lineHeight: 1.6, fontWeight: 600 }}>
-              🛟 Sales &amp; top items count everything SERVED tonight at the bar. NET = food + drink value (before service charge &amp; tax) minus discount. GROSS = what guests actually paid = printed-bill totals (which include service charge + GST) + NC comp. Discount, service charge &amp; tax tiles are saved from v3.224 onward — bills printed before this update count as ₹0 in those three tiles only (GROSS still uses the real bill total).
+              🛟 NC tabs flow through EVERY box exactly like a normal bar bill. Sales &amp; top items count everything SERVED tonight (wallet + NC). NET = food + drink value before SC &amp; tax, minus discount. GROSS = total value of all bills incl. SC + GST = wallet money redeemed + full NC bills. TOTAL COLLECTED = cash actually taken = wallet/walk-in + NC after comp/discount/waive. The gap (GROSS − COLLECTED) is what we gave away, shown in NC GIVEN AWAY (comp + waived + discount) plus any still-open NC DUE. SC &amp; tax tiles are saved from v3.224 onward for wallet bills; bills printed before that count ₹0 there only (GROSS still uses the real total).
             </div>
           </>
         )}
