@@ -304,12 +304,30 @@ export default function KitchenMode() {
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 800, color: "#000" }}>
-                        {p.tableLabel}{p.floorLabel ? ` · ${p.floorLabel.split(" ")[0]}` : ""} {p.roundNum > 1 ? `· R${p.roundNum}` : ""}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        {/* 🪧 Table = the ONE thing the runner needs — big, boxed, hard
+                            shadow so it reads across the kitchen. Updates live on reassign. */}
+                        <span
+                          style={{
+                            display: "inline-block", padding: "3px 12px", borderRadius: 6,
+                            border: "2px solid #000", background: "#FF90E8", color: "#000",
+                            fontSize: 22, fontWeight: 900, lineHeight: 1.15,
+                            boxShadow: "2px 2px 0 #000", letterSpacing: 0.5,
+                          }}
+                        >
+                          {p.tableLabel}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: "#000" }}>
+                          {p.floorLabel ? p.floorLabel.split(" ")[0] : ""}{p.roundNum > 1 ? ` · R${p.roundNum}` : ""}
+                        </span>
                       </div>
                       {p.customerName && (
-                        <div style={{ fontSize: 11, color: "#6B6B6B", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {p.customerName} · ×{p.qty} · {p.mins}m
+                        // 🪧 2026-06-26 (Khushi) — guest name is what the runner
+                        // calls out, so make it BIG + BOLD + black; the ×qty·mins
+                        // stay small and muted beside it.
+                        <div style={{ marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          <span style={{ fontSize: 17, fontWeight: 900, color: "#000" }}>{p.customerName}</span>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: "#6B6B6B" }}> · ×{p.qty} · {p.mins}m</span>
                         </div>
                       )}
                     </div>

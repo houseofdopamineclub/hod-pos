@@ -12,8 +12,22 @@ import { closeOnBackdrop } from "@/lib/centered-ui";
 const GOLD = "#C9A84C";
 const RED = "#EF4444";
 const AMBER = "#F59E0B";
-const BLUE = "#6B9BE8";
+const BLUE = "#2563EB";
 const PURPLE = "#A855F7";
+
+/** Operational-night start (07:00 IST). A club night runs past midnight, so
+ *  "today" = since 7 AM IST, NOT calendar midnight (a 1 AM bill still belongs to
+ *  the night that opened the evening before). 07:00 IST = 01:30 UTC. Computed via
+ *  UTC fields so it is correct no matter what timezone the viewer's device is in. */
+function operationalNightStartMs(): number {
+  const istNow = new Date(Date.now() + 5.5 * 3600_000); // UTC fields now read as IST wall-clock
+  let y = istNow.getUTCFullYear(), m = istNow.getUTCMonth(), d = istNow.getUTCDate();
+  if (istNow.getUTCHours() < 7) {                        // before 7 AM IST → still the previous night
+    const prev = new Date(Date.UTC(y, m, d) - 86400_000);
+    y = prev.getUTCFullYear(); m = prev.getUTCMonth(); d = prev.getUTCDate();
+  }
+  return Date.UTC(y, m, d, 1, 30, 0, 0);                 // 07:00 IST == 01:30 UTC
+}
 
 type AuditEvent =
   | { kind: "bill"; at: string; row: BillAuditRow }
@@ -30,12 +44,12 @@ type AuditEvent =
       removed: Array<{ n: string; qty: number; p: number }>; valueRemoved: number;
       customerName?: string };
 
-type Filter = "all" | "today" | "duplicates" | "voids" | "overrides" | "kots" | "bills" | "silent-edits";
+type Filter = "all" | "tonight" | "duplicates" | "voids" | "overrides" | "kots" | "bills" | "silent-edits";
 
 export default function AuditPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<Filter>("today");
+  const [filter, setFilter] = useState<Filter>("tonight");
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<AuditEvent | null>(null);
 
@@ -67,9 +81,15 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
   };
   useEffect(() => { load(); }, []);
 
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  // 🌙 2026-06-26 — every tab EXCEPT "All days" is scoped to TONIGHT (since 7 AM
+  // IST). Owner only wants the current night's KOTs/bills/etc; "All days" stays
+  // as a history escape-hatch for fraud review. Filter is client-side → 0 extra reads.
+  const nightStart = operationalNightStartMs();
+  const isTonight = (ev: AuditEvent) => new Date(ev.at).getTime() >= nightStart;
   const filtered = useMemo(() => events.filter((ev) => {
-    if (filter === "today") return new Date(ev.at).getTime() >= todayStart.getTime();
+    if (filter === "all") return true;                 // 🗂 every day (history)
+    if (new Date(ev.at).getTime() < nightStart) return false; // all other tabs = TONIGHT only
+    if (filter === "tonight") return true;
     if (filter === "duplicates") return (ev.kind === "bill" && ev.row.isDuplicate) || (ev.kind === "kot" && ev.isDuplicate);
     if (filter === "voids") return ev.kind === "void";
     if (filter === "overrides") return ev.kind === "override";
@@ -77,17 +97,19 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
     if (filter === "bills") return ev.kind === "bill";
     if (filter === "silent-edits") return ev.kind === "silent-edit";
     return true;
-  }), [events, filter, todayStart]);
+  }), [events, filter, nightStart]);
 
+  const tonightEvents = events.filter(isTonight);
   const counts = {
-    today: events.filter((e) => new Date(e.at).getTime() >= todayStart.getTime()).length,
-    duplicates: events.filter((e) => (e.kind === "bill" && e.row.isDuplicate) || (e.kind === "kot" && e.isDuplicate)).length,
-    voids: events.filter((e) => e.kind === "void").length,
-    overrides: events.filter((e) => e.kind === "override").length,
-    kots: events.filter((e) => e.kind === "kot").length,
-    bills: events.filter((e) => e.kind === "bill").length,
-    silentEdits: events.filter((e) => e.kind === "silent-edit").length,
+    tonight: tonightEvents.length,
+    duplicates: tonightEvents.filter((e) => (e.kind === "bill" && e.row.isDuplicate) || (e.kind === "kot" && e.isDuplicate)).length,
+    voids: tonightEvents.filter((e) => e.kind === "void").length,
+    overrides: tonightEvents.filter((e) => e.kind === "override").length,
+    kots: tonightEvents.filter((e) => e.kind === "kot").length,
+    bills: tonightEvents.filter((e) => e.kind === "bill").length,
+    silentEdits: tonightEvents.filter((e) => e.kind === "silent-edit").length,
   };
+  const nightLabel = new Date(nightStart).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "2-digit", month: "short" });
 
   const fmt = (iso: string) => {
     const d = new Date(iso);
@@ -102,9 +124,16 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
             <ArrowLeft size={16} /> Back
           </Link>
         )}
-        <h1 style={{ fontSize: 22, fontWeight: 900, color: "#000", margin: 0, flex: 1, textTransform: "uppercase", letterSpacing: "-.5px" }}>
-          🔍 Operations Audit
-        </h1>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 900, color: "#000", margin: 0, textTransform: "uppercase", letterSpacing: "-.5px" }}>
+            🔍 Operations Audit
+          </h1>
+          <div style={{ fontSize: 12, fontWeight: 800, color: "#000", marginTop: 3 }}>
+            {filter === "all"
+              ? <span style={{ background: "#000", color: "#fff", padding: "2px 8px" }}>🗂 ALL DAYS — recent history</span>
+              : <span style={{ background: "#FF90E8", color: "#000", padding: "2px 8px", border: "2px solid #000" }}>🌙 TONIGHT · {nightLabel} · since 7 AM</span>}
+          </div>
+        </div>
         <button onClick={load} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#F4F4F0", border: "2px solid #000", color: "#000", padding: "8px 14px", cursor: "pointer", fontWeight: 700, boxShadow: "2px 2px 0px #000", fontSize: 13 }}>
           <RefreshCw size={14} /> Refresh
         </button>
@@ -113,22 +142,22 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
       {/* Filter tab bar */}
       <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
         {([
-          { id: "today",        label: `Today (${counts.today})`,           color: "#000",    bg: "#FF90E8" },
+          { id: "tonight",      label: `🌙 Tonight (${counts.tonight})`,    color: "#000",    bg: "#FF90E8" },
           { id: "voids",        label: `❌ Voids (${counts.voids})`,        color: "#fff",    bg: RED },
           { id: "silent-edits", label: `🔇 Silent Edits (${counts.silentEdits})`, color: "#000", bg: AMBER },
           { id: "overrides",    label: `🔒 Overrides (${counts.overrides})`,color: "#fff",    bg: PURPLE },
           { id: "duplicates",   label: `⚠ Duplicates (${counts.duplicates})`,color: "#000",  bg: AMBER },
-          { id: "kots",         label: `🍳 KOTs (${counts.kots})`,          color: "#000",    bg: BLUE },
+          { id: "kots",         label: `🍳 KOTs (${counts.kots})`,          color: "#fff",    bg: BLUE },
           { id: "bills",        label: `🖨 Bills (${counts.bills})`,         color: "#000",    bg: "#F2C744" },
-          { id: "all",          label: `All (${events.length})`,             color: "#000",    bg: "#F4F4F0" },
+          { id: "all",          label: `🗂 All days (${events.length})`,     color: "#fff",    bg: "#000" },
         ] as Array<{ id: Filter; label: string; color: string; bg: string }>).map((t) => (
           <button key={t.id} onClick={() => setFilter(t.id)}
             style={{
-              padding: "7px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              padding: "8px 14px", fontSize: 12.5, fontWeight: 800, cursor: "pointer",
               background: filter === t.id ? t.bg : "#fff",
               color: filter === t.id ? t.color : "#000",
               border: "2px solid #000",
-              boxShadow: filter === t.id ? "3px 3px 0px #000" : "2px 2px 0px rgba(0,0,0,.15)",
+              boxShadow: filter === t.id ? "3px 3px 0px #000" : "2px 2px 0px rgba(0,0,0,.35)",
               transform: filter === t.id ? "translate(-1px,-1px)" : "none",
             }}>
             {t.label}
@@ -136,12 +165,12 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         ))}
       </div>
 
-      {loading && <div style={{ textAlign: "center", padding: 40, color: "#888", fontWeight: 500 }}>Loading audit log...</div>}
+      {loading && <div style={{ textAlign: "center", padding: 40, color: "#555", fontWeight: 500 }}>Loading audit log...</div>}
       {error && <div style={{ background: "#FFF0EE", border: "2px solid #EF4444", color: "#EF4444", padding: 14, fontWeight: 600 }}>Error: {error}</div>}
 
       {!loading && !error && filtered.length === 0 && (
-        <div style={{ textAlign: "center", padding: 40, color: "#888", border: "2px dashed #ccc", fontWeight: 500 }}>
-          No matching events.
+        <div style={{ textAlign: "center", padding: 40, color: "#444", border: "2px dashed #999", fontWeight: 600 }}>
+          {filter === "all" ? "No events on record." : "Nothing for tonight yet. Switch to 🗂 All days to see earlier nights."}
         </div>
       )}
 
@@ -151,8 +180,8 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         </div>
       )}
 
-      <div style={{ marginTop: 24, fontSize: 11, color: "#aaa", textAlign: "center" }}>
-        Showing the most recent bill prints, KOT prints, voids, and manager-PIN overrides. Append-only — staff cannot delete. Tap a KOT or Bill to see its items.
+      <div style={{ marginTop: 24, fontSize: 11, color: "#777", textAlign: "center" }}>
+        Tonight = since 7 AM IST (a club night runs past midnight). Bill prints, KOTs, voids & manager-PIN overrides. Append-only — staff cannot delete. Tap a KOT or Bill for its items. Use 🗂 All days for earlier nights.
       </div>
 
       {detail && <DetailModal ev={detail} fmt={fmt} onClose={() => setDetail(null)} />}
@@ -187,7 +216,7 @@ function DetailModal({ ev, fmt, onClose }: { ev: AuditEvent; fmt: (iso: string) 
         </div>
         <div style={{ padding: 16 }}>
           {items.length === 0 ? (
-            <div style={{ textAlign: "center", color: "#888", fontWeight: 600, padding: 20 }}>No item details available for this record.</div>
+            <div style={{ textAlign: "center", color: "#555", fontWeight: 600, padding: 20 }}>No item details available for this record.</div>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
@@ -225,7 +254,7 @@ function DetailModal({ ev, fmt, onClose }: { ev: AuditEvent; fmt: (iso: string) 
                 <span>TOTAL</span><span>{money(ev.row.total)}</span>
               </div>
               {ev.row.subtotal === 0 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: "#888", fontStyle: "italic" }}>
+                <div style={{ marginTop: 8, fontSize: 11, color: "#555", fontStyle: "italic" }}>
                   Tax breakdown was not saved for this older bill — only the printed total is on record.
                 </div>
               )}
@@ -237,7 +266,7 @@ function DetailModal({ ev, fmt, onClose }: { ev: AuditEvent; fmt: (iso: string) 
             </div>
           )}
 
-          <div style={{ marginTop: 12, fontSize: 11, color: "#888" }}>
+          <div style={{ marginTop: 12, fontSize: 11, color: "#555" }}>
             {isBill
               ? `${fmt(ev.row.at)} · by ${ev.row.by || "unknown"}${ev.row.printIndex > 1 ? ` · reprint #${ev.row.printIndex}` : ""}`
               : ev.kind === "kot" ? `${fmt(ev.at)} · by ${ev.staff || "unknown"} · ${ev.destinations.join(", ")}` : ""}
@@ -265,9 +294,9 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
       <div onClick={() => onSelect(ev)} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, padding: 14, cursor: "pointer",
         background: isDup ? "#FFF0EE" : "#fff",
         border: `2px solid ${isDup ? RED : "#000"}`,
-        boxShadow: isDup ? `3px 3px 0px ${RED}` : "2px 2px 0px rgba(0,0,0,.12)" }}>
+        boxShadow: isDup ? `3px 3px 0px ${RED}` : "3px 3px 0px #000" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 52 }}>
-          <div style={{ fontSize: 10, color: "#888", fontWeight: 600 }}>#{r.printIndex}</div>
+          <div style={{ fontSize: 10, color: "#555", fontWeight: 600 }}>#{r.printIndex}</div>
           <div style={{ fontSize: 22 }}>{isDup ? "⚠️" : "🖨"}</div>
         </div>
         <div style={{ minWidth: 0 }}>
@@ -279,7 +308,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
           <div style={{ fontSize: 13, color: "#000", fontWeight: 700, marginBottom: 2 }}>
             {r.ref} {r.customerName && `· ${r.customerName}`}
           </div>
-          <div style={{ fontSize: 12, color: "#666" }}>
+          <div style={{ fontSize: 12, color: "#444" }}>
             {fmt(r.at)} · by <strong style={{ color: "#000" }}>{r.by || "unknown"}</strong>
             {r.itemCount > 0 && ` · ${r.itemCount} items`}
           </div>
@@ -296,9 +325,9 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
       <div onClick={() => onSelect(ev)} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, padding: 14, cursor: "pointer",
         background: "#F0F6FF",
         border: `2px solid ${ev.isDuplicate ? RED : BLUE}`,
-        boxShadow: "2px 2px 0px rgba(0,0,0,.12)" }}>
+        boxShadow: "3px 3px 0px #000" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 52 }}>
-          <div style={{ fontSize: 10, color: "#888", fontWeight: 600 }}>R{ev.roundNum}</div>
+          <div style={{ fontSize: 10, color: "#555", fontWeight: 600 }}>R{ev.roundNum}</div>
           <div style={{ fontSize: 22 }}>{ev.isDuplicate ? "⚠️" : "🍳"}</div>
         </div>
         <div style={{ minWidth: 0 }}>
@@ -312,7 +341,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
           <div style={{ fontSize: 13, color: "#000", fontWeight: 700, marginBottom: 2 }}>
             {ev.tableId} {ev.customerName && `· ${ev.customerName}`}
           </div>
-          <div style={{ fontSize: 12, color: "#666" }}>
+          <div style={{ fontSize: 12, color: "#444" }}>
             {fmt(ev.at)} · by <strong style={{ color: "#000" }}>{ev.staff || "unknown"}</strong> · {ev.itemCount} items
           </div>
         </div>
@@ -330,7 +359,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, padding: 14,
         background: isBillVoid ? "#FFF0EE" : "#FFF5F5",
         border: `2px solid ${RED}`,
-        boxShadow: isBillVoid ? `3px 3px 0px ${RED}` : "2px 2px 0px rgba(239,68,68,.3)" }}>
+        boxShadow: isBillVoid ? `3px 3px 0px ${RED}` : "3px 3px 0px #000" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 52 }}>
           <div style={{ fontSize: 10, color: RED, fontWeight: 700 }}>{isBillVoid ? "BILL" : `R${ev.roundNum}`}</div>
           <div style={{ fontSize: 22 }}>{isBillVoid ? "🚫" : "❌"}</div>
@@ -359,13 +388,13 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
               📝 {ev.notes}
             </div>
           )}
-          <div style={{ fontSize: 12, color: "#666" }}>
+          <div style={{ fontSize: 12, color: "#444" }}>
             {fmt(ev.at)} · voided by <strong style={{ color: "#000" }}>{ev.by}</strong>
             {!isBillVoid && ev.reason && ` · "${ev.reason}"`}
           </div>
         </div>
         <div style={{ textAlign: "right", display: "flex", flexDirection: "column", justifyContent: "center" }}>
-          <div style={{ fontSize: 10, color: "#888", marginBottom: 2, fontWeight: 500 }}>{isBillVoid ? "bill leakage" : "value lost"}</div>
+          <div style={{ fontSize: 10, color: "#555", marginBottom: 2, fontWeight: 500 }}>{isBillVoid ? "bill leakage" : "value lost"}</div>
           <div style={{ fontSize: 18, fontWeight: 900, color: RED }}>−₹{ev.valueLost.toLocaleString("en-IN")}</div>
         </div>
       </div>
@@ -377,7 +406,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, padding: 14,
         background: "#FFFBEB",
         border: `2px solid ${AMBER}`,
-        boxShadow: "2px 2px 0px rgba(0,0,0,.12)" }}>
+        boxShadow: "3px 3px 0px #000" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 52 }}>
           <div style={{ fontSize: 10, color: AMBER, fontWeight: 700 }}>R{ev.roundNum}</div>
           <div style={{ fontSize: 22 }}>🔇</div>
@@ -393,12 +422,12 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
           <div style={{ fontSize: 13, color: "#000", fontWeight: 700, marginBottom: 2 }}>
             Removed before print: {ev.removed.map((v) => `${v.qty}× ${v.n}`).join(", ") || "—"}
           </div>
-          <div style={{ fontSize: 12, color: "#666" }}>
+          <div style={{ fontSize: 12, color: "#444" }}>
             {fmt(ev.at)} · by <strong style={{ color: "#000" }}>{ev.by}</strong> · no manager PIN required (pre-print)
           </div>
         </div>
         <div style={{ textAlign: "right", display: "flex", flexDirection: "column", justifyContent: "center" }}>
-          <div style={{ fontSize: 10, color: "#888", marginBottom: 2, fontWeight: 500 }}>silently dropped</div>
+          <div style={{ fontSize: 10, color: "#555", marginBottom: 2, fontWeight: 500 }}>silently dropped</div>
           <div style={{ fontSize: 16, fontWeight: 900, color: AMBER }}>−₹{ev.valueRemoved.toLocaleString("en-IN")}</div>
         </div>
       </div>
@@ -414,7 +443,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, padding: 14,
       background: "#F9F0FF",
       border: `2px solid ${PURPLE}`,
-      boxShadow: "2px 2px 0px rgba(0,0,0,.12)" }}>
+      boxShadow: "3px 3px 0px #000" }}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 52 }}>
         <div style={{ fontSize: 22 }}>🔒</div>
       </div>
@@ -430,7 +459,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
           {(ev as any).overrideKind !== "sc-waiver" ? "%" : ""}
           {(ev as any).reason && ` · "${(ev as any).reason}"`}
         </div>
-        <div style={{ fontSize: 12, color: "#666" }}>
+        <div style={{ fontSize: 12, color: "#444" }}>
           {fmt(ev.at)} · approved by <strong style={{ color: "#000" }}>{(ev as any).by}</strong>
         </div>
       </div>

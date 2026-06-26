@@ -199,6 +199,113 @@ export function centeredAlert(
   });
 }
 
+// 🆕 2026-06-26 (Khushi) — a NON-DISMISSABLE "please wait" overlay. The settle
+// flow makes two slow server calls (send approval code ~5-6s, verify code
+// ~3-5s); during those waits nothing covered the screen so a captain could tap
+// other buttons. This mounts a full-screen spinner + message that BLOCKS every
+// tap (fixed inset:0, z 99999, no backdrop-close) and returns a closer fn the
+// caller invokes when the await resolves. Fail-open: returns a no-op closer if
+// the DOM isn't available.
+export function centeredBusy(message: string, brutalist = false): () => void {
+  try {
+    if (typeof document === "undefined") return () => {};
+    if (!document.getElementById("hod-busy-kf")) {
+      const st = document.createElement("style");
+      st.id = "hod-busy-kf";
+      st.textContent = "@keyframes hod-busy-spin{to{transform:rotate(360deg)}}";
+      document.head.appendChild(st);
+    }
+    const overlay = _mountOverlay(brutalist);
+    const ring   = brutalist ? _BRUT.teal : GOLD;
+    const track  = brutalist ? "rgba(0,0,0,.15)" : "rgba(242,235,211,.18)";
+    const ink    = brutalist ? _BRUT.ink : IVORY;
+    const box = document.createElement("div");
+    box.style.cssText = brutalist
+      ? [
+          `background:${_BRUT.surface}`, `border:2px solid ${_BRUT.ink}`, "border-radius:8px",
+          "padding:26px", "width:100%", "max-width:360px", "text-align:center",
+        ].join(";")
+      : [
+          `background:${BG}`, `border:1.5px solid ${GOLD}`, "border-radius:18px",
+          "padding:26px", "width:100%", "max-width:360px",
+          "box-shadow:0 24px 48px rgba(0,0,0,.7)", "text-align:center",
+        ].join(";");
+    box.innerHTML = `
+      <div style="width:46px;height:46px;margin:0 auto 16px;border-radius:50%;border:5px solid ${track};border-top-color:${ring};animation:hod-busy-spin .8s linear infinite"></div>
+      <div style="font-family:${brutalist ? _BRUT.font : "'Playfair Display',serif"};font-size:16px;font-weight:900;color:${ink};line-height:1.5;white-space:pre-wrap">${message.replace(/</g, "&lt;")}</div>
+    `;
+    overlay.appendChild(box);
+    // Deliberately NO backdrop-close — this is a forced wait, not a prompt.
+    let closed = false;
+    return () => { if (closed) return; closed = true; try { document.body.removeChild(overlay); } catch {} };
+  } catch { return () => {}; }
+}
+
+// 🆕 2026-06-26 (Khushi) — a branded yes/no confirmation (replaces window.confirm
+// in NEW flows). Resolves true on confirm, false on cancel / backdrop / Esc.
+// Used for the aggregator-discount "are you sure?" reminder before settling.
+export function centeredConfirm(
+  title: string,
+  message: string,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  brutalist = false,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      if (typeof document === "undefined") { resolve(window.confirm(`${title}\n\n${message}`)); return; }
+      const overlay = _mountOverlay(brutalist);
+      const accent = brutalist ? _BRUT.teal : GOLD;
+      const box = document.createElement("div");
+      box.style.cssText = brutalist
+        ? [
+            `background:${_BRUT.surface}`, `border:2px solid ${_BRUT.ink}`, "border-radius:8px",
+            "padding:22px", "width:100%", "max-width:400px", "text-align:center",
+          ].join(";")
+        : [
+            `background:${BG}`, `border:1.5px solid ${accent}`, "border-radius:18px",
+            "padding:22px", "width:100%", "max-width:400px",
+            "box-shadow:0 24px 48px rgba(0,0,0,.7)", "text-align:center",
+          ].join(";");
+      box.innerHTML = brutalist
+        ? `
+        <div style="font-size:48px;line-height:1;margin-bottom:6px">⚠️</div>
+        <div style="font-family:${_BRUT.font};font-size:21px;font-weight:900;color:${_BRUT.ink};margin-bottom:10px">${title.replace(/</g, "&lt;")}</div>
+        <div style="font-size:14px;color:${_BRUT.muted};margin-bottom:18px;line-height:1.5;white-space:pre-wrap">${message.replace(/</g, "&lt;")}</div>
+        <div style="display:flex;gap:8px">
+          <button id="hod-cf-cancel" style="flex:1;padding:13px;border-radius:6px;background:${_BRUT.white};border:2px solid ${_BRUT.ink};color:${_BRUT.ink};font-size:14px;font-weight:800;cursor:pointer">${cancelLabel.replace(/</g, "&lt;")}</button>
+          <button id="hod-cf-ok" style="flex:1.4;padding:13px;border-radius:6px;background:${_BRUT.teal};border:2px solid ${_BRUT.ink};color:${_BRUT.ink};font-size:14px;font-weight:900;cursor:pointer">${confirmLabel.replace(/</g, "&lt;")}</button>
+        </div>
+      `
+        : `
+        <div style="font-size:48px;line-height:1;margin-bottom:6px">⚠</div>
+        <div style="font-family:'Playfair Display',serif;font-size:21px;font-weight:900;color:${accent};margin-bottom:10px">${title.replace(/</g, "&lt;")}</div>
+        <div style="font-size:14px;color:rgba(242,235,211,.85);margin-bottom:18px;line-height:1.5;white-space:pre-wrap">${message.replace(/</g, "&lt;")}</div>
+        <div style="display:flex;gap:8px">
+          <button id="hod-cf-cancel" style="flex:1;padding:13px;border-radius:10px;background:transparent;border:1px solid rgba(255,255,255,.18);color:rgba(242,235,211,.7);font-size:14px;font-weight:800;cursor:pointer">${cancelLabel.replace(/</g, "&lt;")}</button>
+          <button id="hod-cf-ok" style="flex:1.4;padding:13px;border-radius:10px;background:${accent};border:none;color:${BG};font-size:14px;font-weight:900;cursor:pointer">${confirmLabel.replace(/</g, "&lt;")}</button>
+        </div>
+      `;
+      overlay.appendChild(box);
+      const ok = box.querySelector("#hod-cf-ok") as HTMLButtonElement;
+      const cancel = box.querySelector("#hod-cf-cancel") as HTMLButtonElement;
+      const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(false); };
+      const close = (v: boolean) => {
+        document.removeEventListener("keydown", onKey);
+        try { document.body.removeChild(overlay); } catch {}
+        resolve(v);
+      };
+      ok.onclick = () => close(true);
+      cancel.onclick = () => close(false);
+      setTimeout(() => ok.focus(), 50);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close(false); });
+      document.addEventListener("keydown", onKey);
+    } catch {
+      try { resolve(window.confirm(`${title}\n\n${message}`)); } catch { resolve(false); }
+    }
+  });
+}
+
 // 🆕 2026-06-18 (Khushi) — APP-WIDE FIX: copying text from a field inside a
 // hand-rolled modal used to close it. Those modals close on a backdrop click
 // (`<div onClick={onClose}>`), but a text-selection drag that ends on the dim

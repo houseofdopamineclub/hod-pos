@@ -73,9 +73,15 @@ type Floor3 = "Ground" | "First" | "Rooftop";
 const FLOORS3: Floor3[] = ["Ground", "First", "Rooftop"];
 const toFloor3 = (key?: string): Floor3 => {
   const k = (key || "").toLowerCase();
-  if (k === "ground") return "Ground";
-  if (k === "rooftop") return "Rooftop";
-  return "First"; // dining + smoking + anything unmapped
+  // 🔴 2026-06-26 (Khushi) — match by SUBSTRING, not exact equality. The ground
+  // floor is stored under SEVERAL strings across the app: door config "ground",
+  // the Captain floor-map key "dance", and the label "Ground Floor". An exact
+  // `=== "ground"` test missed "dance"/"Ground Floor", so every ground-floor
+  // table (e.g. C1) was silently bucketed into First — its billed/discount/sales
+  // vanished from the Ground row. Substring matching covers all spellings.
+  if (k.includes("ground") || k.includes("dance")) return "Ground";
+  if (k.includes("roof") || k.includes("terrace")) return "Rooftop";
+  return "First"; // first / dining / smoking / anything unmapped
 };
 const isProxyId = (id: string) => /-PX\d+$/.test(id);
 // Real (non-proxy) table capacity per 3-floor bucket, derived from the
@@ -185,6 +191,15 @@ export default function LiveReports() {
     const floor: Record<Floor3, FloorAgg> = { Ground: zeroFloor(), First: zeroFloor(), Rooftop: zeroFloor() };
     const channel: Record<Channel, { amt: number; count: number }> =
       { Swiggy: { amt: 0, count: 0 }, Zomato: { amt: 0, count: 0 }, EazyDiner: { amt: 0, count: 0 }, "In-house": { amt: 0, count: 0 }, Others: { amt: 0, count: 0 } };
+    // 🆕 2026-06-26 (Khushi) — aggregator GROSS vs NET reconciliation. For each
+    // platform: gross = full invoice BILLED to the guest; net = what the venue
+    // actually COLLECTS after the platform discount. discount = gross − net.
+    // gross prefers the new aggregatorGrossAmount field; falls back to amountPaid
+    // on legacy docs (where amountPaid WAS the gross). net prefers
+    // aggregatorNetAmount, else amountPaid (which is now the net on new docs).
+    type AggSettle = { gross: number; net: number; count: number };
+    const aggSettle: Record<Channel, AggSettle> =
+      { Swiggy: { gross: 0, net: 0, count: 0 }, Zomato: { gross: 0, net: 0, count: 0 }, EazyDiner: { gross: 0, net: 0, count: 0 }, "In-house": { gross: 0, net: 0, count: 0 }, Others: { gross: 0, net: 0, count: 0 } };
     const cap = new Map<string, { tables: number; amt: number }>();
     const foodItems = new Map<string, { qty: number; amt: number }>();
     const drinkItems = new Map<string, { qty: number; amt: number }>();
@@ -300,6 +315,17 @@ export default function LiveReports() {
       const ch = channelOf(r);
       if (ch === "In-house") A.inhDisc += disc; else A.aggDisc += disc;
       if (ch !== "In-house" && disc > 0) { aggInhouseDiscCount += 1; aggInhouseDiscAmt += disc; }
+      // 🆕 2026-06-26 (Khushi) — the AGGREGATOR discount is the platform commission
+      // knocked off the bill = GROSS billed − NET received (settled aggregator bills
+      // only). It lives in aggregatorGrossAmount/aggregatorNetAmount, NOT in the
+      // in-house discountAmount/discountPercent fields — so without this the
+      // "Aggregator" column always showed ₹0. Mirrors the AGGREGATOR BILLED vs
+      // RECEIVED gross/net source exactly (legacy docs fall back to amountPaid → 0).
+      if (ch !== "In-house" && isPaid) {
+        const aggGross = (r as any).aggregatorGrossAmount ?? (r.amountPaid || billFinal);
+        const aggNet = (r as any).aggregatorNetAmount ?? (r.amountPaid ?? aggGross);
+        A.aggDisc += Math.max(0, aggGross - aggNet);
+      }
       A.sc += sc; A.tax += tax;
       A.food += foodSub; A.drink += drinkSub;
       A.net += Math.max(0, subtotal - disc);
@@ -307,6 +333,19 @@ export default function LiveReports() {
 
       // channel
       if (value > 0) { channel[ch].amt += value; channel[ch].count += 1; }
+
+      // 🆕 2026-06-26 (Khushi) — aggregator GROSS vs NET settlement table. Only
+      // PAID aggregator bills (an open table has no settled net yet). gross =
+      // what was BILLED to the guest (aggregatorGrossAmount on new docs, else the
+      // realized amountPaid on legacy docs); net = what the venue COLLECTED
+      // (aggregatorNetAmount, else amountPaid — which IS the net on new docs).
+      if (isPaid && ch !== "In-house") {
+        const aggGross = (r as any).aggregatorGrossAmount ?? (r.amountPaid || billFinal);
+        const aggNet = (r as any).aggregatorNetAmount ?? (r.amountPaid ?? aggGross);
+        aggSettle[ch].gross += aggGross;
+        aggSettle[ch].net += aggNet;
+        aggSettle[ch].count += 1;
+      }
 
       // captain
       if (r.captainName && (value > 0 || items.length > 0)) {
@@ -344,7 +383,7 @@ export default function LiveReports() {
       Array.from(m.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 5);
     const topCaptain = Array.from(cap.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.amt - a.amt).slice(0, 5);
 
-    return { floor, channel, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt };
+    return { floor, channel, aggSettle, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt };
   }, [reservations, history, covers]);
 
   const sumFloors = (pick: (a: FloorAgg) => number) => FLOORS3.reduce((s, f) => s + pick(agg.floor[f]), 0);
@@ -382,6 +421,21 @@ export default function LiveReports() {
     L.push(["Channel", "Tables", "Amount Rs"].join(","));
     for (const ch of CHANNELS) L.push([ch, agg.channel[ch].count, Math.round(agg.channel[ch].amt)].map(esc).join(","));
     L.push("");
+    // 🆕 2026-06-26 (Khushi) — aggregator GROSS (billed) vs NET (venue collects).
+    {
+      const aggChannels: Channel[] = ["Swiggy", "Zomato", "EazyDiner", "Others"];
+      let tg = 0, tn = 0, tc = 0;
+      L.push("AGGREGATOR BILLED vs RECEIVED");
+      L.push(["Platform", "Bills", "Billed (Gross) Rs", "Received (Net) Rs", "Platform Discount Rs"].join(","));
+      for (const ch of aggChannels) {
+        const s = agg.aggSettle[ch];
+        if (s.count === 0) continue;
+        tg += s.gross; tn += s.net; tc += s.count;
+        L.push([ch, s.count, Math.round(s.gross), Math.round(s.net), Math.round(s.gross - s.net)].map(esc).join(","));
+      }
+      L.push(["TOTAL", tc, Math.round(tg), Math.round(tn), Math.round(tg - tn)].map(esc).join(","));
+      L.push("");
+    }
     L.push("COVER WALLET REDEEMED (CAPTAIN MODE — excludes bar)");
     L.push(["Covers", "Amount Rs"].join(","));
     L.push([agg.walletRedeemedCount, Math.round(agg.walletRedeemed)].map(esc).join(","));
@@ -408,16 +462,23 @@ export default function LiveReports() {
   const C = { ink: "#000", grey: "#6B6B6B", bg: "#F4F4F0", card: "#fff", accent: "#23A094" };
   const NUM_FONT = "'Space Grotesk', sans-serif";
 
+  // 🆕 2026-06-26 (Khushi) — column headings bigger + darker (10.5→13, grey→ink)
+  // so the report headers read clearly alongside the bumped TOTAL rows.
   const Th = ({ children, right }: { children: React.ReactNode; right?: boolean }) => (
-    <th style={{ padding: "8px 11px", fontSize: 10.5, fontWeight: 800, color: C.grey, letterSpacing: 0.6, textTransform: "uppercase", textAlign: right ? "right" : "left", whiteSpace: "nowrap" }}>{children}</th>
+    <th style={{ padding: "9px 11px", fontSize: 13, fontWeight: 900, color: C.ink, letterSpacing: 0.6, textTransform: "uppercase", textAlign: right ? "right" : "left", whiteSpace: "nowrap" }}>{children}</th>
   );
-  const Cell = ({ children, bold, num, right }: { children: React.ReactNode; bold?: boolean; num?: boolean; right?: boolean }) => (
-    <td style={{ padding: "8px 11px", fontSize: 13, fontWeight: bold ? 900 : 700, color: C.ink, fontFamily: num ? NUM_FONT : undefined, whiteSpace: "nowrap", textAlign: right ? "right" : "left", borderTop: `1px solid ${C.ink}` }}>{children}</td>
+  // 🆕 2026-06-26 (Khushi) — TOTAL rows must POP: pass `total` to bump the font
+  // (13→17), force weight 900 and a thicker top rule; the TOTAL <tr> itself is
+  // tinted Gumroad pink (#FF90E8, black text passes AA) so the bottom-line is
+  // impossible to miss against the white floor rows.
+  const Cell = ({ children, bold, num, right, total }: { children: React.ReactNode; bold?: boolean; num?: boolean; right?: boolean; total?: boolean }) => (
+    <td style={{ padding: total ? "11px" : "8px 11px", fontSize: total ? 17 : 13, fontWeight: bold || total ? 900 : 700, color: C.ink, fontFamily: num ? NUM_FONT : undefined, whiteSpace: "nowrap", textAlign: right ? "right" : "left", borderTop: `${total ? 2 : 1}px solid ${C.ink}` }}>{children}</td>
   );
+  const TOTAL_BG = "#FF90E8";
   const Box = ({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) => (
     <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, marginBottom: 16, overflowX: "auto" }}>
       <div style={{ fontSize: 15, fontWeight: 900, color: C.ink, letterSpacing: 0.4 }}>{title}</div>
-      <div style={{ fontSize: 11, color: C.grey, fontWeight: 700, marginBottom: 12 }}>{hint}</div>
+      {hint ? <div style={{ fontSize: 11, color: C.grey, fontWeight: 700, marginBottom: 12 }}>{hint}</div> : null}
       {children}
     </div>
   );
@@ -436,9 +497,9 @@ export default function LiveReports() {
             {cols.map((c) => <Cell key={c.label} num right>{c.money ? fmtRs(c.pick(agg.floor[f])) : fmtN(c.pick(agg.floor[f]))}</Cell>)}
           </tr>
         ))}
-        <tr style={{ background: C.bg }}>
-          <Cell bold>TOTAL</Cell>
-          {cols.map((c) => <Cell key={c.label} num bold right>{c.money ? fmtRs(sumFloors(c.pick)) : fmtN(sumFloors(c.pick))}</Cell>)}
+        <tr style={{ background: TOTAL_BG }}>
+          <Cell total>TOTAL</Cell>
+          {cols.map((c) => <Cell key={c.label} num total right>{c.money ? fmtRs(sumFloors(c.pick)) : fmtN(sumFloors(c.pick))}</Cell>)}
         </tr>
       </tbody>
     </table>
@@ -461,15 +522,30 @@ export default function LiveReports() {
             </tr>
           );
         })}
-        <tr style={{ background: C.bg }}>
-          <Cell bold>TOTAL</Cell>
-          <Cell num bold right>{fmtN(FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0))}</Cell>
-          <Cell num bold right>{fmtN(sumFloors((a) => a.liveTables))}</Cell>
-          <Cell num bold right>{fmtN(FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0))}</Cell>
+        <tr style={{ background: TOTAL_BG }}>
+          <Cell total>TOTAL</Cell>
+          <Cell num total right>{fmtN(FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0))}</Cell>
+          <Cell num total right>{fmtN(sumFloors((a) => a.liveTables))}</Cell>
+          <Cell num total right>{fmtN(FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0))}</Cell>
         </tr>
       </tbody>
     </table>
   );
+
+  // 🆕 2026-06-26 (Khushi) — clamp the NIGHT picker to ±3 days around the
+  // current operational night and grey out everything else (same idea as Bar
+  // Mode's max-only clamp). Native min/max disables out-of-range days.
+  const _shiftNight = (base: string, delta: number) => {
+    const [y, m, d] = base.split("-").map(Number);
+    if (!y || !m || !d) return base;
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + delta);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+  };
+  const _nightBase = getOperationalNightStr();
+  const nightMin = _shiftNight(_nightBase, -3);
+  const nightMax = _shiftNight(_nightBase, 3);
 
   return (
     <div style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
@@ -482,7 +558,12 @@ export default function LiveReports() {
       {/* CONTROLS */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
         <label style={{ fontSize: 12, fontWeight: 800, color: C.ink, letterSpacing: 0.5 }}>NIGHT</label>
-        <input type="date" value={night} onChange={(e) => setNight(e.target.value || getOperationalNightStr())}
+        <input type="date" value={night} min={nightMin} max={nightMax}
+          onChange={(e) => {
+            const v = e.target.value || getOperationalNightStr();
+            // Clamp typed values too — native min/max only greys the picker.
+            setNight(v < nightMin ? nightMin : v > nightMax ? nightMax : v);
+          }}
           style={{ padding: "9px 12px", borderRadius: 8, background: C.card, border: `2px solid ${C.ink}`, color: C.ink, fontSize: 13, fontWeight: 700, outline: "none" }} />
         <div style={{ flex: 1 }} />
         <button onClick={downloadCsv}
@@ -499,17 +580,17 @@ export default function LiveReports() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 0, columnGap: 16 }}>
             {/* 🆕 2026-06-08 — Khushi merge: LIVE TABLES = capacity + live + available
                 in ONE box (4 cols: Floor · Capacity · Live · Available). */}
-            <Box title="🪑 LIVE TABLES" hint="Floor capacity, LIVE tables (a running order placed — at least 1 item; a table that's only booked/assigned with no order is NOT live), and available (capacity − occupied/assigned; real tables only, excludes proxy).">
+            <Box title="🪑 LIVE TABLES" hint="">
               <AvailTable />
             </Box>
             {/* 🆕 merge: BILLED + UNBILLED in ONE box (3 cols: Floor · Billed · Unbilled). */}
-            <Box title="💰 BILLED & UNBILLED" hint="Billed = ₹ collected from settled (paid) tables, INCLUDING tables already released this night. Unbilled = ₹ still open on live tables (bill generated but not settled yet).">
+            <Box title="💰 BILLED & UNBILLED" hint="">
               <FloorTable cols={[
                 { label: "Billed", pick: (a) => a.billed, money: true },
                 { label: "Unbilled", pick: (a) => a.unfilled, money: true },
               ]} />
             </Box>
-            <Box title="🏷 DISCOUNT (aggregators + in-house)" hint="₹ knocked off the bill, split by aggregator vs in-house.">
+            <Box title="🏷 DISCOUNT (aggregators + in-house)" hint="">
               <FloorTable cols={[
                 { label: "Aggregator", pick: (a) => a.aggDisc, money: true },
                 { label: "In-house", pick: (a) => a.inhDisc, money: true },
@@ -524,7 +605,7 @@ export default function LiveReports() {
                 </div>
               )}
             </Box>
-            <Box title="🧾 SERVICE CHARGE & TAX" hint="Service charge (10%) and tax / GST collected per floor.">
+            <Box title="🧾 SERVICE CHARGE & TAX" hint="">
               <FloorTable cols={[
                 { label: "Service Charge", pick: (a) => a.sc, money: true },
                 { label: "Tax (GST)", pick: (a) => a.tax, money: true },
@@ -559,14 +640,55 @@ export default function LiveReports() {
                     <Cell num right>{fmtRs(agg.channel[ch].amt)}</Cell>
                   </tr>
                 ))}
-                <tr style={{ background: C.bg }}>
-                  <Cell bold>TOTAL</Cell>
-                  <Cell num bold right>{fmtN(CHANNELS.reduce((s, ch) => s + agg.channel[ch].count, 0))}</Cell>
-                  <Cell num bold right>{fmtRs(CHANNELS.reduce((s, ch) => s + agg.channel[ch].amt, 0))}</Cell>
+                <tr style={{ background: TOTAL_BG }}>
+                  <Cell total>TOTAL</Cell>
+                  <Cell num total right>{fmtN(CHANNELS.reduce((s, ch) => s + agg.channel[ch].count, 0))}</Cell>
+                  <Cell num total right>{fmtRs(CHANNELS.reduce((s, ch) => s + agg.channel[ch].amt, 0))}</Cell>
                 </tr>
               </tbody>
             </table>
           </Box>
+
+          {/* 🆕 2026-06-26 (Khushi) — AGGREGATOR BILLED vs RECEIVED */}
+          {(() => {
+            const aggChannels: Channel[] = ["Swiggy", "Zomato", "EazyDiner", "Others"];
+            const rows = aggChannels.filter((ch) => agg.aggSettle[ch].count > 0);
+            const tg = rows.reduce((s, ch) => s + agg.aggSettle[ch].gross, 0);
+            const tn = rows.reduce((s, ch) => s + agg.aggSettle[ch].net, 0);
+            const tc = rows.reduce((s, ch) => s + agg.aggSettle[ch].count, 0);
+            return (
+              <Box title="💼 AGGREGATOR BILLED vs RECEIVED" hint="Per platform: BILLED = full invoice printed to the guest (gross). RECEIVED = what the venue actually collects after the platform discount (net). DISCOUNT = billed − received. Only settled (paid) aggregator bills.">
+                {rows.length === 0 ? (
+                  <div style={{ fontSize: 14, fontWeight: 700, color: C.grey }}>No settled aggregator bills tonight.</div>
+                ) : (
+                  <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 420 }}>
+                    <thead><tr style={{ background: C.bg }}><Th>Platform</Th><Th right>Bills</Th><Th right>Billed</Th><Th right>Received</Th><Th right>Discount</Th></tr></thead>
+                    <tbody>
+                      {rows.map((ch) => {
+                        const s = agg.aggSettle[ch];
+                        return (
+                          <tr key={ch}>
+                            <Cell bold>{ch}</Cell>
+                            <Cell num right>{fmtN(s.count)}</Cell>
+                            <Cell num right>{fmtRs(s.gross)}</Cell>
+                            <Cell num right>{fmtRs(s.net)}</Cell>
+                            <Cell num right>{fmtRs(s.gross - s.net)}</Cell>
+                          </tr>
+                        );
+                      })}
+                      <tr style={{ background: TOTAL_BG }}>
+                        <Cell total>TOTAL</Cell>
+                        <Cell num total right>{fmtN(tc)}</Cell>
+                        <Cell num total right>{fmtRs(tg)}</Cell>
+                        <Cell num total right>{fmtRs(tn)}</Cell>
+                        <Cell num total right>{fmtRs(tg - tn)}</Cell>
+                      </tr>
+                    </tbody>
+                  </table>
+                )}
+              </Box>
+            );
+          })()}
 
           {/* COVER WALLET REDEEMED */}
           <Box title="👛 AMOUNT REDEEMED FROM COVER WALLET" hint="Cover wallet ₹ the captain redeemed against tables this night, INCLUDING tables already released. Bar-mode redemptions are NOT counted here.">
@@ -600,7 +722,7 @@ function TopTable({ rows, qtyLabel, C, numFont }: {
   qtyLabel: string; C: { ink: string; grey: string; bg: string }; numFont: string;
 }) {
   const Th = ({ children, right }: { children: React.ReactNode; right?: boolean }) => (
-    <th style={{ padding: "8px 11px", fontSize: 10.5, fontWeight: 800, color: C.grey, letterSpacing: 0.6, textTransform: "uppercase", textAlign: right ? "right" : "left", whiteSpace: "nowrap" }}>{children}</th>
+    <th style={{ padding: "9px 11px", fontSize: 13, fontWeight: 900, color: C.ink, letterSpacing: 0.6, textTransform: "uppercase", textAlign: right ? "right" : "left", whiteSpace: "nowrap" }}>{children}</th>
   );
   const Cell = ({ children, bold, num, right }: { children: React.ReactNode; bold?: boolean; num?: boolean; right?: boolean }) => (
     <td style={{ padding: "8px 11px", fontSize: 13, fontWeight: bold ? 900 : 700, color: C.ink, fontFamily: num ? numFont : undefined, whiteSpace: "nowrap", textAlign: right ? "right" : "left", borderTop: `1px solid ${C.ink}` }}>{children}</td>

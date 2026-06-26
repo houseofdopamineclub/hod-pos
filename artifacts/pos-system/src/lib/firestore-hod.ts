@@ -15,7 +15,7 @@ import { getFloorFromTableId, type FloorKey } from "./floor-plan";
 // ANY reservation for the table that night (no time-window, no paid filter),
 // while the picker is time-windowed + skips paid → a GREEN table got rejected as
 // "already occupied". Import is runtime-safe: door-tables only TYPE-imports back.
-import { doorTableOccupantAt, doorNowMinutesIST, isTableReservationSettled } from "./door-tables";
+import { doorTableOccupantAt, doorNowMinutesIST, doorParseClockToMinutes, isTableReservationSettled } from "./door-tables";
 
 // 🆕 2026-05-27 v3.94 — SHARED SUBSCRIPTION CACHE (Khushi LIVE-NIGHT: 13M
 // reads / 305 listeners observed 2026-05-27 ~2PM). DoorMode alone mounts
@@ -252,6 +252,13 @@ export interface HodTabRound {
    *  marks a COVER-ONLY (instant-redeemed-at-bar) round that must never be
    *  dropped by the table→cover mirror. */
   source?: string;
+  /** 🆕 2026-06-26 (Khushi) — DISPLAY-ONLY audit of items VOIDED out of this
+   *  round AFTER its KOT was printed. The live `items` array already drops the
+   *  voided item (so bill/money stays correct), but the captain round card still
+   *  renders these with a struck-through red VOID badge — so a round whose only
+   *  item was voided never shows up blank, and staff can see what was removed.
+   *  NEVER feeds bill/tax math. */
+  voidedItems?: Array<{ n: string; qty: number; p: number; voidedBy?: string; voidedAt?: string }>;
 }
 
 export interface HodTransaction {
@@ -2147,7 +2154,12 @@ export function isTableBillSettled(
 }
 
 export async function updateRoundItems(
-  docId: string, roundIndex: number, items: HodOrderItem[], roundTotal: number, editedBy?: string
+  docId: string, roundIndex: number, items: HodOrderItem[], roundTotal: number, editedBy?: string,
+  /** 🆕 2026-06-26 (Khushi) — items removed from an already-PRINTED KOT round.
+   *  Appended (display-only) to the round's voidedItems so the captain card can
+   *  render a struck-through VOID badge instead of a blank round. Never affects
+   *  bill math (the live `items` array already excludes them). */
+  voidedAppend?: Array<{ n: string; qty: number; p: number }>,
 ): Promise<void> {
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
@@ -2161,6 +2173,14 @@ export async function updateRoundItems(
     const editHistory = rounds[roundIndex].editHistory || [];
     editHistory.push({ prevItems, editedBy: editedBy || "unknown", editedAt: new Date().toISOString() });
     rounds[roundIndex].editHistory = editHistory;
+    if (voidedAppend && voidedAppend.length) {
+      const prevVoided = Array.isArray(rounds[roundIndex].voidedItems) ? rounds[roundIndex].voidedItems : [];
+      const at = new Date().toISOString();
+      rounds[roundIndex].voidedItems = [
+        ...prevVoided,
+        ...voidedAppend.map((v) => ({ n: v.n, qty: v.qty, p: v.p, voidedBy: editedBy || "unknown", voidedAt: at })),
+      ];
+    }
   }
   const tabTotal = rounds.reduce((s: number, r: any) => s + (r.roundTotal || 0), 0);
   // L8: editing items after a bill print invalidates the printed chit.
@@ -2570,6 +2590,12 @@ export async function markTablePaid(
      *  applied for aggregator orders); `aggregatorNetAmount` is what the
      *  venue actually nets so admin can reconcile in Reports. */
     aggregatorNetAmount?: number;
+    /** 🆕 2026-06-26 (Khushi) — the FULL printed invoice (gross) for an
+     *  aggregator bill. As of this change `amount` (amountPaid) is the venue's
+     *  discounted NET (the guest paid the platform that price), so the gross is
+     *  kept here for Reports to show BILLED vs RECEIVED. Absent on old docs
+     *  (where amountPaid was the gross) — readers fall back accordingly. */
+    aggregatorGrossAmount?: number;
     discountPercent?: number; discountAmount?: number;
     serviceChargeAmount?: number; serviceChargeApplied?: boolean;
     taxAmount?: number;
@@ -2619,8 +2645,12 @@ export async function markTablePaid(
     upd.paymentSplits = payment.splits.map((s) => ({ method: s.method, amount: s.amount }));
   }
   if (payment.aggregator) upd.aggregator = payment.aggregator;
-  if (payment.aggregatorDiscount) upd.aggregatorDiscount = payment.aggregatorDiscount;
+  // 🆕 2026-06-26 (Khushi) — aggregator discount is now editable at settle and
+  // can validly be 0%. Use !== undefined (not a truthy check) so an edited 0
+  // OVERWRITES a stale non-zero value left on the reservation from before.
+  if (payment.aggregatorDiscount !== undefined) upd.aggregatorDiscount = payment.aggregatorDiscount;
   if (payment.aggregatorNetAmount !== undefined) upd.aggregatorNetAmount = payment.aggregatorNetAmount;
+  if (payment.aggregatorGrossAmount !== undefined) upd.aggregatorGrossAmount = payment.aggregatorGrossAmount;
   if (payment.discountPercent) upd.discountPercent = payment.discountPercent;
   if (payment.discountAmount) upd.discountAmount = payment.discountAmount;
   if (payment.serviceChargeAmount !== undefined) upd.serviceChargeAmount = payment.serviceChargeAmount;
@@ -4572,13 +4602,55 @@ export async function reassignTable(
   const others = existing.docs
     .filter((d) => d.id !== docId)
     .map((d) => ({ _docId: d.id, ...(d.data() as any) })) as HodTableReservation[];
-  if (doorTableOccupantAt(newTableId, doorNowMinutesIST(), others)) {
+  // 🔴 2026-06-26 (Khushi BUG) — check occupancy AT THIS BOOKING'S OWN ARRIVAL
+  // SLOT, not at NOW. The grid picker paints green/red using the reservation's
+  // arrivalTime (parseClockToMinutes(reservation.arrivalTime)); this backend gate
+  // used doorNowMinutesIST() → a table free during the booking's 8pm slot but
+  // busy at the current wall-clock time (e.g. a 1pm guest seated now) showed
+  // GREEN in the picker yet got rejected on confirm. Mirror the picker exactly so
+  // green == assignable. Fail-open to NOW if the booking has no parseable time.
+  const targetMin = doorParseClockToMinutes(data.arrivalTime) ?? doorNowMinutesIST();
+  if (doorTableOccupantAt(newTableId, targetMin, others)) {
     throw new Error(`Table ${newTableId} is already occupied`);
   }
   await updateDoc(doc(db, TABLE_RES_COL, docId), {
     tableId: newTableId, floor: newFloor, floorLabel: newFloorLabel,
     reassignedFrom: oldTableId, reassignedAt: new Date().toISOString(), reassignedBy: captainName,
   });
+  // 🆕 2026-06-26 (Khushi) — the booking doc carries its own tabRounds, so all
+  // orders MOVE with the booking automatically (same doc, new tableId). But the
+  // linked CUSTOMER COVER stores its OWN tableId/floor/floorLabel (the guest
+  // wallet's "YOUR TABLE" card reads it), and that wasn't being updated → the
+  // guest still saw the OLD table after a reassign. Mirror the new table onto
+  // every cover ref for this booking (dual-mirror: bookingRef AND
+  // linkedCoverDocId AND linkedCoverRef). FAIL-OPEN — a stale wallet card must
+  // never block the captain's reassign (the table HAS moved on the POS).
+  try {
+    const coverRefs = new Set<string>(
+      [data.bookingRef, (data as any).linkedCoverDocId, (data as any).linkedCoverRef]
+        .filter((x): x is string => typeof x === "string" && x.length > 0),
+    );
+    await Promise.all(
+      [...coverRefs].map((cref) =>
+        setDoc(
+          doc(db, COVERS_COL, cref),
+          { tableId: newTableId, floor: newFloor, floorLabel: newFloorLabel },
+          { merge: true },
+        ).catch(() => {}),
+      ),
+    );
+  } catch { /* fail-open: reassign already succeeded */ }
+  // 🆕 2026-06-26 (Khushi) — the KITCHEN screen (KDS) snapshots the table label
+  // when the KOT fires, so its live rows still showed the OLD table after a
+  // reassign → the runner would carry food to the wrong table. Re-stamp the new
+  // table onto every live KDS row for this booking. Fire-and-forget (NOT awaited)
+  // so it never adds latency to the captain's reassign; fail-open (paper KOT backs it).
+  void updateKDSTableForReassign({
+    reservationId: docId,
+    coverDocId: (data as any).linkedCoverDocId || "",
+    tableLabel: newTableId,
+    floorLabel: newFloorLabel,
+  }).catch(() => {});
 }
 
 // 🆕 2026-06-19 (Khushi) — corporate bookings hold N tables via a master doc +
@@ -4602,7 +4674,9 @@ export async function reassignCorporateTables(
   if (isTableBillSettled(master as any)) throw new Error("Cannot reassign a settled table");
   const date = (master.date as string) || getOperationalNightStr();
   const groupRef = (master.groupRef as string) || masterDocId;
-  const nowMin = doorNowMinutesIST();
+  // 🔴 2026-06-26 (Khushi BUG) — same fix as reassignTable: conflict-check at the
+  // booking's OWN arrival slot, not at the current wall-clock, so green == assignable.
+  const nowMin = doorParseClockToMinutes(master.arrivalTime) ?? doorNowMinutesIST();
   // All doc ids belonging to this group — excluded from conflict checks.
   const holdSnap = await getDocs(
     query(collection(db, TABLE_RES_COL), where("groupRef", "==", groupRef), where("isGroupHold", "==", true)),
@@ -5483,6 +5557,9 @@ export async function printBill(data: {
   amounts: {
     subtotal: number; serviceCharge: number; cgst: number; sgst: number;
     discount: number; roundOff: number; total: number; happyHourDiscount?: number;
+    /** 🆕 Discount PERCENTAGE so the printed bill renders "Discount (X%)" —
+     *  matches the on-screen preview. Omitted/0 → prints plain "Discount". */
+    discountPct?: number;
   };
   paymentMethod?: string;
   billNumber?: string;
@@ -6280,16 +6357,23 @@ export async function writeKDSItemsFromKOT(input: {
   staff: string;
   roundNum: number;
   items: HodOrderItem[];
+  /** 🆕 2026-06-26 (Khushi) — distinct token folded into each KDS doc id so a
+   *  SECOND fire for the same round writes NEW rows instead of overwriting the
+   *  original ones. Used by the Captain Edit-Order "add item to a printed round"
+   *  path (every add is a deliberate, distinct kitchen task). OMIT for the normal
+   *  per-round KOT so its idempotent stable id still de-dupes accidental re-fires. */
+  idNonce?: string;
 }): Promise<number> {
   try {
     const foodOnly = (input.items || []).filter((i) => (i.t || "").toLowerCase() === "food");
     if (foodOnly.length === 0) return 0;
     const opNight = getOperationalNightStr();
     const idBase = input.reservationId || input.coverDocId || `${input.tableId}_${Date.now()}`;
+    const nonce = input.idNonce ? `_${input.idNonce.replace(/[^a-z0-9]/gi, "")}` : "";
     let written = 0;
     for (let idx = 0; idx < foodOnly.length; idx++) {
       const it = foodOnly[idx];
-      const stableId = `${idBase}_r${input.roundNum}_i${idx}_${normalizeItemKey(it.n).slice(0, 24).replace(/[^a-z0-9]/g, "")}`;
+      const stableId = `${idBase}_r${input.roundNum}${nonce}_i${idx}_${normalizeItemKey(it.n).slice(0, 24).replace(/[^a-z0-9]/g, "")}`;
       try {
         await setDoc(doc(db, KDS_COL, stableId), {
           itemName: it.n,
@@ -6425,6 +6509,54 @@ export async function recallKDSItem(id: string): Promise<void> {
     });
   } catch (e) {
     console.warn("[KDS] recall failed", e);
+  }
+}
+
+/** 🆕 2026-06-26 (Khushi) — when a table is reassigned, the kitchen screen's
+ *  KDS rows still carry the OLD tableLabel/floorLabel (they snapshot it at
+ *  KOT-fire time), so the runner would carry the food to the WRONG table.
+ *  Re-stamp the new table onto every LIVE (pending OR ready) KDS row for this
+ *  booking — matched by reservationId AND coverDocId (a cover+table booking
+ *  fires under coverDocId). Single-field `where` only (no composite index);
+ *  picked-up/voided rows are left alone. FAIL-OPEN — a KDS sync miss must never
+ *  block the reassign, and paper KOTs are the fallback. */
+export async function updateKDSTableForReassign(input: {
+  reservationId?: string;
+  coverDocId?: string;
+  tableLabel: string;
+  floorLabel: string;
+}): Promise<void> {
+  try {
+    const keys = new Set<string>(
+      [input.reservationId, input.coverDocId].filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      ),
+    );
+    if (keys.size === 0) return;
+    const seen = new Set<string>();
+    for (const key of keys) {
+      const field = key === input.coverDocId && key !== input.reservationId ? "coverDocId" : "reservationId";
+      try {
+        const snap = await getDocs(query(collection(db, KDS_COL), where(field, "==", key), limit(200)));
+        await Promise.all(
+          snap.docs
+            .filter((d) => {
+              if (seen.has(d.id)) return false;
+              seen.add(d.id);
+              const st = (d.data() as any).status;
+              return st === "pending" || st === "ready";
+            })
+            .map((d) =>
+              updateDoc(doc(db, KDS_COL, d.id), {
+                tableLabel: input.tableLabel || "—",
+                floorLabel: input.floorLabel || "",
+              }).catch(() => {}),
+            ),
+        );
+      } catch { /* fail-open per key */ }
+    }
+  } catch (e) {
+    console.warn("[KDS] reassign table-label sync failed", e);
   }
 }
 

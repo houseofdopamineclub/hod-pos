@@ -20,7 +20,8 @@ import {
 import { db } from "@/lib/firebase";
 import { doc as fsDoc, getDoc as fsGetDoc, collection as fsCollection, query as fsQuery, where as fsWhere, limit as fsLimit, getDocs as fsGetDocs } from "firebase/firestore";
 import { getOperationalNightStr } from "@/lib/utils-pos";
-import { centeredPinPrompt, centeredAlert, closeOnBackdrop } from "@/lib/centered-ui";
+import { centeredPinPrompt, centeredAlert, closeOnBackdrop, centeredBusy } from "@/lib/centered-ui";
+import { getManagerDiscountOtp, clearManagerDiscountOtp, verifyManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
 import {
   getNextToken, createBillDue, appendBillDue, subscribeBillDue, fetchBillDueForNight, clearBillDue, sendBillDueWhatsApp,
   computeNcBill,
@@ -40,14 +41,72 @@ const BAR_MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e0
 // separate from the manager discount PIN. sha256("1919"). They cannot tap WAIVE
 // until this PIN is entered correctly.
 const BAR_WAIVE_HASH = "274dfec6e079fb08d6b5771537c54d3f0bd36c64c3d8ed0a4e6d2f201b489274";
+// 🆕 2026-06-26 (Khushi) — Bar discount approval moved off the standalone
+// Manager PIN onto the SAME Manager-WhatsApp-OTP flow Captain uses. The PIN
+// stays only as the silent network-fail fallback and is 959196 (sha256 below).
+const BAR_DISCOUNT_PIN_HASH = "de00cb8591ef351fb5099a4f38e84604a6fa975adb1cd2347fdd1b9995ee9e68";
 
-// 🆕 2026-06-24 (Khushi) — TEMPORARILY HIDE the Bar Mode discount UI. The
-// discount controls (recharge-overlay picker + SETTLE BILL discount % input)
-// were misleading/unclear, so we hide them for now and will revisit separately.
-// Set this back to `true` to restore the discount UI — all discount LOGIC and
-// state (barDiscPct, discInput, DiscountModal, math) is left fully intact, so
-// flipping the flag is the only change needed to bring it back.
-const SHOW_BAR_DISCOUNT = false;
+/** 🆕 2026-06-26 (Khushi) — Manager approval for a BAR discount via a one-time
+ *  WhatsApp OTP (server-minted, 10-min, single-use). The captain/bartender
+ *  enters the code OR the Manager PIN (959196), which stays as a SILENT
+ *  FALLBACK so a weak-wifi night never blocks the bar. Mirrors CaptainMode's
+ *  requireManagerApproval. Returns true only on a confirmed OTP or PIN.
+ *  Fail-open: a stalled/failed send never blocks — it shows the "use the PIN"
+ *  message instead. */
+async function requireBarManagerApproval(reason: string, ctx: OtpContext): Promise<boolean> {
+  const closeSendBusy = centeredBusy(
+    "📲 Sending approval code to the manager…\n\nPlease wait — don't tap anything.",
+    true,
+  );
+  let otp: Awaited<ReturnType<typeof getManagerDiscountOtp>>;
+  try {
+    otp = await getManagerDiscountOtp(ctx); // helper has its own timeout
+  } finally {
+    closeSendBusy();
+  }
+  const sent = otp.ok && otp.sentTo > 0;
+  const head = sent
+    ? `📲 A 6-digit code was sent to the manager's WhatsApp.\nEnter the CODE below to approve.\n\n`
+    : `⚠️ Couldn't send the WhatsApp code (network).\nEnter the Manager PIN to approve.\n\n`;
+  let verifiedViaOtp = false;
+  const entered = await centeredPinPrompt(head + reason, true, async (val) => {
+    const v = (val || "").trim();
+    if (!v) return false;
+    // 🆕 2026-06-26 (Khushi choice B) — the Manager PIN is a BACKUP that only
+    // works when the WhatsApp OTP could NOT be sent. If the code was delivered
+    // (sent), only the OTP approves; the PIN is rejected so it can't bypass it.
+    if (!sent && (await sha256(v)) === BAR_DISCOUNT_PIN_HASH) return true;
+    // Otherwise verify the OTP server-side (single-use, 10-min expiry).
+    if (otp.otpId) {
+      const closeVerifyBusy = centeredBusy("🔐 Verifying code…\n\nPlease wait.", true);
+      let okv = false;
+      try {
+        okv = await verifyManagerDiscountOtp(otp.otpId, v);
+      } finally {
+        closeVerifyBusy();
+      }
+      if (okv) { clearManagerDiscountOtp(ctx); verifiedViaOtp = true; }
+      return okv;
+    }
+    return false;
+  });
+  if (entered && verifiedViaOtp) {
+    await centeredAlert(
+      "OTP VERIFIED",
+      "Manager approval confirmed.\n\nThe discount is now applied.",
+      "success",
+      true,
+    );
+  }
+  return !!entered;
+}
+
+// 🆕 2026-06-26 (Khushi) — Bar Mode discount UI is BACK ON, now gated by the
+// Manager-WhatsApp-OTP flow (requireBarManagerApproval, PIN 959196 fallback)
+// instead of a standalone PIN. Presets are capped at 50% and the old >50%
+// CUSTOM-PIN path was removed. Wallet-bill discounts persist to
+// walletBillPrintLog.discount and surface in the Bar report DISCOUNT box.
+const SHOW_BAR_DISCOUNT = true;
 
 const BAR_BILL_VOID_REASONS: string[] = [
   "CUSTOMER REFUSED TO PAY",
@@ -1032,7 +1091,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         customerName: cv.name,
         staff: staffName,
         items: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
-        amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: amts.roundOff, total: finalAmount },
+        amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: amts.roundOff, total: finalAmount, discountPct: barDiscPct },
         billNumber: optBillNumber,
         isDuplicate: optIsDuplicate,
         tabletFloor: floor,
@@ -1210,7 +1269,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             customerName: cv.name,
             staff: staffName,
             items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty })),
-            amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB },
+            amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB, discountPct: barDiscPct },
             billNumber: optBillNumberB,
             isDuplicate: false,
             tabletFloor: floorB,
@@ -2016,7 +2075,23 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             style={{ padding: "8px 12px", borderRadius: 10, background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, flexShrink: 0 }}>× CLOSE</button>
         </div>
       <div style={{ padding: "10px 16px 0", background: "#fff", flexShrink: 0 }}>
-        <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search"
+        <input value={searchTerm} onChange={(e) => {
+            const v = e.target.value; setSearchTerm(v);
+            // 🆕 2026-06-26 (Khushi) — search already spans ALL groups; also jump
+            // the highlighted group tab to where the first match lives so e.g.
+            // "kingfisher" lights up the beer tab even if you were on FOOD.
+            const q = _norm(v);
+            if (q) {
+              const words = q.split(" ").filter(Boolean);
+              const hit = menuForPicker.find((m) => {
+                if (!m.available || menuOverrides[ovKey(m.name)]?.outOfStock) return false;
+                const gl = (GROUP_LABELS[m.group] || m.group).toLowerCase();
+                const hay = _norm(`${m.name} ${m.category} ${gl}`);
+                return words.every((w) => _wordMatch(w, hay));
+              });
+              if (hit && hit.group !== activeGroup) { setActiveGroup(hit.group); setSubCategory(""); }
+            }
+          }} placeholder="Search"
           style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "2px solid #000", color: "#000", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${menuGroups.length}, 1fr)`, gap: 6, marginBottom: 8 }}>
           {menuGroups.map((g) => {
@@ -2303,17 +2378,24 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
                       const sel = barDiscPct === q;
                       return (
                         <button key={q} type="button"
-                          onClick={() => { setDiscDdOpen(false); if (q <= 0) { setBarDiscPct(0); } else { setDiscSeed(q); setDiscOpen(true); } }}
+                          onClick={() => {
+                            setDiscDdOpen(false);
+                            if (q <= 0) { setBarDiscPct(0); return; }
+                            // 🆕 2026-06-26 (Khushi) — any non-zero discount needs
+                            // Manager approval (WhatsApp OTP, PIN 959196 fallback).
+                            void (async () => {
+                              const ok = await requireBarManagerApproval(
+                                `Apply ${q}% discount to this wallet bill.`,
+                                { by: staffName, tableId: String(cover.id || "bar"), discountPct: q, amount: Math.round(activeTotal || 0) },
+                              );
+                              if (ok) { setBarDiscPct(q); showToast(`✅ ${q}% discount applied`); }
+                            })();
+                          }}
                           style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "12px 14px", background: sel ? "#FF90E8" : "#fff", border: "none", borderBottom: idx < arr.length ? "1px solid #EEE" : "none", color: "#000", fontSize: 15, fontWeight: sel ? 900 : 700, cursor: "pointer" }}>
                           {q === 0 ? "NO DISCOUNT (0%)" : `${q}%`}
                         </button>
                       );
                     })}
-                    <button type="button"
-                      onClick={() => { setDiscDdOpen(false); setDiscSeed(null); requestDiscount(); }}
-                      style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "12px 14px", background: barDiscPct > 50 ? "#FF90E8" : "#fff", border: "none", borderTop: "2px solid #000", color: "#000", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
-                      🔒 CUSTOM % (MANAGER PIN)
-                    </button>
                   </div>
                 )}
                 {/* 🆕 2026-06-24 (Khushi) — once a discount is approved + applied,
@@ -2364,14 +2446,9 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         {/* v3.114 — DISCOUNT modal (in-app, no browser popup). Quick chips
             0/10/20/30/40/50% one-tap; custom % input; above 50% reveals
             inline Manager PIN field (validated via BAR_MANAGER_HASH). */}
-        {SHOW_BAR_DISCOUNT && discOpen && typeof document !== "undefined" && document.body && createPortal(
-          <DiscountModal
-            current={discSeed != null ? discSeed : barDiscPct}
-            onApply={(pct) => { setBarDiscPct(pct); setDiscOpen(false); setDiscSeed(null); showToast(`✅ Discount set to ${pct}%`); }}
-            onClose={() => { setDiscOpen(false); setDiscSeed(null); }}
-          />,
-          document.body
-        )}
+        {/* 🆕 2026-06-26 (Khushi) — the DiscountModal Manager-PIN flow was removed.
+            Bar discounts are now approved inline via the Manager-WhatsApp-OTP gate
+            (requireBarManagerApproval) the moment a preset % is tapped. */}
 
         {/* 🆕 2026-05-26 v3.26 (Khushi) — Inline PRINT BILL button REMOVED.
             Combined PRINT KOT+BILL lives in the sticky footer button row
@@ -4505,7 +4582,20 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
             style={{ padding: "8px 12px", borderRadius: 10, background: "transparent", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, flexShrink: 0 }}>× DONE</button>
         </div>
         <div style={{ padding: "10px 16px 0", background: "#fff", flexShrink: 0 }}>
-          <input value={pickSearch} onChange={(e) => setPickSearch(e.target.value)} placeholder="Search"
+          <input value={pickSearch} onChange={(e) => {
+              const v = e.target.value; setPickSearch(v);
+              // 🆕 2026-06-26 (Khushi) — search spans ALL groups; also jump the
+              // highlighted group tab to the first match's group for clarity.
+              const q = normLocal(v);
+              if (q) {
+                const hit = MENU_ITEMS.find((m) => {
+                  const gl = (GROUP_LABELS[m.group] || m.group).toLowerCase();
+                  const hay = normLocal(`${m.name} ${m.category} ${gl}`);
+                  return hay.includes(q);
+                });
+                if (hit && hit.group !== pickGroup) setPickGroup(hit.group);
+              }
+            }} placeholder="Search"
             style={{ width: "100%", padding: "12px 14px", borderRadius: 6, background: "transparent", border: "2px solid #000", color: "#000", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 10, textAlign: "center" }} />
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${pickerGroups.length}, 1fr)`, gap: 6, marginBottom: 8 }}>
             {pickerGroups.map((g) => {
@@ -5010,7 +5100,7 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
           customerName: g.customerName,
           staff: staffName,
           items: g.items.map((it) => ({ n: it.n, p: it.p, qty: it.qty })),
-          amounts: { subtotal: g.subtotal, serviceCharge: g.serviceCharge, cgst, sgst, discount: billDiscount, roundOff, total: finalAmt },
+          amounts: { subtotal: g.subtotal, serviceCharge: g.serviceCharge, cgst, sgst, discount: billDiscount, roundOff, total: finalAmt, discountPct: effPct },
           paymentMethod: method === "waived" ? "WAIVED" : method.toUpperCase(),
           billNumber: `NC-${g.tokens[0] || g.customerName.slice(0, 4).toUpperCase()}`,
           token: g.tokens[0],
@@ -5263,23 +5353,9 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
                 </div>
               </div>
 
-              {/* DISCOUNT INPUT — 🆕 v3.126 live-recompute, no APPLY needed.
-                  🆕 2026-06-24 (Khushi) — UNHIDDEN for NC settle: discount on the
-                  BILL DUE (after comp), HARD-CAPPED at 50%, and ANY discount (even
-                  1%) requires a Manager PIN (needPin = effPct > 0 in finalizeClear).
-                  The recharge-wallet discount stays hidden (SHOW_BAR_DISCOUNT). */}
-              <div style={{ marginBottom: 18 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>DISCOUNT % · MAX 50% · MANAGER PIN</div>
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <input type="number" min={0} max={50} value={discInput}
-                    onChange={(e) => onDiscChange(e.target.value)}
-                    onFocus={(e) => e.target.select()}
-                    placeholder="0"
-                    style={{ width: 140, padding: "14px 16px", borderRadius: 8, background: "#F4F4F0", border: "2px solid #000", color: "#000", fontSize: 22, fontWeight: 900, textAlign: "center", fontFamily: "'Space Grotesk', monospace" }} />
-                  {discPct > 0 && (<div style={{ fontSize: 12, color: "#000", fontWeight: 800, letterSpacing: 0.5 }}>✓ {discPct}% LIVE</div>)}
-                  {discPct > 0 && (<div style={{ fontSize: 10, color: "#000", background: "#FACC15", padding: "3px 8px", borderRadius: 6, fontWeight: 900, letterSpacing: 0.5 }}>⚠ MANAGER PIN</div>)}
-                </div>
-              </div>
+              {/* 🆕 2026-06-26 (Khushi) — NC discount REMOVED. NC tabs get a COMP
+                  (free items), never a discount, so the discount input is hidden.
+                  discInput stays 0 → finalizeClear's needPin/effPct never fire. */}
 
               {/* PAYMENT METHOD GRID — 🆕 v3.126 select-then-confirm (no auto-clear) */}
               <div style={{ fontSize: 11, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 8, textTransform: "uppercase" }}>PAID BY</div>
