@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   subscribeToHodEvents, createHodEvent, updateHodEvent, updateHodEventImageOnly,
-  toggleHodEventPublished, deleteHodEvent, deleteExpiredHodEvents, type HodEvent,
+  toggleHodEventPublished, deleteHodEvent, deleteExpiredHodEvents, uploadEventPoster, type HodEvent,
 } from "../lib/firestore-hod";
 
 type Tab = "list" | "form";
@@ -140,7 +140,19 @@ export default function EventsAdmin() {
 
   const handleImageFile = async (file: File) => {
     setBusy("img");
-    try { const url = await compressImage(file); setForm((f) => ({ ...f, image: url })); }
+    try {
+      const dataUrl = await compressImage(file);
+      // Upload the compressed poster to Firebase Storage and store ONLY the
+      // returned URL in the event doc — keeps event docs tiny so hodclub.in's
+      // event list paints instantly (posters used to be base64 INSIDE the doc,
+      // which the customer site had to fully download before the first paint).
+      // Fail-open: if the upload fails, fall back to the inline base64 image so
+      // the owner is never blocked from saving an event.
+      let stored = dataUrl;
+      try { stored = await uploadEventPoster(dataUrl); }
+      catch (up) { console.error("Poster upload to Storage failed — keeping inline image", up); }
+      setForm((f) => ({ ...f, image: stored }));
+    }
     catch (e: any) { alert("Image processing failed: " + (e?.message || String(e))); }
     setBusy("");
   };
@@ -148,45 +160,31 @@ export default function EventsAdmin() {
   const handleOptimizeAll = async () => {
     if (optimizeRunning.current) return;
     optimizeRunning.current = true;
-    const targets = events.filter((e) => {
-      if (!e.image) return false;
-      if (e.image.startsWith("http")) return true;
-      if (e.image.startsWith("data:") && e.image.length > 150_000) return true;
-      return false;
-    });
-    if (targets.length === 0) { optimizeRunning.current = false; alert("All posters are already optimized — nothing to do."); return; }
+    // Target every poster still stored as a base64 data: URI INSIDE the event
+    // doc — those are what bloat the events query and cause the slow load.
+    // http(s) images are already on Storage (or external) → nothing to move.
+    const targets = events.filter((e) => !!e.image && e.image!.startsWith("data:"));
+    if (targets.length === 0) { optimizeRunning.current = false; alert("All posters are already on fast storage — nothing to do."); return; }
     const totalKb = Math.round(targets.reduce((s, e) => s + (e.image?.length || 0), 0) / 1024);
     const ok = window.confirm(
-      `Optimize ${targets.length} poster(s)?\n\nCurrent total: ~${totalKb} KB\nWill resize to max 800px wide + WebP, target ~120 KB each.\n\nCustomer-facing site will load much faster.\nExisting bookings/stock are NOT touched.`
+      `Speed up hodclub.in?\n\n${targets.length} poster(s) (~${totalKb} KB) are stored INSIDE the event records, which slows the customer site's event loading.\n\nThis moves them to fast image storage — posters look identical — and is safe to run during live bookings.\n\nExisting bookings/stock are NOT touched.`
     );
     if (!ok) { optimizeRunning.current = false; return; }
     setBusy("optimize-all");
     let done = 0, failed = 0, savedKb = 0;
     for (const ev of targets) {
       try {
-        let src = ev.image!;
-        if (src.startsWith("http")) {
-          const r = await fetch(src);
-          const blob = await r.blob();
-          src = await new Promise<string>((res, rej) => {
-            const fr = new FileReader();
-            fr.onload = () => res(String(fr.result));
-            fr.onerror = rej;
-            fr.readAsDataURL(blob);
-          });
-        }
-        const before = src.length;
-        const out = await compressImage(src);
-        if (out.length < before * 0.9) {
-          await updateHodEventImageOnly(ev.id, out);
-          savedKb += Math.round((before - out.length) / 1024);
-          done++;
-        }
+        const before = ev.image!.length;
+        const out = await compressImage(ev.image!);   // shrink first
+        const url = await uploadEventPoster(out);       // move OUT of the doc → Storage
+        await updateHodEventImageOnly(ev.id, url);       // store only the short URL
+        savedKb += Math.round(before / 1024);            // the whole base64 leaves the doc
+        done++;
       } catch (e) { console.error("Optimize failed for", ev.id, e); failed++; }
       setBusy(`optimize-${done + failed}/${targets.length}`);
     }
     setBusy(""); optimizeRunning.current = false;
-    alert(`✅ Done: ${done} optimized, ${failed} failed.\nSaved ~${savedKb} KB on the live site.`);
+    alert(`✅ Done: ${done} moved to fast storage, ${failed} failed.\nEvent records are now ~${savedKb} KB lighter — hodclub.in loads much faster.`);
   };
 
   const tStr = todayStr();
@@ -231,7 +229,7 @@ export default function EventsAdmin() {
         <div className="flex gap-2 flex-wrap">
           <button onClick={handleOptimizeAll} disabled={busy.startsWith("optimize")}
             style={{ padding: "8px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", background: "#FFFBEB", color: "#000", border: "2px solid #F2C744", boxShadow: SHADOW_SM, opacity: busy.startsWith("optimize") ? 0.6 : 1 }}
-            title="Re-compress all event posters to <150 KB WebP — speeds up hodclub.in">
+            title="Move event posters to fast image storage — speeds up hodclub.in event loading">
             {busy.startsWith("optimize-") ? `⏳ ${busy.replace("optimize-", "")}` :
              busy === "optimize-all" ? "⏳ Starting…" : "🚀 Optimize Posters"}
           </button>

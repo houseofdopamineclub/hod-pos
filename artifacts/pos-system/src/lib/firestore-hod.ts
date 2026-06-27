@@ -3,7 +3,8 @@ import {
   onSnapshot, query, where, orderBy, limit, increment, arrayUnion,
   serverTimestamp, runTransaction, Timestamp, type Unsubscribe,
 } from "firebase/firestore";
-import { db, authReady } from "./firebase";
+import { db, authReady, storage } from "./firebase";
+import { ref as _storageRef, uploadString as _uploadString, getDownloadURL as _getDownloadURL } from "firebase/storage";
 import { getOperationalNightStr, getCoverExpiryFor } from "./utils-pos";
 // 🆕 2026-05-26 v3.10 (Fix #1 Listener Scoping) — floor lookup for the scoped
 // reservations listener. getFloorFromTableId() returns null for off-map IDs;
@@ -785,6 +786,24 @@ export async function toggleHodEventPublished(id: string, next: boolean): Promis
  *  Optimize Posters bulk re-compressor. */
 export async function updateHodEventImageOnly(id: string, image: string): Promise<void> {
   await updateDoc(doc(db, EVENTS_COL, id), { image });
+}
+
+/** ⚡ 2026-06-27 (Khushi — event-load speedup): upload a poster to Firebase
+ *  Storage and return its public (tokenised) download URL, instead of storing
+ *  a base64 data: URI inside the event doc. Posters used to live INSIDE each
+ *  Firestore event document (up to ~700 KB of base64 each), so the customer
+ *  site had to download EVERY poster before the first event could paint — the
+ *  5-7s "loading events" wait. Storing only a short URL keeps event docs tiny
+ *  so the list paints instantly and images stream in lazily via <img>.
+ *  Tokenised getDownloadURL() URLs are publicly readable (the token grants
+ *  access, bypassing Storage rules) so the customer site needs no rule change.
+ *  Input is a data: URL (already compressed by the caller). */
+export async function uploadEventPoster(dataUrl: string): Promise<string> {
+  const ext = dataUrl.startsWith("data:image/webp") ? "webp" : "jpg";
+  const name = `event-posters/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const r = _storageRef(storage, name);
+  await _uploadString(r, dataUrl, "data_url");
+  return await _getDownloadURL(r);
 }
 
 /** Bar-mode helper: search BOTH bookings + guestlist by name/phone/ref so the
