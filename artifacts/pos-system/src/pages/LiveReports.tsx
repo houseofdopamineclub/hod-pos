@@ -146,6 +146,10 @@ export default function LiveReports() {
   // they DON'T count toward occupancy/LIVE (a released table is genuinely free).
   const [history, setHistory] = useState<HodTableReservation[]>([]);
   const [loading, setLoading] = useState(true);
+  // 🔍 2026-06-27 (Khushi) — table-by-table BREAKDOWN toggle (default off): trace
+  // a mystery floor total (e.g. "First billed ₹X with no visible table") to the
+  // exact booking behind it. Reads already-loaded data → ZERO extra Firestore reads.
+  const [showDetail, setShowDetail] = useState(false);
 
   const nextDay = useMemo(() => nextDayStr(night), [night]);
 
@@ -221,6 +225,11 @@ export default function LiveReports() {
     // below the printed bill (e.g. FD7). Surfaced as a warning in the DISCOUNT box.
     let aggInhouseDiscCount = 0;
     let aggInhouseDiscAmt = 0;
+
+    // 🔍 2026-06-27 (Khushi) — per-booking BREAKDOWN rows so any floor total can be
+    // traced to the exact table behind it (display-only; never feeds money math).
+    type DetailRow = { table: string; floor: Floor3; src: "live" | "released"; paid: boolean; billed: number; unbilled: number; items: number; channel: Channel; offMap: boolean; occupies: boolean; name: string };
+    const details: DetailRow[] = [];
 
     const addItem = (it: HodOrderItem) => {
       const name = (it.n || "").trim();
@@ -356,6 +365,26 @@ export default function LiveReports() {
 
       // top items (table sales)
       for (const it of items) addItem(it);
+
+      // 🔍 BREAKDOWN row (display-only). Captures EVERY non-cancelled booking so a
+      // floor total can be traced to its table. occupies = counts toward LIVE/
+      // AVAILABLE (live real table); offMap = tableId not on the floor plan → it
+      // falls into the "First" catch-all bucket.
+      if (isPaid || openBill || realFloor) {
+        details.push({
+          table: (r.tableId || "").trim() || "(no table)",
+          floor: F,
+          src: countOccupancy ? "live" : "released",
+          paid: isPaid,
+          billed: isPaid ? realized : 0,
+          unbilled: openBill ? billFinal : 0,
+          items: items.length,
+          channel: ch,
+          offMap: !doorFloorForTable(r.tableId || ""),
+          occupies: !!realFloor,
+          name: (r.customerName || (r as any).name || "").toString().slice(0, 22),
+        });
+      }
     };
 
     // LIVE reservations count toward occupancy; RELEASED history does NOT
@@ -383,7 +412,7 @@ export default function LiveReports() {
       Array.from(m.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 5);
     const topCaptain = Array.from(cap.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.amt - a.amt).slice(0, 5);
 
-    return { floor, channel, aggSettle, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt };
+    return { floor, channel, aggSettle, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt, details };
   }, [reservations, history, covers]);
 
   const sumFloors = (pick: (a: FloorAgg) => number) => FLOORS3.reduce((s, f) => s + pick(agg.floor[f]), 0);
@@ -627,6 +656,60 @@ export default function LiveReports() {
               ]} />
             </Box>
           </div>
+
+          {/* 🔍 2026-06-27 (Khushi) — TABLE-BY-TABLE BREAKDOWN. Traces every floor
+              total to the exact booking behind it. RELEASED = settled then closed
+              (off the floor map but its money stays in BILLED); OFF-MAP = table not
+              on the floor plan, so it's counted under "First". Reads already-loaded
+              data → ZERO extra Firestore reads. Default collapsed. */}
+          <Box title="🔍 TABLE-BY-TABLE BREAKDOWN" hint="Every booking behind the floor totals above — trace a mystery number to its exact table. RELEASED = already settled & closed (stays in BILLED). OFF-MAP = table not on the floor plan, so it lands under First.">
+            <button onClick={() => setShowDetail((s) => !s)}
+              style={{ padding: "9px 16px", borderRadius: 8, background: showDetail ? C.ink : C.card, color: showDetail ? "#fff" : C.ink, border: `2px solid ${C.ink}`, fontSize: 12, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer", marginBottom: showDetail ? 12 : 0 }}>
+              {showDetail ? "▲ HIDE" : "▼ SHOW"} {fmtN(agg.details.length)} BOOKING{agg.details.length === 1 ? "" : "S"}
+            </button>
+            {showDetail && (() => {
+              const rows = [...agg.details].sort((a, b) => (b.billed - a.billed) || (b.unbilled - a.unbilled));
+              if (rows.length === 0) return <div style={{ fontSize: 13, fontWeight: 700, color: C.grey }}>No bookings this night.</div>;
+              // Reconciliation totals across ALL rows (not just the shown slice) so
+              // the breakdown sum always matches the floor BILLED/UNBILLED boxes.
+              const totBilled = rows.reduce((s, d) => s + d.billed, 0);
+              const totUnbilled = rows.reduce((s, d) => s + d.unbilled, 0);
+              const CAP = 200;
+              const shown = rows.slice(0, CAP);
+              return (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: C.ink, marginBottom: 10 }}>
+                    Total across all {fmtN(rows.length)} booking{rows.length === 1 ? "" : "s"}: BILLED {fmtRs(totBilled)} · UNBILLED {fmtRs(totUnbilled)} <span style={{ color: C.grey, fontWeight: 700 }}>(matches the floor totals above)</span>
+                  </div>
+                  <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 560 }}>
+                    <thead><tr style={{ background: C.bg }}><Th>Table</Th><Th>Floor</Th><Th>State</Th><Th right>Billed</Th><Th right>Unbilled</Th><Th right>Items</Th><Th>Source</Th></tr></thead>
+                    <tbody>
+                      {shown.map((d, i) => {
+                        const state = d.src === "released" ? "RELEASED" : d.paid ? "PAID" : "LIVE";
+                        const stateColor = d.src === "released" ? "#B45309" : d.paid ? C.accent : C.ink;
+                        return (
+                          <tr key={i}>
+                            <Cell bold>{d.table}{d.offMap ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 900, color: "#fff", background: "#B91C1C", padding: "1px 5px", borderRadius: 5 }}>OFF-MAP</span> : null}</Cell>
+                            <Cell>{d.floor}</Cell>
+                            <Cell><span style={{ color: stateColor, fontWeight: 900 }}>{state}</span></Cell>
+                            <Cell num right>{d.billed > 0 ? fmtRs(d.billed) : "—"}</Cell>
+                            <Cell num right>{d.unbilled > 0 ? fmtRs(d.unbilled) : "—"}</Cell>
+                            <Cell num right>{fmtN(d.items)}</Cell>
+                            <Cell>{d.channel}{d.name ? ` · ${d.name}` : ""}</Cell>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {rows.length > CAP && (
+                    <div style={{ fontSize: 12, fontWeight: 800, color: C.grey, marginTop: 10 }}>
+                      Showing the {fmtN(CAP)} biggest of {fmtN(rows.length)} bookings (sorted by billed ₹). The Total line above still counts every booking.
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </Box>
 
           {/* SALES BY CHANNEL */}
           <Box title="🛵 SALES BY CHANNEL" hint="Total table sales split by Swiggy · Zomato · in-house · EazyDiner · others.">

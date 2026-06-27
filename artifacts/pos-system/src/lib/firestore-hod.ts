@@ -653,7 +653,8 @@ export interface HodEvent {
   sold?: number;
   description?: string;
   color?: string;          // hex
-  image?: string;          // URL or base64 data:image/...
+  image?: string;          // primary poster (URL or base64) — = images[0]; kept for back-compat
+  images?: string[];       // 🆕 2026-06-27 carousel — up to 5 poster URLs (Storage)
   published?: boolean;
   // legacy single-field artist support (some old docs)
   artist?: string;
@@ -761,6 +762,7 @@ export async function updateHodEvent(id: string, data: Partial<HodEvent>): Promi
     description: clean.description,
     color: clean.color,
     image: clean.image,
+    images: clean.images,
     published: clean.published,
   };
   // Stock + 6AM-reset snapshots only update if the admin actually edited
@@ -947,9 +949,22 @@ function normalizeEvent(d: Partial<HodEvent>): HodEvent {
     sold: n(d.sold, 0),
     description: d.description || "",
     color: d.color || "#C9A84C",
-    image: d.image || "",
+    ...normalizeEventImages(d),
     published: d.published === true,
   };
+}
+
+// 🆕 2026-06-27 (Khushi) — carousel poster normalization. Up to 5 poster URLs
+// live in `images[]`; `image` mirrors images[0] so every legacy reader (door
+// tablet, old customer build) that only knows `image` still shows a poster.
+// Back-compat: a doc with only the old single `image` becomes images=[image].
+function normalizeEventImages(d: Partial<HodEvent>): { image: string; images: string[] } {
+  const arr = (Array.isArray(d.images) ? d.images : [])
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  const single = String(d.image || "").trim();
+  const images = (arr.length ? arr : single ? [single] : []).slice(0, 5);
+  return { image: images[0] || single || "", images };
 }
 const MENU_OVERRIDES_COL = "posMenuOverrides";
 

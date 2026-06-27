@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
 import { StaffLogin } from "@/components/StaffLogin";
 import {
-  sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
+  sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeToTableHistory, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
   ensureCoverForAggregatorArrival,
   markTablePaid, releaseTable, setReservationAggregator, updateRoundItems,
   setSettleRequest, clearSettleRequest,
@@ -6300,6 +6300,18 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   const [txOpen, setTxOpen] = useState(false);
   const [txFull, setTxFull] = useState(false);
   const [txExpanded, setTxExpanded] = useState<Record<string, boolean>>({});
+  // 🆕 2026-06-27 (Khushi) — RELEASED tables must STILL show in TABLE
+  // TRANSACTIONS (they were vanishing the instant a captain tapped Release,
+  // because releaseTable archives to `tableHistory` and DELETES the live doc).
+  // A released table is settled+closed → it belongs in the CLEARED tab. We read
+  // the released archive ONLY while the panel is OPEN (gated, like Bar Mode's
+  // covers feed) so an idle tablet pays ZERO extra Firestore reads. Fail-open.
+  const [txHistory, setTxHistory] = useState<HodTableReservation[]>([]);
+  useEffect(() => {
+    if (!txOpen) { setTxHistory([]); return; }
+    const unsub = subscribeToTableHistory(date, (h) => setTxHistory(h || []));
+    return () => { unsub(); };
+  }, [txOpen, date]);
   // 🆕 2026-06-12 v3.268 (Khushi) — OPEN / CLEARED tables filter for the panel.
   const [txFilter, setTxFilter] = useState<"all" | "open" | "cleared">("all");
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
@@ -6435,8 +6447,29 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // owner never misreads it as a discrepancy. Display/EXPORT ONLY — no writes.
   const _txTime = (ms: number) =>
     ms ? new Date(ms).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true }) : "—";
-  const txRows = allReservations
-    .map((r) => {
+  // 🆕 2026-06-27 (Khushi) — merge LIVE tables + RELEASED archive (txHistory)
+  // into one source so released tables still appear (in the CLEARED tab). Dedupe
+  // by bookingRef (same key logic as Live Reports) so a row that somehow lands
+  // in both lists is counted once; live rows win over their archived copy.
+  const _txDedupeKey = (r: HodTableReservation) =>
+    r.bookingRef ? `ref:${r.bookingRef}` : `cmp:${(r.tableId || "").toUpperCase()}|${r.bookedAt || ""}|${r.amountPaid || 0}|${r.arrivalTime || ""}`;
+  const _txSeen = new Set<string>();
+  const _txSource: { r: HodTableReservation; released: boolean }[] = [];
+  for (const r of allReservations) {
+    const k = _txDedupeKey(r);
+    if (_txSeen.has(k)) continue;
+    _txSeen.add(k);
+    _txSource.push({ r, released: false });
+  }
+  for (const r of txHistory) {
+    if ((r.status || "").toLowerCase() === "cancelled") continue;
+    const k = _txDedupeKey(r);
+    if (_txSeen.has(k)) continue;
+    _txSeen.add(k);
+    _txSource.push({ r, released: true });
+  }
+  const txRows = _txSource
+    .map(({ r, released }) => {
       const rounds = r.tabRounds || [];
       const allItems = rounds.flatMap((rd) => rd.items || []);
       const discPct = r.discountPercent || 0;
@@ -6491,9 +6524,12 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       // ("Discount (10%) −₹104"). Derived from the ₹ discount vs the pre-discount
       // subtotal so it is correct regardless of source (captain or aggregator).
       const discountPct = subtotal > 0 && discount > 0 ? Math.round((discount / subtotal) * 100) : 0;
+      // A RELEASED table is settled+closed and off the floor → it always counts
+      // as CLEARED (never OPEN), regardless of any odd archived paymentStatus.
+      const cleared = isPaid || released;
       return {
         r, rounds, allItems, billed, subtotal, discount, discountPct, serviceCharge, tax,
-        isPaid, amountPaid, walletPaid, estimated, override, inhouseDiscOnAgg,
+        isPaid, amountPaid, walletPaid, estimated, override, inhouseDiscOnAgg, released, cleared,
         status: r.paymentStatus || "open", ms,
       };
     })
@@ -6502,13 +6538,13 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     .filter((row) => row.rounds.length > 0 || row.billed > 0)
     .sort((a, b) => b.ms - a.ms);
   // 🆕 2026-06-12 v3.268 (Khushi) — OPEN = unsettled tables; CLEARED = settled
-  // (paid) tables. When a specific filter is chosen we show ALL of them (no
-  // 10-row cap) so "OPEN TABLES" / "CLEARED TABLES" is a complete list.
-  const txOpenCount = txRows.filter((r) => !r.isPaid).length;
-  const txClearedCount = txRows.filter((r) => r.isPaid).length;
+  // (paid) tables. Released tables are always CLEARED. When a specific filter is
+  // chosen we show ALL of them (no 10-row cap) so the list is complete.
+  const txOpenCount = txRows.filter((r) => !r.cleared).length;
+  const txClearedCount = txRows.filter((r) => r.cleared).length;
   const txFiltered =
-    txFilter === "open" ? txRows.filter((r) => !r.isPaid)
-    : txFilter === "cleared" ? txRows.filter((r) => r.isPaid)
+    txFilter === "open" ? txRows.filter((r) => !r.cleared)
+    : txFilter === "cleared" ? txRows.filter((r) => r.cleared)
     : txRows;
   const txShown = (txFull || txFilter !== "all") ? txFiltered : txFiltered.slice(0, 10);
   const _txStatusPill = (status: string, mode?: string) => {
@@ -6530,7 +6566,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         _txTime(row.ms), r.tableId || "", r.floorLabel || r.floor || "", r.customerName || "", r.phone || "", r.bookingRef || "",
         Math.round(row.subtotal), Math.round(row.discount), Math.round(row.serviceCharge), Math.round(row.tax), Math.round(row.billed),
         row.isPaid ? Math.round(row.amountPaid) : "", Math.round(row.walletPaid), r.paymentMode || "",
-        row.estimated ? `${row.status} (estimated)` : row.override ? `${row.status} (SC waiver/adjusted)` : row.status, items,
+        row.released ? `${row.status} (released)` : row.estimated ? `${row.status} (estimated)` : row.override ? `${row.status} (SC waiver/adjusted)` : row.status, items,
       ].map(esc).join(","));
     }
     const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -7046,6 +7082,12 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                               <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: pill.bg, color: pill.fg }}>
                                 {pill.label}
                               </span>
+                              {row.released && (
+                                <span title="This table was settled and then RELEASED off the floor. It still counts in the night's takings."
+                                  style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#B45309", color: "#fff" }}>
+                                  📤 RELEASED
+                                </span>
+                              )}
                               {row.override && (
                                 <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#7C3AED", color: "#fff" }}>
                                   ⚠ SC WAIVER / ADJUSTED
