@@ -3876,18 +3876,34 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       }
     }
   }
-  // 🆕 2026-06-25 (Khushi) — NC items count toward FOOD/DRINK sales + TOP-5,
-  // exactly like a bar tab (the food/drink WAS served on the NC tab). Raw item
-  // value (before tax); NC items carry no `cat`, so smoke/food keys off name.
+  // 🆕 2026-06-28 (Khushi / accountant rule) — NC tabs: the FIRST ₹1000 of item
+  // value is COMP (no SC/tax, "given away"). Everything ABOVE ₹1000 is billed
+  // like a NORMAL bar bill (SC + GST on the overage) and MERGES into the bar's
+  // main NET / GROSS / SC / TAX / BILLS. Only the ₹1000 comp stays separate in
+  // the NC GIVEN AWAY block below. We fold each NC row's CHARGEABLE item value
+  // into the SAME drink/food/other buckets — proportional to the comp split —
+  // so NET = liquor + food + others − discount stays exact. computeNcBill is the
+  // single source of truth (recompute from items → self-heals legacy rows).
+  let ncChargeNet = 0, ncChargeSC = 0, ncChargeTax = 0, ncChargeGross = 0, ncChargeBillCount = 0;
   for (const r of nc) {
-    for (const it of (r.items || [])) {
-      const line = (it.p || 0) * (it.qty || 0);
+    const items = r.items || [];
+    const rb = computeNcBill(items, 1000);
+    ncChargeSC += rb.serviceCharge;
+    ncChargeTax += rb.gst;
+    ncChargeGross += rb.amountDue;                          // base + SC + tax on the >₹1000 part
+    ncChargeNet += Math.max(0, rb.amountDue - rb.serviceCharge - rb.gst);
+    if (rb.amountDue > 0) ncChargeBillCount++;
+    const fracR = rb.subtotal > 0 ? Math.min(1, Math.max(0, (rb.subtotal - rb.compApplied) / rb.subtotal)) : 0;
+    if (fracR <= 0) continue;
+    for (const it of items) {
+      const chargeLine = (it.p || 0) * (it.qty || 0) * fracR;  // chargeable (>₹1000) slice of this item
+      if (chargeLine <= 0) continue;
       const name = it.n || "—";
       const isSmoke = SMOKE_RE.test(name);
       const isFood = (it as any).t === "food" || FOOD_NAMES.has(normName(name));
-      if (isSmoke) { otherSales += line; }
-      else if (isFood) { foodSales += line; foodQty[name] = (foodQty[name] || 0) + (it.qty || 0); }
-      else { drinkSales += line; drinkQty[name] = (drinkQty[name] || 0) + (it.qty || 0); }
+      if (isSmoke) otherSales += chargeLine;
+      else if (isFood) foodSales += chargeLine;
+      else drinkSales += chargeLine;
     }
   }
   const top5 = (m: Record<string, number>): [string, number][] =>
@@ -3917,6 +3933,11 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
     scTotal += last.serviceCharge || 0;
     taxTotal += last.tax || 0;
   }
+  // 🆕 2026-06-28 (Khushi / accountant rule) — the CHARGEABLE (>₹1000) part of NC
+  // tabs is billed like a normal bar bill, so its SC + GST MERGE into the bar's
+  // main service-charge / tax totals (the comped ₹1000 carries none).
+  scTotal += ncChargeSC;
+  taxTotal += ncChargeTax;
 
   // ── NC from billDue ledger ────────────────────────────────────────
   // (`nc` is hoisted above the sales loop so NC items fold into FOOD/DRINK.)
@@ -3966,18 +3987,10 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // = totalBill. Cleared waived: comp + amountDue(=waive) = totalBill. NC DUE
   // stays = amountDue (the realistic post-comp collectible), never the full bill.
   const ncClearedRows = nc.filter((r) => r.status !== "open");
-  // Full tax-inclusive NC bill value → GROSS + BILLS GENERATED. Stored totalBill
-  // (SC+GST landed on NC tabs); legacy rows fall back to raw item sum.
-  const ncTotalBill = nc.reduce((s, r) =>
-    s + (typeof r.totalBill === "number"
-      ? r.totalBill
-      : (r.items || []).reduce((ss: number, it: any) => ss + (it.qty || 0) * (it.p ?? it.price ?? 0), 0)), 0);
-  const ncBillCount = nc.length;
-  // NC service charge + GST → SERVICE CHARGE + TAXES tiles (legacy rows = 0).
-  const ncSC = nc.reduce((s, r) => s + (typeof r.serviceCharge === "number" ? r.serviceCharge : 0), 0);
-  const ncTax = nc.reduce((s, r) => s + (typeof r.tax === "number" ? r.tax : 0), 0);
-  scTotal += ncSC;
-  taxTotal += ncTax;
+  // The chargeable NC sales (ncChargeNet / ncChargeGross / ncChargeSC /
+  // ncChargeTax / ncChargeBillCount) are computed in the fold loop above and
+  // already merged into the bar's NET / GROSS / SC / TAX / BILLS. The NC section
+  // below re-shows them for detail (labelled "included in bar sales above").
   // NC cash actually collected (after comp/discount/waive) → TOTAL COLLECTED.
   // Settled, non-waived rows only; waived collects ₹0.
   const ncCollectedRows = ncClearedRows.filter((r) => r.paymentMethod !== "waived");
@@ -4003,11 +4016,15 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // taxTotal are ₹0 for bills printed before v3.224, so GROSS collapsed onto NET
   // (the infamous "NET 3554 == GROSS 3554"). billTotal already carries SC+tax,
   // so it reflects the true cash figure retroactively.
+  // 🆕 2026-06-28 (Khushi / accountant rule) — NET now INCLUDES the chargeable
+  // (>₹1000) NC item value: the fold loop above already added each NC row's
+  // chargeable item slice into baseSales (drink/food/other), so NET = bar wallet
+  // F&B + NC chargeable F&B, minus wallet discount. The comped ₹1000 is excluded
+  // (it's pure give-away, shown in NC GIVEN AWAY).
   const netSales = Math.max(0, baseSales - discountTotal);
-  // GROSS = actual wallet money redeemed (avoids the recompute ₹1 drift) + the
-  // FULL tax-inclusive NC bill value. (Was billTotal + ncComp.) NET picks up NC
-  // automatically — NC item value already folds into baseSales above.
-  const grossSales = barRedeemed + ncTotalBill;
+  // GROSS = wallet money redeemed + chargeable NC gross (base + SC + tax on the
+  // >₹1000 part). The comp carries no money, so it never enters GROSS.
+  const grossSales = barRedeemed + ncChargeGross;
 
   // 🆕 2026-06-24 (Khushi) — "TOTAL PROFIT" = NET sales + LEFTOVER wallet balance.
   // Khushi confirmed the venue NEVER refunds and wallets EXPIRE after the event,
@@ -4040,9 +4057,9 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Others (smoke / hookah)", Math.round(otherSales)],
       ["Bills generated — wallet (count)", billCount],
       ["Bills generated — wallet (amount)", Math.round(barRedeemed)],
-      ["Bills generated — NC (count)", ncBillCount],
-      ["Bills generated — NC (amount, incl tax)", Math.round(ncTotalBill)],
-      ["Bills generated — TOTAL (amount)", Math.round(barRedeemed + ncTotalBill)],
+      ["Bills generated — NC chargeable (count)", ncChargeBillCount],
+      ["Bills generated — NC chargeable (amount, >₹1000 incl tax)", Math.round(ncChargeGross)],
+      ["Bills generated — TOTAL (amount)", Math.round(barRedeemed + ncChargeGross)],
       ["NC collected after payment (settled)", Math.round(ncCollected)],
       ["TOTAL collected incl NC (cash taken)", Math.round(barTotalCollected + ncCollected)],
       ["NC total (count)", ncCount],
@@ -4058,12 +4075,14 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Discount applied — NC tabs (amount)", Math.round(ncDiscount)],
       ["Discount applied — TOTAL (count)", discountCountAll],
       ["Discount applied — TOTAL (amount)", Math.round(discountTotalAll)],
-      ["Service charge (wallet + NC)", Math.round(scTotal)],
-      ["  of which NC service charge", Math.round(ncSC)],
-      ["Taxes (wallet + NC)", Math.round(taxTotal)],
-      ["  of which NC taxes", Math.round(ncTax)],
-      ["NET sales", Math.round(netSales)],
-      ["GROSS sales", Math.round(grossSales)],
+      ["Service charge (bar wallet + NC chargeable)", Math.round(scTotal)],
+      ["Taxes (bar wallet + NC chargeable)", Math.round(taxTotal)],
+      ["NET sales (bar wallet + NC chargeable)", Math.round(netSales)],
+      ["GROSS sales (bar wallet + NC chargeable)", Math.round(grossSales)],
+      ["— of which NC chargeable net (>₹1000 item value)", Math.round(ncChargeNet)],
+      ["— of which NC chargeable gross (incl tax)", Math.round(ncChargeGross)],
+      ["— of which NC chargeable service charge", Math.round(ncChargeSC)],
+      ["— of which NC chargeable taxes", Math.round(ncChargeTax)],
       ["Leftover wallet balance (expired = profit)", Math.round(barNotRedeemed)],
       ["TOTAL EARNINGS (NET sales + leftover wallet)", Math.round(barProfit)],
     ];
@@ -4214,10 +4233,10 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
                 TOTAL COLLECTED to 6th (end of wallets row). */}
             {/* TOP-LINE: NET / GROSS / BILLS GENERATED */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
-              <Tile label="NET SALES" value={fmtRs(netSales)} sub="Food + drink value before SC & tax (wallet + NC), minus discount" />
-              <Tile label="GROSS SALES" value={fmtRs(grossSales)} sub="Total value of all bills incl. SC + tax (wallet + NC)" />
-              <StatTable label="BILLS GENERATED" count={billCount + ncBillCount}
-                rows={[["Wallet Bills", fmtRs(barRedeemed)], ["NC Bills", fmtRs(ncTotalBill)], ["Total", fmtRs(barRedeemed + ncTotalBill)]]} />
+              <Tile label="NET SALES" value={fmtRs(netSales)} sub="Food + drink before SC & tax, minus discount. Includes NC chargeable (item value above ₹1000)." />
+              <Tile label="GROSS SALES" value={fmtRs(grossSales)} sub="All bills incl. SC + tax. Includes NC chargeable (above ₹1000). Comped ₹1000 excluded." />
+              <StatTable label="BILLS GENERATED" count={billCount + ncChargeBillCount}
+                rows={[["Wallet Bills", fmtRs(barRedeemed)], ["NC Chargeable", fmtRs(ncChargeGross)], ["Total", fmtRs(barRedeemed + ncChargeGross)]]} />
             </div>
 
             {/* 🆕 TOTAL EARNINGS = NET sales + leftover (expired, non-refundable) wallet balance */}
@@ -4251,8 +4270,8 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
 
             {/* SALES */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
-              <Tile label="LIQUOR / DRINKS SALES" value={fmtRs(drinkSales)} sub="Item value before tax (wallet + NC)" />
-              <Tile label="FOOD SALES" value={fmtRs(foodSales)} sub="Item value before tax (wallet + NC)" />
+              <Tile label="LIQUOR / DRINKS SALES" value={fmtRs(drinkSales)} sub="Item value before tax (incl. NC chargeable)" />
+              <Tile label="FOOD SALES" value={fmtRs(foodSales)} sub="Item value before tax (incl. NC chargeable)" />
               <Tile label="OTHERS (SMOKE / HOOKAH)" value={fmtRs(otherSales)}
                 sub={otherSales === 0 ? "₹0 until smoke items are added to the menu" : undefined} />
             </div>
@@ -4263,21 +4282,30 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
               <TopList label="TOP 5 FOOD (BY QTY)" rows={topFood} />
             </div>
 
-            {/* NC + DEDUCTIONS — 🆕 v3.226 (Khushi): NC TOTAL / NC DUE / DISCOUNT
-                APPLIED now render as bold tables inside the box (count + money row). */}
+            {/* DEDUCTIONS — bar wallet only (NC is reported separately below). */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 4 }}>
+              <StatTable label="DISCOUNT APPLIED" count={discountCount}
+                rows={[["Wallet Bills", fmtRs(discountTotal)]]} />
+              <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} sub="Bar wallet + NC chargeable (above ₹1000)" />
+              <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} sub="Bar wallet + NC chargeable (above ₹1000)" />
+            </div>
+
+            {/* 🆕 2026-06-28 (Khushi) — NC (NON-CHARGEABLE) reporting is now FULLY
+                SEPARATE from the bar's main NET / GROSS / SC / TAX / DISCOUNT. */}
+            <div style={{ fontSize: 13, fontWeight: 900, color: "#000", letterSpacing: 0.6, textTransform: "uppercase", margin: "16px 2px 8px", borderTop: "2px solid #000", paddingTop: 14 }}>
+              NC — FIRST ₹1000 COMP (GIVEN AWAY) · ABOVE ₹1000 BILLED INTO BAR SALES
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 4 }}>
+              <StatTable label="NC CHARGEABLE (incl. in bar sales above)" count={ncChargeBillCount}
+                rows={[["NC Net (>₹1000 items)", fmtRs(ncChargeNet)], ["NC Gross (incl tax)", fmtRs(ncChargeGross)], ["NC Service Charge", fmtRs(ncChargeSC)], ["NC Taxes", fmtRs(ncChargeTax)]]} />
               <StatTable label="NC GIVEN AWAY" count={ncCount}
-                accentIdx={0} note="Total NC Given = Waived + Comp + Discount"
-                rows={[["Total NC Given", fmtRs(ncGivenTotal)], ["Waived", fmtRs(ncWaived)], ["Comp Given", fmtRs(ncComp)], ["Discount Given", fmtRs(ncDiscount)]]} />
+                accentIdx={0} note="Total NC Given = Comp (₹1000 each) + Waived + Discount"
+                rows={[["Total NC Given", fmtRs(ncGivenTotal)], ["Comp Given (≤₹1000)", fmtRs(ncComp)], ["Waived", fmtRs(ncWaived)], ["Discount Given", fmtRs(ncDiscount)]]} />
               <StatTable label="NC DUE" count={ncDueCount} rows={[["Still Owed", fmtRs(ncDue)]]} />
-              <StatTable label="DISCOUNT APPLIED" count={discountCountAll}
-                rows={[["Wallet Bills", fmtRs(discountTotal)], ["NC Tabs", fmtRs(ncDiscount)], ["Total", fmtRs(discountTotalAll)]]} />
-              <Tile label="SERVICE CHARGE" value={fmtRs(scTotal)} sub="Wallet + NC" />
-              <Tile label="TAXES (CGST + SGST)" value={fmtRs(taxTotal)} sub="Wallet + NC" />
             </div>
 
             <div style={{ marginTop: 16, padding: 12, background: "#fff", border: "2px solid #000", borderRadius: 8, fontSize: 11.5, color: "#6B6B6B", lineHeight: 1.6, fontWeight: 600 }}>
-              🛟 NC tabs flow through EVERY box exactly like a normal bar bill. Sales &amp; top items count everything SERVED tonight (wallet + NC). NET = food + drink value before SC &amp; tax, minus discount. GROSS = total value of all bills incl. SC + GST = wallet money redeemed + full NC bills. TOTAL COLLECTED = cash actually taken = wallet/walk-in + NC after comp/discount/waive. The gap (GROSS − COLLECTED) is what we gave away, shown in NC GIVEN AWAY (comp + waived + discount) plus any still-open NC DUE. SC &amp; tax tiles are saved from v3.224 onward for wallet bills; bills printed before that count ₹0 there only (GROSS still uses the real total).
+              🛟 <strong>NC rule:</strong> the first <strong>₹1000 of item value</strong> on every NC tab is <strong>comp</strong> — no service charge, no tax — and shows under <strong>NC GIVEN AWAY</strong>. Anything <strong>above ₹1000</strong> is billed like a normal bar bill (10% SC + GST on the overage) and is <strong>already counted</strong> in the bar's NET, GROSS, BILLS GENERATED, SERVICE CHARGE and TAXES above. The <strong>NC CHARGEABLE</strong> box just re-shows that same chargeable portion for detail — don't add it again. NC DUE = still owed.
             </div>
           </>
         )}
@@ -4323,8 +4351,6 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   const [lines, setLines] = useState<NcItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  // 🆕 2026-06-24 (Khushi) — collapsible "PREVIOUS ON TAB" itemised dropdown.
-  const [showPrev, setShowPrev] = useState(false);
   // 🆕 2026-06-24 (Khushi) — ROLE picker is now an in-app Gumroad dropdown
   // (no native browser <select>); roleDdOpen toggles the inline list.
   const [roleDdOpen, setRoleDdOpen] = useState(false);
@@ -4402,9 +4428,12 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   // ticket shows item prices, not tax).
   const newTotal = lines.reduce((s, it) => s + it.p * it.qty, 0);
   const bill = computeNcBill([...existingItems, ...lines], COMP_CAP);
-  const grandTotal = bill.totalBill;      // tax-inclusive grand total
   const compApplied = bill.compApplied;
   const amountDue = bill.amountDue;
+  // 🆕 2026-06-28 (Khushi) — the CHARGEABLE base = item value ABOVE the ₹1000
+  // comp; SC + GST are levied ONLY on this (computeNcBill already does the math).
+  // Surfaced so the breakdown can show comp FIRST, then tax on the remainder.
+  const chargeableBase = Math.max(0, bill.subtotal - compApplied);
 
   // 🆕 v3.188 (Khushi) — RUNNING TAB: don't make the bartender re-type phone /
   // approved-by for a repeat order. When an open tab is matched, carry its
@@ -4555,7 +4584,7 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <button type="button"
-              onClick={() => { setName(""); setPhone(""); setApprovedBy(""); setRole("DJ"); setLines([]); setErr(""); setShowPrev(false); setRoleDdOpen(false); setPickSearch(""); setPickGroup(GROUP_ORDER[0] || "spirits"); setTabSearch(""); setLoggedInfo(null); }}
+              onClick={() => { setName(""); setPhone(""); setApprovedBy(""); setRole("DJ"); setLines([]); setErr(""); setRoleDdOpen(false); setPickSearch(""); setPickGroup(GROUP_ORDER[0] || "spirits"); setTabSearch(""); setLoggedInfo(null); }}
               style={{ flex: 1, padding: "15px 12px", borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.4, textTransform: "uppercase" }}>
               ➕ Log Another NC
             </button>
@@ -4810,42 +4839,30 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           // added — so tapping a search result shows PREVIOUS ON TAB + BILL DUE
           // immediately. Totals fall back to the existing tab when lines is empty.
           <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
-            {/* 🆕 2026-06-24 (Khushi) — PREVIOUS ON TAB is now a COLLAPSIBLE
-                dropdown that ITEMISES what's already on the tab (was a single
-                lump-sum line). Header shows raw subtotal of prior items so the
-                listed lines reconcile with SUBTOTAL below. */}
-            {existingItems.length > 0 && (() => {
-              const prevRaw = existingItems.reduce((s, it) => s + it.p * it.qty, 0);
-              const prevQty = existingItems.reduce((s, it) => s + it.qty, 0);
-              return (
-                <>
-                  <button type="button" onClick={() => setShowPrev((v) => !v)}
-                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 13, color: "#000", fontWeight: 800, background: "#EDEDE8", border: "none", borderRadius: 0, cursor: "pointer", letterSpacing: 0.3, textAlign: "left" }}>
-                    <span>{showPrev ? "▾" : "▸"} PREVIOUS ON TAB · {prevQty} ITEM{prevQty === 1 ? "" : "S"}</span>
-                    <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 800 }}>₹{prevRaw.toLocaleString("en-IN")}</span>
-                  </button>
-                  {showPrev && existingItems.map((it) => (
-                    <div key={`prev-${lineKey(it.n, it.p, it.t)}`} style={{ display: "flex", justifyContent: "space-between", padding: "7px 12px 7px 24px", borderBottom: "1px solid #000", fontSize: 13, color: "#000", background: "#FAFAF7" }}>
-                      <span style={{ fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" }}>{it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}</span>
-                      <span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
-                    </div>
-                  ))}
-                </>
-              );
-            })()}
-            {/* "ADDING THIS ROUND" header — only when there's a prior tab to
-                distinguish the new round from. */}
-            {existingItems.length > 0 && lines.length > 0 && (
-              <div style={{ padding: "8px 12px", borderBottom: "1px solid #000", fontSize: 12, fontWeight: 900, letterSpacing: 0.8, color: "#000", background: "#FFE3F4" }}>
-                ➕ ADDING THIS ROUND
+            {/* 🆕 2026-06-28 (Khushi) — ONE SINGLE flat item list. The old
+                collapsible "PREVIOUS ON TAB" dropdown + separate "ADDING THIS
+                ROUND" header made it look like the ₹1000 comp was being applied
+                twice. Now EVERY item (already-on-tab + newly added) sits in one
+                list feeding ONE breakdown below, so the single COMP −₹1000 on the
+                combined subtotal is unmistakable. Already-committed items have NO
+                × (can't be removed); new items are tagged NEW + removable. */}
+            {existingItems.map((it) => (
+              <div key={`prev-${lineKey(it.n, it.p, it.t)}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15 }}>
+                <span style={{ color: "#000", fontWeight: 700 }}>
+                  {it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}
+                </span>
+                <span style={{ color: "#000", fontWeight: 800, fontFamily: "'Space Grotesk', monospace" }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
               </div>
-            )}
+            ))}
             {lines.map((it) => {
               const key = lineKey(it.n, it.p, it.t);
               return (
                 <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15 }}>
-                  <span style={{ color: "#000", fontWeight: 700 }}>
-                    {it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}
+                  <span style={{ color: "#000", fontWeight: 700, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                    <span>{it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}</span>
+                    {existingItems.length > 0 && (
+                      <span style={{ fontSize: 9.5, fontWeight: 900, letterSpacing: 0.6, color: "#000", background: "#FF90E8", border: "1px solid #000", borderRadius: 4, padding: "1px 5px" }}>NEW</span>
+                    )}
                   </span>
                   <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
                     <span style={{ color: "#000", fontWeight: 800, fontFamily: "'Space Grotesk', monospace" }}>₹{(it.p * it.qty).toLocaleString("en-IN")}</span>
@@ -4856,24 +4873,28 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
                 </div>
               );
             })}
-            {/* 🆕 2026-06-24 (Khushi) — tax lines are now SMALLER + grey so the
-                eye can tell taxes apart from the TOTAL at a glance. */}
+            {/* 🆕 2026-06-28 (Khushi) — breakdown REORDERED so it's unmistakable
+                that SC + GST are charged ONLY on the part ABOVE the ₹1000 comp.
+                Order: SUBTOTAL → COMP → CHARGEABLE (subtotal−comp) → SC → GST →
+                BILL DUE. Tax lines are small + grey; the comp + chargeable lines
+                are tinted so the eye follows the comp-first logic. */}
             <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
-              <span>SUBTOTAL</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.subtotal.toLocaleString("en-IN")}</span>
+              <span>SUBTOTAL (item value)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.subtotal.toLocaleString("en-IN")}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 14, color: "#000", fontWeight: 800, background: "#D6F5EF" }}>
+              <span>🎁 COMP (₹1000 MAX — no tax)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{compApplied.toLocaleString("en-IN")}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", borderBottom: "2px solid #000", fontSize: 13, color: "#000", fontWeight: 800, background: "#FCEFCB" }}>
+              <span>CHARGEABLE (above comp)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{chargeableBase.toLocaleString("en-IN")}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
-              <span>SERVICE CHARGE (10%)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.serviceCharge.toLocaleString("en-IN")}</span>
+              <span>SERVICE CHARGE (10% on chargeable)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.serviceCharge.toLocaleString("en-IN")}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
+              <span>CGST (on chargeable)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.cgst.toLocaleString("en-IN")}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "2px solid #000", fontSize: 12, color: "#555", fontWeight: 600 }}>
-              <span>GST</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.gst.toLocaleString("en-IN")}</span>
-            </div>
-            {/* 🆕 2026-06-24 (Khushi) — TOTAL BILL HIGHLIGHTED: bigger font +
-                gold tint so it stands out from the small grey tax lines. */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "13px 12px", borderBottom: "1px solid #000", fontSize: 20, color: "#000", fontWeight: 900, background: "#FCEFCB", letterSpacing: 0.3 }}>
-              <span>TOTAL BILL (incl. tax)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{grandTotal.toLocaleString("en-IN")}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15, color: "#000", fontWeight: 800, background: "#D6F5EF" }}>
-              <span>🎁 COMP (₹1000 MAX)</span><span style={{ fontFamily: "'Space Grotesk', monospace" }}>− ₹{compApplied.toLocaleString("en-IN")}</span>
+              <span>SGST (on chargeable)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{bill.sgst.toLocaleString("en-IN")}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", padding: "13px 12px", fontSize: 18, fontWeight: 900, color: "#000", background: amountDue > 0 ? "#FFE9C2" : "#D6F5EF" }}>
               <span>💸 BILL DUE</span>

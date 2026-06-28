@@ -431,11 +431,11 @@ export default function LiveReports() {
       L.push("");
     };
     floorBlock("LIVE TABLES", [{ label: "Live", pick: (a) => a.liveTables }]);
-    // TABLES AVAILABLE uses the static per-floor capacity (not a FloorAgg pick).
-    L.push("TABLES AVAILABLE");
-    L.push(["Floor", "Capacity", "Live", "Available"].join(","));
-    for (const f of FLOORS3) { const a = agg.floor[f]; L.push([f, TOTAL_TABLES[f], a.liveTables, Math.max(0, TOTAL_TABLES[f] - a.occupiedTables)].map(esc).join(",")); }
-    L.push(["TOTAL", FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0), sumFloors((a) => a.liveTables), FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0)].map(esc).join(","));
+    // LIVE TABLES — capacity + live per floor (Available column removed per Khushi).
+    L.push("LIVE TABLES");
+    L.push(["Floor", "Capacity", "Live"].join(","));
+    for (const f of FLOORS3) { const a = agg.floor[f]; L.push([f, TOTAL_TABLES[f], a.liveTables].map(esc).join(",")); }
+    L.push(["TOTAL", FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0), sumFloors((a) => a.liveTables)].map(esc).join(","));
     L.push("");
     floorBlock("BILLED AMOUNT (collected)", [{ label: "Billed Rs", pick: (a) => a.billed }]);
     floorBlock("UNBILLED AMOUNT (open on live tables)", [{ label: "Unbilled Rs", pick: (a) => a.unfilled }]);
@@ -537,17 +537,16 @@ export default function LiveReports() {
   const AvailTable = () => (
     <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 320 }}>
       <thead><tr style={{ background: C.bg }}>
-        <Th>Floor</Th><Th right>Capacity</Th><Th right>Live</Th><Th right>Available</Th>
+        <Th>Floor</Th><Th right>Capacity</Th><Th right>Live</Th>
       </tr></thead>
       <tbody>
         {FLOORS3.map((f) => {
-          const a = agg.floor[f]; const avail = Math.max(0, TOTAL_TABLES[f] - a.occupiedTables);
+          const a = agg.floor[f];
           return (
             <tr key={f}>
               <Cell bold>{f}</Cell>
               <Cell num right>{fmtN(TOTAL_TABLES[f])}</Cell>
               <Cell num right>{fmtN(a.liveTables)}</Cell>
-              <Cell num bold right>{fmtN(avail)}</Cell>
             </tr>
           );
         })}
@@ -555,7 +554,6 @@ export default function LiveReports() {
           <Cell total>TOTAL</Cell>
           <Cell num total right>{fmtN(FLOORS3.reduce((s, f) => s + TOTAL_TABLES[f], 0))}</Cell>
           <Cell num total right>{fmtN(sumFloors((a) => a.liveTables))}</Cell>
-          <Cell num total right>{fmtN(FLOORS3.reduce((s, f) => s + Math.max(0, TOTAL_TABLES[f] - agg.floor[f].occupiedTables), 0))}</Cell>
         </tr>
       </tbody>
     </table>

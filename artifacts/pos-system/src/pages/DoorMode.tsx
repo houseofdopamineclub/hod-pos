@@ -8656,6 +8656,21 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   // Operational night = the YYYY-MM-DD that represents the night. Today's
   // op night by default; date picker can rewind.
   const [nightDate, setNightDate] = useState<string>(getOperationalNightStr());
+  // 🆕 2026-06-28 (Khushi) — clamp the NIGHT picker to ±3 days around the
+  // current operational night and grey out everything else (same as Captain/
+  // Bar Mode). Native min/max disables out-of-range days; onChange also clamps
+  // a manually-typed value into range.
+  const _shiftNight = (base: string, delta: number) => {
+    const [y, m, d] = base.split("-").map(Number);
+    if (!y || !m || !d) return base;
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + delta);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+  };
+  const _nightBase = getOperationalNightStr();
+  const nightMin = _shiftNight(_nightBase, -3);
+  const nightMax = _shiftNight(_nightBase, 3);
   // 🔴 2026-05-22 (Khushi COST FIX) — Subscribe to covers for the SELECTED
   // night. Was a parent-level full-collection subscription that broke when
   // the date picker rewound (parent only had tonight's covers). Now follows
@@ -9025,9 +9040,14 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0, flexWrap: "wrap" }}>
-            <input type="date" value={nightDate} onChange={(e) => setNightDate(e.target.value)}
+            <input type="date" value={nightDate} min={nightMin} max={nightMax}
+              onChange={(e) => {
+                const v = e.target.value || getOperationalNightStr();
+                // Clamp typed values too — native min/max only greys the picker.
+                setNightDate(v < nightMin ? nightMin : v > nightMax ? nightMax : v);
+              }}
               style={{ background: "#fff", border: "2px solid #000", color: "#000", padding: "6px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}
-              title="Pick operational night" />
+              title="Pick operational night (±3 days)" />
             <button onClick={downloadCsv}
               style={{ padding: "7px 12px", borderRadius: 6, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}
               title="Download CSV of all tiles">

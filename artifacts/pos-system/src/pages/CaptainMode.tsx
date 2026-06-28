@@ -86,6 +86,15 @@ const MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6
 // 9999; rotate by computing sha256(newPin) and replacing this hash.
 const ADMIN_HASH = "888df25ae35772424a560c7152a1de794440e0ea5cfee62828333a456a506e05";
 const SERVICE_CHARGE_RATE = 0.10;
+// 🆕 2026-06-28 (Khushi BUG) — phantom "1 PENDING": a round can sit in status
+// "preparing" with ZERO items if a captain adds a round then removes every item
+// before printing (an empty husk). The booking modal already HIDES such husks
+// (round-list filter at the BookingDetailModal), so the PENDING count/badges/
+// filters MUST agree or the table blinks "1 KOT pending" while the modal says
+// "No orders yet". A round is genuinely pending only when preparing AND it still
+// has items. Use this single source everywhere "pending" is derived.
+const isLivePreparingRound = (rd: HodTabRound | null | undefined): boolean =>
+  !!rd && rd.status === "preparing" && (rd.items || []).length > 0;
 // 🆕 2026-06-25 (Khushi) — aggregator refs (AGG-ND-ARJUN-20260625-1415) are too
 // long to read on the tablet. Strip the embedded 8-digit YYYYMMDD date block for
 // DISPLAY only (keeps platform + name + HHMM time → AGG-ND-ARJUN-1415). The
@@ -1093,9 +1102,17 @@ function ReassignTableModal({ reservation, existingTables, allReservations, capt
             // capacity groups ascending; proxies (cap 0 = flexible) sort LAST.
             const caps = Array.from(new Set(rows.map((r) => doorTableCapacity(r.t))))
               .sort((a, b) => (a === 0 ? 1 : b === 0 ? -1 : a - b));
+            const totalFree = rows.filter((r) => !r.occupied).length;
+            // 🆕 2026-06-28 v3.400 (Khushi) — each zone (Ground / Dining·Smoking /
+            // Rooftop) is now wrapped in its OWN bordered box with a title bar +
+            // a "N FREE" pill, so on Reassign it's obvious which tables sit in
+            // which area. Pure layout — same DOOR_TABLE_OPTIONS groups + math.
             return (
-              <div key={group.floor} style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#000", marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+              <div key={group.floor} style={{ marginBottom: 14, border: "2px solid #000", borderRadius: 14, background: "#FBFBF8", padding: 12, boxShadow: "2px 2px 0 #000" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, paddingBottom: 6, borderBottom: "2px dashed #D9D9D2" }}>
+                  <div style={{ fontSize: 13, fontWeight: 900, color: "#000", textTransform: "uppercase", letterSpacing: 1 }}>{group.label}</div>
+                  <div style={{ fontSize: 10, fontWeight: 900, color: "#fff", background: "#23A094", border: "2px solid #000", borderRadius: 999, padding: "2px 8px", letterSpacing: 0.5 }}>{totalFree} FREE</div>
+                </div>
                 {caps.map((cap) => {
                   const grp = rows
                     .filter((r) => doorTableCapacity(r.t) === cap)
@@ -3339,7 +3356,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     String(r.aggregatorDiscount ?? getAggregatorDiscount(r.aggregator || r.source || "inhouse"))
   );
 
-  const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
+  const pending = (r.tabRounds || []).filter((rd) => isLivePreparingRound(rd)).length;
   const billReq = r.paymentStatus === "bill_requested";
   // ── 2026-05-20 — COVER+TABLE LINKED WALLET (Khushi spec) ──
   // Door girl's "💰 ACTIVATE COVER + TABLE" path writes linkedCoverDocId on
@@ -3542,7 +3559,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     if (isPastDate) { setKotNotice({ kind: "warn", title: "⏪ Past night", lines: ["Can't print KOT on a past night.", "Switch the date to tonight first."] }); return; }
     const pendingIdxs = (r.tabRounds || [])
       .map((rd, i) => ({ rd, i }))
-      .filter(({ rd }) => rd.status === "preparing" || rd.status === "activated")
+      .filter(({ rd }) => isLivePreparingRound(rd) || rd.status === "activated")
       .map(({ i }) => i);
     if (pendingIdxs.length === 0) return;
     if (busy === "serve-all") return;
@@ -3633,7 +3650,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       alert(`⚠ ITEMS CHANGED SINCE LAST BILL\n\nReprint the bill before releasing ${r.tableId}.`);
       return;
     }
-    const preparingRounds = (r.tabRounds || []).filter(rd => rd.status === "preparing").length;
+    const preparingRounds = (r.tabRounds || []).filter(rd => isLivePreparingRound(rd)).length;
     if (preparingRounds > 0) {
       if (!confirm(`⚠️ ${preparingRounds} round(s) still PREPARING in kitchen!\n\nRelease anyway? Kitchen orders will be lost.`)) return;
     }
@@ -4374,7 +4391,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         </div>
 
         {(() => {
-          const pendingCount = (r.tabRounds || []).filter((rd) => rd.status === "preparing" || rd.status === "activated").length;
+          const pendingCount = (r.tabRounds || []).filter((rd) => isLivePreparingRound(rd) || rd.status === "activated").length;
           if (pendingCount < 2) return null;
           return (
             <div style={{ padding: "8px 16px 0" }}>
@@ -5034,7 +5051,7 @@ function BookingRow({ r, captainName, existingTables, allReservations, onClick }
   // upfront how much will come off the bill (was just "ZOMATO DINING").
   const aggDiscount = r.aggregatorDiscount ?? getAggregatorDiscount(aggName);
   const safeAggDiscount = Number.isFinite(Number(aggDiscount)) ? Number(aggDiscount) : 0;
-  const pending = (r.tabRounds || []).filter((rd) => rd.status === "preparing").length;
+  const pending = (r.tabRounds || []).filter((rd) => isLivePreparingRound(rd)).length;
   const billReq = r.paymentStatus === "bill_requested";
   const paid = r.paymentStatus === "paid";
   // 🆕 2026-06-07 (Khushi) — prepaid-cover tables carry paymentStatus:"paid" from
@@ -5363,7 +5380,7 @@ function FloorPlanView({
   const _occScore = (r: HodTableReservation): number => {
     let s = 0;
     const rounds = r.tabRounds || [];
-    if (rounds.some(rd => rd.status === "preparing")) s += 16; // KOT not yet printed
+    if (rounds.some(rd => isLivePreparingRound(rd))) s += 16; // KOT not yet printed (empty husk excluded)
     if (rounds.length) s += 8;                                  // has any orders
     if (r.paymentStatus === "bill_requested") s += 8;
     if (r.customerCallRequest) s += 8;
@@ -5411,7 +5428,7 @@ function FloorPlanView({
         out[fk].occ += 1;
         const isCalling = !!r.customerCallRequest || activeWaiterCallTableIds.has(t.id.toLowerCase());
         const isBill = r.paymentStatus === "bill_requested";
-        const isPending = (r.tabRounds || []).some(rd => rd.status === "preparing");
+        const isPending = (r.tabRounds || []).some(rd => isLivePreparingRound(rd));
         const matchesQ = q && [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase().includes(q);
         if (pendingFilter === "calling" && isCalling) out[fk].matches += 1;
         else if (pendingFilter === "bill" && isBill) out[fk].matches += 1;
@@ -5494,7 +5511,7 @@ function FloorPlanView({
       //   GREEN  = all rounds served (or no rounds)
       // Previously preparing = orange, activated never surfaced as orange so a
       // table whose KOT was already fired showed GREEN (FD17 bug Khushi caught).
-      const preparing = (r.tabRounds || []).filter(rd => rd.status === "preparing");
+      const preparing = (r.tabRounds || []).filter(rd => isLivePreparingRound(rd));
       if (preparing.length) {
         const earliest = preparing.reduce((min, rd) => {
           const t = new Date((rd as any).placedAt || 0).getTime();
@@ -5549,7 +5566,7 @@ function FloorPlanView({
       // the badge said "1 PENDING" but the floor map highlighted nothing
       // because no table was in state==="orange". Fix: gate on the actual
       // preparing-round predicate, identical to floorStats (line ~3928).
-      if (pendingFilter === "pending" && (r.tabRounds || []).some(rd => rd.status === "preparing")) { s.add(t.id); return; }
+      if (pendingFilter === "pending" && (r.tabRounds || []).some(rd => isLivePreparingRound(rd))) { s.add(t.id); return; }
       if (pendingFilter === "ready" && readyKDSResIds.has(r._docId)) { s.add(t.id); return; }
       if (!pendingFilter && q) {
         const hay = [r.customerName, r.phone, r.tableId, r.bookingRef].filter(Boolean).join(" ").toLowerCase();
@@ -5901,7 +5918,7 @@ function FloorPlanView({
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {offMapReservations.map(r => {
               const callOrBill = !!r.customerCallRequest || r.paymentStatus === "bill_requested";
-              const preparing = (r.tabRounds || []).some(rd => rd.status === "preparing");
+              const preparing = (r.tabRounds || []).some(rd => isLivePreparingRound(rd));
               const activated = (r.tabRounds || []).some(rd => rd.status === "activated");
               let state: "red" | "orange" | "green" = "green";
               if (callOrBill || preparing) state = "red";
@@ -6238,7 +6255,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         prevSnapshot.current[r._docId] = curr;
       });
 
-      pendingCountRef.current = all.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
+      pendingCountRef.current = all.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => isLivePreparingRound(rd)).length, 0);
       // 🆕 v3.69 — exclude orphan rows (no tableId). They drive an unsilenceable
       // 12s chime via the interval below and the captain has no way to clear
       // them (modal ADD ORDER / PRINT BILL / RELEASE all need a table).
@@ -6349,7 +6366,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     return () => { unsub(); prevTableCallIdsRef.current = new Set(); hasHydratedTableCallsRef.current = false; };
   }, [playAlert]);
 
-  const pending = reservations.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => rd.status === "preparing").length, 0);
+  const pending = reservations.reduce((s, r) => s + (r.tabRounds || []).filter((rd) => isLivePreparingRound(rd)).length, 0);
   // 🆕 v3.74 — KEEP all bill_requested rows in the KPI counter (including
   // those without a tableId — e.g. HODTAB customer just hit "GET BILL" but
   // door hasn't assigned a physical table yet). Khushi 7:33am: v3.69's
@@ -6382,7 +6399,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   );
   const displayedReservations = useMemo(() => {
     let list = reservations;
-    if (pendingFilter === "pending") list = list.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
+    if (pendingFilter === "pending") list = list.filter(r => (r.tabRounds || []).some(rd => isLivePreparingRound(rd)));
     else if (pendingFilter === "bill") list = list.filter(r => r.paymentStatus === "bill_requested");
     else if (pendingFilter === "calling") {
       list = list.filter(r => !!r.customerCallRequest || waiterCallTableIds.has((r.tableId || "").toLowerCase()));
@@ -6867,7 +6884,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           never invisible. Tap a chip to open the booking modal. Mirrors the
           orphan-calls strip for the Calling filter above. */}
       {pendingFilter === "pending" && (() => {
-        const pendingRes = reservations.filter(r => (r.tabRounds || []).some(rd => rd.status === "preparing"));
+        const pendingRes = reservations.filter(r => (r.tabRounds || []).some(rd => isLivePreparingRound(rd)));
         const mapIds = new Set<string>();
         (Object.keys(HOD_TABLES) as FloorKey[]).forEach(fk =>
           HOD_TABLES[fk].tables.forEach(t => mapIds.add(t.id.toUpperCase())));
@@ -6884,7 +6901,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           <div style={{ padding: "0 16px", marginBottom: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
             {pendingRes.map((r) => {
               const tid = (r.tableId || "—").toUpperCase();
-              const pcount = (r.tabRounds || []).filter(rd => rd.status === "preparing").length;
+              const pcount = (r.tabRounds || []).filter(rd => isLivePreparingRound(rd)).length;
               const onMap = mapIds.has(tid);
               return (
                 <button key={r._docId} onClick={() => setSelectedDocId(r._docId)}

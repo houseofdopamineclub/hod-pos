@@ -83,12 +83,19 @@ export interface BillDueDoc {
 
 const COL = "billDue";
 
-/** 🆕 2026-06-24 (Khushi) — SINGLE SOURCE OF TRUTH for NC bill math. NC tabs
- *  are billed exactly like any other bar bill: 10% service charge + GST (food
- *  5%, alcohol exempt) via the shared `computeHodBreakdown` engine, then the
- *  flat ₹1000 comp is knocked off the tax-INCLUSIVE total. So we genuinely
- *  collect SC + tax on NC consumption (Khushi: "we will be collecting taxes
- *  and service charges for nc too"), and the comp just reduces what's owed.
+/** 🆕 2026-06-28 (Khushi / accountant rule) — SINGLE SOURCE OF TRUTH for NC bill
+ *  math. The FIRST ₹1000 of ITEM VALUE (subtotal) is COMP — NO service charge,
+ *  NO tax on that part ("we don't calculate SC & taxes until ₹1000, which is
+ *  comp"). Only the item value ABOVE ₹1000 (the chargeable overage) is billed
+ *  like a NORMAL bar bill: 10% service charge + GST (food 5%, alcohol exempt).
+ *  So `amountDue` = (item value − ₹1000) + SC + GST on that overage, and the
+ *  ₹1000 comp is pure give-away (no tax). For mixed food+drink tabs the comp is
+ *  applied PROPORTIONALLY across items, so SC/GST scale by the chargeable
+ *  fraction and the per-item attribution stays exact (used by the bar report to
+ *  fold the chargeable part into NET/GROSS/SC/TAX).
+ *
+ *  `totalBill` = compApplied + amountDue (= subtotal + SC + tax on the overage),
+ *  so the invariant `amountDue = totalBill − compApplied` still holds.
  *
  *  Item tax class mirrors the rest of the bar: `t==="food"` → GST-applicable;
  *  any drink (no `alc` flag on NC items) → treated as alcohol → GST-exempt. */
@@ -112,12 +119,24 @@ export function computeNcBill(items: BillDueItem[], compCap = 1000): NcBill {
     alc: it.t === "food" ? false : true,
   }));
   const b = computeHodBreakdown(mapped);
-  const totalBill = b.grandTotal;
-  const compApplied = Math.min(compCap, totalBill);
-  const amountDue = Math.max(0, totalBill - compApplied);
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const subtotal = b.subtotal;
+  // First ₹1000 of item value is comp (no SC/tax); SC + GST apply only to the
+  // chargeable overage, scaled proportionally so mixed food/drink stay correct.
+  const compApplied = Math.min(compCap, subtotal);
+  const chargeableBase = Math.max(0, subtotal - compApplied);
+  const frac = subtotal > 0 ? chargeableBase / subtotal : 0;
+  const serviceCharge = r2(b.serviceCharge * frac);
+  const gst = r2(b.gst * frac);
+  const cgst = r2(b.cgst * frac);
+  const sgst = r2(b.sgst * frac);
+  const dueRaw = chargeableBase + serviceCharge + gst;
+  const amountDue = Math.round(dueRaw);
+  const roundOff = r2(amountDue - dueRaw);
+  // Keep the invariant amountDue = totalBill − compApplied (comp is tax-free).
+  const totalBill = compApplied + amountDue;
   return {
-    subtotal: b.subtotal, serviceCharge: b.serviceCharge, gst: b.gst,
-    cgst: b.cgst, sgst: b.sgst, roundOff: b.roundOff,
+    subtotal, serviceCharge, gst, cgst, sgst, roundOff,
     totalBill, compApplied, amountDue,
   };
 }
