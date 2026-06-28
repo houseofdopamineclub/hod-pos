@@ -30,6 +30,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useStaff } from "@/lib/staff-context";
 import {
   subscribeToCoversForNight, subscribeToHodReservations,
+  computeHodBreakdownAdjusted,
   type HodCover, type HodTableReservation,
 } from "@/lib/firestore-hod";
 import { subscribeBillDue, fetchBillDueForNight, type BillDueDoc } from "@/lib/bill-due";
@@ -231,6 +232,8 @@ export default function AgentsReport() {
       // cover (running tabs re-print the full bill each round, so summing
       // every entry would double-count — same rule the Live Reports use).
       const log = c.walletBillPrintLog || [];
+      let barDiscCaptured = false;
+      let barBillActor = "";
       if (log.length) {
         for (const b of log) {
           if (b?.isDuplicate && b.by) {
@@ -242,9 +245,43 @@ export default function AgentsReport() {
         if (nonDup.length) {
           const atMs = (b: any) => { const t = new Date(b?.at || 0).getTime(); return isNaN(t) ? 0 : t; };
           const last = nonDup.reduce((p, q) => (atMs(q) >= atMs(p) ? q : p));
+          if (last.by) barBillActor = last.by;
           if ((last.discount || 0) > 0 && last.by) {
             const v = ensure(bar, last.by, zeroBar);
             if (v) { v.discCount += 1; v.discAmt += last.discount || 0; }
+            barDiscCaptured = true;
+          }
+        }
+      }
+
+      // 🆕 2026-06-28 (Khushi) — BAR discount FALLBACK. The print-log block
+      // above only counts a discount that rode a PRINTED non-duplicate bill.
+      // But a bartender can apply a discount and then settle by wallet
+      // redemption WITHOUT a fresh bill print — the % still persists on the
+      // cover (billDiscountPct via setCoverBillDiscount) yet no print-log entry
+      // carries the ₹ value, so the discount silently read ₹0 in this report
+      // (Khushi: "I gave a bar discount today, I don't see it here"). When the
+      // print-log path captured nothing AND billDiscountPct>0, recompute the ₹
+      // discount from the cover's own tab items with the SAME bill math the bar
+      // uses, so the figure matches the wallet. Gated to BAR covers (!isTable)
+      // so table discounts (counted under CAPTAIN via reservation) never
+      // double-count here.
+      if (!isTable && !barDiscCaptured) {
+        const pct = Number((c as any).billDiscountPct) || 0;
+        if (pct > 0) {
+          const rounds = Array.isArray(c.tabRounds) ? c.tabRounds : [];
+          const items = rounds
+            .filter((rd) => rd && rd.status !== "preparing")
+            .flatMap((rd) => (Array.isArray(rd.items) ? rd.items : []));
+          if (items.length) {
+            const scOn = (c as any).billScOn !== false;
+            const disc = computeHodBreakdownAdjusted(items, pct, scOn).discount || 0;
+            const actor = barBillActor || c.activatedBy ||
+              (rounds.length ? (rounds[rounds.length - 1].activatedBy || rounds[rounds.length - 1].placedBy) : "") || "";
+            if (disc > 0 && actor) {
+              const v = ensure(bar, actor, zeroBar);
+              if (v) { v.discCount += 1; v.discAmt += disc; }
+            }
           }
         }
       }

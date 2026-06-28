@@ -3288,6 +3288,96 @@ export async function getRecentKotPrints(maxRows = 200): Promise<Array<{
   return rows;
 }
 
+/**
+ * 📅 Historical download — pulls EVERY bill + KOT print between two timestamps
+ * straight from the permanent `posKOTs` log (the print server's append-only
+ * record; nothing here is ever deleted, unlike released-table docs). Both bills
+ * (`kind:"bill"`) and KOTs (everything else) live in this one collection with a
+ * `createdAt`, so a single range query returns the full history for any dates.
+ *
+ * COST: this is a real Firestore read of one doc per print in the range — used
+ * ONLY when the owner taps Download with a date range, never on a listener. A
+ * whole-month range can be thousands of docs, so the UI warns before large pulls.
+ */
+export interface RangePrintItem { n: string; p: number; qty: number; t?: string; alc?: boolean }
+export interface RangeBillRow {
+  at: string; billNumber: string; tableId: string; floorLabel: string;
+  customerName: string; staff: string; paymentMethod: string; isDuplicate: boolean;
+  gstin: string; items: RangePrintItem[];
+  subtotal: number; discount: number; serviceCharge: number;
+  cgst: number; sgst: number; roundOff: number; total: number;
+}
+export interface RangeKotRow {
+  at: string; tableId: string; customerName: string; staff: string;
+  roundNum: number; destinations: string[]; isDuplicate: boolean;
+  roundTotal: number; items: RangePrintItem[];
+}
+function mapPrintItems(raw: unknown): RangePrintItem[] {
+  const arr = Array.isArray(raw) ? raw as Array<Record<string, unknown>> : [];
+  return arr.map((it) => ({
+    n: String(it.n ?? it.name ?? ""),
+    p: Number(it.p ?? it.price) || 0,
+    qty: Number(it.qty) || 0,
+    t: it.t === "food" ? "food" : it.t === "drink" ? "drink" : undefined,
+    alc: it.alc === true ? true : it.alc === false ? false : undefined,
+  }));
+}
+export async function getBillKotPrintsByRange(startMs: number, endMs: number): Promise<{
+  bills: RangeBillRow[];
+  kots: RangeKotRow[];
+}> {
+  const bills: RangeBillRow[] = [];
+  const kots: RangeKotRow[] = [];
+  try {
+    const q = query(
+      collection(db, "posKOTs"),
+      where("createdAt", ">=", Timestamp.fromMillis(startMs)),
+      where("createdAt", "<=", Timestamp.fromMillis(endMs)),
+      orderBy("createdAt", "asc"),
+    );
+    const snap = await getDocs(q);
+    snap.forEach((d) => {
+      const data = d.data() as Record<string, unknown>;
+      const ts = data.createdAt as { toMillis?: () => number } | undefined;
+      const at = ts?.toMillis ? new Date(ts.toMillis()).toISOString() : new Date().toISOString();
+      const items = mapPrintItems(data.items);
+      if (data.kind === "bill") {
+        const amt = (data.amounts && typeof data.amounts === "object") ? data.amounts as Record<string, unknown> : {};
+        bills.push({
+          at, billNumber: String(data.billNumber || ""), tableId: String(data.tableId || ""),
+          floorLabel: data.floorLabel ? String(data.floorLabel) : "",
+          customerName: data.customerName ? String(data.customerName) : "",
+          staff: String(data.staff || ""),
+          paymentMethod: data.paymentMethod ? String(data.paymentMethod) : "",
+          isDuplicate: Boolean(data.isDuplicate),
+          gstin: data.gstin ? String(data.gstin) : "",
+          items,
+          subtotal: Number(amt.subtotal) || 0,
+          discount: Number(amt.discount) || 0,
+          serviceCharge: Number(amt.serviceCharge) || 0,
+          cgst: Number(amt.cgst) || 0,
+          sgst: Number(amt.sgst) || 0,
+          roundOff: Number(amt.roundOff) || 0,
+          total: Number(amt.total) || 0,
+        });
+      } else {
+        kots.push({
+          at, tableId: String(data.tableId || ""),
+          customerName: data.customerName ? String(data.customerName) : "",
+          staff: String(data.staff || ""), roundNum: Number(data.roundNum) || 0,
+          roundTotal: Number(data.roundTotal) || 0,
+          destinations: Array.isArray(data.destinations) ? (data.destinations as string[]) : [],
+          isDuplicate: Boolean(data.isDuplicate), items,
+        });
+      }
+    });
+  } catch (e) {
+    console.error("[getBillKotPrintsByRange] failed", e);
+    throw e; // surfaced to the owner so they know the pull failed (not silently empty)
+  }
+  return { bills, kots };
+}
+
 export async function setReservationAggregator(
   docId: string, aggregator: string, discountPercent: number,
   opts?: { managerOverride?: boolean; staffName?: string; reason?: string }
@@ -3504,6 +3594,64 @@ export function runBillBookkeepingBg(fn: () => Promise<unknown>, attempts = 4): 
   go();
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// 🆕 2026-06-28 (Khushi) — SEQUENTIAL GST INVOICE NUMBER
+// Khushi flagged that bill numbers were random booking refs (OSO0QL-1, 241223-1)
+// — not the consecutive serial a GST tax invoice legally needs. This assigns a
+// single running series `HOD/2026-27/00001` that RESETS each Indian financial
+// year (Apr 1 – Mar 31). The number is allocated ONCE per cover/reservation (the
+// first time its bill prints) and REUSED on every reprint, so duplicates carry
+// the SAME invoice number (the "** DUPLICATE / REPRINT **" line still flags them).
+// The counter lives at posCounters/invoiceCounter (one int field per FY, fy_YYYY_YY)
+// — posCounters is ALREADY a live writable rule (it backs the walk-in counter), so
+// this needs NO Firestore-rules publish — and is bumped in its OWN dedicated
+// single-document transaction (NOT folded into
+// the bill-print record txn). Reason: a cross-collection commit that bumps the
+// counter AND updates the reservation/cover was being rejected by the server with
+// `failed-precondition`, which silently failed-open EVERY bill to the legacy ref
+// number (and stopped persisting billPrintCount). Allocating the serial in a
+// separate single-doc txn keeps the bill-record txn in its original proven form.
+// Assign-once is preserved by checking the bill doc's stored invoiceNumber first;
+// the only tradeoff is a possible serial GAP if two FIRST prints of the SAME tab
+// race (a compliance annoyance, never money loss — same tradeoff already noted).
+// ════════════════════════════════════════════════════════════════════════
+/** Indian financial year label for a YYYY-MM-DD date, e.g. "2026-06-28" → "2026-27". */
+export function financialYearOf(ymd: string): string {
+  const [y, m] = ymd.split("-").map(Number);
+  const startYear = (m || 1) >= 4 ? y : y - 1;
+  const endYY = String((startYear + 1) % 100).padStart(2, "0");
+  return `${startYear}-${endYY}`;
+}
+
+/** Allocate the NEXT financial-year invoice serial in a dedicated single-document
+ *  transaction (posCounters/invoiceCounter only). Returns "" on ANY failure so the
+ *  caller fails open to the legacy ref number — a bill must NEVER fail to print.
+ *  Logs a SHORT {code,message} on failure (not the full Firestore blob, which the
+ *  console truncates) so a persistent failure stays diagnosable. */
+export async function allocateInvoiceNumber(): Promise<string> {
+  try {
+    const fy = financialYearOf(getOperationalNightStr());
+    const fyKey = `fy_${fy.replace(/-/g, "_")}`;
+    // 🆕 2026-06-28 — the counter lives in posCounters/invoiceCounter (NOT a new
+    // posConfig collection). posCounters is ALREADY a live, writable rule (it
+    // backs the walk-in number counter), so the sequential GST invoice serial
+    // works with ZERO Firestore-rules changes — no Console re-publish needed.
+    const counterRef = doc(db, "posCounters", "invoiceCounter");
+    const nextSeq = await runTransaction(db, async (txn) => {
+      const cSnap = await txn.get(counterRef);
+      const cData = cSnap.exists() ? cSnap.data() : {};
+      const seq = ((cData[fyKey] as number) || 0) + 1;
+      txn.set(counterRef, { [fyKey]: seq }, { merge: true });
+      return seq;
+    });
+    return `HOD/${fy}/${String(nextSeq).padStart(5, "0")}`;
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    console.warn("[invoice] allocate failed", err?.code, err?.message);
+    return "";
+  }
+}
+
 export async function recordWalletBillPrint(
   coverId: string,
   entry: { by: string; total: number; itemCount: number; billNumberBase: string;
@@ -3516,8 +3664,21 @@ export async function recordWalletBillPrint(
     /** 🆕 2026-06-05 — money breakdown for LIVE REPORTS (optional). */
     subtotal?: number; discount?: number; serviceCharge?: number; tax?: number;
   }
-): Promise<{ count: number; isDuplicate: boolean; billNumber: string }> {
+): Promise<{ count: number; isDuplicate: boolean; billNumber: string; invoiceNumber: string }> {
   const ref = doc(db, COVERS_COL, coverId);
+  // 🆕 Sequential GST invoice serial — assign ONCE, reuse on every reprint. The
+  // counter is bumped in its OWN single-doc txn (allocateInvoiceNumber) so the
+  // bill-record txn below stays single-document. Pre-read the stored number so a
+  // reprint never bumps the counter; allocate a fresh serial only on a first print.
+  // All fail-open: any error → allocated stays "" → falls back to the legacy ref.
+  let allocated = "";
+  try {
+    const pre = await getDoc(ref);
+    const existingPre = (pre.exists() ? (pre.data().invoiceNumber as string) : "") || "";
+    // Only allocate when the bill doc EXISTS but has no serial yet — a missing doc
+    // would be rejected by the main txn anyway, so never burn a serial on it.
+    if (pre.exists() && !existingPre) allocated = await allocateInvoiceNumber();
+  } catch { allocated = ""; }
   return await withTxnTimeout(runTransaction(db, async (txn) => {
     const snap = await txn.get(ref);
     if (!snap.exists()) throw new Error("Wallet not found");
@@ -3529,18 +3690,23 @@ export async function recordWalletBillPrint(
     const billNumber = `${entry.billNumberBase}-${next}`;
     const now = new Date().toISOString();
     const log = Array.isArray(data.walletBillPrintLog) ? [...data.walletBillPrintLog] : [];
-    log.push({ at: now, by: entry.by, total: entry.total,
-      itemCount: entry.itemCount, isDuplicate, billNumber,
-      subtotal: entry.subtotal ?? 0, discount: entry.discount ?? 0,
-      serviceCharge: entry.serviceCharge ?? 0, tax: entry.tax ?? 0 });
     const upd: Record<string, unknown> = {
       walletBillPrintCount: next,
       lastWalletBillPrintedAt: now,
       walletBillPrintLog: log,
     };
+    // Reuse the stored serial if present (reprint), else stamp the freshly
+    // allocated one; if allocation failed, fall back to the legacy ref number.
+    const existing = (data.invoiceNumber as string) || "";
+    const invoiceNumber = existing || allocated || billNumber;
+    if (!existing && allocated) upd.invoiceNumber = allocated;
+    log.push({ at: now, by: entry.by, total: entry.total,
+      itemCount: entry.itemCount, isDuplicate, billNumber,
+      subtotal: entry.subtotal ?? 0, discount: entry.discount ?? 0,
+      serviceCharge: entry.serviceCharge ?? 0, tax: entry.tax ?? 0 });
     if (prev === 0) upd.walletBillFirstPrintedAt = now;
     txn.update(ref, upd);
-    return { count: next, isDuplicate, billNumber };
+    return { count: next, isDuplicate, billNumber, invoiceNumber };
   }));
 }
 
@@ -3556,8 +3722,21 @@ export async function recordWalletBillPrint(
 export async function recordBillPrint(
   docId: string,
   entry: { by: string; total: number; discountPct: number; aggregator: string; billNumberBase: string }
-): Promise<{ count: number; isDuplicate: boolean; billNumber: string }> {
+): Promise<{ count: number; isDuplicate: boolean; billNumber: string; invoiceNumber: string }> {
   const ref = doc(db, TABLE_RES_COL, docId);
+  // 🆕 Sequential GST invoice serial — assign ONCE, reuse on every reprint. The
+  // counter is bumped in its OWN single-doc txn (allocateInvoiceNumber) so the
+  // bill-record txn below stays single-document. Pre-read the stored number so a
+  // reprint never bumps the counter; allocate a fresh serial only on a first print.
+  // All fail-open: any error → allocated stays "" → falls back to the legacy ref.
+  let allocated = "";
+  try {
+    const pre = await getDoc(ref);
+    const existingPre = (pre.exists() ? (pre.data().invoiceNumber as string) : "") || "";
+    // Only allocate when the bill doc EXISTS but has no serial yet — a missing doc
+    // would be rejected by the main txn anyway, so never burn a serial on it.
+    if (pre.exists() && !existingPre) allocated = await allocateInvoiceNumber();
+  } catch { allocated = ""; }
   return await runTransaction(db, async (txn) => {
     const snap = await txn.get(ref);
     if (!snap.exists()) throw new Error("Reservation not found");
@@ -3568,23 +3747,28 @@ export async function recordBillPrint(
     const billNumber = `${entry.billNumberBase}-${next}`;
     const now = new Date().toISOString();
     const log = Array.isArray(data.billPrintLog) ? [...data.billPrintLog] : [];
-    log.push({
-      at: now, by: entry.by, total: entry.total, discountPct: entry.discountPct,
-      aggregator: entry.aggregator, isDuplicate, billNumber,
-    });
     const upd: Record<string, unknown> = {
       billPrintCount: next,
       lastBillPrintedAt: now,
       billPrintLog: log,
       billStale: false,
     };
+    // Reuse the stored serial if present (reprint), else stamp the freshly
+    // allocated one; if allocation failed, fall back to the legacy ref number.
+    const existing = (data.invoiceNumber as string) || "";
+    const invoiceNumber = existing || allocated || billNumber;
+    if (!existing && allocated) upd.invoiceNumber = allocated;
+    log.push({
+      at: now, by: entry.by, total: entry.total, discountPct: entry.discountPct,
+      aggregator: entry.aggregator, isDuplicate, billNumber,
+    });
     if (prev === 0) {
       upd.billFirstPrintedAt = now;
       upd.billLockedSource = entry.aggregator;
       upd.billLockedDiscount = entry.discountPct;
     }
     txn.update(ref, upd);
-    return { count: next, isDuplicate, billNumber };
+    return { count: next, isDuplicate, billNumber, invoiceNumber };
   });
 }
 

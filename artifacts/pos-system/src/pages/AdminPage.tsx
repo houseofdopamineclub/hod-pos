@@ -24,7 +24,6 @@ import { formatINR } from "@/lib/utils-pos";
 import { LiveMonitor } from "./LiveMonitor";
 import Reports from "./Reports";
 import AgentsReport from "./AgentsReport";
-import LiveReports from "./LiveReports";
 import SalesTab from "./SalesTab";
 import EventsAdmin from "./EventsAdmin";
 import KnowledgeBaseAdmin from "./KnowledgeBaseAdmin";
@@ -75,7 +74,7 @@ const SHADOW_SM = "2px 2px 0px #000";
 export default function AdminPage() {
   const { currentStaff, allStaff, hasRole, logout } = useStaff();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"monitor" | "reports" | "live-reports" | "sales" | "agents" | "audit" | "events" | "menu" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
+  const [tab, setTab] = useState<"monitor" | "reports" | "sales" | "agents" | "audit" | "events" | "menu" | "bot-knowledge" | "staff" | "tablet" | "locks" | "settings" | "door-pricing" | "table-pricing" | "digitory-sync">("monitor");
   const [doorPricing, setDoorPricing] = useState<DoorPricingSettings>({ priceOverrideEnabled: false });
   const [doorPricingSaving, setDoorPricingSaving] = useState(false);
   const [tablePricing, setTablePricing] = useState<TablePricingSettings>({
@@ -405,7 +404,6 @@ export default function AdminPage() {
             [
               { id: "monitor",      label: "🔴 Live Monitor" },
               { id: "reports",      label: "📋 Reports" },
-              { id: "live-reports", label: "📊 Live Reports" },
               { id: "sales",        label: "💰 Sales" },
               { id: "agents",       label: "👥 Agents" },
               { id: "audit",        label: "🛡 Audit" },
@@ -453,7 +451,6 @@ export default function AdminPage() {
       <div className="p-4">
         {tab === "monitor"      && <LiveMonitor />}
         {tab === "reports"      && <Reports embedded />}
-        {tab === "live-reports" && <LiveReports />}
         {tab === "sales"        && <SalesTab />}
         {tab === "agents"       && <AgentsReport />}
         {tab === "audit"        && <AuditPage embedded />}

@@ -101,6 +101,40 @@ const isLivePreparingRound = (rd: HodTabRound | null | undefined): boolean =>
 // stored ref is never changed — this is purely a display shortener.
 const shortRef = (ref?: string | null): string =>
   (ref || "").replace(/-\d{8}-/i, "-");
+// 🆕 2026-06-28 (Khushi) — SEQUENTIAL GST INVOICE NUMBER for table bills.
+// A reprint already carries `invoiceNumber` on the live reservation → return it
+// INSTANTLY and persist the record in the background (reuse, no realloc). The
+// FIRST bill must AWAIT the atomic counter allocation inside recordBillPrint to
+// get its number; fail-OPEN to the legacy ref-N (`fallback`) if the counter
+// write is slow (6s) or denied so a bill NEVER fails to print.
+async function resolveTableInvoiceNumber(
+  docId: string,
+  existing: string | undefined | null,
+  fallback: string,
+  fallbackDup: boolean,
+  entry: { by: string; total: number; discountPct: number; aggregator: string; billNumberBase: string },
+): Promise<{ billNumber: string; isDuplicate: boolean }> {
+  // Reprint — a number was already assigned on a PRIOR print, so this is by
+  // definition a DUPLICATE. Persist the record in the background, return instantly.
+  if (existing) {
+    runBillBookkeepingBg(() => recordBillPrint(docId, entry));
+    return { billNumber: existing, isDuplicate: true };
+  }
+  try {
+    // First print — AWAIT the txn so the DUPLICATE flag is the AUTHORITATIVE one
+    // from the backend (a concurrent tablet may have already printed), not the
+    // possibly-stale local snapshot count.
+    const res = await Promise.race([
+      recordBillPrint(docId, entry),
+      new Promise<Awaited<ReturnType<typeof recordBillPrint>>>((_, rej) =>
+        setTimeout(() => rej(new Error("slow")), 6000)),
+    ]);
+    return { billNumber: res.invoiceNumber || res.billNumber, isDuplicate: res.isDuplicate };
+  } catch {
+    // Fail-open — counter slow/denied. Print with the legacy ref-N + optimistic dup.
+    return { billNumber: fallback, isDuplicate: fallbackDup };
+  }
+}
 // L6 — minimum gap between two thermal-bill prints for the same table; below
 // this we ask the captain to confirm so they can't waste paper hammering the button.
 const BILL_REPRINT_DEBOUNCE_MS = 10_000;
@@ -1664,12 +1698,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
             const sBillBase = reservation._docId.slice(-6).toUpperCase();
             const sPrevCount = reservation.billPrintCount || 0;
-            const sBillNumber = `${sBillBase}-${sPrevCount + 1}`;
-            const sIsDuplicate = sPrevCount > 0;
-            runBillBookkeepingBg(() => recordBillPrint(reservation._docId, {
-              by: captainName, total: 0, discountPct: 0,
-              aggregator: aggName, billNumberBase: sBillBase,
-            }));
+            // 🆕 2026-06-28 — sequential GST invoice number (assign-once/reuse);
+            // DUPLICATE flag is the authoritative txn result, fail-open to local.
+            const { billNumber: sBillNumber, isDuplicate: sIsDuplicate } =
+              await resolveTableInvoiceNumber(
+                reservation._docId, (reservation as any).invoiceNumber,
+                `${sBillBase}-${sPrevCount + 1}`, sPrevCount > 0,
+                { by: captainName, total: 0, discountPct: 0, aggregator: aggName, billNumberBase: sBillBase },
+              );
             printBill({
               tableId: reservation.tableId, floorLabel: reservation.floorLabel,
               customerName: reservation.customerName, partySize: (reservation as any).partySize, staff: captainName,
@@ -1897,12 +1933,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           // saved above). Fail-open: a failed bg write loses one audit row.
           const sBillBase = reservation._docId.slice(-6).toUpperCase();
           const sPrevCount = reservation.billPrintCount || 0;
-          const sBillNumber = `${sBillBase}-${sPrevCount + 1}`;
-          const sIsDuplicate = sPrevCount > 0;
-          runBillBookkeepingBg(() => recordBillPrint(reservation._docId, {
-            by: captainName, total: finalAmount, discountPct,
-            aggregator: aggName, billNumberBase: sBillBase,
-          }));
+          // 🆕 2026-06-28 — sequential GST invoice number (assign-once/reuse);
+          // DUPLICATE flag is the authoritative txn result, fail-open to local.
+          const { billNumber: sBillNumber, isDuplicate: sIsDuplicate } =
+            await resolveTableInvoiceNumber(
+              reservation._docId, (reservation as any).invoiceNumber,
+              `${sBillBase}-${sPrevCount + 1}`, sPrevCount > 0,
+              { by: captainName, total: finalAmount, discountPct, aggregator: aggName, billNumberBase: sBillBase },
+            );
           // ⚡ 2026-06-25 — FIRE-AND-FORGET (see confirmAndPrint note). Don't block
           // settlement-complete on the print job's SERVER ack; the job is queued
           // durably the instant we call printBill. Settlement money is already saved.
@@ -3768,12 +3806,14 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       // canonical order is the backend bill-print log, and no money depends on it.
       const billBaseC = r._docId.slice(-6).toUpperCase();
       const prevCountC = r.billPrintCount || 0;
-      const optBillNumberC = `${billBaseC}-${prevCountC + 1}`;
-      const optIsDuplicateC = prevCountC > 0;
-      runBillBookkeepingBg(() => recordBillPrint(r._docId, {
-        by: captainName, total: snap.finalAmount, discountPct: snap.discountPct,
-        aggregator: snap.aggName, billNumberBase: billBaseC,
-      }));
+      // 🆕 2026-06-28 — sequential GST invoice number (assign-once/reuse);
+      // DUPLICATE flag is the authoritative txn result, fail-open to local.
+      const { billNumber: optBillNumberC, isDuplicate: optIsDuplicateC } =
+        await resolveTableInvoiceNumber(
+          r._docId, (r as any).invoiceNumber,
+          `${billBaseC}-${prevCountC + 1}`, prevCountC > 0,
+          { by: captainName, total: snap.finalAmount, discountPct: snap.discountPct, aggregator: snap.aggName, billNumberBase: billBaseC },
+        );
       // ⚡ 2026-06-25 — FIRE-AND-FORGET the print job. printBill is a plain addDoc
       // whose Promise only resolves on SERVER ack; awaiting it stalled the chit
       // 10-30s on the preview proxy / shaky venue wifi. The job is written to the

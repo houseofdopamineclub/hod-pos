@@ -7,7 +7,7 @@
 //  All money math is re-used from lib/venue-sales.ts (which mirrors LiveReports
 //  + BarMode to the rupee). Gumroad theme, fail-open.
 // ─────────────────────────────────────────────────────────────────────────
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
@@ -58,6 +58,16 @@ const PAY_META: Array<{ key: keyof PaymentMix; label: string; color: string }> =
   { key: "other", label: "Other", color: "#6B7280" },
 ];
 
+// The Payment Methods pie + the mini-table below it show ONLY the real tender
+// types collected at settlement (Cash / Card / UPI / Other). Wallet / aggregator
+// / comp are not cash-in-hand tenders, so they stay out of this chart.
+const TENDER_META: Array<{ key: keyof PaymentMix; label: string; color: string }> = [
+  { key: "cash", label: "Cash", color: "#23A094" },
+  { key: "card", label: "Card", color: "#2563EB" },
+  { key: "upi", label: "UPI", color: "#7C3AED" },
+  { key: "other", label: "Other", color: "#6B7280" },
+];
+
 export default function SalesTab() {
   const today = useMemo(() => getOperationalNightStr(), []);
   const MENU_ITEMS = useEffectiveMenu();
@@ -76,6 +86,7 @@ export default function SalesTab() {
   const [result, setResult] = useState<VenueSalesResult | null>(null);
   const [loadedRange, setLoadedRange] = useState("");
   const [cacheNote, setCacheNote] = useState("");
+  const autoLoaded = useRef(false);
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -84,6 +95,7 @@ export default function SalesTab() {
 
   const load = async () => {
     if (loading) return;
+    autoLoaded.current = true; // any load (auto, manual, or refresh) cancels the pending auto-load fallback
     let s = start, e = end;
     if (s > e) { const t = s; s = e; e = t; setStart(s); setEnd(e); }
     setLoading(true); setErr("");
@@ -107,6 +119,24 @@ export default function SalesTab() {
       setLoading(false);
     }
   };
+
+  // Auto-load TODAY the first time Sales opens so the owner sees tonight's live
+  // numbers instantly (no need to tap LOAD). Waits for the menu so the food/drink
+  // split is right; a 1.2s fallback fires even if the menu never populates.
+  useEffect(() => {
+    if (autoLoaded.current) return;
+    if (MENU_ITEMS.length === 0) return;
+    autoLoaded.current = true;
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [MENU_ITEMS]);
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (!autoLoaded.current) { autoLoaded.current = true; void load(); }
+    }, 1200);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── CSV (multi-section, BOM so Excel opens it cleanly) ──
   const downloadCsv = () => {
@@ -170,7 +200,7 @@ export default function SalesTab() {
 
   const t = result?.total;
   const payData = useMemo(
-    () => !t ? [] : PAY_META.map((m) => ({ name: m.label, value: Math.round(t.pay[m.key]), color: m.color })).filter((d) => d.value > 0),
+    () => !t ? [] : TENDER_META.map((m) => ({ name: m.label, value: Math.round(t.pay[m.key]), color: m.color })).filter((d) => d.value > 0),
     [t],
   );
   const trendData = useMemo(
@@ -182,7 +212,7 @@ export default function SalesTab() {
     <div style={{ fontFamily: "Inter, sans-serif", color: C.ink }}>
       <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: -0.4, marginBottom: 4 }}>💰 Sales — Whole Venue</div>
       <div style={{ fontSize: 12, fontWeight: 700, color: C.grey, marginBottom: 16 }}>
-        Bar + tables + NC, all floors combined. Loads only when you tap LOAD (saves read cost).
+        Bar + tables + NC, all floors combined. Opens on tonight's live numbers — pick a range + LOAD for other days.
       </div>
 
       {/* date controls */}
@@ -259,12 +289,7 @@ export default function SalesTab() {
               {/* Cash / Card / UPI sales table inside the pie box */}
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 10 }}>
                 <tbody>
-                  {([
-                    { label: "Cash", key: "cash", color: "#23A094" },
-                    { label: "Card", key: "card", color: "#2563EB" },
-                    { label: "UPI", key: "upi", color: "#7C3AED" },
-                    { label: "Other", key: "other", color: "#6B7280" },
-                  ] as const).map((m) => (
+                  {TENDER_META.map((m) => (
                     <tr key={m.key} style={{ borderTop: `1px solid #E5E5E0` }}>
                       <td style={{ padding: "7px 4px", fontWeight: 800 }}>
                         <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: m.color, border: "1px solid #000", marginRight: 8, verticalAlign: "middle" }} />

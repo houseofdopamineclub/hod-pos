@@ -1077,13 +1077,34 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
     // 🆕 v3.224 — CASH & CARRY: a new round since the last bill makes this a
     // FRESH cumulative bill, not a duplicate (hasNewRoundSinceLastBill); else
     // LIVE REPORTS (latest NON-duplicate bill per wallet) would undercount it.
-    runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, {
+    const recordArgs = {
       by: staffName, total: finalAmount, itemCount: allItems.length,
       billNumberBase: billBase,
       hasNewRoundSinceLastBill,
       subtotal: amts.subtotal, discount: amts.discount,
       serviceCharge: amts.serviceCharge, tax: amts.cgst + amts.sgst,
-    }));
+    };
+    // 🆕 2026-06-28 — SEQUENTIAL GST INVOICE NUMBER. A reprint already carries
+    // `invoiceNumber` on the live cover → print it INSTANTLY + record in the
+    // background (reuse, no realloc). The FIRST bill must AWAIT the atomic
+    // counter allocation to get its number; fail-OPEN to the legacy ref-N if
+    // the counter write is slow (6s) or denied so a bill NEVER fails to print.
+    let printNumber: string = (cv as any).invoiceNumber || "";
+    let printDup = optIsDuplicate;
+    if (printNumber) {
+      runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, recordArgs));
+    } else {
+      try {
+        const res = await Promise.race([
+          recordWalletBillPrint(cover.id, recordArgs),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("slow")), 6000)),
+        ]);
+        printNumber = res.invoiceNumber || res.billNumber;
+        printDup = res.isDuplicate;
+      } catch {
+        printNumber = optBillNumber; // fail-open: bg txn (if slow) still stores the real number for the reprint
+      }
+    }
     try {
       const ok = await printBill({
         tableId: cv.tableId || cv.ref || "WALLET",
@@ -1092,14 +1113,14 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         staff: staffName,
         items: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
         amounts: { subtotal: amts.subtotal, serviceCharge: amts.serviceCharge, cgst: amts.cgst, sgst: amts.sgst, discount: amts.discount, roundOff: amts.roundOff, total: finalAmount, discountPct: barDiscPct },
-        billNumber: optBillNumber,
-        isDuplicate: optIsDuplicate,
+        billNumber: printNumber,
+        isDuplicate: printDup,
         tabletFloor: floor,
         token: tokenForPrint,
       });
       if (ok) {
         // B2/B9 — full-screen success overlay so bartender CANNOT miss it.
-        setBillDone({ billNumber: optBillNumber, total: finalAmount, itemCount: allItems.length, isDuplicate: optIsDuplicate });
+        setBillDone({ billNumber: printNumber, total: finalAmount, itemCount: allItems.length, isDuplicate: printDup });
       } else {
         showToast("❌ Bill print failed — check Firestore.");
       }
@@ -1256,13 +1277,29 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           // so this 2nd Firestore transaction can't add a 15s stall to the print.
           const billBaseB = (cv.ref || cv.id.slice(-6)).toUpperCase();
           const optBillNumberB = `${billBaseB}-${(cv.walletBillPrintCount || 0) + 1}`;
-          runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, {
+          const recordArgsB = {
             by: staffName, total: finalB, itemCount: billItems.length,
             billNumberBase: billBaseB,
             hasNewRoundSinceLastBill: true,
             subtotal: amtsB.subtotal, discount: amtsB.discount,
             serviceCharge: amtsB.serviceCharge, tax: amtsB.cgst + amtsB.sgst,
-          }));
+          };
+          // 🆕 2026-06-28 — sequential GST invoice number (see PRINT BILL path).
+          // Reuse the cover's existing number instantly; allocate on first bill.
+          let printNumberB: string = (cv as any).invoiceNumber || "";
+          if (printNumberB) {
+            runBillBookkeepingBg(() => recordWalletBillPrint(cover.id, recordArgsB));
+          } else {
+            try {
+              const resB = await Promise.race([
+                recordWalletBillPrint(cover.id, recordArgsB),
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error("slow")), 6000)),
+              ]);
+              printNumberB = resB.invoiceNumber || resB.billNumber;
+            } catch {
+              printNumberB = optBillNumberB; // fail-open
+            }
+          }
           const okB = await printBill({
             tableId: cv.tableId || cv.ref || "WALLET",
             floorLabel: cv.floorLabel || "Wallet",
@@ -1270,13 +1307,13 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             staff: staffName,
             items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty })),
             amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB, discountPct: barDiscPct },
-            billNumber: optBillNumberB,
+            billNumber: printNumberB,
             isDuplicate: false,
             tabletFloor: floorB,
             token: tokenForActivate,
           });
           if (okB) {
-            setBillDone({ billNumber: optBillNumberB, total: finalB, itemCount: billItems.length, isDuplicate: false, withKot: true });
+            setBillDone({ billNumber: printNumberB, total: finalB, itemCount: billItems.length, isDuplicate: false, withKot: true });
           } else {
             showToast("✅ KOT printed but ❌ bill print failed — try PRINT BILL");
             setActDone(true);

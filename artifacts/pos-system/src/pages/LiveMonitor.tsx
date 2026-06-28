@@ -318,23 +318,42 @@ export function LiveMonitor() {
   // Scenario: Rahul averaged 34.5% on Zomato (default 30%) across 25 tables → ~₹1.5L bleed.
   const driftHeatmap = useMemo(() => {
     void tick;
-    type Cell = { sumDelta: number; count: number };
+    type Cell = { sumDelta: number; count: number; extraRs: number };
     const grid = new Map<string, Map<string, Cell>>(); // captain -> source -> cell
     const sourcesUsed = new Set<string>();
+    let totalExtraRs = 0;
+    type DriftWorst = { captain: string; source: string; avgDelta: number; count: number; extraRs: number };
+    let worst: DriftWorst | null = null;
     reservations.forEach((r) => {
       const captain = r.captainName || "—";
       const aggName = r.aggregator || (r as any).source || "inhouse";
       const defDisc = getAggregatorDiscount(aggName);
       const actDisc = r.aggregatorDiscount ?? defDisc;
+      const delta = actDisc - defDisc;
+      // Approx ₹ over-given on this table = extra discount points × the table's
+      // bill. Only OVER-discount (delta > 0) costs money; under-discount is free.
+      const extraRs = delta > 0 ? (delta / 100) * Number(r.tabTotal || 0) : 0;
       sourcesUsed.add(aggName);
       let row = grid.get(captain); if (!row) { row = new Map(); grid.set(captain, row); }
-      let cell = row.get(aggName); if (!cell) { cell = { sumDelta: 0, count: 0 }; row.set(aggName, cell); }
-      cell.sumDelta += (actDisc - defDisc);
+      let cell = row.get(aggName); if (!cell) { cell = { sumDelta: 0, count: 0, extraRs: 0 }; row.set(aggName, cell); }
+      cell.sumDelta += delta;
       cell.count += 1;
+      cell.extraRs += extraRs;
+      totalExtraRs += extraRs;
     });
     const sources = Array.from(sourcesUsed).sort();
     const captains = Array.from(grid.keys()).filter(c => c && c !== "—" && c !== "?").sort();
-    return { sources, captains, grid };
+    // Single worst captain×source by ₹ over-given — drives the plain-English callout.
+    captains.forEach((cap) => {
+      const row = grid.get(cap); if (!row) return;
+      row.forEach((cell, src) => {
+        const avgDelta = cell.count > 0 ? cell.sumDelta / cell.count : 0;
+        if (avgDelta >= 1 && (!worst || cell.extraRs > worst.extraRs)) {
+          worst = { captain: cap, source: src, avgDelta: Math.round(avgDelta * 10) / 10, count: cell.count, extraRs: Math.round(cell.extraRs) };
+        }
+      });
+    });
+    return { sources, captains, grid, totalExtraRs: Math.round(totalExtraRs), worst: worst as DriftWorst | null };
   }, [reservations, tick]);
 
   const tiles: Array<{ id: string; label: string; count: number; severity: Severity; sub: string; recentRed: boolean }> = [
@@ -466,15 +485,35 @@ export function LiveMonitor() {
 
       {/* Per-staff Leakage Score */}
       <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, textTransform: "uppercase", letterSpacing: "-.2px" }}>👥 Per-Staff Leakage Score (tonight)</div>
-        <div style={{ fontSize: 10, color: "#666", marginBottom: 10, fontWeight: 500 }}>
-          Leakage % = (overrides + source-swaps + voids + duplicates) ÷ tables handled. Catches high-rate outliers — a captain
-          with 3 flags on 5 tables (60%) is more suspicious than one with 5 flags on 30 tables (17%).
+        <div style={{ fontSize: 14, fontWeight: 900, color: "#000", marginBottom: 6, textTransform: "uppercase", letterSpacing: "-.2px" }}>👥 Per-Staff Leakage Score (tonight)</div>
+        <div style={{ fontSize: 11, color: "#444", marginBottom: 8, fontWeight: 600, lineHeight: 1.5 }}>
+          <b>What it shows:</b> which captain is raising the most money-touching exceptions <i>relative to how busy they were</i>.
+          A "flag" is any of: a discount changed by hand, a booking's source switched, a printed order (KOT) cancelled, or a
+          bill reprinted. We divide a captain's total flags by the tables they handled, so a busy captain isn't punished for volume.
+        </div>
+        <div style={{ fontSize: 11, color: "#444", marginBottom: 8, fontWeight: 600, lineHeight: 1.5 }}>
+          <b>How to read it:</b> <b>Leakage %</b> = flags ÷ tables handled. Lower is better.
+          Example — Rahul: 5 flags on 30 tables = <b>17%</b> (fine). Vikram: 3 flags on 5 tables = <b>60%</b> (talk to Vikram).
+          <span style={{ color: "#888" }}> "Low data" means too few tables (&lt;3) to judge fairly yet.</span>
+        </div>
+        {/* Column key + status legend (so the abbreviations aren't a guessing game) */}
+        <div style={{ fontSize: 10, color: "#666", marginBottom: 6, fontWeight: 600 }}>
+          Columns: <b>OVRD</b> = discount overrides · <b>SWAPS</b> = source swaps · <b>VOIDS</b> = cancelled KOTs · <b>DUPS</b> = duplicate bills · <b>FLAGS</b> = all of those added up.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[
+            { c: GREEN, t: "✓ Clean (under 15%)", white: true },
+            { c: AMBER, t: "Keep an eye (15–30%)", white: false },
+            { c: RED, t: "🚩 Review now (30%+)", white: true },
+            { c: "#aaa", t: "Low data (<3 tables)", white: true },
+          ].map((l) => (
+            <span key={l.t} style={{ fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 999, background: l.c, color: l.white ? "#fff" : "#000", border: "1.5px solid #000" }}>{l.t}</span>
+          ))}
         </div>
         {perStaff.length === 0 ? (
           <div style={{ fontSize: 12, color: "#888", fontWeight: 600 }}>No staff activity yet — clean shift so far.</div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "1.5fr repeat(6, 0.7fr) 0.9fr", gap: 6, fontSize: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr repeat(6, 0.56fr) 0.78fr 1.15fr", gap: 6, fontSize: 12, alignItems: "center" }}>
             <div style={{ fontWeight: 800, color: "#444", fontSize: 10, textTransform: "uppercase" }}>STAFF</div>
             <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>TABLES</div>
             <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>OVRD</div>
@@ -483,8 +522,15 @@ export function LiveMonitor() {
             <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>DUPS</div>
             <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>FLAGS</div>
             <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>LEAKAGE%</div>
+            <div style={{ fontWeight: 800, color: "#444", textAlign: "right", fontSize: 10, textTransform: "uppercase" }}>STATUS</div>
             {perStaff.map((s) => {
-              const leakSev = s.tables < 3 ? "#aaa" : s.leakagePct >= 30 ? RED : s.leakagePct >= 15 ? AMBER : GREEN;
+              const lowData = s.tables < 3;
+              const leakSev = lowData ? "#aaa" : s.leakagePct >= 30 ? RED : s.leakagePct >= 15 ? AMBER : GREEN;
+              const status = lowData
+                ? { c: "#aaa", t: "Low data", white: true }
+                : s.leakagePct >= 30 ? { c: RED, t: "🚩 Review", white: true }
+                : s.leakagePct >= 15 ? { c: AMBER, t: "Watch", white: false }
+                : { c: GREEN, t: "✓ Clean", white: true };
               return (
                 <Fragment key={s.name}>
                   <div style={{ color: "#000", fontWeight: 600 }}>{s.name}</div>
@@ -494,9 +540,11 @@ export function LiveMonitor() {
                   <div style={{ textAlign: "right", color: s.voids > 0 ? AMBER : "#bbb" }}>{s.voids}</div>
                   <div style={{ textAlign: "right", color: s.duplicates > 0 ? AMBER : "#bbb" }}>{s.duplicates}</div>
                   <div style={{ textAlign: "right", fontWeight: 900, color: s.total >= 5 ? RED : s.total >= 3 ? AMBER : GREEN }}>{s.total}</div>
-                  <div style={{ textAlign: "right", fontWeight: 900, color: leakSev, fontSize: 13 }}>
+                  <div style={{ textAlign: "right", fontWeight: 900, color: leakSev, fontSize: 14 }}>
                     {s.tables === 0 ? "—" : `${s.leakagePct}%`}
-                    {s.tables < 3 && s.tables > 0 && <span style={{ fontSize: 9, color: "#aaa" }}> (low n)</span>}
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 999, background: status.c, color: status.white ? "#fff" : "#000", border: "1.5px solid #000", whiteSpace: "nowrap" }}>{status.t}</span>
                   </div>
                 </Fragment>
               );
@@ -508,10 +556,46 @@ export function LiveMonitor() {
       {/* Discount Drift Heatmap */}
       {driftHeatmap.captains.length > 0 && driftHeatmap.sources.length > 0 && (
         <div style={{ background: "#fff", border: "2px solid #000", padding: 14, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, textTransform: "uppercase" }}>🌡 Discount Drift Heatmap (tonight)</div>
-          <div style={{ fontSize: 10, color: "#666", marginBottom: 10, fontWeight: 500 }}>
-            Avg gap between actual discount % and the source's locked default. RED ≥ +3pp, AMBER ≥ +1pp, GREEN at default.
-            Negative gap (under-discount) is a non-issue. Cells show "Δpp · n tables".
+          <div style={{ fontSize: 14, fontWeight: 900, color: "#000", marginBottom: 6, textTransform: "uppercase" }}>🌡 Discount Drift Heatmap (tonight)</div>
+          <div style={{ fontSize: 11, color: "#444", marginBottom: 8, fontWeight: 600, lineHeight: 1.5 }}>
+            <b>What it shows:</b> every booking source (in-house, Zomato, etc.) has a <i>set discount</i>. This grid shows how much
+            <b> extra</b> each captain gave on top of that set rate, on average. It catches the captain who quietly gives more
+            discount than allowed on one channel — small per table, but it adds up over a night.
+          </div>
+          <div style={{ fontSize: 11, color: "#444", marginBottom: 10, fontWeight: 600, lineHeight: 1.5 }}>
+            <b>How to read it:</b> each cell shows <b>"pp"</b> = extra discount points above the set rate (e.g. <b>+4pp</b> = gave 34% where 30% was set),
+            how many tables it covers, and the <b>≈₹</b> extra that cost you. <span style={{ color: "#888" }}>Giving <i>less</i> than the set rate is fine and shown grey.</span>
+          </div>
+          {/* Plain-English headline: the single biggest leak + tonight's total */}
+          {(() => {
+            const w = driftHeatmap.worst;
+            const srcLabel = (v: string) => AGGREGATOR_OPTIONS.find(a => a.value === v)?.label || v;
+            return (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                {w ? (
+                  <div style={{ flex: "1 1 280px", background: `${RED}14`, border: `2px solid ${RED}`, padding: "8px 12px", fontSize: 12, color: "#000", fontWeight: 600 }}>
+                    🚩 <b>Biggest drift:</b> {w.captain} gave <b style={{ color: RED }}>+{w.avgDelta}pp</b> extra on <b>{srcLabel(w.source)}</b> across {w.count} table{w.count > 1 ? "s" : ""} — about <b style={{ color: RED }}>₹{w.extraRs.toLocaleString("en-IN")}</b> more than the set rate.
+                  </div>
+                ) : (
+                  <div style={{ flex: "1 1 280px", background: `${GREEN}14`, border: `2px solid ${GREEN}`, padding: "8px 12px", fontSize: 12, color: "#000", fontWeight: 700 }}>
+                    ✓ No captain is over-discounting tonight — everyone is at or below the set rates.
+                  </div>
+                )}
+                <div style={{ flex: "0 1 auto", background: driftHeatmap.totalExtraRs > 0 ? `${AMBER}14` : "#f4f4f4", border: `2px solid ${driftHeatmap.totalExtraRs > 0 ? AMBER : "#ccc"}`, padding: "8px 12px", fontSize: 12, color: "#000", fontWeight: 700 }}>
+                  Est. extra discount given tonight: <b style={{ color: driftHeatmap.totalExtraRs > 0 ? AMBER : "#000", fontSize: 14 }}>₹{driftHeatmap.totalExtraRs.toLocaleString("en-IN")}</b>
+                </div>
+              </div>
+            );
+          })()}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+            {[
+              { c: GREEN, t: "At the set rate", white: true },
+              { c: AMBER, t: "Slightly over (+1 to +3pp)", white: false },
+              { c: RED, t: "Well over (+3pp or more)", white: true },
+              { c: "#aaa", t: "Under the set rate (fine)", white: true },
+            ].map((l) => (
+              <span key={l.t} style={{ fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 999, background: l.c, color: l.white ? "#fff" : "#000", border: "1.5px solid #000" }}>{l.t}</span>
+            ))}
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", fontSize: 11, color: "#000", minWidth: "100%" }}>
@@ -538,10 +622,12 @@ export function LiveMonitor() {
                       const avgDelta = Math.round((cell.sumDelta / cell.count) * 10) / 10;
                       const sevColor = avgDelta >= 3 ? RED : avgDelta >= 1 ? AMBER : avgDelta <= -1 ? "#aaa" : GREEN;
                       const bgAlpha = Math.min(0.35, Math.abs(avgDelta) * 0.06);
+                      const extraRs = Math.round(cell.extraRs);
                       return (
                         <td key={s} style={{ padding: "6px 10px", textAlign: "center", background: avgDelta > 0 ? `${sevColor}${Math.round(bgAlpha * 255).toString(16).padStart(2, "0")}` : "transparent", color: sevColor, fontWeight: 800, borderBottom: "1px solid #eee" }}>
                           {avgDelta > 0 ? "+" : ""}{avgDelta}pp
                           <div style={{ fontSize: 9, color: "#999", fontWeight: 400, marginTop: 2 }}>{cell.count} tab{cell.count > 1 ? "s" : ""}</div>
+                          {extraRs >= 1 && <div style={{ fontSize: 9, color: sevColor, fontWeight: 700, marginTop: 1 }}>≈₹{extraRs.toLocaleString("en-IN")}</div>}
                         </td>
                       );
                     })}

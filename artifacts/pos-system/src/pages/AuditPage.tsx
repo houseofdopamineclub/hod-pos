@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, RefreshCw, Download } from "lucide-react";
 import {
-  getRecentBillPrints, getRecentKotPrints,
+  getRecentBillPrints, getRecentKotPrints, getBillKotPrintsByRange,
   type BillAuditRow, type HodOrderItem,
 } from "@/lib/firestore-hod";
+import { getOperationalNightStr } from "@/lib/utils-pos";
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { closeOnBackdrop } from "@/lib/centered-ui";
@@ -44,7 +45,7 @@ type AuditEvent =
       removed: Array<{ n: string; qty: number; p: number }>; valueRemoved: number;
       customerName?: string };
 
-type Filter = "all" | "tonight" | "duplicates" | "voids" | "overrides" | "kots" | "bills" | "silent-edits";
+type Filter = "tonight" | "duplicates" | "voids" | "overrides" | "kots" | "bills" | "silent-edits";
 
 export default function AuditPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -52,6 +53,12 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
   const [filter, setFilter] = useState<Filter>("tonight");
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<AuditEvent | null>(null);
+  // 📅 Download date range — defaults to tonight's operational night. Picking
+  // wider dates pulls that exact range from the permanent cloud log.
+  const todayNight = useMemo(() => getOperationalNightStr(), []);
+  const [dlFrom, setDlFrom] = useState(todayNight);
+  const [dlTo, setDlTo] = useState(todayNight);
+  const [downloading, setDownloading] = useState(false);
 
   const load = async () => {
     setLoading(true); setError("");
@@ -81,14 +88,13 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
   };
   useEffect(() => { load(); }, []);
 
-  // 🌙 2026-06-26 — every tab EXCEPT "All days" is scoped to TONIGHT (since 7 AM
-  // IST). Owner only wants the current night's KOTs/bills/etc; "All days" stays
-  // as a history escape-hatch for fraud review. Filter is client-side → 0 extra reads.
+  // 🌙 Every tab is scoped to TONIGHT (since 7 AM IST) — the owner only wants the
+  // current night's KOTs/bills/etc on screen. Earlier nights are reached via the
+  // ⬇ Download KOTs + Bills export (already-loaded data → 0 extra reads).
   const nightStart = operationalNightStartMs();
   const isTonight = (ev: AuditEvent) => new Date(ev.at).getTime() >= nightStart;
   const filtered = useMemo(() => events.filter((ev) => {
-    if (filter === "all") return true;                 // 🗂 every day (history)
-    if (new Date(ev.at).getTime() < nightStart) return false; // all other tabs = TONIGHT only
+    if (new Date(ev.at).getTime() < nightStart) return false; // every tab = TONIGHT only (history is via ⬇ Download)
     if (filter === "tonight") return true;
     if (filter === "duplicates") return (ev.kind === "bill" && ev.row.isDuplicate) || (ev.kind === "kot" && ev.isDuplicate);
     if (filter === "voids") return ev.kind === "void";
@@ -116,6 +122,179 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
     return d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   };
 
+  // ── Download KOTs + Bills as CSV for ANY date range the owner picks. Pulls
+  //    the exact range from the permanent posKOTs cloud log (a real read, only on
+  //    tap — never a listener). Every row carries its own IST Date + Time so the
+  //    owner can sort/filter by any single day in Excel. ──
+  // 07:00 IST (operational-night start) on the morning of YYYY-MM-DD = 01:30 UTC.
+  const nightStartMsOf = (ymd: string) => Date.parse(`${ymd}T01:30:00Z`);
+
+  const downloadCsv = async () => {
+    if (downloading) return;
+    const start = nightStartMsOf(dlFrom);
+    // End = last millisecond BEFORE 07:00 IST the morning after `to`, so a print at
+    // exactly the next night's 7 AM is NOT pulled into this night (exclusive boundary).
+    const end = nightStartMsOf(dlTo) + 86_400_000 - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      alert("Please pick a valid date range — 'To' must be on or after 'From'."); return;
+    }
+    const nights = Math.round((end + 1 - start) / 86_400_000);
+    if (nights > 7 && !window.confirm(
+      `This will download ${nights} nights of bills + KOTs straight from the cloud.\n\n` +
+      `Bigger ranges read more data (a small cost). Pick the smallest range you need.\n\nContinue?`
+    )) return;
+
+    setDownloading(true);
+    try {
+      const { bills, kots } = await getBillKotPrintsByRange(start, end);
+      const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const row = (cells: unknown[]) => cells.map(esc).join(",");
+      const r2 = (n: number) => Math.round(n * 100) / 100; // 2-decimal rupees
+      const dt = (iso: string): [string, string] => {
+        const d = new Date(iso);
+        const date = d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
+        const time = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour12: false });
+        return [date, time];
+      };
+      // GST back-calculation — must mirror the bill engine (computeHodBreakdown):
+      //   gstBase = (food + non-alcoholic) + serviceCharge   ← alcohol is EXEMPT,
+      //   but service charge IS taxed. GST = gstBase × 5% (CGST 2.5 + SGST 2.5).
+      // So the value GST was actually charged on = (CGST+SGST)/5% = gstBase, and
+      // that is the legal "Taxable Value @5%" for GSTR (it already includes SC).
+      // The alcohol/exempt supply = net item value − the taxable food/soft items
+      //   = (subtotal − discount) − (gstBase − serviceCharge).
+      // These columns reconcile exactly:
+      //   Taxable@5% + Exempt + CGST + SGST + RoundOff = Invoice Total.
+      const gstBreakup = (b: { subtotal: number; discount: number; serviceCharge: number; cgst: number; sgst: number }) => {
+        const gst = (b.cgst || 0) + (b.sgst || 0);
+        const taxableValue = gst > 0 ? r2(gst / 0.05) : 0;          // = gstBase (incl. SC)
+        const net = Math.max(0, (b.subtotal || 0) - (b.discount || 0));
+        const taxableItemsExclSc = Math.max(0, taxableValue - (b.serviceCharge || 0));
+        const exempt = Math.max(0, r2(net - taxableItemsExclSc));   // alcohol / non-GST supply
+        return { gst, taxableValue, exempt };
+      };
+
+      // De-duplicate reprints: a bill ref prints "REF-1" (original) and "REF-2"
+      // (reprint, often after a discount). For GST the FINAL print of each ref is
+      // the real invoice. Group by ref base (strip trailing -N) + table + the
+      // operational night (7AM IST) so reprints (seconds apart, same club night,
+      // even across midnight) merge but two genuine bills that ever share a base
+      // ref on different nights/tables never collapse.
+      // Keep the latest print as the invoice; earlier prints are excluded reprints.
+      const baseRef = (bn: string) => bn.replace(/-\d+$/, "");
+      // Operational-night string (7AM IST boundary) for a given epoch-ms — same
+      // rule as getOperationalNightStr() but for an arbitrary bill time, so a
+      // reprint at 23:59 and 00:05 of the SAME club night share a key and merge.
+      const opNight = (at: string) =>
+        new Date(new Date(at).getTime() - 7 * 60 * 60 * 1000).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      const finalByRef = new Map<string, typeof bills[number]>();
+      for (const b of bills) {
+        const night = opNight(b.at);
+        const key = b.billNumber ? `${baseRef(b.billNumber)}|${b.tableId}|${night}` : `__${b.tableId}__${b.at}`;
+        const ex = finalByRef.get(key);
+        if (!ex || b.at > ex.at) finalByRef.set(key, b);
+      }
+      const invoices = Array.from(finalByRef.values()).sort((a, b) => (a.at > b.at ? 1 : -1));
+      const reprintCount = bills.length - invoices.length;
+
+      const L: string[] = [];
+      L.push("HOUSE OF DOPAMINE — GST REPORT (Bills + KOTs)");
+      L.push(row(["Supplier GSTIN", bills.find((b) => b.gstin)?.gstin || "29AARFH2309E1ZC"]));
+      L.push(row(["Period (club nights)", `${dlFrom} to ${dlTo}`, "A club night = 7 AM to next 7 AM"]));
+      L.push(row(["Generated", new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })]));
+      L.push("");
+      L.push("THIS FILE HAS 3 PARTS:");
+      L.push("1) TAX INVOICE REGISTER = your actual GST bills (use this for GST filing). Reprints removed.");
+      L.push("2) BILL ITEMS = the dishes/drinks on each bill (where the bill saved its items).");
+      L.push("3) KOT REGISTER = kitchen/bar order tickets. These are NOT tax bills — operational only.");
+      L.push("Note: alcohol is OUTSIDE GST (state excise). GST 5% (CGST 2.5% + SGST 2.5%) applies to food only.");
+      L.push("");
+
+      // ── GST SUMMARY (over final invoices only) ──
+      const sum = invoices.reduce((a, b) => {
+        const g = gstBreakup(b);
+        a.subtotal += b.subtotal; a.discount += b.discount; a.sc += b.serviceCharge;
+        a.cgst += b.cgst; a.sgst += b.sgst; a.taxable += g.taxableValue; a.exempt += g.exempt;
+        a.roundOff += b.roundOff; a.total += b.total;
+        const pm = (b.paymentMethod || "UNSPECIFIED").toUpperCase();
+        a.byPm.set(pm, (a.byPm.get(pm) || 0) + b.total);
+        return a;
+      }, { subtotal: 0, discount: 0, sc: 0, cgst: 0, sgst: 0, taxable: 0, exempt: 0, roundOff: 0, total: 0, byPm: new Map<string, number>() });
+      L.push("=== GST SUMMARY (final invoices only) ===");
+      L.push(row(["Number of invoices", invoices.length]));
+      L.push(row(["Taxable value @5% (food + soft drinks + service charge)", r2(sum.taxable)]));
+      L.push(row(["CGST (2.5%)", r2(sum.cgst)]));
+      L.push(row(["SGST (2.5%)", r2(sum.sgst)]));
+      L.push(row(["Total GST", r2(sum.cgst + sum.sgst)]));
+      L.push(row(["Non-GST / exempt value (alcohol)", r2(sum.exempt)]));
+      L.push(row(["Round off", r2(sum.roundOff)]));
+      L.push(row(["GRAND TOTAL COLLECTED", r2(sum.total)]));
+      L.push(row(["(of which service charge, already inside taxable value)", r2(sum.sc)]));
+      L.push(row(["(of which discount given off item value)", r2(sum.discount)]));
+      L.push("Check: Taxable@5% + Exempt + CGST + SGST + Round off = Grand Total.");
+      L.push("");
+      L.push("Collected by payment mode:");
+      for (const [pm, amt] of Array.from(sum.byPm.entries()).sort((a, b) => b[1] - a[1])) L.push(row([pm, r2(amt)]));
+      L.push("");
+
+      // ── SECTION 1: TAX INVOICE REGISTER ──
+      L.push("=== 1) TAX INVOICE REGISTER (GST bills — reprints removed) ===");
+      L.push("Each row reconciles: Taxable@5% + Exempt + CGST + SGST + Round Off = INVOICE TOTAL. Taxable@5% already includes service charge (GST is charged on it). Alcohol is exempt.");
+      L.push(row(["Date", "Time", "Invoice No", "Table", "Customer", "Cashier", "Payment",
+        "Item Value", "Discount", "Service Charge", "Taxable @5%", "CGST", "SGST", "Exempt (alcohol)", "Round Off", "INVOICE TOTAL"]));
+      for (const b of invoices) {
+        const [date, time] = dt(b.at); const g = gstBreakup(b);
+        L.push(row([date, time, b.billNumber, b.tableId, b.customerName, b.staff, (b.paymentMethod || "").toUpperCase(),
+          r2(b.subtotal), r2(b.discount), r2(b.serviceCharge), g.taxableValue, r2(b.cgst), r2(b.sgst), g.exempt, r2(b.roundOff), r2(b.total)]));
+      }
+      if (invoices.length === 0) L.push("(no bills in this range)");
+      L.push("");
+
+      // ── SECTION 2: BILL LINE ITEMS ──
+      L.push("=== 2) BILL ITEMS (what was on each invoice) ===");
+      L.push(row(["Date", "Time", "Invoice No", "Table", "Customer", "Item", "Qty", "Rate", "Amount", "Type", "GST treatment"]));
+      let billItemRows = 0;
+      for (const b of invoices) {
+        const [date, time] = dt(b.at);
+        for (const it of b.items) {
+          billItemRows++;
+          const isAlc = it.alc === true || (it.t === "drink" && it.alc !== false);
+          L.push(row([date, time, b.billNumber, b.tableId, b.customerName, it.n, it.qty, r2(it.p), r2(it.p * it.qty),
+            it.t === "food" ? "Food" : it.t === "drink" ? "Drink" : "—", isAlc ? "Non-GST (alcohol)" : "GST 5% (food)"]));
+        }
+      }
+      if (billItemRows === 0) L.push("(bills in this range did not save line items — see KOT REGISTER below for the itemised orders)");
+      L.push("");
+
+      // ── SECTION 3: KOT REGISTER (operational, itemised) ──
+      L.push("=== 3) KOT REGISTER (kitchen / bar order tickets — NOT tax bills) ===");
+      L.push(row(["Date", "Time", "Table", "Customer", "Round", "Sent to", "Item", "Qty", "Rate", "Amount", "Staff", "Reprint"]));
+      let kotItemRows = 0;
+      for (const k of kots) {
+        const [date, time] = dt(k.at); const sentTo = k.destinations.join(" ");
+        if (k.items.length === 0) continue; // skip empty husk rounds
+        for (const it of k.items) {
+          kotItemRows++;
+          L.push(row([date, time, k.tableId, k.customerName, k.roundNum, sentTo, it.n, it.qty, r2(it.p), r2(it.p * it.qty), k.staff, k.isDuplicate ? "YES" : ""]));
+        }
+      }
+      if (kotItemRows === 0) L.push("(no KOTs in this range)");
+      L.push("");
+      if (reprintCount > 0) L.push(`Note: ${reprintCount} reprint(s)/duplicate bill print(s) were excluded from the GST totals above (only the final print of each bill counts).`);
+
+      const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `HOD_GST_Report_${dlFrom}_to_${dlTo}.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert("Download failed — couldn't read that date range from the cloud.\n\n" + (e?.message || String(e)));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <div style={{ color: "#000", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
@@ -129,14 +308,35 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
             🔍 Operations Audit
           </h1>
           <div style={{ fontSize: 12, fontWeight: 800, color: "#000", marginTop: 3 }}>
-            {filter === "all"
-              ? <span style={{ background: "#000", color: "#fff", padding: "2px 8px" }}>🗂 ALL DAYS — recent history</span>
-              : <span style={{ background: "#FF90E8", color: "#000", padding: "2px 8px", border: "2px solid #000" }}>🌙 TONIGHT · {nightLabel} · since 7 AM</span>}
+            <span style={{ background: "#FF90E8", color: "#000", padding: "2px 8px", border: "2px solid #000" }}>🌙 TONIGHT · {nightLabel} · since 7 AM</span>
           </div>
         </div>
         <button onClick={load} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#F4F4F0", border: "2px solid #000", color: "#000", padding: "8px 14px", cursor: "pointer", fontWeight: 700, boxShadow: "2px 2px 0px #000", fontSize: 13 }}>
           <RefreshCw size={14} /> Refresh
         </button>
+      </div>
+
+      {/* 📥 Download bills + KOTs for ANY date range (pulled from the permanent cloud log) */}
+      <div style={{ border: "2px solid #000", background: "#FFF", padding: 12, marginBottom: 16, boxShadow: "3px 3px 0px #000" }}>
+        <div style={{ fontSize: 14, fontWeight: 900, marginBottom: 2 }}>📥 Download Bills + KOTs (any dates)</div>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "#444", marginBottom: 10 }}>
+          Every bill &amp; KOT is saved in the cloud forever. Pick the club nights you want and download them to Excel.
+          A "night" runs 7&nbsp;AM → next 7&nbsp;AM. Bigger ranges read a little more data — pick the smallest you need.
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+          <label style={{ fontSize: 11, fontWeight: 800 }}>From
+            <input type="date" value={dlFrom} max={todayNight} onChange={(e) => setDlFrom(e.target.value)}
+              style={{ display: "block", marginTop: 3, border: "2px solid #000", padding: "6px 8px", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }} />
+          </label>
+          <label style={{ fontSize: 11, fontWeight: 800 }}>To
+            <input type="date" value={dlTo} max={todayNight} onChange={(e) => setDlTo(e.target.value)}
+              style={{ display: "block", marginTop: 3, border: "2px solid #000", padding: "6px 8px", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }} />
+          </label>
+          <button onClick={downloadCsv} disabled={downloading}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, background: downloading ? "#999" : "#000", border: "2px solid #000", color: "#fff", padding: "8px 16px", cursor: downloading ? "default" : "pointer", fontWeight: 800, boxShadow: "2px 2px 0px #000", fontSize: 13 }}>
+            <Download size={14} /> {downloading ? "Preparing…" : "Download CSV"}
+          </button>
+        </div>
       </div>
 
       {/* Filter tab bar */}
@@ -149,7 +349,6 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
           { id: "duplicates",   label: `⚠ Duplicates (${counts.duplicates})`,color: "#000",  bg: AMBER },
           { id: "kots",         label: `🍳 KOTs (${counts.kots})`,          color: "#fff",    bg: BLUE },
           { id: "bills",        label: `🖨 Bills (${counts.bills})`,         color: "#000",    bg: "#F2C744" },
-          { id: "all",          label: `🗂 All days (${events.length})`,     color: "#fff",    bg: "#000" },
         ] as Array<{ id: Filter; label: string; color: string; bg: string }>).map((t) => (
           <button key={t.id} onClick={() => setFilter(t.id)}
             style={{
@@ -170,7 +369,7 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
 
       {!loading && !error && filtered.length === 0 && (
         <div style={{ textAlign: "center", padding: 40, color: "#444", border: "2px dashed #999", fontWeight: 600 }}>
-          {filter === "all" ? "No events on record." : "Nothing for tonight yet. Switch to 🗂 All days to see earlier nights."}
+          Nothing for tonight yet. Use 📥 Download Bills + KOTs above to pull any past dates.
         </div>
       )}
 
@@ -181,7 +380,7 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
       )}
 
       <div style={{ marginTop: 24, fontSize: 11, color: "#777", textAlign: "center" }}>
-        Tonight = since 7 AM IST (a club night runs past midnight). Bill prints, KOTs, voids & manager-PIN overrides. Append-only — staff cannot delete. Tap a KOT or Bill for its items. Use 🗂 All days for earlier nights.
+        Tonight = since 7 AM IST (a club night runs past midnight). Bill prints, KOTs, voids & manager-PIN overrides. Append-only — staff cannot delete. Tap a KOT or Bill for its items. Use 📥 Download Bills + KOTs (top) to export any past dates — every row has its date & time, so sort by date in Excel.
       </div>
 
       {detail && <DetailModal ev={detail} fmt={fmt} onClose={() => setDetail(null)} />}
