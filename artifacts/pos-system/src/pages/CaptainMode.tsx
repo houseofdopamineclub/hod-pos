@@ -13,9 +13,8 @@ import {
   recordKotVoid, recordWalkInDiscountOverride, getTabletFloor, setTabletFloor, printKOTVoid,
   voidBill, printBillVoid, assertCaptainCanVoid, recordCaptainVoidUsage,
   recordSilentPrePrintEdit,
-  computeHodBreakdown, computeHodBreakdownAdjusted, lookupOrphanZomatoPaymentByName, isTableBillSettled, type TabletFloor,
+  computeHodBreakdown, computeHodBreakdownAdjusted, isTableBillSettled, type TabletFloor,
   type HodTableReservation, type HodTabRound, type HodOrderItem,
-  type OrphanZomatoPayment,
   // 2026-05-15 — Captain × Cover wallet redemption (Khushi spec)
   redeemFromWalletAtTable, undoWalletRedemption, findCoverForRedemption,
   type WalletRedemption, type HodCover,
@@ -528,6 +527,17 @@ function tableOccupantAt(
   targetMin: number,
   reservations: HodTableReservation[]
 ): HodTableReservation | null {
+  // 🆕 2026-06-27 (Khushi GREEN-BUT-REJECTED BUG) — the NEW booking would hold the
+  // table for its OWN [−lead, +slot] window, so a clash is a WINDOW-vs-WINDOW
+  // OVERLAP, not "does targetMin fall inside the existing window". The backend
+  // createWalkInTableReservation rejects on window overlap (firestore-hod.ts
+  // "time slot overlaps"); the old point-in-window check here was LOOSER, so a
+  // table showed GREEN (e.g. a 20:30 walk-in next to a 22:00 booking — 20:30 is
+  // not inside [21:30,24:00] so it looked free) but Create then threw. Compute
+  // the new booking's window once and overlap-test each existing window with the
+  // SAME math + constants the backend uses → picker green ⇔ backend will accept.
+  const newWinStart = targetMin - SLOT_LEAD_IN_MIN;
+  const newWinEnd = targetMin + SLOT_MINUTES;
   for (const r of reservations) {
     if (r.tableId !== tableId) continue;
     // 🆕 2026-06-07 (Khushi) — a prepaid-cover table carries paymentStatus:"paid"
@@ -542,9 +552,9 @@ function tableOccupantAt(
       // never set arrivalTime. This matches the old, time-blind behaviour.
       return r;
     }
-    const winStart = start - SLOT_LEAD_IN_MIN;
-    const winEnd = start + SLOT_MINUTES;
-    if (targetMin >= winStart && targetMin <= winEnd) return r;
+    const exWinStart = start - SLOT_LEAD_IN_MIN;
+    const exWinEnd = start + SLOT_MINUTES;
+    if (newWinStart < exWinEnd && exWinStart < newWinEnd) return r;
   }
   return null;
 }
@@ -2159,11 +2169,32 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                   onWheel={(e) => e.currentTarget.blur()}
                   onChange={(e) => {
                     const raw = e.target.value;
-                    setAggDiscRaw(raw);
-                    setAggEditDiscount(Math.min(100, Math.max(0, Number(raw) || 0)));
+                    // 🔴 2026-06-27 (Khushi) — aggregator discount must obey the
+                    // SAME 50% cap as in-house (was clamped to 100, so 60% slipped
+                    // through). Keep blank ("") distinct from 0 for the blank-guard.
+                    if (raw.trim() === "") {
+                      setAggDiscRaw("");
+                      setAggEditDiscount(0);
+                      if (error) setError("");
+                      return;
+                    }
+                    let n = Math.max(0, Number(raw) || 0);
+                    if (n > CAPTAIN_DISCOUNT_MAX) {
+                      n = CAPTAIN_DISCOUNT_MAX;
+                      setAggDiscRaw(String(n));
+                      void centeredAlert(
+                        "DISCOUNT CAPPED",
+                        `Aggregator discount is capped at ${CAPTAIN_DISCOUNT_MAX}%.\nAsk a manager to apply anything higher.`,
+                        "error",
+                        true,
+                      );
+                    } else {
+                      setAggDiscRaw(raw);
+                    }
+                    setAggEditDiscount(n);
                     if (error) setError("");
                   }}
-                  placeholder={`e.g. ${aggDiscount}`} min={0} max={100}
+                  placeholder={`e.g. ${aggDiscount}`} min={0} max={CAPTAIN_DISCOUNT_MAX}
                   style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 17, fontWeight: 800, outline: "none", boxSizing: "border-box", fontFamily: "'Manrope','Space Grotesk',sans-serif" }} />
                 <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "#E6F5F2", border: "2px solid #23A094", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
                   <span style={{ fontSize: 12, fontWeight: 800, color: "#23A094", letterSpacing: 0.3 }}>VENUE COLLECTS (NET)</span>
@@ -3325,45 +3356,22 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
   const linkedCoverBalance = linkedCover ? (linkedCover.coverBalance || 0) : (r.linkedCoverInitial || 0);
   const linkedCoverActive = !!r.linkedCoverDocId && !r.linkedCoverPending && linkedCoverBalance > 0;
   const linkedCoverEmpty = !!r.linkedCoverDocId && !r.linkedCoverPending && linkedCoverBalance <= 0;
-  // 🩹 v3.4 belt-and-suspenders: orphan zomato-txn-* payment doc fallback.
-  // Captain Mode polls for a sibling pending-booking doc that matches this
-  // guest's first name when the booking itself isn't yet PAID, so the green
-  // badge appears even if the cloud-function v3.4 claim hasn't run yet.
-  const [orphanPay, setOrphanPay] = useState<OrphanZomatoPayment | null>(null);
-  const aggForFallback = r.aggregator || r.source || "inhouse";
-  useEffect(() => {
-    let cancelled = false;
-    if (r.paymentStatus === "paid" || aggForFallback !== "zomato" || !r.customerName) {
-      setOrphanPay(null);
-      return () => { cancelled = true; };
-    }
-    // 💰 READ-COST FIX 2026-06-16 — lookupOrphanZomatoPaymentByName runs an
-    // UNBOUNDED `aggregatorBookings WHERE source==zomato AND status==pending-booking`
-    // scan. This used to fire every 30s FOREVER, per unpaid Zomato table, per
-    // tablet — thousands of Firestore reads/night for a badge that only needs
-    // to flip ONCE. Now: (1) STOP polling the instant the orphan payment is
-    // found, (2) idle poll slowed 30s → 3min. Badge behaviour is unchanged.
-    let id: ReturnType<typeof setInterval> | null = null;
-    const stop = () => { if (id !== null) { clearInterval(id); id = null; } };
-    const tick = async () => {
-      const o = await lookupOrphanZomatoPaymentByName(r.customerName || "", r.phone || "");
-      if (cancelled) return;
-      setOrphanPay(o);
-      if (o) stop();  // payment matched — badge has flipped, no need to keep scanning
-    };
-    tick();
-    id = setInterval(tick, 180000);
-    return () => { cancelled = true; stop(); };
-  }, [r.paymentStatus, aggForFallback, r.customerName]);
-  const paid = r.paymentStatus === "paid" || !!orphanPay;
+  // 💰 READ-COST 2026-06-28 (Khushi) — the Zomato orphan-payment AUTO-POLL was
+  // REMOVED. It ran an unbounded `aggregatorBookings WHERE source==zomato AND
+  // status==pending-booking` scan per unpaid Zomato table, per tablet, every
+  // 3min — the #2 Firestore read culprit (~324k reads / 30d). Zomato collects
+  // payment on its OWN platform, so the captain now simply verifies it and taps
+  // "Paid by Zomato" in the Settle flow (existing aggregator settle path). The
+  // PAID badge then flips from the reservation's own paymentStatus, which is
+  // already on the live listener → ZERO extra reads, no background scanning.
+  const paid = r.paymentStatus === "paid";
   // 🆕 2026-06-07 (Khushi) — a table booked online with a PREPAID COVER carries
   // paymentStatus:"paid" from the cover deposit while its FOOD TAB is still OPEN
   // (the guest keeps self-ordering). `paid` above stays true so the cover-PAID
   // badge/display is unchanged, but ordering/settlement ACTIONS must key off the
   // TRUE settlement stamp (markTablePaid writes paymentMode/paidAt) — otherwise
-  // the captain can't ADD ORDER or SETTLE the real food bill. orphanPay (zomato
-  // pre-claim) is still treated as locked, exactly as before.
-  const billSettled = isTableBillSettled(r) || !!orphanPay;
+  // the captain can't ADD ORDER or SETTLE the real food bill.
+  const billSettled = isTableBillSettled(r);
   // V3 2026-05-10 — `voided` reflects a Manager-PIN-gated bill void (customer
   // refused/walked out/etc). When true: hide payment + edit actions, show a
   // loud red badge, and only allow Release Table (which archives + clears).
@@ -4185,7 +4193,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
                 // reservation. Render that as a GREEN ✅ PAID ONLINE
                 // chip so the captain instantly sees online settlements
                 // distinct from captain-marked ones (yellow ✅ PAID).
-                const pm = String((r as any).paymentMethod || (orphanPay ? orphanPay.paymentChannel : "")).toLowerCase();
+                const pm = String((r as any).paymentMethod || "").toLowerCase();
                 const isOnline = pm === "paid_online";
                 const isAgg = ["zomato","swiggy","eazydiner","payeazy"].includes(pm);
                 const pid = String((r as any).paymentId || "");
@@ -4194,19 +4202,16 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
                 const paidAtStr = paidAtIso ? new Date(paidAtIso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
                 const tip = isOnline
                   ? `Customer paid online via Razorpay${amt ? ` · ₹${amt}` : ""}${paidAtStr ? ` at ${paidAtStr}` : ""}${pid ? ` · ID …${pid.slice(-8)}` : ""}`
-                  : (orphanPay && r.paymentStatus !== "paid"
-                      ? `Auto-matched from an unclaimed Zomato payment of ₹${orphanPay.paidAmount}. Verify the amount before releasing the table.`
-                      : "Marked paid by the captain.");
+                  : "Marked paid by the captain.";
                 const bg = isOnline ? "#E6F5F2" : "#FBF3D6";
                 const bd = isOnline ? "#23A094" : "#000";
                 const fg = isOnline ? "#23A094" : "#000";
                 const label = isOnline
                   ? "✅ PAID ONLINE"
                   : ("✅ PAID" + (isAgg ? ` · ${pm.toUpperCase()}` : ""));
-                const showWarn = orphanPay && r.paymentStatus !== "paid" && !isOnline;
                 return (
-                  <span title={tip} style={{ background: bg, border: `1px solid ${bd}`, color: fg, fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: showWarn || isOnline ? "help" : "default" }}>
-                    {label}{showWarn ? " ⚠︎" : ""}
+                  <span title={tip} style={{ background: bg, border: `1px solid ${bd}`, color: fg, fontSize: 12, fontWeight: 800, padding: "3px 8px", borderRadius: 10, cursor: isOnline ? "help" : "default" }}>
+                    {label}
                   </span>
                 );
               })()}

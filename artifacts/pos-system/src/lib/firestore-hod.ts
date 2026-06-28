@@ -4944,10 +4944,19 @@ export async function lookupOrphanZomatoPaymentByName(
   const phoneSuffix = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : "";
   if (!fn && !phoneSuffix) return null;
   try {
+    // 💰 READ-COST FIX 2026-06-28 (Khushi) — this scan runs per unpaid Zomato
+    // table, per tablet (every 3min until matched). It was UNBOUNDED — every tick
+    // read EVERY pending-booking zomato doc, and stale pending docs accumulate.
+    // Bound it with a plain limit (NO orderBy — that would force a composite index
+    // and drop docs missing the sort field, breaking the badge via the fail-open
+    // catch). The client filters to exactly ONE match anyway, so capping the
+    // candidate set just stops the worst case from scaling with the collection.
+    // The real fix for accumulation is cleaning up stale pending-booking docs.
     const q = query(
       collection(db, "aggregatorBookings"),
       where("source", "==", "zomato"),
       where("status", "==", "pending-booking"),
+      limit(80),
     );
     const snap = await getDocs(q);
     // Phone-first match (more reliable when two bookings share a first name).
