@@ -1104,6 +1104,11 @@ export async function activateCoverForBooking(input: ActivateCoverInput): Promis
     topUpTotal: 0,
     groupSize: (booking as any).qty || 1,
     coverDocId: docId,
+    // 🆕 2026-06-29 (Khushi) — clear any prior VOID so re-activating a
+    // previously-voided booking starts clean (merge:true would otherwise keep
+    // voided:true / a now-expired expiresAt from the void).
+    voided: false,
+    voidedAt: null,
     // 🔴 2026-05-29 (Khushi) — was hardcoded "walkin_door_cover", which made
     // Reports.classifyWallet() (startsWith("walkin")) tag EVERY door-activated
     // cover as WALK-IN — including online "buy covers" bookings. By Khushi's
@@ -1568,6 +1573,60 @@ export async function editCoverAmount(coverId: string, newAmount: number, staffN
       }
     } catch (mErr) {
       console.warn("[editCoverAmount] table mirror failed (non-fatal)", mErr);
+    }
+  }
+}
+
+// 🆕 2026-06-29 (Khushi) — VOID an ACTIVATED door cover. Use case: the door
+// agent activated the WRONG amount (e.g. ₹2,000 instead of ₹1,000). VOID zeroes
+// the wallet AND expires it IMMEDIATELY (expiresAt = now) so the guest's QR /
+// wallet locks at once — then the door can re-activate the correct amount
+// (coverActivated:0 lets activateCoverForBooking run again on the same booking).
+// BLOCKED once any cover credit has already been redeemed (coverUsed > 0) — for
+// that use Edit Cover Amount instead. Gated behind a manager OTP/PIN at the call
+// site. Fail-open table mirror (customer wallet for table refs reads the
+// tableReservations doc, not covers).
+export async function voidActivatedCover(coverId: string, staffName: string): Promise<void> {
+  const ref = doc(db, COVERS_COL, coverId);
+  let _coverRef = "";
+  await runTransaction(db, async (txn) => {
+    const snap = await txn.get(ref);
+    if (!snap.exists()) throw new Error("Cover not found");
+    const data = snap.data();
+    const used = Number(data.coverUsed || 0);
+    if (used > 0) throw new Error(`Cannot void — ₹${used} already redeemed. Use Edit Cover Amount instead.`);
+    const oldAmount = Number(data.coverActivated || 0);
+    const nowIso = new Date().toISOString();
+    _coverRef = String(data.ref || "");
+    txn.update(ref, {
+      coverActivated: 0,
+      coverBalance: 0,
+      voided: true,
+      voidedAt: nowIso,
+      voidedBy: staffName,
+      // Expire the wallet/QR right now (was next-day 3 AM).
+      expiresAt: nowIso,
+      transactions: arrayUnion({
+        amount: 0, oldAmount, note: `VOID: ₹${oldAmount}→₹0 (cover voided & expired)`,
+        timestamp: nowIso, type: "void", staff: staffName,
+      } as HodTransaction),
+    });
+  });
+  const _looksLikeTableRef = _coverRef.startsWith("HODTAB") || _coverRef.startsWith("TBL-") || _coverRef.startsWith("AGG-");
+  if (_coverRef && _looksLikeTableRef) {
+    try {
+      const q = query(collection(db, TABLE_RES_COL), where("bookingRef", "==", _coverRef), limit(1));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        await updateDoc(snap.docs[0].ref, {
+          coverActivated: 0,
+          coverBalance: 0,
+          coverVoided: true,
+          expiresAt: new Date().toISOString(),
+        });
+      }
+    } catch (mErr) {
+      console.warn("[voidActivatedCover] table mirror failed (non-fatal)", mErr);
     }
   }
 }

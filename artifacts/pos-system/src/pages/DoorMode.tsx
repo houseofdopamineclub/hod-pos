@@ -10,7 +10,7 @@ import {
   updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
   subscribeToHodEvents, subscribeToHodEventsRecent, type HodEvent,
-  getCoverForBooking, activateCoverForBooking, editCoverAmount,
+  getCoverForBooking, activateCoverForBooking, editCoverAmount, voidActivatedCover,
   ensureCoverForAggregatorArrival, createAggregatorTableBooking,
   createWalkInTicketBooking, createWalkInGuestlistEntry, createWalkInTableReservation,
   createCorporateTableBooking,
@@ -21,6 +21,7 @@ import {
   type HodBooking, type HodGuestlistEntry, type HodTableReservation, type HodCover,
 } from "@/lib/firestore-hod";
 import { subscribeToEdcDefaultVendor } from "@/lib/firestore";
+import { getManagerDiscountOtp, verifyManagerDiscountOtp, clearManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
 
 // L-A1 — Manager PIN gate for door-side aggregator booking creation when
 // the door agent applies a discount higher than the source's default by more
@@ -36,6 +37,56 @@ async function requireDoorManagerPin(reason: string): Promise<boolean> {
     return false;
   }
   return true;
+}
+// 🆕 2026-06-29 (Khushi) — Manager approval with the EXACT SAME OTP UX as
+// Captain/Bar Mode: a branded "sending code…" spinner → an OTP / Manager-PIN
+// prompt → a "🔐 Verifying code…" spinner → an "OTP VERIFIED" success screen.
+// Returns true only on a confirmed OTP or PIN. Fail-open: if the WhatsApp send
+// fails (weak venue wifi) the present manager approves with the PIN instead.
+async function requireDoorManagerApproval(reason: string, ctx: OtpContext): Promise<boolean> {
+  const closeSendBusy = centeredBusy(
+    "📲 Sending approval code to the manager…\n\nPlease wait — don't tap anything.",
+    true,
+  );
+  let otp: Awaited<ReturnType<typeof getManagerDiscountOtp>>;
+  try {
+    otp = await getManagerDiscountOtp(ctx);
+  } finally {
+    closeSendBusy();
+  }
+  const sent = otp.ok && otp.sentTo > 0;
+  const head = sent
+    ? `📲 A 6-digit code was sent to the manager's WhatsApp.\nEnter the CODE below — or the Manager PIN.\n\n`
+    : `⚠️ Couldn't send the WhatsApp code (network).\nEnter the Manager PIN to approve.\n\n`;
+  let verifiedViaOtp = false;
+  const entered = await centeredPinPrompt(head + reason, true, async (val) => {
+    const v = (val || "").trim();
+    if (!v) return false;
+    // PIN fallback first — local, instant, always works for a present manager.
+    if ((await sha256(v)) === DOOR_MANAGER_HASH) return true;
+    // Otherwise verify the OTP server-side (single-use, 10-min expiry).
+    if (otp.otpId) {
+      const closeVerifyBusy = centeredBusy("🔐 Verifying code…\n\nPlease wait.", true);
+      let okv = false;
+      try {
+        okv = await verifyManagerDiscountOtp(otp.otpId, v);
+      } finally {
+        closeVerifyBusy();
+      }
+      if (okv) {
+        clearManagerDiscountOtp(ctx);
+        verifiedViaOtp = true;
+      }
+      return okv;
+    }
+    return false;
+  });
+  // OTP-verified success screen — the SAME ✅ "OTP VERIFIED" confirmation the
+  // other modes show, so the door knows the code worked before the void runs.
+  if (entered && verifiedViaOtp) {
+    await centeredAlert("OTP VERIFIED", "Manager approval confirmed.", "success", true);
+  }
+  return !!entered;
 }
 import { ALL_TABLES, SECTION_LABELS } from "@/lib/tables-config";
 import {
@@ -121,7 +172,7 @@ const EMAIL_CF_URL = "https://us-central1-hod-tickets.cloudfunctions.net/sendBoo
 
 import { ToastAction } from "@/components/ui/toast";
 import { QrScanner } from "@/components/QrScanner";
-import { centeredAlert, centeredPinPrompt, closeOnBackdrop } from "@/lib/centered-ui";
+import { centeredAlert, centeredPinPrompt, centeredBusy, centeredConfirm, closeOnBackdrop } from "@/lib/centered-ui";
 import { sendWhatsAppTextMessage } from "@/lib/wa-send";
 
 // 🔄 2026-05-24 (Khushi) — REVERTED per-staff login back to shared name+password.
@@ -252,6 +303,9 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
   // Floor tablets are in PWA-style fullscreen — the browser-native confirm
   // popup looks alien and jarring. When non-null, render a styled overlay.
   const [confirmNewAmt, setConfirmNewAmt] = useState<number | null>(null);
+  // 🆕 2026-06-29 (Khushi) — VOID an activated cover (wrong amount). Uses the
+  // SHARED requireDoorManagerApproval flow (identical OTP UX to Captain/Bar).
+  const [voidBusy, setVoidBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -433,6 +487,41 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
     setBusy(false);
   };
 
+  // 🆕 2026-06-29 (Khushi) — VOID flow. Branded confirm → SHARED manager
+  // approval (same sending/verifying/OTP-VERIFIED UX as Captain/Bar) → void +
+  // expire the cover → success. Fail-open: any error shows a clear alert.
+  const startVoid = async () => {
+    if (!existing || voidBusy) return;
+    const amt = Number(existing.coverActivated || 0);
+    const who = (booking.name || "this guest").toString();
+    const ok = await centeredConfirm(
+      "VOID THIS COVER?",
+      `This zeroes ${who}'s wallet (₹${amt.toLocaleString("en-IN")} → ₹0) and EXPIRES it immediately — the guest's QR stops working at once.\n\nYou can re-activate the correct amount right after.`,
+      "VOID COVER", "CANCEL", true,
+    );
+    if (!ok) return;
+    const approved = await requireDoorManagerApproval(
+      `Void ₹${amt.toLocaleString("en-IN")} cover for ${who}.`,
+      { by: agentName, tableId: existing.id, amount: amt },
+    );
+    if (!approved) return;
+    setVoidBusy(true);
+    const closeBusy = centeredBusy("Voiding cover…\n\nPlease wait.", true);
+    try {
+      await voidActivatedCover(existing.id, agentName);
+      closeBusy();
+      // Cover is now ₹0 / expired → drop back to the activation form so the
+      // door can re-enter the correct amount.
+      setExisting(null);
+      setEditMode(false);
+      await centeredAlert("COVER VOIDED", `${who}'s cover has been voided and expired.`, "success", true);
+    } catch (e: any) {
+      closeBusy();
+      await centeredAlert("VOID FAILED", e?.message || "Could not void the cover. Try again.", "error", true);
+    }
+    setVoidBusy(false);
+  };
+
   return (
     <div onClick={closeOnBackdrop(onClose)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 24, width: "100%", maxWidth: 440, maxHeight: "92vh", overflowY: "auto", fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif" }}>
@@ -504,10 +593,16 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
               style={{ width: "100%", padding: 14, borderRadius: 6, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: "pointer", marginBottom: 10 }}>
               📲 SEND WHATSAPP WALLET LINK
             </button>
-            {/* 🔴 2026-05-21 (Khushi) — Void Cover button REMOVED per request.
-                Mistakes during check-in are now reverted via the existing
-                ✏️ Edit Cover Amount button just above (set back to ₹0 or
-                whatever was originally collected). */}
+            {/* 🆕 2026-06-29 (Khushi) — VOID re-added: wrong-amount activations
+                (e.g. ₹2,000 instead of ₹1,000) zero + EXPIRE the wallet now,
+                manager-gated. Re-activate the correct amount right after. */}
+            <button onClick={startVoid}
+              style={{ width: "100%", padding: 14, borderRadius: 6, background: "#fff", border: "2px solid #FF5733", color: "#FF5733", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer", marginBottom: 4 }}>
+              🚫 VOID COVER &amp; EXPIRE
+            </button>
+            <div style={{ fontSize: 11, color: "#6B6B6B", textAlign: "center" }}>
+              Wrong amount? Voids the wallet &amp; expires it now. Manager OTP required.
+            </div>
           </>
         ) : (
           <>
@@ -720,6 +815,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
           </div>
         </div>
       )}
+
     </div>
   );
 }
@@ -2352,6 +2448,15 @@ function PaidBadge({ booking, cover }: { booking: HodBooking; cover?: HodCover |
   const greenPill: React.CSSProperties = { background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 6, whiteSpace: "nowrap", letterSpacing: .3 };
   const bluePill: React.CSSProperties = { background: "#fff", border: "2px solid #000", color: "#3D3D3D", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 6, whiteSpace: "nowrap", letterSpacing: .3 };
   const dimGoldPill: React.CSSProperties = { background: "#FFD700", border: "2px solid #000", color: "#000", fontSize: 10, fontWeight: 800, padding: "3px 9px", borderRadius: 6, whiteSpace: "nowrap", letterSpacing: .3 };
+  const redPill: React.CSSProperties = { background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 10, fontWeight: 900, padding: "3px 9px", borderRadius: 6, whiteSpace: "nowrap", letterSpacing: .3 };
+
+  // 🆕 2026-06-29 (Khushi) — VOIDED wins over EVERY other state. After a cover
+  // is voided the wallet is ₹0/expired, but a prepaid ticket can still make the
+  // row read "✓ PAID ₹500" — misleading. Show a clear RED "VOIDED" badge so the
+  // door knows the cover was cancelled. (voidActivatedCover stamps `voided`.)
+  if ((cover as any)?.voided) {
+    return <span style={redPill}>🚫 VOIDED</span>;
+  }
 
   // ── CHECKED-IN states (evaluated FIRST so post-arrival actions win over
   //    pre-arrival shortcuts like guestlist/paidOnline). ──────────────────
@@ -2539,6 +2644,11 @@ function BookingDetailModal({
   // pass it down so both the inline ACTIVATE COVER gate AND the LookupResult
   // CHECK IN GUEST gate read the override after a successful reassign.
   const [reassignedTableId, setReassignedTableId] = useState<string>("");
+  // 🆕 2026-06-29 (Khushi) — VOID an activated cover straight from the guest
+  // card. Uses the SHARED requireDoorManagerApproval flow (identical OTP UX to
+  // Captain/Bar). Shown only while a cover is live (coverActivated > 0); the
+  // live modalCover subscription flips it back to ACTIVATE COVER once voided.
+  const [voidBusy, setVoidBusy] = useState(false);
   // v3.91 — also read `_tableId` (lookupBooking sets this on TBL-/HODTAB
   // scanner results; `.tableId` is empty on the shim).
   const _liveTableIdRaw = reassignedTableId || String((booking as any).tableId || (booking as any)._tableId || "").trim();
@@ -2579,6 +2689,37 @@ function BookingDetailModal({
     });
     return unsub;
   }, [booking.ref, booking.id]);
+  // 🆕 2026-06-29 (Khushi) — VOID flow (operates on the live cover). Branded
+  // confirm → SHARED manager approval (same sending/verifying/OTP-VERIFIED UX
+  // as Captain/Bar) → void + expire → success. The live modalCover snapshot
+  // flips coverActivated→0, hiding VOID and re-showing ACTIVATE COVER.
+  const startVoid = async () => {
+    if (!modalCover || voidBusy) return;
+    const amt = Number(modalCover.coverActivated || 0);
+    const who = (booking.name || "this guest").toString();
+    const ok = await centeredConfirm(
+      "VOID THIS COVER?",
+      `This zeroes ${who}'s wallet (₹${amt.toLocaleString("en-IN")} → ₹0) and EXPIRES it immediately — the guest's QR stops working at once.\n\nYou can re-activate the correct amount right after.`,
+      "VOID COVER", "CANCEL", true,
+    );
+    if (!ok) return;
+    const approved = await requireDoorManagerApproval(
+      `Void ₹${amt.toLocaleString("en-IN")} cover for ${who}.`,
+      { by: agentName, tableId: modalCover.id, amount: amt },
+    );
+    if (!approved) return;
+    setVoidBusy(true);
+    const closeBusy = centeredBusy("Voiding cover…\n\nPlease wait.", true);
+    try {
+      await voidActivatedCover(modalCover.id, agentName);
+      closeBusy();
+      await centeredAlert("COVER VOIDED", `${who}'s cover has been voided and expired.`, "success", true);
+    } catch (e: any) {
+      closeBusy();
+      await centeredAlert("VOID FAILED", e?.message || "Could not void the cover. Try again.", "error", true);
+    }
+    setVoidBusy(false);
+  };
   return (
     <div onClick={closeOnBackdrop(onClose)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.78)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, overflowY: "auto", backdropFilter: "blur(4px)" }}>
@@ -2712,6 +2853,16 @@ function BookingDetailModal({
               📞 CALL
             </a>
           )}
+          {/* 🆕 2026-06-29 (Khushi) — VOID COVER: wrong-amount activations
+              (e.g. ₹2,000 instead of ₹1,000) zero + EXPIRE the wallet now,
+              manager-gated. Only shown while a cover is live; re-activate the
+              correct amount right after (ACTIVATE COVER reappears). */}
+          {Number(modalCover?.coverActivated || 0) > 0 && (
+            <button onClick={startVoid}
+              style={{ gridColumn: "1 / -1", padding: "16px 12px", borderRadius: 6, background: "#fff", border: "2px solid #FF5733", color: "#FF5733", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+              🚫 VOID COVER &amp; EXPIRE
+            </button>
+          )}
           {/* 🆕 v3.67 (Khushi) — REASSIGN TABLE for ground-floor table bookings.
               Spans both columns so it never wraps under the 2-col grid. Locked
               once arrived — same rule as TABLES tab (KOTs tagged to table). */}
@@ -2785,6 +2936,7 @@ function BookingDetailModal({
           }}
         />
       )}
+
     </div>
   );
 }
