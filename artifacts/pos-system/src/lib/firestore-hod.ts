@@ -3677,11 +3677,25 @@ export async function allocateInvoiceNumber(): Promise<string> {
     // backs the walk-in number counter), so the sequential GST invoice serial
     // works with ZERO Firestore-rules changes — no Console re-publish needed.
     const counterRef = doc(db, "posCounters", "invoiceCounter");
+    // 🆕 2026-06-29 (Khushi DUPLICATE-NUMBER FIX) — MONOTONIC high-water guard.
+    // A duplicate `HOD/2026-27/00005` appeared across two nights: the running
+    // counter had effectively restarted from a low value (a fresh counter doc /
+    // location), so it re-issued serials that were already printed. To make the
+    // series NEVER go backwards and NEVER repeat for a financial year, we keep a
+    // strictly-increasing high-water field `hw_<fy>` ALONGSIDE the running
+    // `fy_<fy>` counter and allocate from `max(running, highWater) + 1`. So even
+    // if `fy_<fy>` is ever reset to a lower value (migration / manual edit), the
+    // high-water mark floors the next serial above every number ever issued —
+    // numbers stay unique and continue from where they left off.
+    const hwKey = `hw_${fy.replace(/-/g, "_")}`;
     const nextSeq = await runTransaction(db, async (txn) => {
       const cSnap = await txn.get(counterRef);
       const cData = cSnap.exists() ? cSnap.data() : {};
-      const seq = ((cData[fyKey] as number) || 0) + 1;
-      txn.set(counterRef, { [fyKey]: seq }, { merge: true });
+      const safeNum = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+      const prevSeq = safeNum(cData[fyKey]);
+      const prevHw = safeNum(cData[hwKey]);
+      const seq = Math.max(prevSeq, prevHw) + 1;
+      txn.set(counterRef, { [fyKey]: seq, [hwKey]: seq }, { merge: true });
       return seq;
     });
     return `HOD/${fy}/${String(nextSeq).padStart(5, "0")}`;
