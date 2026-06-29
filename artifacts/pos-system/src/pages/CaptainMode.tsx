@@ -1689,7 +1689,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         try {
           const printItems = allItems
             .filter((it) => it && (it.qty || 0) > 0)
-            .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0 }));
+            .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0, t: it.t, alc: it.alc }));
           if (printItems.length > 0) {
             const id = (reservation.tableId || "").toUpperCase();
             let floor: TabletFloor = "first";
@@ -1919,7 +1919,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
       try {
         const printItems = allItems
           .filter((it) => it && (it.qty || 0) > 0)
-          .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0 }));
+          .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0, t: it.t, alc: it.alc }));
         if (printItems.length > 0) {
           const id = (reservation.tableId || "").toUpperCase();
           let floor: TabletFloor = "first";
@@ -3824,7 +3824,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       printBill({
         tableId: r.tableId, floorLabel: r.floorLabel,
         customerName: r.customerName, partySize: (r as any).partySize, staff: captainName,
-        items: snap.items.map((i) => ({ n: i.n, p: i.p, qty: i.qty })),
+        items: snap.items.map((i) => ({ n: i.n, p: i.p, qty: i.qty, t: i.t, alc: i.alc })),
         amounts: { subtotal: snap.subtotal, serviceCharge: snap.scAmt, cgst: snap.cgst, sgst: snap.sgst,
           discount: snap.discountAmt, roundOff: 0, total: snap.finalAmount, discountPct: snap.discountPct },
         paymentMethod: (r as any).paymentMethod || (snap.aggName !== "inhouse" ? snap.aggName : undefined),

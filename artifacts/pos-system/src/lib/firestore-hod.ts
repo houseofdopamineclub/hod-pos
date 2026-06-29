@@ -3443,6 +3443,11 @@ export interface BillAuditRow {
   itemCount: number;
   isDuplicate: boolean;
   billNumber: string;
+  // 🆕 2026-06-28 — the SEQUENTIAL GST invoice serial (HOD/2026-27/00001), stamped
+  // ONCE on the cover/reservation DOC (not per print-log row). The Audit display
+  // shows this when present, else falls back to the legacy `billNumber` ref. This
+  // is the SAME number the printed paper bill shows (recordBillPrint returns it).
+  invoiceNumber: string;
   printIndex: number;    // 1 = original, 2+ = reprint
   // 🆕 2026-06-16 v3.302 — item lines + persisted tax breakdown so the Audit
   // page can show the FULL bill (items + GST/SC/discount) when a row is tapped.
@@ -3471,23 +3476,35 @@ function flattenRoundItems(rounds?: HodTabRound[]): HodOrderItem[] {
 }
 export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]> {
   const rows: BillAuditRow[] = [];
-  // Wallets — 💰 COST FIX 2026-05-21: cap at 500 covers (was: full collection scan
-  // growing unbounded). No orderBy because not every cover doc has a guaranteed
-  // 'createdAt' field — adding it would fail the query. limit(500) alone returns
-  // Firestore's natural order which is close-enough for an audit page that's
-  // already paginated by `maxRows` below.
-  const coverSnap = await getDocs(query(collection(db, COVERS_COL), limit(500)));
+  // Wallets — 🐛 FIX 2026-06-28: read the billed covers MOST-RECENT-FIRST so a
+  // fresh BAR bill is never dropped. The old `limit(500)` had NO ordering, so
+  // Firestore returned the lexicographically-lowest 500 cover IDs (covers use
+  // RANDOM `HODENT######` ids). Once the covers collection grew past 500, a new
+  // bar bill frequently fell OUTSIDE that window and silently never showed in
+  // Boss→Audit "Bills" — while table bills (separate collection, no limit)
+  // always did. `lastWalletBillPrintedAt` is stamped on EVERY bill print
+  // (recordWalletBillPrint), so ordering by it desc returns exactly the covers
+  // that have bills, newest first — SAME-or-fewer reads AND correct. Single-field
+  // orderBy → auto-indexed, no composite index. Fail-open to the legacy unordered
+  // scan so the Audit page never breaks if the field/index is unavailable.
+  let coverSnap;
+  try {
+    coverSnap = await getDocs(query(collection(db, COVERS_COL), orderBy("lastWalletBillPrintedAt", "desc"), limit(500)));
+  } catch {
+    coverSnap = await getDocs(query(collection(db, COVERS_COL), limit(500)));
+  }
   coverSnap.forEach((d) => {
     const data = d.data() as HodCover & { id?: string };
     const log = data.walletBillPrintLog;
     if (!Array.isArray(log) || log.length === 0) return;
     const items = flattenRoundItems(data.tabRounds);
+    const invNum = String((data as { invoiceNumber?: string }).invoiceNumber || "");
     log.forEach((e, i) => {
       rows.push({
         at: e.at, source: "wallet", docId: d.id,
         ref: (data.ref || d.id).toUpperCase(), customerName: data.name || "",
         by: e.by, total: e.total, itemCount: e.itemCount,
-        isDuplicate: e.isDuplicate, billNumber: e.billNumber, printIndex: i + 1,
+        isDuplicate: e.isDuplicate, billNumber: e.billNumber, invoiceNumber: invNum, printIndex: i + 1,
         items, subtotal: e.subtotal ?? 0, discount: e.discount ?? 0,
         serviceCharge: e.serviceCharge ?? 0, tax: e.tax ?? 0,
       });
@@ -3500,19 +3517,42 @@ export async function getRecentBillPrints(maxRows = 200): Promise<BillAuditRow[]
     const log = data.billPrintLog;
     if (!Array.isArray(log) || log.length === 0) return;
     const items = flattenRoundItems(data.tabRounds);
+    const invNum = String((data as { invoiceNumber?: string }).invoiceNumber || "");
     log.forEach((e: typeof log[number] & { itemCount?: number; subtotal?: number; discount?: number; serviceCharge?: number; tax?: number }, i) => {
       rows.push({
         at: e.at, source: "table", docId: d.id,
         ref: (data.tableId || d.id).toUpperCase(), customerName: data.customerName || "",
         by: e.by, total: e.total, itemCount: e.itemCount ?? 0,
-        isDuplicate: e.isDuplicate, billNumber: e.billNumber, printIndex: i + 1,
+        isDuplicate: e.isDuplicate, billNumber: e.billNumber, invoiceNumber: invNum, printIndex: i + 1,
         items, subtotal: e.subtotal ?? 0, discount: e.discount ?? 0,
         serviceCharge: e.serviceCharge ?? 0, tax: e.tax ?? 0,
       });
     });
   });
-  rows.sort((a, b) => (b.at > a.at ? 1 : -1));
-  return rows.slice(0, maxRows);
+  // 🐛 FIX 2026-06-28 (Khushi: "PRINT BILL makes a bill, then SETTLE BILL makes
+  // ONE MORE with all discounts — which do we store?"): collapse to ONE
+  // authoritative bill per table/cover. A captain taps 🖨 PRINT BILL (logs row
+  // #1), then SETTLE BILL re-prints the FINAL bill WITH the discount applied
+  // (logs row #2, flagged isDuplicate) → the SAME table showed TWO rows with
+  // DIFFERENT amounts, the real discounted one mislabeled "DUPLICATE". Bar bills
+  // likewise re-print the FULL cumulative tab each round. In every case the
+  // LATEST print per doc IS the complete, final, settled bill — earlier prints
+  // are interim/reprints. We keep only the latest `at` per source+doc (the SAME
+  // reprint dedup the GST report uses), so the owner sees ONE correct bill =
+  // exactly what was charged. The full log is still stored untouched (audit
+  // trail); `printIndex` carries the total print count so a reprint is still
+  // visible, but the kept row is the authoritative invoice (never a "DUPLICATE").
+  const finalByDoc = new Map<string, BillAuditRow>();
+  for (const r of rows) {
+    const key = `${r.source}|${r.docId}`;
+    const prev = finalByDoc.get(key);
+    const count = Math.max(r.printIndex, prev?.printIndex || 0);
+    const latest = !prev || r.at > prev.at ? r : prev;
+    finalByDoc.set(key, { ...latest, isDuplicate: false, printIndex: count });
+  }
+  const deduped = Array.from(finalByDoc.values());
+  deduped.sort((a, b) => (b.at > a.at ? 1 : -1));
+  return deduped.slice(0, maxRows);
 }
 
 /**
@@ -5780,7 +5820,11 @@ export async function printBill(data: {
   customerName?: string;
   partySize?: number;
   staff: string;
-  items: Array<{ n: string; p: number; qty: number }>;
+  // 🆕 2026-06-28 — carry the tax class (`t`) + alcohol flag (`alc`) onto the
+  // bill doc so the GST report's BILL ITEMS section can tag each line as
+  // "Non-GST (alcohol)" vs "GST 5% (food)" instead of defaulting everything to
+  // GST 5%. Optional → legacy/untagged callers still work (treated as food).
+  items: Array<{ n: string; p: number; qty: number; t?: "food" | "drink"; alc?: boolean }>;
   amounts: {
     subtotal: number; serviceCharge: number; cgst: number; sgst: number;
     discount: number; roundOff: number; total: number; happyHourDiscount?: number;

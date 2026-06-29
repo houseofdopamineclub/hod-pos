@@ -20,11 +20,16 @@
 //  ⚠️ DOUBLE-COUNT DISCIPLINE (the whole point of "100% accurate"):
 //    • Tables and Bar are DISJOINT collections → their NET/GROSS simply add.
 //    • Cover redemption is NOT added to NET/GROSS (it's how a bill was paid,
-//      not extra sales). It only feeds the wallet-economics tiles + the
-//      payment-method pie (settlement-tender view).
-//    • The payment pie is measured at BILL SETTLEMENT (wallet / cash / card /
-//      upi / online / aggregator / comp) so wallet money is counted ONCE
-//      (the redemption), never also as the cash that loaded the wallet.
+//      not extra sales). It only feeds the wallet-economics tiles.
+//    • The payment-method pie shows REAL TENDER COLLECTED (cash / card / upi /
+//      other) — the money that physically entered the drawer. For bar/cover
+//      wallets that means the LOADING tender (door activation + recharges, by
+//      method), NOT the wallet redemption (redemption just spends pre-paid
+//      money; counting it would double-count the cash that loaded it). Direct
+//      table settlement + NC settlement add their own cash/card/upi. So pie
+//      cash+card+upi+other == Cover-Charges-at-Door + Recharges + table-direct
+//      + NC-collected. Wallet/aggregator/comp are tracked on `pay` but are NOT
+//      shown in the 4-tender pie (they are not drawer tender).
 // ─────────────────────────────────────────────────────────────────────────
 import { collection, doc, getDocs, query, setDoc, where } from "firebase/firestore";
 import { db } from "./firebase";
@@ -32,6 +37,7 @@ import {
   computeHodBreakdown,
   type HodCover,
   type HodTableReservation,
+  type HodTransaction,
 } from "./firestore-hod";
 import { computeNcBill, type BillDueDoc } from "./bill-due";
 
@@ -240,8 +246,11 @@ export function aggregateNight(
         const aggNet = (r as { aggregatorNetAmount?: number }).aggregatorNetAmount ?? (r.amountPaid ?? aggGross);
         out.pay.aggregator += num(aggNet);
       } else {
+        // walletSlice = the part paid from a pre-loaded cover. We do NOT add it
+        // to pay.wallet — that money's real tender (cash/card/upi) is counted at
+        // wallet-LOADING time in the cover tender loop below; counting it here
+        // too would double-count. Only the `direct` remainder is fresh tender.
         const walletSlice = num((r as { walletPaidAmount?: number }).walletPaidAmount);
-        out.pay.wallet += walletSlice;
         const direct = Math.max(0, num(r.amountPaid) - walletSlice);
         const splits = (r as { paymentSplits?: Array<{ method: string; amount: number }> }).paymentSplits;
         if (splits && splits.length) {
@@ -338,8 +347,11 @@ export function aggregateNight(
   out.drinkSales += drinkSales;
   out.orders += billCount + ncChargeBillCount;
 
-  // bar bills settle by wallet → pay.wallet
-  out.pay.wallet += barRedeemed;
+  // NOTE: bar bills settle by wallet REDEMPTION (barRedeemed) — that is NOT
+  // fresh tender, it spends money already collected when the wallet was loaded.
+  // The real cash/card/upi for bar covers is attributed in the cover tender
+  // loop below (door activation + recharges). So we deliberately do NOT add
+  // barRedeemed to the payment-method pie (it would double-count).
   // NC cash actually collected (settled, non-waived) by method; comp + waived → comp
   for (const r of nc) {
     if (r.status === "open") continue;
@@ -360,6 +372,43 @@ export function aggregateNight(
     // entry/bar (non-table) cover guests — table guests already counted via reservation
     if (!c.isTableBooking) {
       out.guests += num((c as { partySize?: number }).partySize) || num((c as { guests?: number }).guests) || 1;
+    }
+
+    // ── REAL TENDER COLLECTED to LOAD this wallet (door activation + recharges) ──
+    // This is the cash/card/upi that physically entered the drawer. The recharge
+    // transactions carry their own method (`<method>_topup` / `split_topup`); the
+    // remaining (= original door/booking activation) uses the activation method.
+    // We force the per-cover tender to sum to `activatedAmt` so the pie reconciles
+    // EXACTLY to (Cover Charges at Door + Recharges) — any unknown method → other.
+    let assigned = 0;
+    const txns = (c as { transactions?: HodTransaction[] }).transactions || [];
+    for (const tx of txns) {
+      const ty = String((tx as { type?: string }).type || "");
+      const amt = num((tx as { amount?: number }).amount);
+      if (ty === "split_topup") {
+        const sp = (tx as { split?: { cash?: number; upi?: number; card?: number } }).split || {};
+        out.pay.cash += num(sp.cash); out.pay.upi += num(sp.upi); out.pay.card += num(sp.card);
+        assigned += num(sp.cash) + num(sp.upi) + num(sp.card);
+      } else if (/_topup$/.test(ty) && amt > 0) {
+        out.pay[tenderKey(ty.replace(/_topup$/, ""))] += amt;
+        assigned += amt;
+      }
+    }
+    // door / original activation remainder, split by the activation method/split
+    const rest = activatedAmt - assigned;
+    if (rest > 0.5) {
+      const aSplit = (c as { coverPaymentSplit?: { cash?: number; upi?: number; card?: number } }).coverPaymentSplit;
+      const aSum = aSplit ? num(aSplit.cash) + num(aSplit.upi) + num(aSplit.card) : 0;
+      if (aSum > 0) {
+        // distribute `rest` by the recorded split ratio so it sums to `rest` exactly
+        const fc = num(aSplit!.cash) / aSum, fu = num(aSplit!.upi) / aSum;
+        const rc = rest * fc, ru = rest * fu;
+        out.pay.cash += rc; out.pay.upi += ru; out.pay.card += rest - rc - ru;
+      } else {
+        out.pay[tenderKey(String(
+          (c as { coverPaymentMethod?: string }).coverPaymentMethod || c.paymentMethod || "",
+        ))] += rest;
+      }
     }
   }
 
@@ -450,7 +499,7 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
 //  Bump SUMMARY_SCHEMA whenever the aggregation MATH changes so stale cached
 //  summaries are ignored and recomputed (old docs with a lower _schema = miss).
 // ─────────────────────────────────────────────────────────────────────────
-export const SUMMARY_SCHEMA = 1;
+export const SUMMARY_SCHEMA = 2;
 const SUMMARY_COL = "daily_summaries";
 
 /** Inclusive list of YYYY-MM-DD nights from `start` to `end` (calendar days). */

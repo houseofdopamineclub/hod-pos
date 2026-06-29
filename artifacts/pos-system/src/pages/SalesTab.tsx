@@ -164,7 +164,7 @@ export default function SalesTab() {
     ];
     for (const [k, v] of rows) L.push([k, Math.round(v)].map(esc).join(","));
     L.push("");
-    L.push("PAYMENT METHODS (how bills were settled)");
+    L.push("PAYMENT METHODS (real tender collected - cash/card/UPI into the drawer)");
     L.push("Method,Amount Rs");
     for (const m of PAY_META) L.push([m.label, Math.round(t.pay[m.key])].map(esc).join(","));
     L.push("");
@@ -272,7 +272,8 @@ export default function SalesTab() {
           {/* CHARTS */}
           <div style={{ display: "grid", gridTemplateColumns: trendData.length > 1 ? "minmax(0,1fr) minmax(0,1.4fr)" : "minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
             <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 8 }}>Payment Methods</div>
+              <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 2 }}>Payment Methods</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.grey, marginBottom: 8 }}>Real cash / card / UPI collected — bar wallet loads + table & NC bills.</div>
               {payData.length === 0 ? (
                 <div style={{ color: C.grey, fontWeight: 700, fontSize: 13, padding: 20, textAlign: "center" }}>No settled payments in range.</div>
               ) : (

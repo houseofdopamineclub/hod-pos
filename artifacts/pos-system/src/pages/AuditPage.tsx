@@ -156,6 +156,36 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         const time = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour12: false });
         return [date, time];
       };
+      // 🆕 2026-06-28 (Khushi) — show HOW each bill was settled in plain words.
+      // The stored paymentMethod is a raw token (e.g. "cash", "wallet+cash",
+      // "split:cash+upi", or an aggregator slug like "zomato-district") — map it
+      // to clean labels so the report clearly reads "Cash", "Card", "UPI", or the
+      // actual platform "Swiggy"/"Zomato" instead of a slug. Combined modes
+      // ("wallet+cash") are split and re-joined with " + ".
+      const prettyPayMode = (raw: string | undefined): string => {
+        const s = (raw || "").trim().toLowerCase();
+        if (!s) return "Unspecified";
+        const one = (t0: string): string => {
+          const t = t0.replace(/^split:/, "").trim();
+          if (!t) return "";
+          if (t.includes("swiggy")) return "Swiggy";
+          if (t.includes("zomato") || t.includes("district")) return "Zomato";
+          if (t.includes("eazy")) return "EazyDiner";
+          if (t.includes("magic")) return "Magicpin";
+          if (t === "cash") return "Cash";
+          if (t === "card") return "Card";
+          if (t === "upi") return "UPI";
+          if (t === "wallet") return "Wallet (prepaid)";
+          if (t === "aggregator") return "Aggregator";
+          if (t === "complimentary" || t === "comp") return "Complimentary";
+          if (t === "waived") return "Waived";
+          if (t === "online") return "Online";
+          if (t === "other") return "Other";
+          return t.charAt(0).toUpperCase() + t.slice(1);
+        };
+        const parts = s.split("+").map(one).filter(Boolean);
+        return parts.length ? parts.join(" + ") : "Unspecified";
+      };
       // GST back-calculation — must mirror the bill engine (computeHodBreakdown):
       //   gstBase = (food + non-alcoholic) + serviceCharge   ← alcohol is EXEMPT,
       //   but service charge IS taxed. GST = gstBase × 5% (CGST 2.5 + SGST 2.5).
@@ -216,7 +246,7 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         a.subtotal += b.subtotal; a.discount += b.discount; a.sc += b.serviceCharge;
         a.cgst += b.cgst; a.sgst += b.sgst; a.taxable += g.taxableValue; a.exempt += g.exempt;
         a.roundOff += b.roundOff; a.total += b.total;
-        const pm = (b.paymentMethod || "UNSPECIFIED").toUpperCase();
+        const pm = prettyPayMode(b.paymentMethod);
         a.byPm.set(pm, (a.byPm.get(pm) || 0) + b.total);
         return a;
       }, { subtotal: 0, discount: 0, sc: 0, cgst: 0, sgst: 0, taxable: 0, exempt: 0, roundOff: 0, total: 0, byPm: new Map<string, number>() });
@@ -244,7 +274,7 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         "Item Value", "Discount", "Service Charge", "Taxable @5%", "CGST", "SGST", "Exempt (alcohol)", "Round Off", "INVOICE TOTAL"]));
       for (const b of invoices) {
         const [date, time] = dt(b.at); const g = gstBreakup(b);
-        L.push(row([date, time, b.billNumber, b.tableId, b.customerName, b.staff, (b.paymentMethod || "").toUpperCase(),
+        L.push(row([date, time, b.billNumber, b.tableId, b.customerName, b.staff, prettyPayMode(b.paymentMethod),
           r2(b.subtotal), r2(b.discount), r2(b.serviceCharge), g.taxableValue, r2(b.cgst), r2(b.sgst), g.exempt, r2(b.roundOff), r2(b.total)]));
       }
       if (invoices.length === 0) L.push("(no bills in this range)");
@@ -399,7 +429,7 @@ function DetailModal({ ev, fmt, onClose }: { ev: AuditEvent; fmt: (iso: string) 
   // (always-from-saved-log) totals are never silently contradicted.
   const itemsSum = items.reduce((s, it) => s + (it.p || 0) * (it.qty || 0), 0);
   const itemsMismatch = isBill && ev.row.subtotal > 0 && Math.abs(itemsSum - ev.row.subtotal) > 1;
-  const title = isBill ? (ev.row.billNumber || "BILL") : ev.kind === "kot" ? `KOT · R${ev.roundNum}` : "DETAILS";
+  const title = isBill ? (ev.row.invoiceNumber || ev.row.billNumber || "BILL") : ev.kind === "kot" ? `KOT · R${ev.roundNum}` : "DETAILS";
   const sub = isBill ? `${ev.row.ref}${ev.row.customerName ? ` · ${ev.row.customerName}` : ""}`
                      : ev.kind === "kot" ? `${ev.tableId}${ev.customerName ? ` · ${ev.customerName}` : ""}` : "";
   const money = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN")}`;
@@ -500,7 +530,7 @@ function AuditRow({ ev, fmt, onSelect }: { ev: AuditEvent; fmt: (iso: string) =>
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-            <span style={{ fontFamily: "monospace", fontSize: 14, fontWeight: 900, color: accent }}>{r.billNumber}</span>
+            <span style={{ fontFamily: "monospace", fontSize: 14, fontWeight: 900, color: accent }}>{r.invoiceNumber || r.billNumber}</span>
             {isDup && <span style={{ background: "#FFF0EE", color: RED, fontSize: 10, fontWeight: 900, padding: "2px 6px", border: `1px solid ${RED}`, letterSpacing: .5 }}>DUPLICATE</span>}
             <span style={{ background: r.source === "wallet" ? "#EFF6FF" : "#F5F0FF", color: r.source === "wallet" ? BLUE : PURPLE, fontSize: 10, fontWeight: 800, padding: "2px 6px", textTransform: "uppercase", border: `1px solid ${r.source === "wallet" ? BLUE : PURPLE}` }}>{r.source}</span>
           </div>
