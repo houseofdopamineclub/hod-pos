@@ -40,7 +40,7 @@ import {
   type HodTableReservation,
   type HodTransaction,
 } from "./firestore-hod";
-import { computeNcBill, type BillDueDoc } from "./bill-due";
+import { computeNcBill, computeChargeBill, type BillDueDoc } from "./bill-due";
 
 // ── raw range data ────────────────────────────────────────────────────────
 export interface VenueRaw {
@@ -71,13 +71,53 @@ export async function fetchVenueRange(
       return []; // 🛟 fail-open
     }
   };
-  const [reservations, history, covers, nc, bookings] = await Promise.all([
+  // RANGE-BOUNDED NC BILL DUE fetch: a persistent cross-day tab created BEFORE
+  // the range can still carry a round/payment INSIDE it (operationalNight = the
+  // creation night, so the `operationalNight` range query above misses it). We
+  // catch those via array-contains-any on the per-night `roundNights` /
+  // `paymentNights` stamps — bounded to the SELECTED range (NOT all history),
+  // chunked to Firestore's 30-value array-contains-any limit, single-field (no
+  // composite index), each query fail-open. Deduped by id.
+  const rangeBillDue = async (): Promise<BillDueDoc[]> => {
+    try {
+      const nights = listNights(startNight, endNight);
+      if (nights.length === 0) return [];
+      const chunks: string[][] = [];
+      for (let i = 0; i < nights.length; i += 30) chunks.push(nights.slice(i, i + 30));
+      const byId = new Map<string, BillDueDoc>();
+      const jobs: Promise<void>[] = [];
+      for (const ch of chunks) {
+        for (const field of ["roundNights", "paymentNights"] as const) {
+          jobs.push((async () => {
+            try {
+              const q = query(collection(db, "billDue"), where(field, "array-contains-any", ch));
+              const snap = await getDocs(q);
+              snap.docs.forEach((d) =>
+                byId.set(d.id, { id: d.id, ...(d.data() as object) } as unknown as BillDueDoc));
+            } catch { /* 🛟 fail-open per query */ }
+          })());
+        }
+      }
+      await Promise.all(jobs);
+      return Array.from(byId.values());
+    } catch {
+      return []; // 🛟 fail-open
+    }
+  };
+  const [reservations, history, covers, ncRange, ncBillDue, bookings] = await Promise.all([
     rangeDocs<HodTableReservation>("tableReservations", "date"),
     rangeDocs<HodTableReservation>("tableHistory", "date"),
     rangeDocs<HodCover>("covers", "date"),
     rangeDocs<BillDueDoc>("billDue", "operationalNight"),
+    rangeBillDue(),
     rangeDocs<HodBooking>("bookings", "date"),
   ]);
+  // Merge range docs (legacy/comp/owner + billdue created in range) with the
+  // full billdue set, deduped by id, so cross-day tabs are never missed.
+  const ncMap = new Map<string, BillDueDoc>();
+  for (const d of ncRange) ncMap.set(String((d as { id?: string }).id || ""), d);
+  for (const d of ncBillDue) ncMap.set(String((d as { id?: string }).id || ""), d);
+  const nc = Array.from(ncMap.values());
   return { reservations, history, covers, nc, bookings };
 }
 
@@ -126,10 +166,13 @@ export interface VenueSales {
   recharges: number;          // subsequent top-ups = topUpTotal
   redeemed: number;           // coverActivated − coverBalance
   notRedeemed: number;        // leftover coverBalance (breakage, kept by house)
-  ncComp: number;             // ₹1000 comp lines given away on NC tabs
+  ncComp: number;             // ₹1000 comp lines given away on NC tabs (legacy + new COMP kind)
   ncDiscount: number;         // discounts given on settled NC tabs
   ncWaived: number;           // full NC bills written off (waived)
-  ncDue: number;              // chargeable overage billed on NC tabs (must be collected)
+  ncDue: number;              // chargeable overage billed on legacy NC tabs (must be collected)
+  ncOwner: number;            // 🆕 OWNER kind: item-price owed (non-waived); EXCLUDED from Net/Gross
+  ncBillDueBilled: number;    // 🆕 BILLDUE kind: real-bill value accrued on rounds punched THIS night (incl SC+GST); INCLUDED in Net/Gross
+  ncBillDueOutstanding: number; // 🆕 BILLDUE balance still unpaid — a LIVE snapshot, filled by the dashboard, NOT by night aggregation (always 0 here)
 
   // ── settlement-tender split (whole venue) ──
   pay: PaymentMix;
@@ -149,6 +192,7 @@ const zeroSales = (night: string): VenueSales => ({
   entryCollected: 0,
   coverChargesAtDoor: 0, recharges: 0, redeemed: 0, notRedeemed: 0,
   ncComp: 0, ncDiscount: 0, ncWaived: 0, ncDue: 0,
+  ncOwner: 0, ncBillDueBilled: 0, ncBillDueOutstanding: 0,
   pay: zeroPay(),
 });
 
@@ -325,10 +369,24 @@ export function aggregateNight(
     }
   }
 
-  // NC chargeable (>₹1000) folds into the bar sales like a normal bar bill
+  // ── NC LEDGER (3 kinds + legacy) ─────────────────────────────────────────
+  //  LEGACY (no kind): old "first ₹1000 comp + charge overage" model — folds
+  //                    the chargeable part into bar sales (UNCHANGED).
+  //  COMP    : free give-away (≤₹1000), no SC/GST → ncComp only, EXCLUDED from Net/Gross.
+  //  OWNER   : item-price only, no SC/GST → ncOwner (non-waived), EXCLUDED from Net/Gross.
+  //  BILLDUE : a REAL bill (full SC+GST) on a persistent cross-day per-person tab —
+  //            each ROUND lands in Net/Gross/SC/tax on ITS night; each PAYMENT lands
+  //            in the tender pie on ITS night.
+  //  NOTE: the caller passes billdue docs filtered by round/payment NIGHT (not
+  //  operationalNight), so re-filter the legacy/comp/owner kinds by night here.
+  const ncLegacy = ncRows.filter((r) => !r.kind && r.operationalNight === night);
+  const ncCompRows = ncRows.filter((r) => r.kind === "comp" && r.operationalNight === night);
+  const ncOwnerRows = ncRows.filter((r) => r.kind === "owner" && r.operationalNight === night);
+  const ncBillDueRows = ncRows.filter((r) => r.kind === "billdue");
+
+  // NC chargeable (>₹1000) folds into the bar sales like a normal bar bill (LEGACY)
   let ncChargeSC = 0, ncChargeTax = 0, ncChargeGross = 0, ncChargeBillCount = 0;
-  const nc = ncRows.filter((r) => r.operationalNight === night);
-  for (const r of nc) {
+  for (const r of ncLegacy) {
     const items = r.items || [];
     const rb = computeNcBill(items, 1000);
     ncChargeSC += rb.serviceCharge;
@@ -364,8 +422,8 @@ export function aggregateNight(
   scTotal += ncChargeSC;
   taxTotal += ncChargeTax;
 
-  // NC settle discounts (live on billDue ledger, not walletBillPrintLog)
-  const ncDiscount = nc
+  // NC settle discounts (live on billDue ledger, not walletBillPrintLog) — LEGACY
+  const ncDiscount = ncLegacy
     .filter((r) => r.status !== "open" && r.paymentMethod !== "waived" && typeof r.finalAmount === "number" && num(r.amountDue) - num(r.finalAmount) > 0)
     .reduce((s, r) => s + (num(r.amountDue) - num(r.finalAmount)), 0);
 
@@ -387,12 +445,49 @@ export function aggregateNight(
   // The real cash/card/upi for bar covers is attributed in the cover tender
   // loop below (door activation + recharges). So we deliberately do NOT add
   // barRedeemed to the payment-method pie (it would double-count).
-  // NC cash actually collected (settled, non-waived) by method; comp + waived → comp
-  for (const r of nc) {
+  // NC cash actually collected (settled, non-waived) by method; comp + waived → comp (LEGACY)
+  for (const r of ncLegacy) {
     if (r.status === "open") continue;
     if (r.paymentMethod === "waived") { out.pay.comp += num(r.amountDue); out.ncWaived += num(r.amountDue); continue; }
     const collected = typeof r.finalAmount === "number" ? num(r.finalAmount) : num(r.amountDue);
     out.pay[tenderKey(String(r.paymentMethod || ""))] += collected;
+  }
+
+  // ── NC OWNER (item-price owed, no SC/GST; EXCLUDED from Net/Gross) ──
+  for (const r of ncOwnerRows) {
+    if (r.waived) continue;                 // waived off → owed nothing
+    out.ncOwner += num(r.amountDue);
+  }
+
+  // ── NC BILL DUE (real bill: full SC+GST) ──
+  //  rounds punched THIS night → bar Net/Gross/SC/tax (accrual, even if the
+  //  guest pays days later); payments collected THIS night → real tender pie.
+  for (const r of ncBillDueRows) {
+    for (const rd of (r.rounds || []).filter((x) => x.night === night)) {
+      const items = rd.items || [];
+      const rb = computeChargeBill(items);
+      out.barNet += rb.subtotal;
+      out.barGross += rb.total;
+      out.serviceCharge += rb.serviceCharge;
+      out.tax += rb.gst;
+      out.ncBillDueBilled += rb.total;
+      out.orders += 1;
+      for (const it of items) {
+        const line = num(it.p) * num(it.qty);
+        if (line <= 0) continue;
+        const k = classify(it.n || "—", "", (it as { t?: string }).t);
+        if (k === "food") out.foodSales += line;
+        else if (k === "drink") out.drinkSales += line;
+        // 'other' is already in barNet via rb.subtotal (no food/drink breakdown)
+      }
+    }
+    for (const p of (r.payments || []).filter((x) => x.night === night)) {
+      const amt = num(p.amount);
+      if (amt <= 0) continue;
+      const m = String(p.method || "");
+      if (m === "waived" || m === "complimentary") out.pay.comp += amt;
+      else out.pay[tenderKey(m)] += amt; // salary → "other" via tenderKey
+    }
   }
 
   // ── WALLET ECONOMICS (ALL covers: bar + table + entry/guestlist) ──
@@ -456,7 +551,8 @@ export function aggregateNight(
       .filter((it) => (it as { free?: boolean }).free)
       .reduce((s, it) => s + num(it.qty) * num(it.p ?? (it as { price?: number }).price), 0);
   };
-  out.ncComp = nc.reduce((s, r) => s + ncCompOf(r), 0);
+  // legacy comp lines + the new COMP-kind give-aways (both ≤₹1000, no SC/GST)
+  out.ncComp = [...ncLegacy, ...ncCompRows].reduce((s, r) => s + ncCompOf(r), 0);
   out.pay.comp += out.ncComp;
 
   out.netSales = out.tableNet + out.barNet;
@@ -480,6 +576,7 @@ function sumSales(nights: VenueSales[]): VenueSales {
     t.coverChargesAtDoor += n.coverChargesAtDoor; t.recharges += n.recharges;
     t.redeemed += n.redeemed; t.notRedeemed += n.notRedeemed;
     t.ncComp += n.ncComp; t.ncDiscount += n.ncDiscount; t.ncWaived += n.ncWaived; t.ncDue += n.ncDue;
+    t.ncOwner += n.ncOwner; t.ncBillDueBilled += n.ncBillDueBilled; t.ncBillDueOutstanding += n.ncBillDueOutstanding;
     t.pay.wallet += n.pay.wallet; t.pay.cash += n.pay.cash; t.pay.card += n.pay.card;
     t.pay.upi += n.pay.upi; t.pay.online += n.pay.online; t.pay.aggregator += n.pay.aggregator;
     t.pay.comp += n.pay.comp; t.pay.other += n.pay.other;
@@ -498,7 +595,12 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
   for (const r of raw.reservations) if (r.date) nights.add(r.date);
   for (const r of raw.history) if (r.date) nights.add(r.date);
   for (const c of raw.covers) if (c.date) nights.add(c.date);
-  for (const n of raw.nc) if (n.operationalNight) nights.add(n.operationalNight);
+  for (const n of raw.nc) {
+    if (n.kind === "billdue") {
+      for (const rn of (n.roundNights || [])) if (rn) nights.add(rn);
+      for (const pn of (n.paymentNights || [])) if (pn) nights.add(pn);
+    } else if (n.operationalNight) nights.add(n.operationalNight);
+  }
   for (const b of raw.bookings) { const d = (b.date || "").slice(0, 10); if (d) nights.add(d); }
 
   const byNight = (arr: HodTableReservation[], n: string) => arr.filter((d) => d.date === n);
@@ -508,7 +610,10 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
       byNight(raw.reservations, n),
       byNight(raw.history, n),
       raw.covers.filter((c) => c.date === n),
-      raw.nc.filter((d) => d.operationalNight === n),
+      raw.nc.filter((d) =>
+        d.kind === "billdue"
+          ? ((d.roundNights || []).includes(n) || (d.paymentNights || []).includes(n))
+          : d.operationalNight === n),
       raw.bookings.filter((b) => (b.date || "").slice(0, 10) === n),
       foodNames,
     ),
@@ -537,7 +642,7 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
 //  Bump SUMMARY_SCHEMA whenever the aggregation MATH changes so stale cached
 //  summaries are ignored and recomputed (old docs with a lower _schema = miss).
 // ─────────────────────────────────────────────────────────────────────────
-export const SUMMARY_SCHEMA = 3;
+export const SUMMARY_SCHEMA = 4;
 const SUMMARY_COL = "daily_summaries";
 
 /** Inclusive list of YYYY-MM-DD nights from `start` to `end` (calendar days). */
@@ -577,6 +682,7 @@ function summaryFromDoc(night: string, data: Record<string, unknown>): VenueSale
     coverChargesAtDoor: n("coverChargesAtDoor"), recharges: n("recharges"),
     redeemed: n("redeemed"), notRedeemed: n("notRedeemed"),
     ncComp: n("ncComp"), ncDiscount: n("ncDiscount"), ncWaived: n("ncWaived"), ncDue: n("ncDue"),
+    ncOwner: n("ncOwner"), ncBillDueBilled: n("ncBillDueBilled"), ncBillDueOutstanding: n("ncBillDueOutstanding"),
     pay: {
       wallet: num(p.wallet), cash: num(p.cash), card: num(p.card), upi: num(p.upi),
       online: num(p.online), aggregator: num(p.aggregator), comp: num(p.comp), other: num(p.other),
@@ -695,5 +801,6 @@ function isEmptyNight(s: VenueSales): boolean {
     s.discount === 0 && s.orders === 0 && s.guests === 0 && s.recharges === 0 &&
     s.entryCollected === 0 &&
     s.redeemed === 0 && s.notRedeemed === 0 && s.coverChargesAtDoor === 0 &&
-    s.ncComp === 0 && s.ncDiscount === 0 && s.ncWaived === 0 && s.ncDue === 0;
+    s.ncComp === 0 && s.ncDiscount === 0 && s.ncWaived === 0 && s.ncDue === 0 &&
+    s.ncOwner === 0 && s.ncBillDueBilled === 0;
 }

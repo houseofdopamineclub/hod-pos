@@ -344,6 +344,12 @@ export default function AgentsReport() {
             v.billAmt += r.amountPaid || 0;
           }
           if ((r.discountAmount || 0) > 0) { v.discCount += 1; v.discAmt += r.discountAmount || 0; }
+          // 🆕 2026-06-30 (Khushi) — a comp-to-₹0 is a 100% discount: amountPaid
+          // is 0 and the reduced value lives in complimentaryValue (markTablePaid
+          // with method "complimentary"). Without this it showed as a ₹0 bill and
+          // the captain's discount column missed the comp entirely. Count it as a
+          // discount so EVERY reduction a captain gives is reported.
+          if (((r as any).complimentaryValue || 0) > 0) { v.discCount += 1; v.discAmt += (r as any).complimentaryValue || 0; }
           v.sc += (r as any).serviceChargeAmount || 0;
           v.tax += r.taxAmount || 0;
         }
@@ -353,9 +359,13 @@ export default function AgentsReport() {
       // cancel event has a single canceller, so attributing it to both DOOR and
       // CAPTAIN would double-show the same event; DOOR owns bookings/cancels.)
 
-      // CAPTAIN: void bills (voidLog bill-void entries carry the actor).
+      // CAPTAIN: voids — both whole-bill voids (kind "bill-void") AND item-level
+      // voids after a KOT already fired (kind "items-void", via voidTableItems).
+      // Both remove value from a live tab, so both are attributed to the captain
+      // who performed them. (2026-06-30 Khushi: item voids were previously
+      // invisible here — only full-bill voids showed.)
       for (const e of ((r as any).voidLog || [])) {
-        if (e && e.kind === "bill-void" && e.by) {
+        if (e && (e.kind === "bill-void" || e.kind === "items-void") && e.by) {
           const v = ensure(cap, e.by, zeroCap);
           if (v) { v.voidCount += 1; v.voidAmt += e.valueLost || 0; }
         }
@@ -382,7 +392,7 @@ export default function AgentsReport() {
     for (const { name, v } of barRows) lines.push([labelFor(name), v.rcCount, Math.round(v.rcAmt), v.rdCount, Math.round(v.rdAmt), v.wiCount, Math.round(v.wiAmt), v.reprints, v.discCount, Math.round(v.discAmt), v.voidCount, Math.round(v.voidAmt)].map(esc).join(","));
     lines.push("");
     lines.push("CAPTAIN AGENTS");
-    lines.push(["Employee", "Tables Handled", "Billed (#)", "Billed (Rs)", "Discount (#)", "Discount (Rs)", "Service Charge (Rs)", "Tax (Rs)", "Void Bills (#)", "Void Bills (Rs)"].join(","));
+    lines.push(["Employee", "Tables Handled", "Billed (#)", "Billed (Rs)", "Discount + Comp (#)", "Discount + Comp (Rs)", "Service Charge (Rs)", "Tax (Rs)", "Voids (#)", "Voids (Rs)"].join(","));
     for (const { name, v } of capRows) lines.push([labelFor(name), v.handled, v.billCount, Math.round(v.billAmt), v.discCount, Math.round(v.discAmt), Math.round(v.sc), Math.round(v.tax), v.voidCount, Math.round(v.voidAmt)].map(esc).join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -488,11 +498,11 @@ export default function AgentsReport() {
           </Section>
 
           {/* CAPTAIN */}
-          <Section title="🧑‍🍳 CAPTAIN AGENTS" hint="Tables handled · billed · discount · service charge · tax · void bills (attributed to the final captain on the table).">
+          <Section title="🧑‍🍳 CAPTAIN AGENTS" hint="Tables handled · billed · discount (incl. complimentary / comp-to-₹0) · service charge · tax · voids (whole bill + item-level) — attributed to the final captain on the table.">
             <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 760 }}>
               <thead><tr style={{ background: C.bg }}>
-                <Th>Employee</Th><Th>Handled</Th><Th>Billed</Th><Th>Discount</Th>
-                <Th>Service Charge</Th><Th>Tax</Th><Th>Void Bills</Th>
+                <Th>Employee</Th><Th>Handled</Th><Th>Billed</Th><Th>Discount + Comp</Th>
+                <Th>Service Charge</Th><Th>Tax</Th><Th>Voids</Th>
               </tr></thead>
               <tbody>
                 {capRows.length === 0 ? <EmptyRow cols={7} /> : capRows.map(({ name, v }) => (
@@ -511,7 +521,8 @@ export default function AgentsReport() {
           </Section>
 
           <div style={{ fontSize: 11, color: C.grey, fontWeight: 600, lineHeight: 1.5, marginTop: 4 }}>
-            Note: discount / service-charge / tax persist from v3.224 onward — bills printed before that show ₹0 in those columns.
+            Note: "Discount + Comp" includes complimentary bills (a comp-to-₹0 counts as a full discount). "Voids" includes both whole-bill voids and item-level voids done after a KOT fired.
+            Discount / service-charge / tax persist from v3.224 onward — bills printed before that show ₹0 in those columns.
             A table that changed captains mid-shift credits only the final captain on record.
           </div>
         </>

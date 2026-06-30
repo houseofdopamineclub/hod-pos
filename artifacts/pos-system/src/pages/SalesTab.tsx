@@ -17,6 +17,9 @@ import {
   getVenueSalesCached,
   type VenueSalesResult, type VenueSales, type PaymentMix,
 } from "@/lib/venue-sales";
+import {
+  subscribeOpenNc, fetchNcForRange, type BillDueDoc,
+} from "@/lib/bill-due";
 // 🆕 2026-06-30 (Khushi) — the per-mode "Live Reports" buttons were removed from
 // Door / Bar / Captain. Those reports now live here as sub-tabs under Sales. Each
 // report self-subscribes ONLY while its sub-tab is mounted (cost-safe).
@@ -91,9 +94,13 @@ export default function SalesTab() {
   const [err, setErr] = useState("");
   const [result, setResult] = useState<VenueSalesResult | null>(null);
   const [loadedRange, setLoadedRange] = useState("");
+  // The date bounds that the CURRENT `result` was actually loaded for. The NC
+  // dashboard's comp fetch keys off THESE (not the live From/To inputs) so
+  // changing the inputs WITHOUT tapping LOAD never triggers an off-range fetch.
+  const [loadedBounds, setLoadedBounds] = useState<{ s: string; e: string } | null>(null);
   const [cacheNote, setCacheNote] = useState("");
   const autoLoaded = useRef(false);
-  const [subTab, setSubTab] = useState<"venue" | "door" | "bar" | "captain">("venue");
+  const [subTab, setSubTab] = useState<"venue" | "nc" | "door" | "bar" | "captain">("venue");
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -110,6 +117,7 @@ export default function SalesTab() {
       const res = await getVenueSalesCached(s, e, today, foodNames);
       setResult(res);
       setLoadedRange(s === e ? s : `${s} → ${e}`);
+      setLoadedBounds({ s, e });
       const saved = res.fromCache;
       const fresh = res.computed;
       const liveN = res.live;
@@ -221,7 +229,7 @@ export default function SalesTab() {
           three per-mode reports (Door / Bar / Captain) consolidated here. Only the
           active sub-tab mounts, so its Firestore subscriptions run on demand. */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
-        {([["venue", "💰 VENUE SALES"], ["door", "🚪 DOOR REPORTS"], ["bar", "🍸 BAR REPORTS"], ["captain", "🪩 CAPTAIN REPORTS"]] as const).map(([k, lbl]) => (
+        {([["venue", "💰 VENUE SALES"], ["nc", "🎟️ NC"], ["door", "🚪 DOOR REPORTS"], ["bar", "🍸 BAR REPORTS"], ["captain", "🪩 CAPTAIN REPORTS"]] as const).map(([k, lbl]) => (
           <button key={k} onClick={() => setSubTab(k)}
             style={{
               padding: "14px 24px", borderRadius: 12, border: `2px solid ${C.ink}`, cursor: "pointer",
@@ -232,6 +240,10 @@ export default function SalesTab() {
           </button>
         ))}
       </div>
+
+      {subTab === "nc" && (
+        <NcDashboard start={loadedBounds?.s || start} end={loadedBounds?.e || end} t={t} loaded={!!result && !!loadedBounds} loading={loading} onLoad={load} loadedRange={loadedRange} />
+      )}
 
       {subTab === "door" && (
         <LiveReportsModal embedded agentName="Boss" tableResByDate={{}} selectedEventId="all" eventChips={[]} onClose={() => {}} />
@@ -407,5 +419,198 @@ export default function SalesTab() {
       ) : null}
       </>)}
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  🎟️ NC DASHBOARD — Boss → Sales → NC sub-tab
+// ─────────────────────────────────────────────────────────────────────────
+//  Three sections, all fail-open:
+//    • NC COMP   — give-aways logged in the loaded date range (≤₹1000, no tax,
+//                  excluded from Net/Gross). One-shot range fetch on LOAD.
+//    • NC BILL DUE — currently-OPEN per-person running tabs (live listener):
+//                  total billed / paid / balance + round + payment counts.
+//                  These DO count in Net/Gross on the consumption night.
+//    • OWNERS    — currently-OPEN owner tabs (live listener): amount owed,
+//                  excluded from Net/Gross, "waive off" zeros it in Bar Mode.
+//  The live listener mounts ONLY while this sub-tab is open (cost-safe). The
+//  comp list reuses the SAME date range the owner already picked above.
+// ─────────────────────────────────────────────────────────────────────────
+function NcDashboard({
+  start, end, t, loaded, loading, onLoad, loadedRange,
+}: {
+  start: string; end: string; t?: VenueSales; loaded: boolean;
+  loading: boolean; onLoad: () => void; loadedRange: string;
+}) {
+  const [open, setOpen] = useState<BillDueDoc[]>([]);
+  const [rangeDocs, setRangeDocs] = useState<BillDueDoc[]>([]);
+  const [fetching, setFetching] = useState(false);
+
+  // Live: currently-open NC tabs (billdue + owner). One listener, mount-gated.
+  useEffect(() => {
+    const unsub = subscribeOpenNc(setOpen);
+    return () => unsub();
+  }, []);
+
+  // One-shot: every NC doc created in the loaded range (for the COMP list).
+  useEffect(() => {
+    let alive = true;
+    if (!loaded) { setRangeDocs([]); return; }
+    setFetching(true);
+    fetchNcForRange(start, end).then((rows) => { if (alive) { setRangeDocs(rows); setFetching(false); } });
+    return () => { alive = false; };
+  }, [start, end, loaded]);
+
+  const openBillDue = useMemo(() => open.filter((d) => d.kind === "billdue"), [open]);
+  const openOwners = useMemo(() => open.filter((d) => d.kind === "owner" && !d.waived), [open]);
+  const compRows = useMemo(
+    () => rangeDocs
+      .filter((d) => d.kind === "comp")
+      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)),
+    [rangeDocs],
+  );
+
+  const compValue = (d: BillDueDoc) => Math.round(d.compApplied ?? d.amountDue ?? 0);
+  const billedOf = (d: BillDueDoc) =>
+    Math.round((d.rounds || []).reduce((s, r) => s + (r.total || 0), 0) || d.totalBill || d.amountDue || 0);
+  const ownerOwed = (d: BillDueDoc) => Math.round(d.balanceDue ?? d.amountDue ?? 0);
+
+  const compTotal = compRows.reduce((s, d) => s + compValue(d), 0);
+  const billOutstanding = openBillDue.reduce((s, d) => s + Math.round(d.balanceDue ?? 0), 0);
+  const ownerTotal = openOwners.reduce((s, d) => s + ownerOwed(d), 0);
+
+  return (
+    <div>
+      <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: -0.4, marginBottom: 4 }}>🎟️ NC — Non-Chargeable</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.grey, marginBottom: 16 }}>
+        Open tabs are LIVE (who owes / who's owed right now). Comp give-aways use the date range from VENUE SALES — tap LOAD there for other days.
+      </div>
+
+      {/* summary tiles (range aggregate from venue-sales, live outstanding) */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, marginBottom: 22 }}>
+        <DashTile label="NC Comp Given" value={inr(t ? t.ncComp : compTotal)} accent="#B45309" sub="≤₹1000, no tax · excluded from sales" />
+        <DashTile label="NC Bill Due Billed" value={inr(t?.ncBillDueBilled || 0)} accent={C.accent} sub="counts in Net/Gross" />
+        <DashTile label="NC Bill Due Outstanding" value={inr(billOutstanding)} sub="balance owed (live)" />
+        <DashTile label="Owners Owed" value={inr(ownerTotal)} sub="excluded from sales · live" />
+      </div>
+
+      {/* ── NC BILL DUE (per-person, live) ── */}
+      <Section title="🧾 Open NC Bill Due — Running Tabs (live)">
+        {openBillDue.length === 0 ? (
+          <Empty>No open NC bill-due tabs. 🎉</Empty>
+        ) : (
+          <NcTable
+            head={["Person", "Role", "Billed", "Paid", "Balance", "Rounds", "Payments"]}
+            rows={openBillDue.map((d) => [
+              d.customerName || "—",
+              d.role || "—",
+              inr(billedOf(d)),
+              inr(Math.round(d.amountPaid || 0)),
+              inr(Math.round(d.balanceDue ?? 0)),
+              String((d.rounds || []).length),
+              String((d.payments || []).length),
+            ])}
+            highlightCol={4}
+          />
+        )}
+      </Section>
+
+      {/* ── OWNERS (live) ── */}
+      <Section title="👑 Owners — Outstanding (live)">
+        {openOwners.length === 0 ? (
+          <Empty>No outstanding owner tabs.</Empty>
+        ) : (
+          <NcTable
+            head={["Owner", "Approved By", "Amount Owed", "Night"]}
+            rows={openOwners.map((d) => [
+              d.customerName || "—",
+              d.approvedBy || "—",
+              inr(ownerOwed(d)),
+              d.lastRoundNight || d.operationalNight || "—",
+            ])}
+            highlightCol={2}
+          />
+        )}
+      </Section>
+
+      {/* ── NC COMP (range fetch) ── */}
+      <Section title="🎁 NC Comp Given (in range)">
+        {!loaded ? (
+          <Empty>
+            <button onClick={onLoad} disabled={loading}
+              style={{ padding: "10px 22px", borderRadius: 8, background: loading ? C.grey : C.pink, border: `2px solid ${C.ink}`, color: C.ink, fontSize: 14, fontWeight: 900, letterSpacing: 0.6, cursor: loading ? "default" : "pointer", boxShadow: SHADOW_SM }}>
+              {loading ? "LOADING…" : "LOAD RANGE"}
+            </button>
+            <div style={{ marginTop: 8 }}>Pick a date range under VENUE SALES, then LOAD to see comp give-aways.</div>
+          </Empty>
+        ) : fetching ? (
+          <Empty>Loading comp records…</Empty>
+        ) : compRows.length === 0 ? (
+          <Empty>No NC comp given in {loadedRange || "this range"}.</Empty>
+        ) : (
+          <NcTable
+            head={["Guest", "Role", "Comp Value", "Approved By", "Night"]}
+            rows={compRows.map((d) => [
+              d.customerName || "—",
+              d.role || "—",
+              inr(compValue(d)),
+              d.approvedBy || "—",
+              d.operationalNight || "—",
+            ])}
+            highlightCol={2}
+          />
+        )}
+      </Section>
+    </div>
+  );
+}
+
+function DashTile({ label, value, accent, sub }: { label: string; value: string; accent?: string; sub?: string }) {
+  return (
+    <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, boxShadow: SHADOW_SM, minWidth: 0 }}>
+      <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: C.grey }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 900, fontFamily: NUM_FONT, color: accent || C.ink, marginTop: 6, lineHeight: 1.1, wordBreak: "break-word" }}>{value}</div>
+      {sub ? <div style={{ fontSize: 11, fontWeight: 700, color: C.grey, marginTop: 3 }}>{sub}</div> : null}
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, marginBottom: 16, overflowX: "auto" }}>
+      <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 10 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Empty({ children }: { children: React.ReactNode }) {
+  return <div style={{ color: C.grey, fontWeight: 700, fontSize: 13, padding: 14, textAlign: "center" }}>{children}</div>;
+}
+
+function NcTable({ head, rows, highlightCol }: { head: string[]; rows: string[][]; highlightCol?: number }) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      <thead><tr style={{ background: C.bg }}>
+        {head.map((h, i) => (
+          <th key={h} style={{ padding: "8px 10px", fontWeight: 900, fontSize: 11, letterSpacing: 0.4, textTransform: "uppercase", textAlign: i === 0 ? "left" : "right", whiteSpace: "nowrap" }}>{h}</th>
+        ))}
+      </tr></thead>
+      <tbody>
+        {rows.map((r, ri) => (
+          <tr key={ri} style={{ borderTop: "1px solid #E5E5E5" }}>
+            {r.map((c, ci) => (
+              <td key={ci} style={{
+                padding: "8px 10px", textAlign: ci === 0 ? "left" : "right",
+                fontWeight: ci === 0 ? 800 : (ci === highlightCol ? 900 : 700),
+                fontFamily: ci === 0 ? "inherit" : NUM_FONT,
+                color: ci === highlightCol ? "#B45309" : C.ink,
+                whiteSpace: "nowrap",
+              }}>{c}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
