@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
@@ -27,7 +27,7 @@ import {
   computeNcBill,
   // 🆕 2026-06-30 — NC rework (3 kinds: comp / billdue / owner)
   NC_COMP_CAP, computeItemSubtotal, computeChargeBill, checkCompCap,
-  upsertOpenBillDueRound, addBillDuePayment, waiveOwnerBillDue, subscribeOpenNcBillDue,
+  upsertOpenBillDueRound, upsertOpenOwnerRound, addBillDuePayment, waiveOwnerBillDue, subscribeOpenNc,
   type BillDueDoc, type BillDueItem, type NcRole, type NcPaymentMethod, type NcKind,
 } from "@/lib/bill-due";
 // 🔄 2026-05-25 (Khushi) — WaiterCallBanner removed from BarMode. Bartender
@@ -4530,11 +4530,16 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
   const [pickedOpenId, setPickedOpenId] = useState<string | null>(null);
   // 🆕 BILL DUE — live list of ALL currently-open NC BILL DUE tabs (cross-day,
   // persistent running tabs). Subscribed only while this modal is mounted.
-  const [openBillDue, setOpenBillDue] = useState<BillDueDoc[]>([]);
+  // ONE listener feeds BOTH open Bill-Due AND open Owner tabs (split by kind
+  // client-side) — no extra reads vs the old billdue-only listener.
+  const [openNc, setOpenNc] = useState<BillDueDoc[]>([]);
   useEffect(() => {
-    const unsub = subscribeOpenNcBillDue((rows) => setOpenBillDue(rows));
+    const unsub = subscribeOpenNc((rows) => setOpenNc(rows));
     return () => { try { unsub(); } catch { /* ignore */ } };
   }, []);
+  const openBillDue = useMemo(() => openNc.filter((r) => r.kind === "billdue"), [openNc]);
+  // 🆕 2026-06-30 (Khushi) — OWNER running tabs: same name → same open tab.
+  const openOwners = useMemo(() => openNc.filter((r) => r.kind === "owner" && !r.waived), [openNc]);
   // Item picker state (mirrors BarMain ADD ORDER overlay — same UX).
   const [showPicker, setShowPicker] = useState(false);
   const [pickSearch, setPickSearch] = useState("");
@@ -4586,16 +4591,30 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
     ? (typeof billDueMatch.balanceDue === "number" ? billDueMatch.balanceDue : (billDueMatch.amountDue || 0))
     : 0;
   const newBalance = Math.round((matchBalance + chargeBill.total) * 100) / 100;
+  // 🆕 OWNER: the OPEN owner tab this round appends to. Explicit pick wins; else
+  // auto-match by phone (10-digit) → name slug. null = open a fresh owner tab.
+  const ownerMatch: BillDueDoc | null = kind === "owner"
+    ? (pickedOpenId
+        ? (openOwners.find((r) => r.id === pickedOpenId) || null)
+        : (openOwners.find((r) => {
+            if (phoneKey.length >= 10) return _digits(r.customerPhone || "") === phoneKey;
+            return nameKey.length > 0 && (r.customerName || "").trim().toLowerCase() === nameKey;
+          }) || null))
+    : null;
+  const ownerMatchOwed = ownerMatch ? (typeof ownerMatch.amountDue === "number" ? ownerMatch.amountDue : 0) : 0;
+  const newOwnerOwed = Math.round((ownerMatchOwed + subtotalRaw) * 100) / 100;
   // Round amount surfaced on the picker DONE button (per kind).
   const roundAmt = kind === "comp" ? compChk.subtotal : kind === "owner" ? subtotalRaw : chargeBill.total;
   const roundWord = kind === "comp" ? "COMP" : kind === "owner" ? "OWED" : "THIS ROUND";
 
-  // RUNNING TAB convenience: carry phone + approver from the matched open tab.
+  // RUNNING TAB convenience: carry phone + approver from the matched open tab
+  // (Bill Due OR Owner).
   useEffect(() => {
-    if (!billDueMatch) return;
-    if (!phone && billDueMatch.customerPhone) setPhone(billDueMatch.customerPhone);
-    if (!approvedBy && billDueMatch.approvedBy) setApprovedBy(billDueMatch.approvedBy);
-  }, [billDueMatch, phone, approvedBy]);
+    const m = billDueMatch || ownerMatch;
+    if (!m) return;
+    if (!phone && m.customerPhone) setPhone(m.customerPhone);
+    if (!approvedBy && m.approvedBy) setApprovedBy(m.approvedBy);
+  }, [billDueMatch, ownerMatch, phone, approvedBy]);
 
   // Picker filter — same normalisation + groups as ADD ORDER.
   const normLocal = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -4617,7 +4636,7 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
     if (lines.length === 0) { setErr("Add at least one item."); return; }
     // RUNNING TAB inherits the approver from the matched open tab, so 'Approved
     // by' is only required when opening a FRESH tab (or for comp/owner).
-    const freshTab = !(kind === "billdue" && billDueMatch);
+    const freshTab = !((kind === "billdue" && billDueMatch) || (kind === "owner" && ownerMatch));
     if (!approvedBy.trim() && freshTab) { setErr("'Approved by' required."); return; }
 
     // 🆕 NC COMP cap block — item value over ₹1000 cannot be given as a comp.
@@ -4679,17 +4698,13 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
         due = 0; label = "COMP (FREE)";
       } else if (kind === "owner") {
         // Owner consumption owed at ITEM PRICE, NO tax; waive-off in settle.
-        await createBillDue({
-          kind: "owner",
-          customerName: name.trim(),
-          customerPhone: phone.replace(/\D/g, ""),
-          role: "OWNER", approvedBy: approvedBy.trim(),
-          items: docItems,
-          amountDue: subtotalRaw, compApplied: 0,
-          subtotal: subtotalRaw, serviceCharge: 0, tax: 0, totalBill: subtotalRaw,
-          staff: staffName, token,
-        });
-        due = subtotalRaw; label = "OWNER — OWED";
+        // RUNNING TAB: same owner name → APPEND to the existing open owner tab
+        // (txn re-checks kind/status/identity inside the lib) or open a fresh one.
+        const res = await upsertOpenOwnerRound(
+          { name: name.trim(), phone: phone.replace(/\D/g, ""), approvedBy: approvedBy.trim(), staff: staffName },
+          docItems, ncNote.trim(), ownerMatch?.id,
+        );
+        due = res.amountDue; label = "OWNER — OWED";
       } else {
         // BILL DUE — full SC + GST; append to the matched open running tab or
         // open a fresh one (txn re-checks status==="open" inside the lib).
@@ -4895,29 +4910,34 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
             </div>
           )}
         </div>
-        {/* 🆕 BILL DUE — search a person's OPEN cross-day running tab; tapping one
-            APPENDS this round to it (else a fresh tab opens). */}
-        {kind === "billdue" && (() => {
+        {/* 🆕 BILL DUE + OWNER — search a person's OPEN running tab; tapping one
+            APPENDS this round to it (else a fresh tab opens). Owners merge by
+            name the same way Bill Due does. */}
+        {(kind === "billdue" || kind === "owner") && (() => {
+          const isOwner = kind === "owner";
+          const srcList = isOwner ? openOwners : openBillDue;
           const q = tabSearch.trim().toLowerCase();
           const qDigits = tabSearch.replace(/\D/g, "");
           const matches = q.length > 0
-            ? openBillDue.filter((r) =>
+            ? srcList.filter((r) =>
                 (r.customerName || "").toLowerCase().includes(q) ||
                 (qDigits.length >= 3 && _digits(r.customerPhone || "").includes(qDigits)))
-            : openBillDue.slice(0, 8);
+            : srcList.slice(0, 8);
           const dueOf = (r: BillDueDoc) =>
-            typeof r.balanceDue === "number" ? r.balanceDue : (r.amountDue || 0);
+            isOwner ? (r.amountDue || 0) : (typeof r.balanceDue === "number" ? r.balanceDue : (r.amountDue || 0));
           return (
             <div style={{ marginBottom: 14 }}>
-              <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>🔍 Open Bill-Due Tabs ({openBillDue.length})</label>
-              <input value={tabSearch} onChange={(e) => setTabSearch(e.target.value)} placeholder="Search an open bill-due person by name or phone…"
+              <label style={{ display: "block", fontSize: 10.5, fontWeight: 800, color: "#000", letterSpacing: 1.2, marginBottom: 6, textTransform: "uppercase" }}>{isOwner ? `👑 Open Owner Tabs (${openOwners.length})` : `🔍 Open Bill-Due Tabs (${openBillDue.length})`}</label>
+              <input value={tabSearch} onChange={(e) => setTabSearch(e.target.value)} placeholder={isOwner ? "Search an open owner by name or phone…" : "Search an open bill-due person by name or phone…"}
                 name="hod-nc-tabsearch" autoComplete="off" data-lpignore="true" data-1p-ignore="" data-form-type="other"
                 style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 600 }} />
               {(matches.length > 0 || q.length > 0) && (
                 <div style={{ marginTop: 6, background: "#fff", border: "2px solid #000", borderRadius: 8, overflow: "hidden", maxHeight: 220, overflowY: "auto" }}>
                   {matches.length === 0 ? (
                     <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 700, color: "#6B6B6B" }}>
-                      No open bill-due tab for "{tabSearch.trim()}" — fill the form to start a new one.
+                      {isOwner
+                        ? `No open owner tab for "${tabSearch.trim()}" — fill the form to start a new one.`
+                        : `No open bill-due tab for "${tabSearch.trim()}" — fill the form to start a new one.`}
                     </div>
                   ) : matches.map((r, idx) => {
                     const picked = pickedOpenId === r.id;
@@ -4990,15 +5010,21 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
           </div>
         </div>
 
-        {kind === "billdue" && billDueMatch && (
+        {((kind === "billdue" && billDueMatch) || (kind === "owner" && ownerMatch)) && (() => {
           // 🆕 2026-06-30 — TAPPABLE banner: this round APPENDS to the matched
-          // open cross-day running tab. Shows the carried BALANCE + approver.
-          <button type="button" onClick={() => setShowPicker(true)}
-            style={{ width: "100%", textAlign: "left", background: "#23A094", border: "2px solid #000", borderRadius: 8, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: "#fff", fontWeight: 700, letterSpacing: 0.3, cursor: "pointer" }}>
-            ➕ ADDING TO {((billDueMatch.customerName || name).trim() || "THIS GUEST").toUpperCase()}'S OPEN TAB · BALANCE ₹{matchBalance.toLocaleString("en-IN")}{billDueMatch.approvedBy ? ` · APPROVED BY ${billDueMatch.approvedBy.toUpperCase()}` : ""}
-            <span style={{ display: "block", marginTop: 5, fontSize: 12, fontWeight: 900, letterSpacing: 0.5 }}>👉 TAP TO ADD ITEMS</span>
-          </button>
-        )}
+          // open running tab (Bill Due balance OR Owner owed). Shows the carried
+          // amount + approver.
+          const m = (kind === "owner" ? ownerMatch : billDueMatch)!;
+          const amt = kind === "owner" ? ownerMatchOwed : matchBalance;
+          const word = kind === "owner" ? "OWED" : "BALANCE";
+          return (
+            <button type="button" onClick={() => setShowPicker(true)}
+              style={{ width: "100%", textAlign: "left", background: "#23A094", border: "2px solid #000", borderRadius: 8, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: "#fff", fontWeight: 700, letterSpacing: 0.3, cursor: "pointer" }}>
+              ➕ ADDING TO {((m.customerName || name).trim() || "THIS GUEST").toUpperCase()}'S OPEN TAB · {word} ₹{amt.toLocaleString("en-IN")}{m.approvedBy ? ` · APPROVED BY ${m.approvedBy.toUpperCase()}` : ""}
+              <span style={{ display: "block", marginTop: 5, fontSize: 12, fontWeight: 900, letterSpacing: 0.5 }}>👉 TAP TO ADD ITEMS</span>
+            </button>
+          );
+        })()}
         <button type="button" onClick={() => setShowPicker(true)}
           style={{ width: "100%", padding: "14px 12px", borderRadius: 10, marginBottom: 10, background: GOLD, border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: 0.5, textTransform: "uppercase" }}>
           + ADD ITEMS FROM MENU
@@ -5016,7 +5042,7 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
                 <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid #000", fontSize: 15 }}>
                   <span style={{ color: "#000", fontWeight: 700, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
                     <span>{it.t === "food" ? "🍴" : "🍸"} {it.qty}× {it.n}</span>
-                    {kind === "billdue" && billDueMatch && (
+                    {((kind === "billdue" && billDueMatch) || (kind === "owner" && ownerMatch)) && (
                       <span style={{ fontSize: 9.5, fontWeight: 900, letterSpacing: 0.6, color: "#000", background: "#FF90E8", border: "1px solid #000", borderRadius: 4, padding: "1px 5px" }}>NEW</span>
                     )}
                   </span>
@@ -5049,12 +5075,18 @@ function NcModal({ staffName, priorRows, onClose }: { staffName: string; priorRo
                 </div>
               )}
             </>)}
-            {kind === "owner" && (
+            {kind === "owner" && (<>
               <div style={{ display: "flex", justifyContent: "space-between", padding: "13px 12px", fontSize: 18, fontWeight: 900, color: "#000", background: "#FFE9C2" }}>
-                <span>👑 OWNER OWED (no tax)</span>
+                <span>👑 {ownerMatch ? "THIS ROUND OWED" : "OWNER OWED (no tax)"}</span>
                 <span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{subtotalRaw.toLocaleString("en-IN")}</span>
               </div>
-            )}
+              {ownerMatch && (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "13px 12px", fontSize: 18, fontWeight: 900, color: "#fff", background: "#23A094", borderTop: "2px solid #000" }}>
+                  <span>🧾 NEW TOTAL OWED</span>
+                  <span style={{ fontFamily: "'Space Grotesk', monospace" }}>₹{newOwnerOwed.toLocaleString("en-IN")}</span>
+                </div>
+              )}
+            </>)}
             {kind === "billdue" && (<>
               <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 12px", borderBottom: "1px solid #E0E0DA", fontSize: 12, color: "#555", fontWeight: 600 }}>
                 <span>SUBTOTAL (item value)</span><span style={{ fontFamily: "'Space Grotesk', monospace", fontWeight: 700 }}>₹{chargeBill.subtotal.toLocaleString("en-IN")}</span>
@@ -5423,6 +5455,11 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
       {/* HEADER — 🆕 v3.193 (Khushi) Gumroad PINK band + white counter pills + red CLOSE */}
       <div style={{ padding: "18px 24px 14px", borderBottom: "2px solid #000", background: "#FF90E8", display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
         <div>
+          {/* 🆕 2026-06-30 (Khushi) — BACK button: returns to the POS (same as close). */}
+          <button onClick={onClose}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "8px 14px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: 1 }}>
+            ← BACK
+          </button>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 28, fontWeight: 900, color: "#000", letterSpacing: 0.5, lineHeight: 1 }}>BILL DUE — TONIGHT</div>
           <div style={{ fontSize: 12, color: "#000", marginTop: 6, letterSpacing: 0.4, textTransform: "uppercase", fontWeight: 700 }}>
             NC tabs awaiting payment · Manager PIN required to clear

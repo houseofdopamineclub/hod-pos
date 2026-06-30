@@ -443,6 +443,90 @@ export async function upsertOpenBillDueRound(
   return { id: ref.id, balanceDue: totalBill, totalBill, created: true };
 }
 
+/** 🆕 2026-06-30 (Khushi) — OWNER running tab. Mirrors upsertOpenBillDueRound but
+ *  item-price only (NO SC/GST). When the SAME owner name (phone optional) already
+ *  has an OPEN, non-waived owner tab, this round is MERGED into it inside a
+ *  transaction that re-checks kind==="owner" + status==="open" + !waived + identity;
+ *  on any mismatch it FAILS OPEN to a brand-new owner tab (a round is never lost or
+ *  merged into the wrong/closed/waived tab). Returns the tab id + new total owed. */
+export async function upsertOpenOwnerRound(
+  person: { name: string; phone: string; approvedBy: string; staff: string },
+  roundItems: BillDueItem[],
+  note?: string,
+  existingOpenId?: string,
+): Promise<{ id: string; amountDue: number; created: boolean }> {
+  const night = getOperationalNightStr();
+  const at = new Date().toISOString();
+  const sub = computeItemSubtotal(roundItems); // item price only, NO tax
+  const round: NcRound = {
+    night, at, items: roundItems,
+    subtotal: sub, serviceCharge: 0, tax: 0, total: sub,
+    note: note || null, by: person.staff || null,
+  };
+  const nameKey = _slugName(person.name);
+
+  if (existingOpenId) {
+    try {
+      const res = await runTransaction(db, async (txn) => {
+        const ref = doc(db, COL, existingOpenId);
+        const snap = await txn.get(ref);
+        if (!snap.exists()) return null;
+        const data = snap.data() as BillDueDoc;
+        if (data.kind !== "owner" || data.status !== "open" || data.waived) return null;
+        const wantPhone = _digits10(person.phone || "");
+        if (wantPhone.length >= 10) {
+          if (_digits10(data.customerPhone || "") !== wantPhone) return null;
+        } else if ((data.nameKey || _slugName(data.customerName || "")) !== nameKey) {
+          return null;
+        }
+        const rounds = [...(data.rounds || []), round];
+        const sums = _sumRounds(rounds);
+        const totalBill = _round2(sums.subtotal); // owner = item price only, no tax
+        txn.update(ref, {
+          rounds,
+          roundNights: _uniqPush(data.roundNights, night),
+          items: rounds.flatMap((r) => r.items),
+          subtotal: totalBill, serviceCharge: 0, tax: 0,
+          totalBill, amountDue: totalBill, balanceDue: totalBill,
+          lastRoundNight: night, updatedAt: serverTimestamp(),
+        });
+        return { id: existingOpenId, amountDue: totalBill, created: false };
+      });
+      if (res) return res;
+    } catch (e) {
+      console.warn("[owner.upsert] append txn failed, opening fresh tab", e);
+    }
+    // fall through → open a fresh owner tab (fail-open)
+  }
+
+  const totalBill = _round2(sub);
+  const ref = await addDoc(collection(db, COL), {
+    kind: "owner",
+    operationalNight: night,
+    customerName: person.name || "",
+    customerPhone: person.phone || "",
+    nameKey,
+    role: "OWNER",
+    approvedBy: person.approvedBy || "",
+    staff: person.staff || "",
+    items: roundItems,
+    rounds: [round],
+    roundNights: [night],
+    payments: [],
+    paymentNights: [],
+    subtotal: sub, serviceCharge: 0, tax: 0,
+    totalBill, amountDue: totalBill, amountPaid: 0, balanceDue: totalBill,
+    compApplied: 0,
+    waived: false,
+    status: "open",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    lastRoundNight: night,
+    clearedAt: null, clearedBy: null,
+  });
+  return { id: ref.id, amountDue: totalBill, created: true };
+}
+
 /** Record a PARTIAL (or full) payment against an NC BILL DUE tab. Recomputes the
  *  balance + status inside a transaction. Overpay is clamped to the balance. */
 export async function addBillDuePayment(
