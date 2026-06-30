@@ -67,7 +67,6 @@ import { HOD_LOCATION_URL } from "@/pages/DoorMode";
 // is architect-passed) rendered inside a fullscreen modal — identical numbers
 // to Boss Mode, no duplicated/divergent accounting. Subscriptions only run
 // while the modal is open (component mounts on open, unmounts on close).
-import LiveReports from "./LiveReports";
 
 // Firebase Cloud Functions — replaces Replit /api/whatsapp/*
 // Set this to your Firebase Functions URL after deploying:
@@ -330,12 +329,17 @@ const VOID_REASONS: string[] = [
  *  reason dropdown + optional notes BEFORE the void is committed. Replaces
  *  the old prompt() / alert() chain so reasons are structured, audit-ready,
  *  and reportable. Mounts above the EditOrderModal. */
-function VoidReasonModal({ voided, valueLost, roundNum, onCancel, onConfirm }: {
+function VoidReasonModal({ voided, valueLost, roundNum, onCancel, onConfirm, skipPin }: {
   voided: Array<{ n: string; qty: number; p: number }>;
   valueLost: number;
   roundNum: number;
   onCancel: () => void;
   onConfirm: (data: { pin: string; reason: string; notes: string }) => Promise<void>;
+  /** 🆕 2026-06-29 (Khushi) — when the captain reached this modal via the new
+   *  "Void Items" button, manager approval was ALREADY collected up front via
+   *  the WhatsApp OTP (requireManagerApproval). In that case skip the PIN field
+   *  here so the captain isn't asked twice — we still capture the REASON. */
+  skipPin?: boolean;
 }) {
   const [pin, setPin] = useState("");
   const [reason, setReason] = useState<string>("");
@@ -347,9 +351,13 @@ function VoidReasonModal({ voided, valueLost, roundNum, onCancel, onConfirm }: {
     setErr("");
     if (!reason) { setErr("Pick a reason."); return; }
     if (reason === "OTHER" && !notes.trim()) { setErr("Type a note for 'Other'."); return; }
-    if (pin.length !== 4) { setErr("Manager PIN is 4 digits."); return; }
-    const h = await sha256(pin.trim());
-    if (h !== MANAGER_HASH) { setErr("❌ Wrong Manager PIN."); setPin(""); return; }
+    // skipPin → manager already approved via WhatsApp OTP up front (Void Items
+    // button); only capture the reason here, no second PIN.
+    if (!skipPin) {
+      if (pin.length !== 4) { setErr("Manager PIN is 4 digits."); return; }
+      const h = await sha256(pin.trim());
+      if (h !== MANAGER_HASH) { setErr("❌ Wrong Manager PIN."); setPin(""); return; }
+    }
     setBusy(true);
     try {
       const finalReason = reason === "OTHER" ? notes.trim() : (notes.trim() ? `${reason} — ${notes.trim()}` : reason);
@@ -396,11 +404,19 @@ function VoidReasonModal({ voided, valueLost, roundNum, onCancel, onConfirm }: {
           placeholder={reason === "OTHER" ? "Required — describe what happened" : "e.g. table 5 sent it back"}
           style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: "#fff", border: "1px solid #000", color: "#000", fontSize: 16, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
 
-        <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6, fontWeight: 700 }}>🔒 MANAGER PIN *</div>
-        <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-          autoFocus disabled={busy} placeholder="4-digit PIN"
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "#fff", border: "1px solid #000", color: "#000", fontSize: 21, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+        {skipPin ? (
+          <div style={{ background: "#E7F8EE", border: "2px solid #15803D", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 13, fontWeight: 800, color: "#15803D", textAlign: "center" }}>
+            ✅ Manager approval confirmed — pick a reason and confirm the void.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6, fontWeight: 700 }}>🔒 MANAGER PIN *</div>
+            <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              autoFocus disabled={busy} placeholder="4-digit PIN"
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 10, background: "#fff", border: "1px solid #000", color: "#000", fontSize: 21, letterSpacing: 8, textAlign: "center", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
+          </>
+        )}
 
         {err && <div style={{ fontSize: 14, color: "#FF5733", marginBottom: 10, textAlign: "center" }}>{err}</div>}
 
@@ -639,15 +655,21 @@ function CaptainLogin({ onLogin }: { onLogin: (name: string) => void }) {
   return <StaffLogin allowedRoles={["captain"]} title="CAPTAIN LOGIN" emoji="👨‍✈️" brutalist />;
 }
 
-function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tableId, floorLabel, customerName, onClose }: {
+function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tableId, floorLabel, customerName, onClose, voidApproved }: {
   round: HodTabRound; roundIndex: number; docId: string; captainName: string;
   bookingRef?: string;
   /** V1 — passed through so the KOT VOID PRINT can route to the same destinations
    *  the original order went to (bar/kitchen/floor printers). */
   tableId: string; floorLabel?: string; customerName?: string;
   onClose: () => void;
+  /** 🆕 2026-06-29 (Khushi) — opened via the "Void Items" button after a
+   *  WhatsApp manager OTP was already verified; skip the 2nd PIN in the void
+   *  reason modal. */
+  voidApproved?: boolean;
 }) {
   const [items, setItems] = useState<HodOrderItem[]>([...round.items]);
+  // 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole round.
+  const [roundNote, setRoundNote] = useState<string>(round.note || "");
   const [saving, setSaving] = useState(false);
   // V1 — track items that have been removed/reduced relative to the original
   // round so we can write a void log entry when the captain saves. Snapshot of
@@ -831,7 +853,7 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
       // every other code path stored inclusive (214) — so editing a round
       // silently DOWNGRADED its total on the customer phone.
       const total = computeHodBreakdown(items).grandTotal;
-      await updateRoundItems(docId, roundIndex, items, total, captainName, isPrintedKot ? voidedSnapshot : undefined);
+      await updateRoundItems(docId, roundIndex, items, total, captainName, isPrintedKot ? voidedSnapshot : undefined, roundNote);
       // 🆕 2026-06-26 (Khushi) — items ADDED to an already-PRINTED KOT round need
       // their OWN chit so the kitchen/bar actually makes them. Pre-print rounds
       // skip this — the round's own PRINT KOT NOW button prints everything when
@@ -846,14 +868,14 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
             tableId, floorLabel, customerName, staff: captainName,
             roundNum: round.roundNum, items: added,
             roundTotal: computeHodBreakdown(added).grandTotal,
-            bookingRef, reservationId: docId,
+            bookingRef, reservationId: docId, roundNote,
           }).catch(() => {});
           if (added.some((a) => a.t === "food")) {
             writeKDSItemsFromKOT({
               reservationId: docId, coverDocId: "",
               tableId, tableLabel: tableId, floorLabel: floorLabel || "",
               customerName: customerName || "", bookingRef, staff: captainName,
-              roundNum: round.roundNum, items: added,
+              roundNum: round.roundNum, items: added, roundNote,
               // unique per-edit token → a 2nd add to the same round writes NEW
               // kitchen rows instead of overwriting the original round's KDS docs.
               idNonce: `add${Date.now()}`,
@@ -942,19 +964,30 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
         {/* Scrollable body: current items + the full ADD picker. */}
         <div style={{ flex: 1, overflowY: "auto", padding: "0 24px" }}>
           {items.map((it, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #6B6B6B" }}>
-              <div style={{ flex: 1, fontSize: 16, color: "#000" }}>{it.n}</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <button onClick={() => updateQty(i, -1)} style={{ width: 28, height: 28, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer" }}>−</button>
-                <span style={{ fontSize: 17, fontWeight: 800, color: "#000", minWidth: 20, textAlign: "center" }}>{it.qty}</span>
-                <button onClick={() => updateQty(i, 1)} style={{ width: 28, height: 28, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer" }}>+</button>
-                {/* 🔴 2026-05-20 (Khushi Bug 4) — inclusive ₹ via computeHodBreakdown
-                    so this line matches the Total below to the rupee. */}
-                <span style={{ fontSize: 16, color: "#000", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([it]).grandTotal}</span>
-                <button onClick={() => removeItem(i)} style={{ width: 28, height: 28, borderRadius: 6, background: "#FFF0EC", border: "1px solid #FF5733", color: "#000", cursor: "pointer", fontSize: 17 }}>×</button>
+            <div key={i} style={{ padding: "8px 0", borderBottom: "1px solid #6B6B6B" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ flex: 1, fontSize: 16, color: "#000" }}>{it.n}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button onClick={() => updateQty(i, -1)} style={{ width: 28, height: 28, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer" }}>−</button>
+                  <span style={{ fontSize: 17, fontWeight: 800, color: "#000", minWidth: 20, textAlign: "center" }}>{it.qty}</span>
+                  <button onClick={() => updateQty(i, 1)} style={{ width: 28, height: 28, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer" }}>+</button>
+                  {/* 🔴 2026-05-20 (Khushi Bug 4) — inclusive ₹ via computeHodBreakdown
+                      so this line matches the Total below to the rupee. */}
+                  <span style={{ fontSize: 16, color: "#000", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([it]).grandTotal}</span>
+                  <button onClick={() => removeItem(i)} style={{ width: 28, height: 28, borderRadius: 6, background: "#FFF0EC", border: "1px solid #FF5733", color: "#000", cursor: "pointer", fontSize: 17 }}>×</button>
+                </div>
               </div>
             </div>
           ))}
+          {/* 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole
+              round (e.g. "make it spicy", "no onions"). Prints once on the KOT. */}
+          <input
+            value={roundNote}
+            onChange={(e) => setRoundNote(e.target.value)}
+            placeholder="📝 Kitchen note for this round (e.g. make it spicy)"
+            maxLength={120}
+            style={{ width: "100%", marginTop: 8, padding: "9px 11px", fontSize: 14, color: "#000", background: "#FFFDF5", border: "1px solid #6B6B6B", borderRadius: 6, boxSizing: "border-box", outline: "none" }}
+          />
           {/* 🆕 2026-06-26 (Khushi) — full 4-tab ADD picker (same browse-and-tap
               grid as Add Order). Search is GLOBAL (auto-jumps tab to the match);
               tap ADD+ to drop an item into THIS round. On a printed KOT the added
@@ -1057,6 +1090,7 @@ function EditOrderModal({ round, roundIndex, docId, captainName, bookingRef, tab
           voided={pendingVoid.voided}
           valueLost={pendingVoid.valueLost}
           roundNum={round.roundNum}
+          skipPin={voidApproved}
           onCancel={() => setPendingVoid(null)}
           onConfirm={async ({ reason }) => {
             const snap = pendingVoid;
@@ -2979,6 +3013,8 @@ function AddOrderModal({ docId, tableId, captainName, isPastDate, onClose }: {
   const [tab, setTab] = useState<WalletTab>("food");
   const [cart, setCart] = useState<HodOrderItem[]>([]);
   const [saving, setSaving] = useState(false);
+  // 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole round.
+  const [roundNote, setRoundNote] = useState("");
 
   // 🔴 2026-05-09 — Live OOS + discount overrides from Admin → Menu.
   // Keyed by slug(name) so it bridges menu-data.ts ↔ hod-menu.ts ↔ wallet.
@@ -3114,7 +3150,6 @@ function AddOrderModal({ docId, tableId, captainName, isPastDate, onClose }: {
   const updateCartQty = (idx: number, delta: number) => {
     setCart((prev) => prev.map((c, i) => i === idx ? { ...c, qty: Math.max(0, c.qty + delta) } : c).filter((c) => c.qty > 0));
   };
-
   const cartBreakdown = computeHodBreakdown(cart);
   // 🔴 2026-05-07 — show CLEAN SUBTOTAL in cart (matches table card + menu
   // prices). SC + GST are added later at Mark Paid time, with toggle for
@@ -3127,7 +3162,7 @@ function AddOrderModal({ docId, tableId, captainName, isPastDate, onClose }: {
     if (isPastDate) { alert("⏪ Can't add an order on a past night. Switch the date to tonight first."); return; }
     setSaving(true);
     try {
-      await addRoundToTable(docId, cart, captainName);
+      await addRoundToTable(docId, cart, captainName, roundNote);
       onClose();
     } catch (e: any) { alert(e.message); }
     setSaving(false);
@@ -3276,17 +3311,31 @@ function AddOrderModal({ docId, tableId, captainName, isPastDate, onClose }: {
         <div style={{ borderTop: "2px solid #000", background: "#fff", padding: "12px 16px" }}>
           <div style={{ maxHeight: 150, overflowY: "auto", marginBottom: 8 }}>
             {cart.map((c, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
-                <span style={{ fontSize: 14, color: "#000", flex: 1 }}>{c.n}</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, -1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer", fontSize: 14 }}>−</button>
-                  <span style={{ fontSize: 16, fontWeight: 800, color: "#000", minWidth: 16, textAlign: "center" }}>{c.qty}</span>
-                  <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, 1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer", fontSize: 14 }}>+</button>
-                  <span style={{ fontSize: 14, color: "#000", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([c]).grandTotal}</span>
+              <div key={i} style={{ padding: "6px 0", borderBottom: "1px dashed #E0E0E0" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 14, color: "#000", flex: 1 }}>{c.n}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, -1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer", fontSize: 14 }}>−</button>
+                    <span style={{ fontSize: 16, fontWeight: 800, color: "#000", minWidth: 16, textAlign: "center" }}>{c.qty}</span>
+                    <button onClick={(e) => { e.stopPropagation(); updateCartQty(i, 1); }} style={{ width: 24, height: 24, borderRadius: 6, background: "#fff", border: "1px solid #000", color: "#000", cursor: "pointer", fontSize: 14 }}>+</button>
+                    <span style={{ fontSize: 14, color: "#000", minWidth: 50, textAlign: "right" }}>₹{computeHodBreakdown([c]).grandTotal}</span>
+                  </div>
                 </div>
               </div>
             ))}
           </div>
+          {/* 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole
+              round (e.g. "make it spicy", "no onions"). Prints once on the KOT. */}
+          {cart.length > 0 && (
+            <input
+              value={roundNote}
+              onChange={(e) => setRoundNote(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              placeholder="📝 Kitchen note for this round (e.g. make it spicy)"
+              maxLength={120}
+              style={{ width: "100%", marginBottom: 8, padding: "9px 11px", fontSize: 14, color: "#000", background: "#FFFDF5", border: "1px solid #6B6B6B", borderRadius: 6, boxSizing: "border-box", outline: "none" }}
+            />
+          )}
           <details style={{ borderTop: "1px solid #6B6B6B", paddingTop: 6, marginBottom: 10 }}>
             <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", listStyle: "none", cursor: "pointer" }}>
               <span style={{ fontSize: 13, color: "#6B6B6B", fontStyle: "italic" }}>
@@ -3334,7 +3383,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
   onSeatAnother?: (tableId: string) => void;
 }) {
   const [notified, setNotified] = useState(false);
-  const [editRound, setEditRound] = useState<{ round: HodTabRound; index: number } | null>(null);
+  const [editRound, setEditRound] = useState<{ round: HodTabRound; index: number; voidApproved?: boolean } | null>(null);
   const [showPaid, setShowPaid] = useState(false);
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [showReassign, setShowReassign] = useState(false);
@@ -3566,7 +3615,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       customerPhone: (r as any).customerPhone || (r as any).phone,
       bookingRef: r.bookingRef, reservationId: r._docId,
       staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
-      tabletFloor: tableFloor,
+      tabletFloor: tableFloor, roundNote: round.note,
     }).then((ok) => {
       if (!ok) setKotNotice({ kind: "warn", title: "⚠ KOT may not have printed", lines: ["Check the printer or tap PRINT KOT again.", `Table floor: ${floorName}`] });
     }).catch(() => {
@@ -3586,6 +3635,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         staff: captainName,
         roundNum: round.roundNum,
         items: round.items,
+        roundNote: round.note,
       } as any).catch((e) => console.warn("[KDS] captain serve write failed", e));
     }
     setKotNotice({ kind: "ok", title: "🖨 KOT Sent", lines: [`Sent to: ${dests.join(" + ")}`, `Table floor: ${floorName}`, `Table ${r.tableId}`] });
@@ -3632,7 +3682,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         customerPhone: (r as any).customerPhone || (r as any).phone,
         bookingRef: r.bookingRef, reservationId: r._docId,
         staff: captainName, roundNum: round.roundNum, items: round.items, roundTotal: round.roundTotal,
-        tabletFloor: tableFloor,
+        tabletFloor: tableFloor, roundNote: round.note,
       }).then((ok) => {
         if (!ok) setKotNotice({ kind: "warn", title: "⚠ KOT may not have printed", lines: [`Round ${round.roundNum} — retry that round if needed.`, `Table floor: ${floorName}`] });
       }).catch(() => {
@@ -3651,6 +3701,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
           staff: captainName,
           roundNum: round.roundNum,
           items: round.items,
+          roundNote: round.note,
         } as any).catch((e) => console.warn("[KDS] captain serveAll write failed", e));
       }
     }
@@ -3679,24 +3730,24 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     const printed = (r.billPrintCount || 0) > 0;
     const hasItems = tabTotal > 0 || (r.tabRounds || []).length > 0;
     if (hasItems && !printed) {
-      alert(`🖨 BILL NOT PRINTED YET\n\nPrint the bill first, then release ${r.tableId}.\n\n(Tap "🖨 Print Bill" above.)`);
+      await centeredAlert("BILL NOT PRINTED YET", `Print the bill first, then release ${r.tableId}.\n\n(Tap "🖨 Print Bill" above.)`, "error", true);
       return;
     }
     // Reprint required (items changed since last bill)? Same hard block —
     // the printed paper must reflect the final order.
     if (hasItems && r.billStale) {
-      alert(`⚠ ITEMS CHANGED SINCE LAST BILL\n\nReprint the bill before releasing ${r.tableId}.`);
+      await centeredAlert("ITEMS CHANGED SINCE LAST BILL", `Reprint the bill before releasing ${r.tableId}.`, "error", true);
       return;
     }
     const preparingRounds = (r.tabRounds || []).filter(rd => isLivePreparingRound(rd)).length;
     if (preparingRounds > 0) {
-      if (!confirm(`⚠️ ${preparingRounds} round(s) still PREPARING in kitchen!\n\nRelease anyway? Kitchen orders will be lost.`)) return;
+      if (!(await centeredConfirm(`${preparingRounds} ROUND(S) STILL PREPARING`, "These kitchen orders will be lost if you release now.\n\nRelease anyway?", "Release anyway", "Cancel", true))) return;
     }
     const hasUnpaid = !billSettled && tabTotal > 0;
-    const msg = hasUnpaid
-      ? `⚠️ UNPAID TAB: ₹${tabTotal}\n\nRelease without payment?`
-      : `Release ${r.tableId} for new guests?`;
-    if (!confirm(msg)) return;
+    const ok = hasUnpaid
+      ? await centeredConfirm(`UNPAID TAB: ₹${tabTotal}`, "Release this table without taking payment?", "Release unpaid", "Cancel", true)
+      : await centeredConfirm("RELEASE TABLE", `Release ${r.tableId} for new guests?`, "Release", "Cancel", true);
+    if (!ok) return;
     setBusy("release");
     // 🔴 2026-05-13 v3 (Khushi clarification) — the thank-you message is
     // for the CUSTOMER's wallet, not the captain. The captain side stays
@@ -3712,7 +3763,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       // braces, fire-and-forget, fail-open.)
       try { clearSettleRequest(r._docId); } catch {}
     } catch (e: any) {
-      alert(`❌ Release failed: ${e?.message || String(e)}`);
+      await centeredAlert("RELEASE FAILED", e?.message || String(e), "error", true);
     }
     setBusy("");
   };
@@ -4510,6 +4561,10 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
                           ✏️ Edit Order
                         </button>
                       )}
+                      {/* 🔴 2026-06-30 (Khushi) — VOID ITEMS button REMOVED. Voiding
+                          a printed item is already handled inside ✏️ EDIT ORDER
+                          (manager-approved removal), so the separate VOID ITEMS
+                          button was a duplicate. */}
                     </div>
                   </div>
                   {/* 🆕 2026-06-03 v3.206 (Khushi) — each round's items now render
@@ -4773,7 +4828,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
         </div>
       </div>
 
-      {editRound && <EditOrderModal round={editRound.round} roundIndex={editRound.index} docId={r._docId} captainName={captainName} bookingRef={r.bookingRef} tableId={r.tableId} floorLabel={r.floorLabel} customerName={r.customerName} onClose={() => setEditRound(null)} />}
+      {editRound && <EditOrderModal round={editRound.round} roundIndex={editRound.index} docId={r._docId} captainName={captainName} bookingRef={r.bookingRef} tableId={r.tableId} floorLabel={r.floorLabel} customerName={r.customerName} voidApproved={editRound.voidApproved} onClose={() => setEditRound(null)} />}
       {showPaid && <MarkPaidModal reservation={r} captainName={captainName} onClose={() => setShowPaid(false)} />}
       {showAddOrder && <AddOrderModal docId={r._docId} tableId={r.tableId} captainName={captainName} isPastDate={isPastDate} onClose={() => setShowAddOrder(false)} />}
       {previewBill && (
@@ -6355,7 +6410,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // Click → fullscreen modal with the same row + ACKNOWLEDGE UI we already had.
   const [showTableQrModal, setShowTableQrModal] = useState(false);
   // 🆕 2026-06-07 (Khushi) — LIVE REPORTS modal toggle (Captain parity).
-  const [reportsOpen, setReportsOpen] = useState(false);
+  // LIVE REPORTS moved to Boss Mode → Sales → Captain Reports (2026-06-30).
   // 🆕 2026-06-12 v3.266 (Khushi) — TABLE TRANSACTIONS panel (mirror of Bar
   // Mode's RECENT TRANSACTIONS, but for tables). Collapsible; reuses the
   // already-subscribed allReservations feed → ZERO extra Firestore reads.
@@ -6652,18 +6707,6 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           floor) so the captain sees identical, architect-passed numbers. The
           component mounts here only while open → its Firestore subscriptions
           run only while the modal is open (cost-safe). */}
-      {reportsOpen && (
-        <div style={{ position: "fixed", inset: 0, background: "#F4F4F0", zIndex: 100010, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
-          <div style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", background: "#fff", borderBottom: "2px solid #000" }}>
-            <div style={{ fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 0.4, fontFamily: "'Space Grotesk',sans-serif" }}>🪩 CAPTAIN · LIVE REPORTS</div>
-            <button onClick={() => setReportsOpen(false)}
-              style={{ flexShrink: 0, width: 40, height: 40, borderRadius: 10, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 22, fontWeight: 900, cursor: "pointer", lineHeight: 1 }}>×</button>
-          </div>
-          <div style={{ padding: 16 }}>
-            <LiveReports />
-          </div>
-        </div>
-      )}
       {showTableQrModal && (
         <div onClick={closeOnBackdrop(() => setShowTableQrModal(false))} style={{
           position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.55)",
@@ -6769,12 +6812,8 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             setDate(v);
           }}
           style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "#fff", border: "1px solid #000", borderRadius: 8, padding: "8px 12px", color: "#000", fontSize: 14, outline: "none" }} />
-        {/* 🆕 2026-06-07 (Khushi) — LIVE REPORTS button (parity with Bar / Door). */}
-        <button onClick={() => setReportsOpen(true)}
-          title="Live Reports — tonight's table numbers by floor"
-          style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 8, background: "#000", border: "1px solid #000", color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
-          📊 LIVE REPORTS
-        </button>
+        {/* 🆕 2026-06-30 (Khushi) — LIVE REPORTS button REMOVED from Captain Mode;
+            the captain report now lives in Boss Mode → Sales → 🪩 Captain Reports. */}
       </div>
 
       {/* 🆕 2026-06-14 v3.294 (Khushi) — PAST-NIGHT banner. Makes it obvious why

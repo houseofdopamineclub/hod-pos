@@ -6,7 +6,7 @@ import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, lookupBooking, subscribeToBookings, subscribeToGuestlist,
   subscribeToBookingsForNights, subscribeToGuestlistInRange,
-  subscribeToHodReservations, checkInGuest, reassignTable, reassignCorporateTables, cancelTableReservation,
+  subscribeToHodReservations, subscribeToCorporateReservations, checkInGuest, reassignTable, reassignCorporateTables, cancelTableReservation,
   updateReservationDetails,
   ensureZeroBalanceCoverForGuest,
   subscribeToHodEvents, subscribeToHodEventsRecent, type HodEvent,
@@ -100,7 +100,7 @@ import {
   EDC_CLIENT_TIMEOUT_MS,
   type EdcVendor, type EdcTransactionDoc,
 } from "@/lib/edc-charge";
-import { getOperationalNightStr } from "@/lib/utils-pos";
+import { getOperationalNightStr, zeroTenderMix, tenderMixTotal, addCoverTender, TENDER_BUCKETS, TENDER_LABELS } from "@/lib/utils-pos";
 import { unmarkGuestArrived, markGuestArrived, addToWaitlist, linkCoverToTable, subscribeToDoorPricingSettings, subscribeToCoversForNight, subscribeWaitlist } from "@/lib/firestore-hod";
 import WaitlistView from "@/components/WaitlistView";
 import WaitlistAutoMatch from "@/components/WaitlistAutoMatch";
@@ -2570,6 +2570,16 @@ function describeBooking(b: HodBooking): { category: string; categoryColor: stri
 
 function BookingRow({ booking, cover, onOpen }: { booking: HodBooking; cover?: HodCover | null; onOpen: (b: HodBooking) => void }) {
   const phoneClean = (booking.phone || "").replace(/[^\d+]/g, "");
+  // 🆕 2026-06-30 (Khushi) — show the check-in / cover-activation TIME next to the
+  // ✓ tick. Prefer a ready-made arrival label ("9:30 PM"); else format the ISO
+  // activation/check-in timestamp. Fail-open to a bare tick if no time is known.
+  const _fmtClock = (v: unknown) => { const d = new Date(v as string); return isNaN(d.getTime()) ? "" : d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }); };
+  const checkInTime =
+    (cover?.actualArrivalTime as string) ||
+    (booking as any)._actualArrivalTime ||
+    (booking as any).actualArrivalTime ||
+    ((cover as any)?.coverActivatedAt ? _fmtClock((cover as any).coverActivatedAt) : "") ||
+    ((booking as any).checkedInAt ? _fmtClock((booking as any).checkedInAt) : "");
   return (
     <div onClick={() => onOpen(booking)}
       style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 14px", borderRadius: 8,
@@ -2581,7 +2591,7 @@ function BookingRow({ booking, cover, onOpen }: { booking: HodBooking; cover?: H
           <div style={{ fontSize: 14, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.3px", color: "#000", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {booking.name || "Guest"}
           </div>
-          {booking.checkedIn && <span style={{ color: "#23A094", fontSize: 12, fontWeight: 900 }}>✓</span>}
+          {booking.checkedIn && <span style={{ color: "#23A094", fontSize: 12, fontWeight: 900, whiteSpace: "nowrap" }}>✓{checkInTime ? ` ${checkInTime}` : ""}</span>}
         </div>
         <div style={{ fontSize: 12, color: "#6B6B6B", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {booking.phone || "no phone"}{booking.ref ? ` · ${booking.ref}` : ""}
@@ -3942,6 +3952,17 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     return () => { unsubs.forEach((u) => u()); };
   }, [today, calToday]);
 
+  // 🆕 2026-06-29 (Khushi) — the CORPORATE tab additionally loads ALL corporate
+  // bookings regardless of date (they're booked weeks ahead, beyond the 3-night
+  // window above → an Accenture-style party was missing). Mounted ONLY when this
+  // tab is the corporate one so the Tables/Aggregator tabs pay no extra reads.
+  const [corpExtra, setCorpExtra] = useState<HodTableReservation[]>([]);
+  useEffect(() => {
+    if (sourceFilter !== "corporate") { setCorpExtra([]); return; }
+    const unsub = subscribeToCorporateReservations((rows) => setCorpExtra(rows));
+    return () => unsub();
+  }, [sourceFilter]);
+
   // 🔴 Reset edit drafts ONLY when the modal opens for a different doc —
   // NOT on every `reservations` snapshot, or live Firestore updates would
   // clobber the captain's in-progress typing (architect review 16 May).
@@ -3987,7 +4008,18 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     );
   }, [reservations, today, calToday]);
 
-  const activeAllPreFilter = reservations.filter((r) => (r as any).status !== "cancelled");
+  // 🆕 2026-06-29 (Khushi) — for the CORPORATE tab, merge the date-agnostic
+  // corporate feed (corpExtra) into the 3-night window set, deduped by docId, so
+  // far-future groups appear. Other tabs use the windowed `reservations` as-is.
+  const effReservations = sourceFilter === "corporate"
+    ? (() => {
+        const seen = new Map<string, HodTableReservation>();
+        for (const r of reservations) seen.set(r._docId || r.bookingRef || Math.random().toString(), r);
+        for (const r of corpExtra) seen.set(r._docId || r.bookingRef || Math.random().toString(), r);
+        return Array.from(seen.values());
+      })()
+    : reservations;
+  const activeAllPreFilter = effReservations.filter((r) => (r as any).status !== "cancelled");
   // 🔴 2026-05-20 (Khushi) — corporate split. Corporate bookings now have their
   // own dashboard tab; TABLES tab excludes them so they don't double-count.
   const activeAll = sourceFilter === "corporate"
@@ -4012,6 +4044,14 @@ function TablesTab({ query, agentName, eventId, eventDate, onShowQr, onCover, fo
     // rows — collapse the group to the single master row so a 4-table booking for
     // one company shows as ONE entry (pax 60), not four.
     if ((r as any).isGroupHold) return false;
+    // 🆕 2026-06-29 (Khushi) — CORPORATE tab ignores the tonight/3-night date
+    // scope: corporate groups are pre-booked far ahead, so show TONIGHT + every
+    // FUTURE date. Only past nights are hidden to keep the tab clean.
+    if (sourceFilter === "corporate") {
+      const d = (r.date || "").slice(0, 10);
+      if (d && d < today) return false;
+      return true;
+    }
     if (!tableDates.has((r.date || "").slice(0, 10))) return false;
     return eventId === "all" || !(r as any).eventId || (r as any).eventId === eventId;
   });
@@ -6596,11 +6636,45 @@ function UnifiedWalkInModal({
   const [err, setErr] = useState("");
   const [done, setDone] = useState<{ ref: string; phone: string; isCover: boolean; total: number; coverAmount: number } | null>(null);
   const [showQrModal, setShowQrModal] = useState<{ url: string; title: string } | null>(null);
+  // 🆕 2026-06-30 (Khushi) — the wallet QR on the success screen is HIDDEN by
+  // default. The door girl taps SHOW SCANNER (or SHOW QR) → Manager PIN (8888)
+  // gate → QR appears. One unlock per guest covers BOTH the inline QR and the
+  // popup; resetForNext re-hides it for the next walk-in.
+  const [qrRevealed, setQrRevealed] = useState(false);
   const [actionMsg, setActionMsg] = useState("");
   // 🆕 2026-06-02 (Khushi) — surface the email outcome on the success screen so
   // the door girl can SEE whether the confirmation email fired (mirrors the
   // "Table Booked" screen). Email is OPTIONAL: blank → "No email entered".
   const [emailStatus, setEmailStatus] = useState("—");
+
+  // 🆕 2026-06-30 (Khushi) — SPECIAL AMENITIES editor, mirrored from the Table-
+  // Booking modal so the door can add Valet / Decor / Cake / DJ / custom add-ons
+  // to the GUEST LIST, BUY-COVERS and ENTRY-ONLY walk-in flows too. Shown only
+  // when this walk-in is NOT already linked to a table (the cover+table flow
+  // carries its amenities through `linkToTable`). Amenities are NON-redeemable:
+  // they add to the Total to Collect but never enter the wallet balance.
+  type AmRow = { name: string; price: number; qty: number; included: boolean };
+  const [amenitiesOpen, setAmenitiesOpen] = useState(false);
+  const [amenities, setAmenities] = useState<AmRow[]>(() =>
+    DEFAULT_BOOKING_AMENITIES.map((a) => ({ ...a, included: false }))
+  );
+  const [customAmName, setCustomAmName] = useState("");
+  const [customAmPrice, setCustomAmPrice] = useState<number>(0);
+  const updateAm = (i: number, patch: Partial<AmRow>) =>
+    setAmenities((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const removeAm = (i: number) =>
+    setAmenities((rows) => rows.filter((_, idx) => idx !== i));
+  const addCustomAm = () => {
+    const n = customAmName.trim();
+    if (!n) return;
+    setAmenities((rows) => [...rows, { name: n, price: Math.max(0, customAmPrice || 0), qty: 1, included: true }]);
+    setCustomAmName(""); setCustomAmPrice(0);
+  };
+  const localIncludedAmenities: BookingAmenity[] = amenities
+    .filter((a) => a.included && a.name.trim())
+    .map((a) => ({ name: a.name.trim(), price: Math.max(0, a.price || 0), qty: Math.max(1, a.qty || 1) }));
+  const localAmenitiesTotal = localIncludedAmenities.reduce((s, a) => s + a.price * a.qty, 0);
+  const localAmenitiesLabel = localIncludedAmenities.map((a) => (a.qty > 1 ? `${a.name} ×${a.qty}` : a.name)).join(", ");
 
   const [events, setEvents] = useState<HodEvent[]>([]);
   const [eventId, setEventId] = useState<string>("");
@@ -6634,8 +6708,12 @@ function UnifiedWalkInModal({
   // a NON-redeemable add-on: they're added to the Total to Collect but NEVER
   // enter the wallet balance (wallet = cover only). Only applies in the
   // COVER+TABLE flow; the plain BUY-COVERS / GUEST LIST flow has none.
-  const amenitiesTotal = kind === "guestlist" ? 0 : Math.max(0, Number(linkToTable?.amenitiesTotal) || 0);
-  const amenitiesLabel = (linkToTable?.amenitiesLabel || "").trim();
+  // 🆕 2026-06-30 — amenities can come from TWO places: the linked table booking
+  // (cover+table flow → linkToTable) AND the local editor above (plain walk-in
+  // flows). Combine both. Guestlist now keeps its amenities too (was clamped 0).
+  const linkAmenitiesTotal = Math.max(0, Number(linkToTable?.amenitiesTotal) || 0);
+  const amenitiesTotal = linkAmenitiesTotal + localAmenitiesTotal;
+  const amenitiesLabel = [(linkToTable?.amenitiesLabel || "").trim(), localAmenitiesLabel].filter(Boolean).join(", ");
   // Sum of every NON-redeemable add-on (entry ticket + amenities). Used by the
   // split-payment guard below — split must equal the wallet (cover) amount, so
   // any non-redeemable extra makes split unsafe.
@@ -6655,7 +6733,11 @@ function UnifiedWalkInModal({
     setCoverAmountStr(""); setEntryTicketStr("0");
     setNumGirls(0); setNumBoys(0);
     setSplitCash(0); setSplitUpi(0); setSplitCard(0);
-    setErr(""); setActionMsg(""); setEmailStatus("—"); setDone(null); setBusy(false); setActivating(false);
+    // 🆕 2026-06-30 — clear the local amenities editor too so add-ons never
+    // carry over into the next walk-in (overcollection risk).
+    setAmenities(DEFAULT_BOOKING_AMENITIES.map((a) => ({ ...a, included: false })));
+    setCustomAmName(""); setCustomAmPrice(0); setAmenitiesOpen(false);
+    setErr(""); setActionMsg(""); setEmailStatus("—"); setDone(null); setBusy(false); setActivating(false); setQrRevealed(false);
   };
 
   // 🆕 2026-06-02 (Khushi) — UNIFIED CONFIRM. One tap does everything:
@@ -6684,7 +6766,7 @@ function UnifiedWalkInModal({
     if ((kind === "cover" || kind === "onlyentry") && coverAmount > 50000) {
       setErr("Cover amount can't exceed ₹50,000 per wallet"); return;
     }
-    if (kind === "cover" && total > 0 && payMethod === "split") {
+    if (total > 0 && payMethod === "split") {
       // 🛟 SPLIT + NON-REDEEMABLE guard. The wallet is credited with COVER ONLY,
       // but the split is collected against the TOTAL (cover + entry + amenities).
       // activateCoverForBooking() hard-requires split-sum === amount(=cover),
@@ -6711,8 +6793,10 @@ function UnifiedWalkInModal({
       if (kind === "cover") {
         noteBits.push(`COVER(redeemable):₹${coverAmount}`);
         if (entryTicket > 0) noteBits.push(`ENTRY-TICKET(non-redeemable):₹${entryTicket}`);
-        if (amenitiesTotal > 0) noteBits.push(`AMENITIES(non-redeemable):₹${amenitiesTotal}${amenitiesLabel ? ` [${amenitiesLabel}]` : ""}`);
       }
+      // 🆕 2026-06-30 — record amenities (+ how paid) for EVERY walk-in kind
+      // (guest list / buy-covers / entry-only) so Reports + Sheets show them.
+      if (amenitiesTotal > 0) noteBits.push(`AMENITIES(non-redeemable):₹${amenitiesTotal}${amenitiesLabel ? ` [${amenitiesLabel}]` : ""}${total > 0 && payMethod ? ` (Paid by ${payMethod})` : ""}`);
       noteBits.push(`by ${agentName}`);
       const noteStr = noteBits.join(" · ");
 
@@ -7034,7 +7118,17 @@ function UnifiedWalkInModal({
 
     // 📷 SHOW QR — instant offline path. Customer scans the WALLET URL
     // (not menu) — opens their personal wallet page on hodclub.in.
-    const showMenuQr = () => setShowQrModal({ url: walletUrl, title: "📷 SCAN WALLET" });
+    // 🆕 2026-06-30 (Khushi) — SHOW QR is Manager-PIN gated (8888). One unlock
+    // per guest: once approved, qrRevealed stays true so the inline QR + this
+    // popup both open without re-prompting until the next walk-in.
+    const showMenuQr = async () => {
+      if (!qrRevealed) {
+        const ok = await requireDoorManagerPin("Show the wallet QR to the guest.");
+        if (!ok) return;
+        setQrRevealed(true);
+      }
+      setShowQrModal({ url: walletUrl, title: "📷 SCAN WALLET" });
+    };
 
     // 🆕 2026-06-02 (Khushi) — the wallet is ALREADY created + activated in
     // submit() (cover credited, ₹0 minted for guest list, table linked, QR/
@@ -7094,12 +7188,27 @@ function UnifiedWalkInModal({
                     <div style={{ ...rowS, borderBottom: "none" }}><span style={lblS}>✉️ EMAIL</span><span style={{ fontWeight: 800, color: emailStatus === "Email failed — show QR" ? "#FF5733" : emailStatus === "No email entered" ? "#6B6B6B" : "#23A094" }}>{emailStatus}</span></div>
                   </div>
 
+                  {/* 🆕 2026-06-30 (Khushi) — wallet QR HIDDEN by default; the door
+                      girl taps SHOW SCANNER → Manager PIN (8888) → QR reveals. */}
                   <div style={{ textAlign: "center", marginBottom: 14 }}>
-                    <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B", letterSpacing: 1, marginBottom: 6 }}>SHOW THIS QR TO THE GUEST (WALLET)</div>
-                    <div style={{ background: "#fff", padding: 10, borderRadius: 6, border: "2px solid #000", display: "inline-block" }}>
-                      <img src={qrSrc} alt="Wallet QR" style={{ width: 240, height: 240, display: "block" }} />
-                    </div>
-                    <div style={{ fontSize: 10, color: "#6B6B6B", wordBreak: "break-all", marginTop: 8, fontFamily: "monospace" }}>{walletUrl}</div>
+                    {qrRevealed ? (
+                      <>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B", letterSpacing: 1, marginBottom: 6 }}>SHOW THIS QR TO THE GUEST (WALLET)</div>
+                        <div style={{ background: "#fff", padding: 10, borderRadius: 6, border: "2px solid #000", display: "inline-block" }}>
+                          <img src={qrSrc} alt="Wallet QR" style={{ width: 240, height: 240, display: "block" }} />
+                        </div>
+                        <div style={{ fontSize: 10, color: "#6B6B6B", wordBreak: "break-all", marginTop: 8, fontFamily: "monospace" }}>{walletUrl}</div>
+                      </>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          const ok = await requireDoorManagerPin("Show the wallet QR to the guest.");
+                          if (ok) setQrRevealed(true);
+                        }}
+                        style={{ width: "100%", padding: "16px 16px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 800, letterSpacing: .5, cursor: "pointer" }}>
+                        🔒 SHOW SCANNER
+                      </button>
+                    )}
                   </div>
                 </>
               );
@@ -7284,6 +7393,69 @@ function UnifiedWalkInModal({
           </div>
         )}
 
+        {/* 🆕 2026-06-30 (Khushi) — SPECIAL AMENITIES (Valet, Decor, Cake, DJ,
+            custom) for the plain walk-in flows. Hidden in the cover+table flow —
+            those amenities are chosen on the table screen and arrive via
+            linkToTable. Collapsed by default to keep the modal short. */}
+        {!linkToTable && (
+          <div style={{ marginBottom: 14, border: "2px solid #000", borderRadius: 8, padding: 10, background: "#fff" }}>
+            <button type="button" onClick={() => setAmenitiesOpen((v) => !v)}
+              style={{ ...lbl, marginBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "transparent", border: "none", padding: 0, cursor: "pointer" }}>
+              <span>✨ SPECIAL AMENITIES</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ color: localAmenitiesTotal > 0 ? "#000" : "#6B6B6B", letterSpacing: 0, textTransform: "none" }}>
+                  {localIncludedAmenities.length > 0 ? `${localIncludedAmenities.length} added · ` : ""}₹{localAmenitiesTotal.toLocaleString("en-IN")}
+                </span>
+                <span style={{ fontSize: 12, color: "#000" }}>{amenitiesOpen ? "▲" : "▼"}</span>
+              </span>
+            </button>
+            {amenitiesOpen && (<>
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {amenities.map((row, i) => {
+                  const lineTotal = (Number(row.price) || 0) * (Number(row.qty) || 1);
+                  return (
+                    <div key={i} style={{
+                      display: "grid", gridTemplateColumns: "auto 1fr 70px 50px auto auto", gap: 6,
+                      alignItems: "center", background: "#fff",
+                      border: `2px solid ${row.included ? "#23A094" : "#000"}`,
+                      borderRadius: 8, padding: "6px 8px",
+                    }}>
+                      <input type="checkbox" checked={row.included} onChange={(e) => updateAm(i, { included: e.target.checked })}
+                        style={{ width: 16, height: 16, cursor: "pointer" }} />
+                      <input value={row.name} onChange={(e) => updateAm(i, { name: e.target.value })}
+                        style={{ background: "transparent", border: "none", color: "#000", fontSize: 12, fontWeight: 700, padding: 0, outline: "none" }} />
+                      <input type="number" min={0} value={row.price}
+                        onChange={(e) => updateAm(i, { price: Math.max(0, parseInt(e.target.value || "0", 10) || 0) })}
+                        style={{ background: "#fff", border: "2px solid #000", color: "#000", borderRadius: 6, padding: "4px 6px", fontSize: 11, width: "100%", boxSizing: "border-box" }} />
+                      <input type="number" min={1} value={row.qty}
+                        onChange={(e) => updateAm(i, { qty: Math.max(1, parseInt(e.target.value || "1", 10) || 1) })}
+                        title="Quantity"
+                        style={{ background: "#fff", border: "2px solid #000", color: "#000", borderRadius: 6, padding: "4px 6px", fontSize: 11, width: "100%", boxSizing: "border-box" }} />
+                      <span style={{ fontSize: 11, fontWeight: 800, color: row.included ? "#000" : "#6B6B6B", minWidth: 56, textAlign: "right" }}>
+                        ₹{lineTotal.toLocaleString("en-IN")}
+                      </span>
+                      <button type="button" onClick={() => removeAm(i)} title="Remove row"
+                        style={{ background: "transparent", border: "none", color: "#FF5733", fontSize: 16, cursor: "pointer", padding: "0 4px" }}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 80px auto", gap: 6 }}>
+                <input value={customAmName} onChange={(e) => setCustomAmName(e.target.value)} placeholder="+ Add custom add-on…"
+                  style={{ ...inp, padding: "8px 10px", fontSize: 12 }} />
+                <input type="number" min={0} value={customAmPrice}
+                  onChange={(e) => setCustomAmPrice(Math.max(0, parseInt(e.target.value || "0", 10) || 0))}
+                  placeholder="₹"
+                  style={{ ...inp, padding: "8px 10px", fontSize: 12 }} />
+                <button type="button" onClick={addCustomAm} disabled={!customAmName.trim()}
+                  style={{ background: customAmName.trim() ? "#FF90E8" : "#fff", border: "2px solid #000", color: customAmName.trim() ? "#000" : "#6B6B6B", borderRadius: 6, padding: "8px 12px", fontSize: 11, fontWeight: 900, cursor: customAmName.trim() ? "pointer" : "not-allowed" }}>
+                  ADD
+                </button>
+              </div>
+            </>)}
+          </div>
+        )}
+
         {/* ── Total Amount summary (hidden when total = 0) ─────────────────── */}
         {total > 0 && (
           <div style={{
@@ -7310,8 +7482,10 @@ function UnifiedWalkInModal({
 
         {/* PAYMENT METHOD ROW — only when there's actually money to collect.
             Guestlist is free (₹0) so it skips this. 4 chips:
-            Cash · UPI · Card · Split. UPI/Card use the EDC machine. */}
-        {kind === "cover" && total > 0 && (
+            Cash · UPI · Card · Split. UPI/Card use the EDC machine.
+            🆕 2026-06-30 — also shown for entry-only + guest-list when amenities
+            (or any other charge) push the total above ₹0. */}
+        {total > 0 && (
           <div style={{ marginBottom: 14 }}>
             <div style={lbl}>HOW IS THE CUSTOMER PAYING?</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
@@ -7688,7 +7862,7 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
     return () => unsub();
   }, [waitlistDate]);
   // 🔴 2026-05-20 (Khushi) — LIVE REPORTS modal toggle. Header button opens this.
-  const [liveReportsOpen, setLiveReportsOpen] = useState(false);
+  // LIVE REPORTS moved to Boss Mode → Sales → Door Reports (2026-06-30).
   // 🔴 2026-05-22 (Khushi COST FIX) — Live Reports covers subscription MOVED
   // INTO the modal itself (see LiveReportsModal). Parent no longer subscribes
   // — modal opens rarely + needs night-picker support, so dashboard-wide
@@ -7987,14 +8161,8 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
           <span style={{ fontFamily: "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif", fontSize: 12, color: "#6B6B6B", fontWeight: 800 }}>{agentName}</span>
-          {/* 🔴 2026-05-20 (Khushi) — LIVE REPORTS button, sits LEFT of LOGOUT.
-              Opens a full-screen modal with real-time KPI tiles + CSV export. */}
-          <button onClick={() => setLiveReportsOpen(true)}
-            style={{ padding: "8px 12px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .4, display: "flex", alignItems: "center", gap: 4 }}
-            title="Live Reports — real-time KPIs for tonight">
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#23A094", boxShadow: "none", display: "inline-block" }} />
-            LIVE REPORTS
-          </button>
+          {/* 🆕 2026-06-30 (Khushi) — LIVE REPORTS button REMOVED from Door Mode;
+              the door report now lives in Boss Mode → Sales → 🚪 Door Reports. */}
           <button onClick={onLogout}
             style={{ padding: "8px 12px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#FF5733", fontSize: 11, fontWeight: 800, cursor: "pointer", letterSpacing: .3 }}>
             LOGOUT
@@ -8462,13 +8630,6 @@ function DoorDashboard({ agentName, onLogout }: { agentName: string; onLogout: (
         }}
       />}
       {coverFor && <CoverActivationModal booking={coverFor} agentName={agentName} onClose={() => setCoverFor(null)} />}
-      {liveReportsOpen && <LiveReportsModal
-        agentName={agentName}
-        tableResByDate={tableResByDate}
-        selectedEventId={selectedEventId}
-        eventChips={eventChips}
-        onClose={() => setLiveReportsOpen(false)}
-      />}
       {qrModal && (
         <WalletQrModal
           bookingRef={qrModal.bookingRef} walletUrl={qrModal.walletUrl}
@@ -8802,9 +8963,10 @@ type LiveReportsModalProps = {
   selectedEventId: string;
   eventChips: Array<{ id: string; title: string; date: string }>;
   onClose: () => void;
+  embedded?: boolean;
 };
 
-function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChips, onClose }: LiveReportsModalProps) {
+export function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChips, onClose, embedded }: LiveReportsModalProps) {
   // Operational night = the YYYY-MM-DD that represents the night. Today's
   // op night by default; date picker can rewind.
   const [nightDate, setNightDate] = useState<string>(getOperationalNightStr());
@@ -8998,8 +9160,26 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   });
   const totalCoversCollected = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number((c as any).topUpTotal) || 0)), 0);
   const totalRecharges         = coversForNight.reduce((s, c) => s + (Number((c as any).topUpTotal) || 0), 0);
+  // 🆕 2026-06-30 (Khushi) — split door recharges into CASHIER (staff-entered at
+  // the door: cash/upi/card/split top-ups) vs CUSTOMER self top-up (online via
+  // Razorpay PhonePe / GPay → transaction type 'online_topup'). Mirrors the Bar
+  // Reports split. online_topup is the ONLY customer-self recharge path; every
+  // other top-up is staff-driven, so cashier = total − customer (fail-safe).
+  const doorCustomerRecharges  = coversForNight.reduce((s, c) => {
+    const txns = (((c as any).transactions as Array<{ type?: string; amount?: number }>) || []);
+    return s + txns.reduce((t, tx) => t + (tx.type === "online_topup" ? (Number(tx.amount) || 0) : 0), 0);
+  }, 0);
+  const doorStaffRecharges     = Math.max(0, totalRecharges - doorCustomerRecharges);
   const totalAmountRedeemed    = coversForNight.reduce((s, c) => s + Math.max(0, (Number(c.coverActivated) || 0) - (Number(c.coverBalance) || 0)), 0);
   const totalAmountNotRedeemed = coversForNight.reduce((s, c) => s + Math.max(0, Number(c.coverBalance) || 0), 0);
+  // 🆕 2026-06-30 (Khushi) — PAYMENT METHODS COLLECTED at the door: how the
+  // money taken in (cover charges + recharges) was actually paid. Reconciles to
+  // TOTAL AMOUNT COLLECTED (totalCoversCollected + totalRecharges).
+  const doorTender = (() => {
+    const mix = zeroTenderMix();
+    for (const c of coversForNight) addCoverTender(mix, c as any);
+    return mix;
+  })();
 
   // LUNCH / DINNER split for ALL tables (regular + corporate). Cutoff = 17:00.
   const allTablesForNight = [...regularTables, ...corporateTables];
@@ -9104,9 +9284,15 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
     push("  Pax (Guestlist)", guestlistPax);
     push("", "");
     push("TOTAL COVER CHARGES COLLECTED (Rs)", totalCoversCollected);
-    push("  Recharges by customers (Rs)", totalRecharges);
+    push("  Recharges by CASHIER — staff-entered at door (Rs)", doorStaffRecharges);
+    push("  TOP UP RECHARGES BY CUSTOMER — online self via Razorpay (Rs)", doorCustomerRecharges);
+    push("  Total recharges (Rs)", totalRecharges);
     push("TOTAL AMOUNT REDEEMED (Rs)", totalAmountRedeemed);
     push("TOTAL NOT REDEEMED / Balance in wallets (Rs)", totalAmountNotRedeemed);
+    push("", "");
+    push("PAYMENT METHODS COLLECTED (cover charges + recharges)", "");
+    for (const b of TENDER_BUCKETS) push(`  ${TENDER_LABELS[b]} (Rs)`, Math.round(doorTender[b]));
+    push("  TOTAL (Rs)", Math.round(tenderMixTotal(doorTender)));
     push("", "");
     push("TOTAL TABLES BOOKED (non-corporate)", regularTables.length);
     push("  Lunch (< 5pm)", lunchTables);
@@ -9175,11 +9361,15 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
   const fmtRs = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
 
   return (
-    <div onClick={closeOnBackdrop(onClose)}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, overflow: "auto", padding: "12px 0", WebkitOverflowScrolling: "touch" }}>
+    <div onClick={embedded ? undefined : closeOnBackdrop(onClose)}
+      style={embedded
+        ? { color: "#000" }
+        : { position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 9999, overflow: "auto", padding: "12px 0", WebkitOverflowScrolling: "touch" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 980, margin: "0 auto", background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 16, color: "#000" }}>
-        <BackBtn onClick={onClose} />
+        style={embedded
+          ? { background: "#F4F4F0", color: "#000" }
+          : { maxWidth: 980, margin: "0 auto", background: "#F4F4F0", border: "2px solid #000", borderRadius: 8, padding: 16, color: "#000" }}>
+        {!embedded && <BackBtn onClick={onClose} />}
         {/* HEADER */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, flex: 1 }}>
@@ -9205,10 +9395,12 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
               title="Download CSV of all tiles">
               ⬇ EXPORT CSV
             </button>
+            {!embedded && (
             <button onClick={onClose}
               style={{ padding: "7px 12px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
               ✕ CLOSE
             </button>
+            )}
           </div>
         </div>
 
@@ -9249,10 +9441,15 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
                 <div style={{ fontSize: 12, fontWeight: 800, color: "#555", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Collected at Door</div>
                 <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#000" }}>{fmtRs(totalCoversCollected)}</div>
               </div>
-              {/* Row 2 — recharges */}
+              {/* Row 2 — recharges by CASHIER (staff-entered at door) */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 6, paddingBottom: 6, borderBottom: "1px solid #F0F0F0" }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#555", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Recharges by Cashier</div>
+                <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#000" }}>{fmtRs(doorStaffRecharges)}</div>
+              </div>
+              {/* Row 3 — TOP UP recharges by customer (online self via Razorpay) */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 6 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: "#B8860B", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Recharges by Customers</div>
-                <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#B8860B" }}>{fmtRs(totalRecharges)}</div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#B8860B", letterSpacing: .3, textTransform: "uppercase", fontFamily: NUM_FONT }}>Top Up Recharges by Customer</div>
+                <div style={{ ...NUM_STYLE, fontSize: 18, fontWeight: 900, color: "#B8860B" }}>{fmtRs(doorCustomerRecharges)}</div>
               </div>
             </div>
           </Tile>
@@ -9275,6 +9472,20 @@ function LiveReportsModal({ agentName, tableResByDate, selectedEventId, eventChi
               <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 700, fontFamily: NUM_FONT }}>{cancelledPax} pax cancelled</div>
             </div>
           </Tile>
+        </div>
+
+        {/* 🆕 PAYMENT METHODS COLLECTED — how the door's money was paid */}
+        <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 8, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 900, color: "#000", letterSpacing: 2, marginBottom: 4, fontFamily: NUM_FONT, textTransform: "uppercase" }}>💳 PAYMENT METHODS COLLECTED</div>
+          <div style={{ fontSize: 11.5, color: "#6B6B6B", fontWeight: 700, marginBottom: 12 }}>Cover charges + recharges, by how they were paid · Split = paid via 2+ methods · TOP UPS = online wallet top-ups · Others = comp / other. Reconciles to TOTAL AMOUNT COLLECTED.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "8px 16px", fontSize: 15, maxWidth: 360 }}>
+            {TENDER_BUCKETS.flatMap((b) => [
+              <div key={b + "-l"} style={{ fontWeight: 800, color: "#000" }}>{TENDER_LABELS[b]}</div>,
+              <div key={b + "-v"} style={{ ...NUM_STYLE, fontWeight: 900, color: "#000", textAlign: "right" }}>{fmtRs(doorTender[b])}</div>,
+            ])}
+            <div style={{ borderTop: "2px solid #000", paddingTop: 6, fontWeight: 900, color: "#000" }}>TOTAL</div>
+            <div style={{ ...NUM_STYLE, borderTop: "2px solid #000", paddingTop: 6, fontWeight: 900, color: "#000", textAlign: "right" }}>{fmtRs(tenderMixTotal(doorTender))}</div>
+          </div>
         </div>
 
         {/* AGGREGATOR BUCKETS */}

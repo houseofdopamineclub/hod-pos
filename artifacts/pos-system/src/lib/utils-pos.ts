@@ -63,6 +63,89 @@ export function getOperationalNightStr(): string {
   return shifted.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
+// ── PAYMENT-METHOD ("tender") breakdown ───────────────────────────────
+// 🆕 2026-06-30 (Khushi) — shared by the Door / Bar / Captain reports so each
+// shows how its collected money was actually paid. Six buckets she asked for:
+// Cash · UPI · Card · Split · TOP UPS · Others.
+// 🆕 2026-06-30 v2 (Khushi) — split online wallet top-ups out of "Others" into
+// their OWN "TOP UPS" row. When a customer tops up their wallet through the
+// online Razorpay link the tx type is `online_topup` → method "online"/"razorpay"
+// → the "online" bucket (labelled TOP UPS). The gateway only tells us it was an
+// online payment, NOT whether the customer chose UPI/card inside Razorpay, so it
+// can't be split into UPI/Card. Aggregator / wallet / comp / unknown still fall
+// into Others. Each report scopes the mix to the SAME money its headline
+// "collected" total uses, so the buckets reconcile to that total.
+export type TenderBucket = "cash" | "upi" | "card" | "split" | "online" | "other";
+export const TENDER_BUCKETS: TenderBucket[] = ["cash", "upi", "card", "split", "online", "other"];
+export const TENDER_LABELS: Record<TenderBucket, string> = {
+  cash: "Cash", upi: "UPI", card: "Card", split: "Split", online: "TOP UPS", other: "Others",
+};
+export type TenderMix = Record<TenderBucket, number>;
+export const zeroTenderMix = (): TenderMix => ({ cash: 0, upi: 0, card: 0, split: 0, online: 0, other: 0 });
+export const tenderMixTotal = (m: TenderMix): number =>
+  m.cash + m.upi + m.card + m.split + m.online + m.other;
+
+// Classify any settlement-method string into one of the six buckets.
+export function bucketTender(method?: string): TenderBucket {
+  const m = (method || "").toLowerCase();
+  if (m.includes("split")) return "split";
+  if (m.includes("cash")) return "cash";
+  if (m.includes("card")) return "card";
+  if (m.includes("upi")) return "upi";
+  if (m.includes("online") || m.includes("razorpay")) return "online"; // TOP UPS — online wallet top-up
+  return "other"; // aggregator / wallet / comp / unknown
+}
+
+// Add ONE prepaid cover's REAL collected tender into a mix, budget-capped at
+// coverActivated: each `${method}_topup` recharge is bucketed by its own method
+// (consuming the budget first), then the leftover budget = the initial door/bar
+// load, bucketed by the cover's own payment method. The mix ALWAYS sums to
+// exactly coverActivated, even when malformed legacy `*_topup` sums disagree.
+export function addCoverTender(mix: TenderMix, c: {
+  coverActivated?: number; topUpTotal?: number;
+  paymentMethod?: string; coverPaymentMethod?: string;
+  transactions?: Array<{ type?: string; amount?: number }>;
+}): void {
+  const activated = Number(c.coverActivated) || 0;
+  if (activated <= 0) return;
+  // BUDGET-CAPPED so the per-cover contribution can NEVER exceed coverActivated
+  // (guards malformed legacy docs where the `*_topup` tx sum disagrees with
+  // topUpTotal). Recharges consume the budget first (bucketed by their own
+  // method); whatever budget is left = the initial door/bar load, bucketed by
+  // the cover's payment method. Sum of all buckets == coverActivated exactly.
+  let remaining = activated;
+  for (const tx of c.transactions || []) {
+    const t = String(tx.type || "");
+    if (!/_topup$/.test(t)) continue;
+    const amt = Math.min(Math.max(0, Number(tx.amount) || 0), remaining);
+    if (amt <= 0) continue;
+    mix[bucketTender(t.replace(/_topup$/, ""))] += amt;
+    remaining -= amt;
+    if (remaining <= 0) return;
+  }
+  if (remaining > 0.5) mix[bucketTender(c.paymentMethod || c.coverPaymentMethod)] += remaining;
+}
+
+// Add ONE settled table reservation's collected tender into a mix. A multi-
+// method split goes wholly into Split; a single method (paymentMode or a
+// single-entry paymentSplits) buckets by that method. Aggregator settlements
+// (mode = platform name) fall into Others; comp / unpaid (amountPaid 0) skip.
+export function addReservationTender(mix: TenderMix, r: {
+  paymentStatus?: string; amountPaid?: number; paymentMode?: string;
+  paymentSplits?: Array<{ method?: string; amount?: number }>;
+}, realizedOverride?: number): void {
+  if ((r.paymentStatus || "").toLowerCase() !== "paid") return;
+  // realizedOverride lets a caller pass the SAME value its headline total uses
+  // (e.g. Captain's BILLED = amountPaid || billFinal) so the mix reconciles even
+  // on legacy paid docs that lack amountPaid. Falls back to amountPaid.
+  const realized = realizedOverride != null ? (Number(realizedOverride) || 0) : (Number(r.amountPaid) || 0);
+  if (realized <= 0) return;
+  const splits = r.paymentSplits;
+  if (splits && splits.length > 1) { mix.split += realized; return; }
+  if (splits && splits.length === 1) { mix[bucketTender(splits[0].method)] += realized; return; }
+  mix[bucketTender(r.paymentMode)] += realized;
+}
+
 // Returns a Date set to 3:00 IST on the day AFTER the given YYYY-MM-DD
 // operational night. Used as the cover/wallet expiry timestamp — ALL wallet
 // QRs (covers + prepaid table bookings) stay valid until 3:00 AM the next

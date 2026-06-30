@@ -150,10 +150,21 @@ export interface HodOrderItem {
 
 /** HOD wallet tax — matches printed restaurant bills.
  *  SC 10% on ALL items (food + alcohol + non-alc).
- *  GST 5% (split CGST 2.5% / SGST 2.5%) on (food + non-alcoholic + entire SC).
- *  Alcohol is exempt from GST. */
+ *  GST 5% (split CGST 2.5% / SGST 2.5%) on (food + non-alcoholic + the SC that
+ *  sits on those taxable items). Alcohol — and the service charge on it — is
+ *  exempt from GST, so a pure-alcohol bill attracts ZERO GST. */
 export const HOD_GST_RATE = 0.05;
 export const HOD_SC_RATE = 0.10;
+/** 🆕 2026-06-30 (Khushi) — GST-EXEMPT classifier. A line is exempt from GST when
+ *  it's ALCOHOL (the default for any non-food drink) OR TOBACCO (cigarettes/paan)
+ *  — both are non-GST supplies on HOD's bill. Everything else (food + non-alcoholic
+ *  drinks like soft drinks/water) is taxed at GST 5%. Centralises the rule so the
+ *  wallet, bar bill, printed bill and GST report all agree. */
+export function isHodItemGstExempt(it: { t?: string; alc?: boolean; n?: string }): boolean {
+  if ((it.t || "drink") === "food") return false;   // food is always taxed
+  if (it.alc !== false) return true;                 // alcohol (default for drinks) — exempt
+  return /\bcig|tobacco|\bpaan\b/i.test(String(it.n || "")); // tobacco (cigarettes/paan) — exempt
+}
 export interface HodCartBreakdown {
   foodSubtotal: number;
   alcSubtotal: number;
@@ -174,12 +185,18 @@ export function computeHodBreakdown(items: HodOrderItem[]): HodCartBreakdown {
     const line = (it.p || 0) * (it.qty || 0);
     const t = it.t || "drink";
     if (t === "food") foodSub += line;
-    else if (it.alc === false) nonAlcSub += line;
-    else alcSub += line;
+    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol OR tobacco → GST-exempt bucket
+    else nonAlcSub += line;
   }
   const subtotal = foodSub + alcSub + nonAlcSub;
   const sc = Math.round(subtotal * HOD_SC_RATE * 100) / 100;
-  const gstBase = foodSub + nonAlcSub + sc;
+  // 🆕 2026-06-30 (Khushi BUGFIX) — the service charge sitting on ALCOHOL is
+  // GST-exempt too, so apportion the SC by the taxable (food+non-alc) fraction.
+  // Pure-alcohol bill → taxable fraction 0 → ZERO GST (incl. on its SC);
+  // pure-food bill → fraction 1 → SC fully taxed (unchanged).
+  const taxableSub = foodSub + nonAlcSub;
+  const scTaxable = subtotal > 0 ? Math.round(sc * (taxableSub / subtotal) * 100) / 100 : 0;
+  const gstBase = taxableSub + scTaxable;
   const gst = Math.round(gstBase * HOD_GST_RATE * 100) / 100;
   const cgst = Math.round(gst * 50) / 100;
   const sgst = Math.round((gst - cgst) * 100) / 100;
@@ -214,8 +231,8 @@ export function computeHodBreakdownAdjusted(
     const line = (it.p || 0) * (it.qty || 0);
     const t = it.t || "drink";
     if (t === "food") foodSub += line;
-    else if (it.alc === false) nonAlcSub += line;
-    else alcSub += line;
+    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol OR tobacco → GST-exempt bucket
+    else nonAlcSub += line;
   }
   const subtotal = foodSub + alcSub + nonAlcSub;
   const pct = Math.min(100, Math.max(0, discPct || 0));
@@ -224,7 +241,11 @@ export function computeHodBreakdownAdjusted(
   const discountedSub = dFood + dAlc + dNonAlc;
   const discount = Math.round((subtotal - discountedSub) * 100) / 100;
   const sc = scOn ? Math.round(discountedSub * HOD_SC_RATE * 100) / 100 : 0;
-  const gstBase = dFood + dNonAlc + sc; // alcohol is GST-exempt
+  // 🆕 2026-06-30 (Khushi BUGFIX) — SC on alcohol is GST-exempt too → apportion
+  // the SC by the taxable (food+non-alc) fraction of the discounted subtotal.
+  const taxableSub = dFood + dNonAlc;
+  const scTaxable = discountedSub > 0 ? Math.round(sc * (taxableSub / discountedSub) * 100) / 100 : 0;
+  const gstBase = taxableSub + scTaxable; // alcohol (and the SC on it) is GST-exempt
   const gst = Math.round(gstBase * HOD_GST_RATE * 100) / 100;
   const cgst = Math.round(gst * 50) / 100;
   const sgst = Math.round((gst - cgst) * 100) / 100;
@@ -235,6 +256,37 @@ export function computeHodBreakdownAdjusted(
            drinkSubtotal: alcSub + nonAlcSub, subtotal,
            serviceCharge: sc, gst, cgst, sgst, roundOff, grandTotal,
            discount, discountPct: pct };
+}
+
+/** 🆕 2026-06-30 (Khushi) — CUMULATIVE (whole-tab) breakdown that prices EACH
+ *  round with ITS OWN service-charge + discount (stamped on the round at
+ *  activation). This makes a MIXED tab — e.g. round 1 WITH service charge,
+ *  round 2 WITHOUT — total to exactly what was charged, because Bar Mode bills
+ *  cash-and-carry (each round is independently charged + whole-rupee rounded, so
+ *  the tab total == Σ per-round grandTotal, NOT a single whole-tab recompute).
+ *
+ *  Legacy rounds that pre-date per-round stamping (no `scOn`/`discountPct`) fall
+ *  back to the cover-level `fallbackScOn`/`fallbackDiscPct`, so an all-uniform
+ *  tab is byte-identical to the old `computeHodBreakdownAdjusted(allItems,…)`
+ *  whole-tab path. Returns the same field shape (plus `total` alias === grandTotal)
+ *  so it is a drop-in for `computePrintAmounts`/`computeHodBreakdownAdjusted`. */
+export function computeCumulativeBreakdownFromRounds(
+  rounds: Array<{ items?: HodOrderItem[]; scOn?: boolean; discountPct?: number }>,
+  fallbackDiscPct: number = 0,
+  fallbackScOn: boolean = true,
+) {
+  let subtotal = 0, discount = 0, serviceCharge = 0, gst = 0, cgst = 0, sgst = 0, roundOff = 0, grandTotal = 0;
+  for (const r of rounds || []) {
+    const its = (r?.items || []).filter((it) => it && (it.qty || 0) > 0);
+    if (its.length === 0) continue;
+    const sc = r?.scOn === undefined ? fallbackScOn : r.scOn !== false;
+    const dp = r?.discountPct === undefined ? (fallbackDiscPct || 0) : (Number(r.discountPct) || 0);
+    const b = computeHodBreakdownAdjusted(its, dp, sc);
+    subtotal += b.subtotal; discount += b.discount; serviceCharge += b.serviceCharge;
+    gst += b.gst; cgst += b.cgst; sgst += b.sgst; roundOff += b.roundOff; grandTotal += b.grandTotal;
+  }
+  return { subtotal, discount, serviceCharge, gst, cgst, sgst, roundOff, grandTotal,
+           total: grandTotal, discountPct: fallbackDiscPct || 0 };
 }
 
 export interface HodTabRound {
@@ -260,6 +312,19 @@ export interface HodTabRound {
    *  item was voided never shows up blank, and staff can see what was removed.
    *  NEVER feeds bill/tax math. */
   voidedItems?: Array<{ n: string; qty: number; p: number; voidedBy?: string; voidedAt?: string }>;
+  /** 🆕 2026-06-29 (Khushi / kitchen team) — ONE free-text instruction for the
+   *  WHOLE round (e.g. "make it spicy", "no onions"). Captured once in Add Order
+   *  / Edit Round, stored here, and flows into the round → posKOTs chit (prints
+   *  ONCE per KOT) → KDS screen. Optional; absent/blank means no note. */
+  note?: string;
+  /** 🆕 2026-06-30 (Khushi) — PER-ROUND bill settings captured at the moment the
+   *  round was activated/printed, so a MIXED tab (round 1 WITH service charge,
+   *  round 2 WITHOUT) totals correctly: the full-tab bill + GST report SUM each
+   *  round with ITS OWN sc/discount instead of recomputing the whole tab with the
+   *  bartender's CURRENT toggle. Absent on legacy rounds → readers fall back to
+   *  the cover-level billScOn/billDiscountPct (byte-identical old behaviour). */
+  scOn?: boolean;
+  discountPct?: number;
 }
 
 export interface HodTransaction {
@@ -1806,12 +1871,23 @@ export async function updatePreparingRoundItems(
 }
 
 export async function activateCoverOrder(
-  coverId: string, items: HodOrderItem[], total: number, staffName: string
+  coverId: string, items: HodOrderItem[], total: number, staffName: string,
+  // 🆕 2026-06-30 (Khushi) — the bartender's per-round service-charge + discount
+  // at the moment of activation, stamped onto THIS round so a mixed tab totals
+  // correctly later (see computeCumulativeBreakdownFromRounds). Optional →
+  // legacy callers omit it; readers then fall back to cover-level settings.
+  roundMeta?: { scOn?: boolean; discountPct?: number; note?: string }
 ): Promise<{ newBalance: number; updatedRounds: HodTabRound[] }> {
   const ref = doc(db, COVERS_COL, coverId);
   const note = items.map((it) => `${it.qty}x ${it.n}`).join(", ");
   const now = new Date().toISOString();
   const tx: HodTransaction = { amount: total, note, timestamp: now, type: "activate", staff: staffName };
+  // SC defaults ON (only an explicit `false` turns it off); discount defaults 0.
+  const roundScOn = roundMeta?.scOn === false ? false : true;
+  const roundDiscPct = Number(roundMeta?.discountPct) > 0 ? Number(roundMeta?.discountPct) : 0;
+  // 🆕 2026-06-30 (Khushi) — optional per-round KITCHEN NOTE (mirrors Captain).
+  // Stamped on the round so reprints carry it; printKOT/KDS receive it directly.
+  const roundNoteClean = (roundMeta?.note || "").toString().trim().slice(0, 120);
 
   const result = await withTxnTimeout(runTransaction(db, async (txn) => {
     const freshSnap = await txn.get(ref);
@@ -1834,7 +1910,8 @@ export async function activateCoverOrder(
       updRounds = freshRounds.map((r) =>
         r.status === "preparing"
           ? { ...r, status: "activated" as const, activatedBy: staffName, activatedAt: now,
-              items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc === false ? false : (it.t === "food" ? false : true) })), roundTotal: total }
+              items: items.map((it) => ({ n: it.n, p: it.p, qty: it.qty, cat: it.cat || "", t: it.t || "drink", alc: it.alc === false ? false : (it.t === "food" ? false : true) })), roundTotal: total,
+              scOn: roundScOn, discountPct: roundDiscPct, ...(roundNoteClean ? { note: roundNoteClean } : {}) }
           : r
       );
     } else {
@@ -1852,6 +1929,8 @@ export async function activateCoverOrder(
           // Khushi's "missing Round 2 that the bartender added" bug). The substring
           // "bar" is what _isBarRoundSource matches, so this round now survives.
           source: "bartender_bar",
+          scOn: roundScOn, discountPct: roundDiscPct,
+          ...(roundNoteClean ? { note: roundNoteClean } : {}),
         },
       ];
     }
@@ -1924,6 +2003,36 @@ export function subscribeToHodReservations(
         const all: HodTableReservation[] = [];
         snap.forEach((d) => all.push({ _docId: d.id, ...d.data() } as HodTableReservation));
         all.sort((a, b) => (a.arrivalTime || "").localeCompare(b.arrivalTime || ""));
+        push(all);
+      }, () => push([]));
+    },
+    cb,
+  );
+}
+
+// 🆕 2026-06-29 (Khushi) — CORPORATE bookings are pre-booked WEEKS ahead (e.g.
+// an Accenture party). The Door tabs subscribe to a FIXED 3-night window, so a
+// corporate group dated further out never loaded → it was MISSING from the
+// Corporate tab. This date-AGNOSTIC listener loads every corporate reservation
+// (master + hold docs both carry isCorporateBooking:true) so the Corporate tab
+// can show all upcoming groups regardless of how far ahead they were booked.
+// Single-field where → NO composite index. Corporate volume is tiny so the read
+// cost is negligible. Fail-open (error → []) and shared via _shareSubscription.
+// Only mounted by the Corporate tab (sourceFilter === "corporate"); the regular
+// Tables/Aggregator tabs keep their bounded 3-night window untouched.
+export function subscribeToCorporateReservations(
+  cb: (reservations: HodTableReservation[]) => void
+): Unsubscribe {
+  return _shareSubscription<HodTableReservation[]>(
+    "res:corp:all",
+    (push) => {
+      const q = query(collection(db, TABLE_RES_COL), where("isCorporateBooking", "==", true));
+      return onSnapshot(q, (snap) => {
+        const all: HodTableReservation[] = [];
+        snap.forEach((d) => all.push({ _docId: d.id, ...d.data() } as HodTableReservation));
+        all.sort((a, b) =>
+          (a.date || "").localeCompare(b.date || "") ||
+          (a.arrivalTime || "").localeCompare(b.arrivalTime || ""));
         push(all);
       }, () => push([]));
     },
@@ -2253,6 +2362,10 @@ export async function updateRoundItems(
    *  render a struck-through VOID badge instead of a blank round. Never affects
    *  bill math (the live `items` array already excludes them). */
   voidedAppend?: Array<{ n: string; qty: number; p: number }>,
+  /** 🆕 2026-06-29 (Khushi) — ONE kitchen note for the whole round. When passed
+   *  (even blank), it REPLACES the round's stored note so the captain can edit
+   *  or clear it; pass undefined to leave the existing note untouched. */
+  roundNote?: string,
 ): Promise<void> {
   const snap = await getDoc(doc(db, TABLE_RES_COL, docId));
   if (!snap.exists()) throw new Error("Reservation not found");
@@ -2263,6 +2376,7 @@ export async function updateRoundItems(
     const prevItems = [...(rounds[roundIndex].items || [])];
     rounds[roundIndex].items = items;
     rounds[roundIndex].roundTotal = roundTotal;
+    if (roundNote !== undefined) rounds[roundIndex].note = roundNote.trim().slice(0, 120);
     const editHistory = rounds[roundIndex].editHistory || [];
     editHistory.push({ prevItems, editedBy: editedBy || "unknown", editedAt: new Date().toISOString() });
     rounds[roundIndex].editHistory = editHistory;
@@ -5093,9 +5207,13 @@ export async function createProxyTable(
 }
 
 export async function addRoundToTable(
-  docId: string, items: HodOrderItem[], staffName: string
+  docId: string, items: HodOrderItem[], staffName: string,
+  /** 🆕 2026-06-29 (Khushi) — ONE kitchen note for the whole round. Stored on
+   *  the round; prints once on the KOT. Trimmed; blank = no note. */
+  roundNote?: string
 ): Promise<void> {
   const ref = doc(db, TABLE_RES_COL, docId);
+  const note = (roundNote || "").trim().slice(0, 120);
   await runTransaction(db, async (txn) => {
     const snap = await txn.get(ref);
     if (!snap.exists()) throw new Error("Reservation not found");
@@ -5131,6 +5249,9 @@ export async function addRoundToTable(
         ...rounds[lastIdx],
         items: merged,
         roundTotal: newRoundTotal,
+        // 🆕 2026-06-29 — a fresh non-blank note on this add replaces the round's
+        // note; a blank one keeps whatever instruction was already attached.
+        ...(note ? { note } : {}),
         // Refresh placedAt so the kitchen sees the LATEST add time when KOT prints.
         placedAt: new Date().toISOString(),
         placedBy: staffName,
@@ -5142,6 +5263,7 @@ export async function addRoundToTable(
         roundNum: rounds.length + 1,
         items: normItems,
         roundTotal, status: "preparing",
+        ...(note ? { note } : {}),
         placedAt: new Date().toISOString(), placedBy: staffName,
       });
     }
@@ -5589,6 +5711,43 @@ export function subscribeToBookingsForNights(
   );
 }
 
+// 🆕 2026-06-30 (Khushi) — PAID ENTRY money collected at the door, summed from
+// the `bookings` collection. Entry passes are NOT covers/tables, so this is a
+// DISTINCT revenue line the Bar "TOTAL EARNINGS" tile was missing. MIRRORS
+// DoorMode `totalPaidEntryOnlyAmt` + venue-sales `aggregateNight` EXACTLY:
+//   • skip guestlist + anything not actually paid (online Razorpay, or
+//     cash-at-door that was checked in)
+//   • entry-ONLY booking → its full `total`
+//   • a cover walk-in that ALSO paid a door entry fee (not entry-only, not a
+//     table) → its `entryFee` slice
+// Fail-open: a malformed booking contributes 0. Keep this in lockstep with the
+// DoorMode predicates (the source of truth) if either ever changes.
+export function sumPaidEntryCollected(bookings: HodBooking[]): number {
+  const et = (b: HodBooking) => String((b as { entryType?: string }).entryType || "").toLowerCase();
+  const isGuestlist = (b: HodBooking) => et(b).startsWith("guestlist_");
+  const isOnlyEntry = (b: HodBooking) => {
+    const v = et(b);
+    return v === "entryonly" || v === "only_entry" || v === "entry_only";
+  };
+  const isTable = (b: HodBooking) => !!b._isTable || !!String((b as { tableType?: string }).tableType || "").trim();
+  const isPaid = (b: HodBooking) => {
+    const pid = String(b.paymentId || "");
+    const paidOnline = !!pid && !pid.startsWith("cash_");
+    const cashCollected = pid.startsWith("cash_") && !!b.checkedIn;
+    return paidOnline || cashCollected;
+  };
+  let sum = 0;
+  for (const b of bookings || []) {
+    if (isGuestlist(b) || !isPaid(b)) continue;
+    if (isOnlyEntry(b)) {
+      sum += Number(b.total) || 0;
+    } else if (!isTable(b)) {
+      sum += Math.max(0, Number((b as { entryFee?: number }).entryFee) || 0);
+    }
+  }
+  return sum;
+}
+
 export function subscribeToGuestlist(cb: (guests: HodGuestlistEntry[]) => void): Unsubscribe {
   return onSnapshot(collection(db, GUESTLIST_COL), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data() } as HodGuestlistEntry)));
@@ -5769,6 +5928,10 @@ export async function printKOT(data: {
    *  print server renders it as a giant TOKEN line at the top of each
    *  KOT chit — runners + bartenders pair KOT↔Bill at a glance. */
   token?: string;
+  /** 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole
+   *  round. Stored top-level on the posKOTs doc; the print-server renders it
+   *  ONCE near the top of each chit (NOT per item). Blank/absent = no note. */
+  roundNote?: string;
 }): Promise<boolean> {
   try {
     const tabletFloor = data.tabletFloor ?? getTabletFloor();
@@ -5806,6 +5969,7 @@ export async function printKOT(data: {
       prints,
       status: "pending",
       token: data.token || null,
+      roundNote: (data.roundNote || "").toString().trim().slice(0, 120) || null,
       createdAt: serverTimestamp(),
     });
     return true; // Firestore SDK queues offline writes — always succeeds locally
@@ -5905,6 +6069,16 @@ export async function printBill(data: {
      *  matches the on-screen preview. Omitted/0 → prints plain "Discount". */
     discountPct?: number;
   };
+  /** 🆕 2026-06-30 (Khushi) — PER-ROUND PAPER BILL (cash & carry). When present,
+   *  the PHYSICAL chit (print-server formatBill) renders ONLY these items +
+   *  paperAmounts (the round just served), while `items`/`amounts` above stay
+   *  CUMULATIVE (whole tab) so the GST report + Audit + reprint remain correct.
+   *  Omitted → the chit renders the cumulative items/amounts (standalone reprint). */
+  paperItems?: Array<{ n: string; p: number; qty: number; t?: "food" | "drink"; alc?: boolean }>;
+  paperAmounts?: {
+    subtotal: number; serviceCharge: number; cgst: number; sgst: number;
+    discount: number; roundOff: number; total: number; happyHourDiscount?: number; discountPct?: number;
+  };
   paymentMethod?: string;
   billNumber?: string;
   isDuplicate?: boolean;
@@ -5917,6 +6091,11 @@ export async function printBill(data: {
     const tabletFloor = data.tabletFloor ?? getTabletFloor();
     const dest = floorTag(tabletFloor, "bill");
     const itemsTagged = data.items.map((i) => ({ ...i, dest }));
+    // 🆕 2026-06-30 — per-round PAPER chit. Tag with the SAME dest so the
+    // print-server routes them identically; formatBill prefers them when present.
+    const paperItemsTagged = Array.isArray(data.paperItems)
+      ? data.paperItems.map((i) => ({ ...i, dest }))
+      : null;
     const prints = {
       [dest]: { status: "pending", claimedBy: null, printedAt: null, attempts: 0 },
     };
@@ -5929,6 +6108,10 @@ export async function printBill(data: {
       staff: data.staff,
       items: itemsTagged,
       amounts: data.amounts,
+      // CUMULATIVE items/amounts above feed the GST report + Audit; the optional
+      // per-round paperItems/paperAmounts below drive ONLY the physical chit.
+      paperItems: paperItemsTagged,
+      paperAmounts: data.paperAmounts || null,
       paymentMethod: data.paymentMethod || null,
       billNumber: data.billNumber || null,
       isDuplicate: !!data.isDuplicate,
@@ -6670,6 +6853,9 @@ export interface HodKDSItem {
   kotId: string;
   /** Round number on that table — chef uses to spot re-fires. */
   roundNum: number;
+  /** 🆕 2026-06-29 (Khushi / kitchen team) — captain's per-item instruction
+   *  ("make it spicy"). Empty string when none. Shown on the KDS card. */
+  note?: string;
   /** Status lifecycle. */
   status: HodKDSStatus;
   firedAt?: any;
@@ -6707,6 +6893,10 @@ export async function writeKDSItemsFromKOT(input: {
    *  path (every add is a deliberate, distinct kitchen task). OMIT for the normal
    *  per-round KOT so its idempotent stable id still de-dupes accidental re-fires. */
   idNonce?: string;
+  /** 🆕 2026-06-29 (Khushi / kitchen team) — ONE kitchen note for the whole
+   *  round; denormalised onto each KDS row so the kitchen screen shows it.
+   *  Blank/absent = no note. */
+  roundNote?: string;
 }): Promise<number> {
   try {
     const foodOnly = (input.items || []).filter((i) => (i.t || "").toLowerCase() === "food");
@@ -6724,6 +6914,9 @@ export async function writeKDSItemsFromKOT(input: {
           itemKey: normalizeItemKey(it.n),
           qty: it.qty || 1,
           itemType: "food",
+          // 🆕 2026-06-29 — surface the round's kitchen note on the KDS screen
+          // (same note on every food row of the round).
+          note: (input.roundNote || "").toString().trim().slice(0, 120),
           tableLabel: input.tableLabel || input.tableId || "—",
           floorLabel: input.floorLabel || "",
           customerName: input.customerName || "",

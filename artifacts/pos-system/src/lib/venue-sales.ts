@@ -35,6 +35,7 @@ import { collection, doc, getDocs, query, setDoc, where } from "firebase/firesto
 import { db } from "./firebase";
 import {
   computeHodBreakdown,
+  type HodBooking,
   type HodCover,
   type HodTableReservation,
   type HodTransaction,
@@ -47,6 +48,7 @@ export interface VenueRaw {
   history: HodTableReservation[];
   covers: HodCover[];
   nc: BillDueDoc[];
+  bookings: HodBooking[]; // door entry-pass / ticket bookings (entry-only collection)
 }
 
 /** One-shot range fetch on the operational-night field (`date` for most
@@ -69,13 +71,14 @@ export async function fetchVenueRange(
       return []; // 🛟 fail-open
     }
   };
-  const [reservations, history, covers, nc] = await Promise.all([
+  const [reservations, history, covers, nc, bookings] = await Promise.all([
     rangeDocs<HodTableReservation>("tableReservations", "date"),
     rangeDocs<HodTableReservation>("tableHistory", "date"),
     rangeDocs<HodCover>("covers", "date"),
     rangeDocs<BillDueDoc>("billDue", "operationalNight"),
+    rangeDocs<HodBooking>("bookings", "date"),
   ]);
-  return { reservations, history, covers, nc };
+  return { reservations, history, covers, nc, bookings };
 }
 
 // ── aggregated shape ──────────────────────────────────────────────────────
@@ -115,6 +118,9 @@ export interface VenueSales {
   orders: number;
   guests: number;
 
+  // ── door entry-pass collection (mirrors DoorMode "ENTRY COLLECTED") ──
+  entryCollected: number;     // entry-only bookings paid + entry fees on cover walk-ins
+
   // ── wallet economics (all covers) ──
   coverChargesAtDoor: number; // initial entry load = coverActivated − topUpTotal
   recharges: number;          // subsequent top-ups = topUpTotal
@@ -140,6 +146,7 @@ const zeroSales = (night: string): VenueSales => ({
   discount: 0, inhouseDiscount: 0, aggregatorDiscount: 0,
   foodSales: 0, drinkSales: 0,
   orders: 0, guests: 0,
+  entryCollected: 0,
   coverChargesAtDoor: 0, recharges: 0, redeemed: 0, notRedeemed: 0,
   ncComp: 0, ncDiscount: 0, ncWaived: 0, ncDue: 0,
   pay: zeroPay(),
@@ -179,9 +186,37 @@ export function aggregateNight(
   hist: HodTableReservation[],
   covers: HodCover[],
   ncRows: BillDueDoc[],
+  bookings: HodBooking[],
   foodNames?: Set<string>,
 ): VenueSales {
   const out = zeroSales(night);
+
+  // ── DOOR ENTRY-PASS COLLECTION (entry-only) ──────────────────────────────
+  //  Mirrors the DoorMode dashboard "TOTAL ENTRY-ONLY → ENTRY COLLECTED" tile.
+  //  Entry passes live in the `bookings` collection (entryType "entryonly"),
+  //  NOT as covers/tables — so this is a DISTINCT revenue line from the wallet
+  //  Cover-Charges-at-Door figure. Only money that ACTUALLY moved counts:
+  //  online Razorpay (paymentId not "cash_") OR cash-at-door (cash_ + checkedIn).
+  const bIsGuestlist = (b: HodBooking) => String((b as { entryType?: string }).entryType || "").startsWith("guestlist_");
+  const bIsOnlyEntry = (b: HodBooking) => {
+    const et = String((b as { entryType?: string }).entryType || "").toLowerCase();
+    return et === "entryonly" || et === "only_entry" || et === "entry_only";
+  };
+  const bIsTable = (b: HodBooking) => !!b._isTable || !!String((b as { tableType?: string }).tableType || "").trim();
+  const bPaid = (b: HodBooking) => {
+    const pid = String(b.paymentId || "");
+    const paidOnline = !!pid && !pid.startsWith("cash_");
+    const cashCollected = pid.startsWith("cash_") && !!b.checkedIn;
+    return paidOnline || cashCollected;
+  };
+  for (const b of bookings) {
+    if (bIsGuestlist(b) || !bPaid(b)) continue;
+    if (bIsOnlyEntry(b)) {
+      out.entryCollected += num(b.total);                 // full entry-pass amount
+    } else if (!bIsTable(b)) {
+      out.entryCollected += Math.max(0, num((b as { entryFee?: number }).entryFee)); // cover walk-in's door entry fee
+    }
+  }
 
   // ── TABLES (live ∪ released, deduped) — mirrors LiveReports.processRes ──
   const seen = new Set<string>();
@@ -441,6 +476,7 @@ function sumSales(nights: VenueSales[]): VenueSales {
     t.discount += n.discount; t.inhouseDiscount += n.inhouseDiscount; t.aggregatorDiscount += n.aggregatorDiscount;
     t.foodSales += n.foodSales; t.drinkSales += n.drinkSales;
     t.orders += n.orders; t.guests += n.guests;
+    t.entryCollected += n.entryCollected;
     t.coverChargesAtDoor += n.coverChargesAtDoor; t.recharges += n.recharges;
     t.redeemed += n.redeemed; t.notRedeemed += n.notRedeemed;
     t.ncComp += n.ncComp; t.ncDiscount += n.ncDiscount; t.ncWaived += n.ncWaived; t.ncDue += n.ncDue;
@@ -463,6 +499,7 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
   for (const r of raw.history) if (r.date) nights.add(r.date);
   for (const c of raw.covers) if (c.date) nights.add(c.date);
   for (const n of raw.nc) if (n.operationalNight) nights.add(n.operationalNight);
+  for (const b of raw.bookings) { const d = (b.date || "").slice(0, 10); if (d) nights.add(d); }
 
   const byNight = (arr: HodTableReservation[], n: string) => arr.filter((d) => d.date === n);
   const perNight = Array.from(nights).sort().map((n) =>
@@ -472,6 +509,7 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
       byNight(raw.history, n),
       raw.covers.filter((c) => c.date === n),
       raw.nc.filter((d) => d.operationalNight === n),
+      raw.bookings.filter((b) => (b.date || "").slice(0, 10) === n),
       foodNames,
     ),
   );
@@ -499,7 +537,7 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
 //  Bump SUMMARY_SCHEMA whenever the aggregation MATH changes so stale cached
 //  summaries are ignored and recomputed (old docs with a lower _schema = miss).
 // ─────────────────────────────────────────────────────────────────────────
-export const SUMMARY_SCHEMA = 2;
+export const SUMMARY_SCHEMA = 3;
 const SUMMARY_COL = "daily_summaries";
 
 /** Inclusive list of YYYY-MM-DD nights from `start` to `end` (calendar days). */
@@ -535,6 +573,7 @@ function summaryFromDoc(night: string, data: Record<string, unknown>): VenueSale
     discount: n("discount"), inhouseDiscount: n("inhouseDiscount"), aggregatorDiscount: n("aggregatorDiscount"),
     foodSales: n("foodSales"), drinkSales: n("drinkSales"),
     orders: n("orders"), guests: n("guests"),
+    entryCollected: n("entryCollected"),
     coverChargesAtDoor: n("coverChargesAtDoor"), recharges: n("recharges"),
     redeemed: n("redeemed"), notRedeemed: n("notRedeemed"),
     ncComp: n("ncComp"), ncDiscount: n("ncDiscount"), ncWaived: n("ncWaived"), ncDue: n("ncDue"),
@@ -654,6 +693,7 @@ export async function getVenueSalesCached(
 function isEmptyNight(s: VenueSales): boolean {
   return s.netSales === 0 && s.grossSales === 0 && s.serviceCharge === 0 && s.tax === 0 &&
     s.discount === 0 && s.orders === 0 && s.guests === 0 && s.recharges === 0 &&
+    s.entryCollected === 0 &&
     s.redeemed === 0 && s.notRedeemed === 0 && s.coverChargesAtDoor === 0 &&
     s.ncComp === 0 && s.ncDiscount === 0 && s.ncWaived === 0 && s.ncDue === 0;
 }

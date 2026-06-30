@@ -61,6 +61,7 @@ function defaultCategoriesFor(tabId: VenueMenuTabId): VenueMenuCategory[] {
     // Placeholder smoke menu — venue uploads real list later (see task #fill-smoke-tab).
     return [{ cat: "Cigarettes", items: [
       { n: "Cigarette 10 pc", p: 460, t: "drink", alc: false },
+      { n: "Cigarette 20 pc", p: 920, t: "drink", alc: false },
     ]}];
   }
   const byCat = new Map<string, VenueMenuItem[]>();

@@ -101,6 +101,7 @@ interface GroupedCard {
     qty: number;
     mins: number;
     roundNum: number;
+    note: string;
   }>;
   allIds: string[];
 }
@@ -151,6 +152,7 @@ export default function KitchenMode() {
         qty: it.qty || 1,
         mins,
         roundNum: it.roundNum || 1,
+        note: it.note || "",
       });
     }
     // Sort cards by oldest first (FIFO fairness)
@@ -328,6 +330,18 @@ export default function KitchenMode() {
                         <div style={{ marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                           <span style={{ fontSize: 17, fontWeight: 900, color: "#000" }}>{p.customerName}</span>
                           <span style={{ fontSize: 12, fontWeight: 700, color: "#6B6B6B" }}> · ×{p.qty} · {p.mins}m</span>
+                        </div>
+                      )}
+                      {/* 🆕 2026-06-29 (Khushi / kitchen team) — captain's note for
+                          this item, loud yellow so the chef can't miss it. */}
+                      {p.note && (
+                        <div style={{
+                          marginTop: 4, padding: "4px 8px", background: "#FFE066",
+                          border: "2px solid #000", borderRadius: 6, fontSize: 14,
+                          fontWeight: 800, color: "#000", lineHeight: 1.25,
+                          boxShadow: "2px 2px 0 #000",
+                        }}>
+                          📝 {p.note}
                         </div>
                       )}
                     </div>

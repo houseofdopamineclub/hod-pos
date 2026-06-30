@@ -47,7 +47,7 @@ import {
   computeHodBreakdown,
   type HodCover, type HodTableReservation, type HodOrderItem,
 } from "@/lib/firestore-hod";
-import { getOperationalNightStr } from "@/lib/utils-pos";
+import { getOperationalNightStr, zeroTenderMix, tenderMixTotal, addReservationTender, TENDER_BUCKETS, TENDER_LABELS } from "@/lib/utils-pos";
 import { DOOR_TABLE_OPTIONS, doorFloorForTable } from "@/lib/door-tables";
 
 // ── helpers ───────────────────────────────────────────────────────────
@@ -219,6 +219,10 @@ export default function LiveReports() {
     const liveOrdered: Record<Floor3, Set<string>> = { Ground: new Set(), First: new Set(), Rooftop: new Set() };
     const walletRefs = new Set<string>();
     let walletRedeemed = 0;
+    // 🆕 2026-06-30 (Khushi) — PAYMENT METHODS COLLECTED: how tonight's settled
+    // table bills were actually paid (cash/UPI/card/split/others). Reconciles to
+    // the BILLED total (sum of realized amountPaid across paid live+history).
+    const tender = zeroTenderMix();
     // 🆕 2026-06-12 v3.267 (Khushi) — count/sum IN-HOUSE discounts applied to
     // AGGREGATOR bookings. Aggregator bills normally print full menu price, so a
     // house ₹-off on an aggregator table is unusual and means money collected is
@@ -290,6 +294,9 @@ export default function LiveReports() {
       }
       const billFinal = Math.max(0, subtotal + sc + tax - disc);
       const realized = isPaid ? (r.amountPaid || billFinal) : 0;
+      // PAYMENT METHODS COLLECTED — feed the SAME realized value BILLED uses so
+      // the tender mix reconciles even on legacy paid docs missing amountPaid.
+      addReservationTender(tender, r as any, realized);
       const value = isPaid ? realized : billFinal;          // bill value this table represents
       const arrived = !!r.actualArrivalTime || items.length > 0;
       const openBill = !isPaid && arrived;
@@ -412,7 +419,7 @@ export default function LiveReports() {
       Array.from(m.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 5);
     const topCaptain = Array.from(cap.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.amt - a.amt).slice(0, 5);
 
-    return { floor, channel, aggSettle, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt, details };
+    return { floor, channel, aggSettle, topFood: topN(foodItems), topDrink: topN(drinkItems), topCaptain, walletRedeemed, walletRedeemedCount, aggInhouseDiscCount, aggInhouseDiscAmt, tender, details };
   }, [reservations, history, covers]);
 
   const sumFloors = (pick: (a: FloorAgg) => number) => FLOORS3.reduce((s, f) => s + pick(agg.floor[f]), 0);
@@ -468,6 +475,12 @@ export default function LiveReports() {
     L.push("COVER WALLET REDEEMED (CAPTAIN MODE — excludes bar)");
     L.push(["Covers", "Amount Rs"].join(","));
     L.push([agg.walletRedeemedCount, Math.round(agg.walletRedeemed)].map(esc).join(","));
+    L.push("");
+    L.push("PAYMENT METHODS COLLECTED (settled table bills)");
+    L.push(["Method", "Amount Rs"].join(","));
+    // 🆕 2026-06-30 (Khushi) — TOP UPS row removed; folded into Others (TOTAL unchanged).
+    for (const b of TENDER_BUCKETS) if (b !== "online") L.push([TENDER_LABELS[b], Math.round(b === "other" ? agg.tender.other + agg.tender.online : agg.tender[b])].map(esc).join(","));
+    L.push(["TOTAL", Math.round(tenderMixTotal(agg.tender))].map(esc).join(","));
     L.push("");
     const topBlock = (title: string, rows: Array<{ name: string; qty?: number; amt: number; tables?: number }>, qtyLabel: string) => {
       L.push(title);
@@ -777,6 +790,26 @@ export default function LiveReports() {
               <div style={{ fontSize: 34, fontWeight: 900, color: C.accent, fontFamily: NUM_FONT }}>{fmtRs(agg.walletRedeemed)}</div>
               <div style={{ fontSize: 13, fontWeight: 700, color: C.grey }}>across {fmtN(agg.walletRedeemedCount)} cover wallet{agg.walletRedeemedCount === 1 ? "" : "s"}</div>
             </div>
+          </Box>
+
+          {/* PAYMENT METHODS COLLECTED */}
+          <Box title="💳 PAYMENT METHODS COLLECTED" hint="How tonight's settled table bills were actually paid. Split = a bill paid via 2+ methods. Others = online / aggregator / complimentary. Total reconciles to BILLED.">
+            <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 380 }}>
+              <thead>
+                <tr><Th>Method</Th><Th right>Amount</Th></tr>
+              </thead>
+              <tbody>
+                {/* 🆕 2026-06-30 (Khushi) — TOP UPS (online wallet top-ups) row
+                    removed from this table-bills view; its amount is folded into
+                    "Others" so the TOTAL still reconciles to BILLED. */}
+                {TENDER_BUCKETS.filter((b) => b !== "online").map((b) => (
+                  <tr key={b}><Cell bold>{TENDER_LABELS[b]}</Cell><Cell num right>{fmtRs(b === "other" ? agg.tender.other + agg.tender.online : agg.tender[b])}</Cell></tr>
+                ))}
+                <tr style={{ background: TOTAL_BG }}>
+                  <Cell total>TOTAL</Cell><Cell num total right>{fmtRs(tenderMixTotal(agg.tender))}</Cell>
+                </tr>
+              </tbody>
+            </table>
           </Box>
 
           {/* TOP 5 grid */}

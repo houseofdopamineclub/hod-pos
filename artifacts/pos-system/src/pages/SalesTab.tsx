@@ -17,6 +17,12 @@ import {
   getVenueSalesCached,
   type VenueSalesResult, type VenueSales, type PaymentMix,
 } from "@/lib/venue-sales";
+// 🆕 2026-06-30 (Khushi) — the per-mode "Live Reports" buttons were removed from
+// Door / Bar / Captain. Those reports now live here as sub-tabs under Sales. Each
+// report self-subscribes ONLY while its sub-tab is mounted (cost-safe).
+import LiveReports from "./LiveReports";
+import { LiveReportsModal } from "./DoorMode";
+import { BarReportsModal } from "./BarMode";
 
 // ── Gumroad theme tokens (match LiveReports / AdminPage) ──
 const C = { ink: "#000", grey: "#6B6B6B", bg: "#F4F4F0", card: "#fff", accent: "#23A094", pink: "#FF90E8" };
@@ -87,6 +93,7 @@ export default function SalesTab() {
   const [loadedRange, setLoadedRange] = useState("");
   const [cacheNote, setCacheNote] = useState("");
   const autoLoaded = useRef(false);
+  const [subTab, setSubTab] = useState<"venue" | "door" | "bar" | "captain">("venue");
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -210,6 +217,33 @@ export default function SalesTab() {
 
   return (
     <div style={{ fontFamily: "Inter, sans-serif", color: C.ink }}>
+      {/* 🆕 2026-06-30 (Khushi) — REPORT SUB-TABS. Venue Sales (existing) + the
+          three per-mode reports (Door / Bar / Captain) consolidated here. Only the
+          active sub-tab mounts, so its Firestore subscriptions run on demand. */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+        {([["venue", "💰 VENUE SALES"], ["door", "🚪 DOOR REPORTS"], ["bar", "🍸 BAR REPORTS"], ["captain", "🪩 CAPTAIN REPORTS"]] as const).map(([k, lbl]) => (
+          <button key={k} onClick={() => setSubTab(k)}
+            style={{
+              padding: "14px 24px", borderRadius: 12, border: `2px solid ${C.ink}`, cursor: "pointer",
+              background: subTab === k ? C.pink : "#fff", color: C.ink, fontSize: 15.5, fontWeight: 900, letterSpacing: 0.6,
+              textTransform: "uppercase", boxShadow: subTab === k ? SHADOW_SM : "none", fontFamily: NUM_FONT,
+            }}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {subTab === "door" && (
+        <LiveReportsModal embedded agentName="Boss" tableResByDate={{}} selectedEventId="all" eventChips={[]} onClose={() => {}} />
+      )}
+      {subTab === "bar" && (
+        <BarReportsModal embedded onClose={() => {}} />
+      )}
+      {subTab === "captain" && (
+        <LiveReports />
+      )}
+
+      {subTab === "venue" && (<>
       <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: -0.4, marginBottom: 4 }}>💰 Sales — Whole Venue</div>
       <div style={{ fontSize: 12, fontWeight: 700, color: C.grey, marginBottom: 16 }}>
         Bar + tables + NC, all floors combined. Opens on tonight's live numbers — pick a range + LOAD for other days.
@@ -260,7 +294,23 @@ export default function SalesTab() {
             <Tile label="Cover Charges at Door" value={inr(t.coverChargesAtDoor)} />
             <Tile label="Recharges Made" value={inr(t.recharges)} />
             <Tile label="Redeemed" value={inr(t.redeemed)} />
-            <Tile label="Not Redeemed" value={inr(t.notRedeemed)} accent="#B45309" sub="loaded but unspent" />
+            {/* 🆕 2026-06-29 (Khushi) — Not Redeemed card now carries a 2nd
+                section, PAID ENTRY = the door dashboard "ENTRY COLLECTED" value
+                (entry-only passes paid + entry fees on cover walk-ins), so the
+                owner reads "loaded but unspent" and "collected at door" together.
+                NOTE: this is entryCollected (door entry-pass money), NOT the
+                wallet Cover-Charges-at-Door tile above — they're distinct lines.
+                ZERO new reads beyond the one bookings range fetch. */}
+            <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, boxShadow: SHADOW_SM, minWidth: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: C.grey }}>Not Redeemed</div>
+              <div style={{ fontSize: 26, fontWeight: 900, fontFamily: NUM_FONT, color: "#B45309", marginTop: 6, lineHeight: 1.1, wordBreak: "break-word" }}>{inr(t.notRedeemed)}</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.grey, marginTop: 3 }}>loaded but unspent</div>
+              <div style={{ borderTop: `1px dashed ${C.grey}`, marginTop: 12, paddingTop: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: C.grey }}>Paid Entry</div>
+                <div style={{ fontSize: 26, fontWeight: 900, fontFamily: NUM_FONT, color: C.ink, marginTop: 6, lineHeight: 1.1, wordBreak: "break-word" }}>{inr(t.entryCollected)}</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.grey, marginTop: 3 }}>entry passes collected at door</div>
+              </div>
+            </div>
             <Tile label="Service Charge" value={inr(t.serviceCharge)} />
             <Tile label="Total Discount Given" value={inr(t.discount)} accent="#B45309" sub={`In-house ${inr(t.inhouseDiscount)} · Agg ${inr(t.aggregatorDiscount)}`} />
             <Tile label="NC Comp Given" value={inr(t.ncComp + t.ncDiscount + t.ncWaived)} accent="#B45309" sub={`Comp ${inr(t.ncComp)} · Waived ${inr(t.ncWaived)} · Disc ${inr(t.ncDiscount)}`} />
@@ -355,6 +405,7 @@ export default function SalesTab() {
           </button>
         </>
       ) : null}
+      </>)}
     </div>
   );
 }

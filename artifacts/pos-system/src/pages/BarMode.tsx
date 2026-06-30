@@ -7,8 +7,8 @@ import {
   sha256, searchCovers, searchBookingsAndGuestlist, subscribeToCover, rechargeCover, activateCoverOrder,
   logBarSession, printKOT, printBill, recordWalletBillPrint, runBillBookkeepingBg, voidWalletBill, printBillVoid, printKOTVoid,
   recordPendingPaymentScreenshot,
-  getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, setCoverBillDiscount, updatePreparingRoundItems, createBarWalkinCover,
-  coverDocIdFor, subscribeToCoversForNight, getTabletFloor, setTabletFloor,
+  getCoverByRef, computeHodBreakdown, computeHodBreakdownAdjusted, computeCumulativeBreakdownFromRounds, setCoverBillDiscount, updatePreparingRoundItems, createBarWalkinCover,
+  coverDocIdFor, subscribeToCoversForNight, subscribeToBookingsForNights, sumPaidEntryCollected, type HodBooking, getTabletFloor, setTabletFloor,
   // 2026-05-21 — KDS (Kitchen Display) — write food items to chef screen on KOT fire,
   // listen for ready-bumps so bartender can run-the-pass when food is up.
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
@@ -19,7 +19,7 @@ import {
 } from "@/lib/firestore-hod";
 import { db } from "@/lib/firebase";
 import { doc as fsDoc, getDoc as fsGetDoc, collection as fsCollection, query as fsQuery, where as fsWhere, limit as fsLimit, getDocs as fsGetDocs } from "firebase/firestore";
-import { getOperationalNightStr } from "@/lib/utils-pos";
+import { getOperationalNightStr, zeroTenderMix, tenderMixTotal, addCoverTender, bucketTender, TENDER_BUCKETS, TENDER_LABELS } from "@/lib/utils-pos";
 import { centeredPinPrompt, centeredAlert, closeOnBackdrop, centeredBusy } from "@/lib/centered-ui";
 import { getManagerDiscountOtp, clearManagerDiscountOtp, verifyManagerDiscountOtp, type OtpContext } from "@/lib/manager-otp";
 import {
@@ -441,6 +441,11 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
   // the native browser <select> in the recharge modal's DISCOUNT picker).
   const [discDdOpen, setDiscDdOpen] = useState(false);
   const [scOn, setScOn] = useState(true);
+  // 🆕 2026-06-30 (Khushi) — ONE kitchen note for the whole round (mirrors
+  // Captain Mode). Threads into activateCoverOrder + printKOT + writeKDSItemsFromKOT
+  // so it prints on the bar KOT chit AND shows on the kitchen screen. Cleared
+  // when the success screen is dismissed (same as the cart).
+  const [roundNote, setRoundNote] = useState("");
   // 🆕 2026-06-24 (Khushi) — DISCOUNT must ALWAYS reset to 0% (and SC back ON)
   // on EVERY scan/open of a customer wallet — even re-scanning the SAME customer
   // who was given e.g. 5% on a previous scan. The overlay already remounts
@@ -451,6 +456,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
   useEffect(() => {
     setBarDiscPct(0);
     setScOn(true);
+    setRoundNote("");
   }, [cover?.id, openNonce]);
   // Per-session token for KOT↔Bill pairing. Fresh per print. Displayed in
   // the success overlay so bartender can call it out to the runner / cashier.
@@ -472,17 +478,14 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
   const [discOpen, setDiscOpen] = useState(false);
   const requestDiscount = useCallback(() => { setDiscOpen(true); }, []);
 
-  // v3.114 (Khushi) — SC defaults ON. ON→OFF needs Manager PIN (revenue
-  // protection). OFF→ON is free (re-enabling the default). Uses in-app
-  // centeredPinPrompt + centeredAlert — NO browser popups.
+  // 🆕 2026-06-30 (Khushi) — PER-ROUND Service Charge toggle, NO PIN. SC defaults
+  // ON each round; the bartender flips it OFF/ON freely as a deliberate action
+  // (it is stamped onto the round via roundMeta so a mixed-SC tab totals
+  // correctly). The old Manager-PIN gate was removed per Khushi — turning SC off
+  // for one round is a normal floor decision, not a manager override.
   const requestScToggle = useCallback(async () => {
-    if (!scOn) { setScOn(true); showToast("✅ Service Charge ON"); return; }
-    const pin = await centeredPinPrompt("Turning Service Charge OFF needs Manager PIN.", true);
-    if (!pin) return;
-    const h = await sha256(pin);
-    if (h !== BAR_MANAGER_HASH) { await centeredAlert("WRONG PIN", "Service Charge stays ON.", "error", true); return; }
-    setScOn(false);
-    showToast("⚠ Service Charge OFF (manager-approved)");
+    if (scOn) { setScOn(false); showToast("⚠ Service Charge OFF for this round"); }
+    else { setScOn(true); showToast("✅ Service Charge ON"); }
   }, [scOn]);
 
   /** Single source of truth for the printed-bill math. Honors barDiscPct +
@@ -600,7 +603,9 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
   );
   const preOrderItems: HodOrderItem[] = (_preparing?.items as HodOrderItem[] | undefined) || cv.pendingOrder?.items || [];
   // Tax-inclusive totals so customer-app cart total === bartender screen === wallet debit.
-  const preOrderTotal = computeHodBreakdown(preOrderItems).grandTotal;
+  // 🆕 2026-06-30 (Khushi) — pre-order total honors the per-round SC toggle +
+  // bar discount so the customer-pre-order card matches what actually gets billed.
+  const preOrderTotal = computeHodBreakdownAdjusted(preOrderItems, barDiscPct, scOn).grandTotal;
 
   const cartItemsForTax: HodOrderItem[] = Object.values(cart).map((c) => ({ n: c.n, p: c.p, qty: c.qty, cat: c.cat, t: c.t, alc: c.alc }));
   const cartBreakdown = computeHodBreakdownAdjusted(cartItemsForTax, barDiscPct, scOn);
@@ -1059,8 +1064,11 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
     if (id.startsWith("C")) floor = "ground";
     else if (id.startsWith("T")) floor = "rooftop";
     else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
-    // 🆕 2026-05-26 (Khushi batch) — honor bartender discount % + SC toggle.
-    const amts = computePrintAmounts(allItems);
+    // 🆕 2026-06-30 (Khushi) — standalone PRINT BILL reprint = CUMULATIVE whole
+    // tab (per-round scOn/discountPct honored so a mixed-SC tab totals right).
+    // No paperItems → the chit renders the full tab (not a per-round bill).
+    const billableRounds = (cv.tabRounds || []).filter((rd) => rd && (rd.status === "activated" || rd.status === "served"));
+    const amts = computeCumulativeBreakdownFromRounds(billableRounds as any, barDiscPct, scOn);
     const finalAmount = amts.total;
     const tokenForPrint = getNextToken();
     setLastToken(tokenForPrint);
@@ -1197,7 +1205,9 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
     let activated = false;
     setActBusy(true);
     try {
-      const result = await activateCoverOrder(cover.id, allItems, total, staffArg);
+      // 🆕 2026-06-30 — stamp the bartender's per-round SC toggle + discount onto
+      // the round so a mixed-SC tab (some rounds SC-on, some off) totals correctly.
+      const result = await activateCoverOrder(cover.id, allItems, total, staffArg, { scOn, discountPct: barDiscPct, note: roundNote.trim() });
       sessionStorage.setItem(cooldownKey, new Date().toISOString());
       setCart({});
       // V3 2026-05-11 BUGFIX — sync local cv state IMMEDIATELY after activate
@@ -1229,7 +1239,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         customerPhone: (cv as any).phone || (cv as any).customerPhone || "",
         roundNum: (cv.transactions || []).filter((t) => t.type === "activate").length + 1,
         items: allItems, roundTotal: total,
-        token: tokenForActivate,
+        token: tokenForActivate, roundNote: roundNote.trim(),
       }).catch(() => {});
 
       // 🍳 KDS — mirror food items to kitchen screen for bar walk-in orders.
@@ -1246,7 +1256,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           bookingRef: cv.ref || "",
           staff: staffName,
           roundNum: (cv.transactions || []).filter((t) => t.type === "activate").length + 1,
-          items: allItems,
+          items: allItems, roundNote: roundNote.trim(),
         } as any).catch((e) => console.warn("[KDS] bar write failed", e));
       }
 
@@ -1260,9 +1270,13 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
         try {
           const updated = (result.updatedRounds || []).filter((r: any) => r && (r.status === "activated" || r.status === "served"));
           const billItems = updated.flatMap((r: any) => r.items || []);
-          // 🆕 2026-05-26 — honor discount + SC toggle on the printed bill.
-          const amtsB = computePrintAmounts(billItems as HodOrderItem[]);
+          // 🆕 2026-06-30 (Khushi) — CASH & CARRY. The RECORD (walletBillPrintLog)
+          // + the posKOTs bill doc the GST report reads stay CUMULATIVE (whole tab,
+          // per-round scOn/discountPct honored) so reports + reprint never break;
+          // the PHYSICAL chit (paperAmts) shows ONLY the round we just served.
+          const amtsB = computeCumulativeBreakdownFromRounds(updated as any, barDiscPct, scOn);
           const finalB = amtsB.total;
+          const paperAmts = computePrintAmounts(allItems);
           const idB = (cv.tableId || "").toUpperCase();
           let floorB: TabletFloor | null = null;
           if (idB.startsWith("C")) floorB = "ground";
@@ -1307,13 +1321,17 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             staff: staffName,
             items: billItems.map((i: any) => ({ n: i.n, p: i.p, qty: i.qty, t: i.t, alc: i.alc })),
             amounts: { subtotal: amtsB.subtotal, serviceCharge: amtsB.serviceCharge, cgst: amtsB.cgst, sgst: amtsB.sgst, discount: amtsB.discount, roundOff: amtsB.roundOff, total: finalB, discountPct: barDiscPct },
+            // 🆕 2026-06-30 — PHYSICAL chit = only the round just served (cash & carry).
+            paperItems: allItems.map((i) => ({ n: i.n, p: i.p, qty: i.qty, t: i.t, alc: i.alc })),
+            paperAmounts: { subtotal: paperAmts.subtotal, serviceCharge: paperAmts.serviceCharge, cgst: paperAmts.cgst, sgst: paperAmts.sgst, discount: paperAmts.discount, roundOff: paperAmts.roundOff, total: paperAmts.total, discountPct: barDiscPct },
             billNumber: printNumberB,
             isDuplicate: false,
             tabletFloor: floorB,
             token: tokenForActivate,
           });
           if (okB) {
-            setBillDone({ billNumber: printNumberB, total: finalB, itemCount: billItems.length, isDuplicate: false, withKot: true });
+            // Success overlay reflects the PRINTED chit (this round), not the cumulative tab.
+            setBillDone({ billNumber: printNumberB, total: paperAmts.total, itemCount: allItems.length, isDuplicate: false, withKot: true });
           } else {
             showToast("✅ KOT printed but ❌ bill print failed — try PRINT BILL");
             setActDone(true);
@@ -1335,7 +1353,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             // V4 BUGFIX 2026-05-11 — preserve the PENDING-TICK / SCREENSHOT
             // suffix in this retry path too (was a real audit hole — cooldown
             // retries during fail-open used to drop the marker).
-            const result = await activateCoverOrder(cover.id, allItems, total, staffArg);
+            const result = await activateCoverOrder(cover.id, allItems, total, staffArg, { scOn, discountPct: barDiscPct, note: roundNote.trim() });
             sessionStorage.setItem(cooldownKey, new Date().toISOString());
             setCart({});
             // Same local-state sync as the primary path above (fixes ₹0 / Guest flash).
@@ -1402,7 +1420,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           {/* 🆕 v3.189 (Khushi) — was color:goldFg on background:goldBg (same
               teal → INVISIBLE "✓ DONE" label). Now WHITE text on the solid
               green/red surface + black border (Gumroad, high-contrast). */}
-          <button onClick={() => { setBillDone(null); setActDone(false); setCart({}); }}
+          <button onClick={() => { setBillDone(null); setActDone(false); setCart({}); setRoundNote(""); }}
             style={{ width: "100%", padding: 14, borderRadius: 12, background: goldBg, border: "2px solid #000", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
             ✓ DONE
           </button>
@@ -1431,7 +1449,7 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           </div>
           {/* v3.114 — stay on wallet view after KOT print; bartender closes
               manually via the × on the wallet header. */}
-          <button onClick={() => { setActDone(false); setActResult(null); setCart({}); }}
+          <button onClick={() => { setActDone(false); setActResult(null); setCart({}); setRoundNote(""); }}
             style={{ width: "100%", padding: 14, borderRadius: 12, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", marginBottom: 10 }}>
             ✓ DONE
           </button>
@@ -1673,7 +1691,8 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
             {(() => {
               const allItems = rounds.flatMap(r => r.items || []);
               if (allItems.length === 0) return null;
-              const b = computeHodBreakdownAdjusted(allItems, barDiscPct, scOn);
+              // 🆕 2026-06-30 — cumulative tab total honoring each round's own SC/discount.
+              const b = computeCumulativeBreakdownFromRounds(rounds as any, barDiscPct, scOn);
               return (
                 <details style={{ borderTop: "2px solid #000", paddingTop: 8, marginTop: 6 }}>
                   <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", listStyle: "none", cursor: "pointer", padding: "2px 0" }}>
@@ -1787,6 +1806,15 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
                     <span>{Object.values(cart).reduce((s, i) => s + i.qty, 0)} item(s)</span>
                     <span>Total ₹{Math.round(cartBreakdown.grandTotal).toLocaleString("en-IN")}</span>
                   </div>
+                  {/* 🆕 2026-06-30 (Khushi) — PER-ROUND Service Charge toggle, NO PIN.
+                      Lives in the taxes dropdown so the bartender can flip SC for THIS
+                      round before PRINT KOT+BILL (cash & carry). Flipping it instantly
+                      re-totals the breakdown above (scOn drives cartBreakdown). */}
+                  <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); requestScToggle(); }}
+                    style={{ width: "100%", marginTop: 8, padding: "9px 12px", borderRadius: 10, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: .4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>🧾 SERVICE CHARGE (10%)</span>
+                    <span style={{ background: scOn ? "#23A094" : "#fff", color: scOn ? "#fff" : "#000", border: "2px solid #000", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 900 }}>{scOn ? "ON" : "OFF"}</span>
+                  </button>
                 </div>
               </details>
             </div>
@@ -1844,9 +1872,30 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 900, color: "#000", marginTop: 10, letterSpacing: 0.3, textTransform: "uppercase" }}>
             <span>ORDER TOTAL (INCL. TAX)</span><span>₹{preOrderTotal.toLocaleString("en-IN")}</span>
           </div>
+          {/* 🆕 2026-06-30 (Khushi) — PER-ROUND Service Charge toggle, NO PIN, on the
+              customer-pre-order card too — flip SC for THIS round before PRINT KOT+BILL.
+              Re-totals ORDER TOTAL above instantly (scOn drives preOrderTotal). */}
+          <button type="button" onClick={requestScToggle}
+            style={{ width: "100%", marginTop: 10, padding: "9px 12px", borderRadius: 10, background: "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 12, fontWeight: 900, cursor: "pointer", letterSpacing: .4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>🧾 SERVICE CHARGE (10%)</span>
+            <span style={{ background: scOn ? "#23A094" : "#fff", color: scOn ? "#fff" : "#000", border: "2px solid #000", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 900 }}>{scOn ? "ON" : "OFF"}</span>
+          </button>
         </div>
       )}
 
+      {/* 🆕 2026-06-30 (Khushi) — KITCHEN NOTE for this round, mirrors Captain
+          Mode. Visible whenever there are items to send (staff cart OR customer
+          pre-order); threads into the KOT chit + kitchen screen via doActivate. */}
+      {hasItems && (
+        <textarea
+          value={roundNote}
+          onChange={(e) => setRoundNote(e.target.value)}
+          placeholder="📝 Kitchen note for this round (e.g. make it spicy)"
+          maxLength={120}
+          rows={2}
+          style={{ width: "100%", padding: "8px 10px", borderRadius: 10, border: "2px solid #000", fontSize: 13, fontWeight: 600, color: "#000", background: "#fff", resize: "none", marginTop: 10, boxSizing: "border-box", fontFamily: "inherit" }}
+        />
+      )}
       {/* 🆕 2026-05-26 v3.29 (Khushi screenshot: "MOVE THIS UP IN THE CENTER /
           LIKE HOW WE HAVE BOX IN THE CAPATIN MODE") — Captain-style ACTION
           BOX. Sits right under the rounds list, ALWAYS visible (flexShrink:0,
@@ -2454,12 +2503,13 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
               </div>
               )}
 
-              {/* SERVICE TAX toggle — default ON. OFF needs Manager PIN. */}
+              {/* SERVICE TAX toggle — default ON. 🆕 2026-06-30: NO PIN — per-round
+                  bartender decision (mirrors the add-order + pre-order toggles). */}
               <button onClick={requestScToggle}
                 style={{ width: "100%", padding: "12px 14px", marginBottom: 14, borderRadius: 12, background: scOn ? "#FF90E8" : "#FF90E8", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .5, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>🧾 SERVICE TAX (10%)</span>
                 <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 13, fontWeight: 900, opacity: .95 }}>{scOn ? "ON" : "OFF (MGR)"}</span>
+                  <span style={{ fontSize: 13, fontWeight: 900, opacity: .95 }}>{scOn ? "ON" : "OFF"}</span>
                   {/* 🆕 v3.191 (Khushi) — track was pink-on-pink (same as the
                       button) → invisible. Now a contrasting GREEN (ON) / WHITE
                       (OFF) pill with a 2px black border so the state is clear. */}
@@ -2975,7 +3025,7 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   const [noWalletQr, setNoWalletQr] = useState<string | null>(null);
   const [billDueOpen, setBillDueOpen] = useState(false);
   // 🆕 2026-06-05 v3.224 (Khushi) — LIVE REPORTS for Bar/Cashier mode.
-  const [reportsOpen, setReportsOpen] = useState(false);
+  // LIVE REPORTS moved to Boss Mode → Sales → Bar Reports (2026-06-30).
   const [billDueRows, setBillDueRows] = useState<BillDueDoc[]>([]);
   useEffect(() => subscribeBillDue(setBillDueRows), []);
   const openBillDueCount = billDueRows.filter((r) => r.status === "open").length;
@@ -3278,15 +3328,8 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
             </button>
           )}
           <span style={{ fontSize: 11, color: "#6B6B6B" }}>👤 {staffName}</span>
-          {/* 🆕 2026-06-05 v3.225 (Khushi) — LIVE REPORTS button moved to the TOP
-              header, sits LEFT of LOGOUT, EXACTLY like Door Mode. (The old big
-              blue button below the NC/BILL-DUE row is removed.) */}
-          <button onClick={() => setReportsOpen(true)}
-            title="Live Reports — whole-night bar / cashier numbers"
-            style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 900, cursor: "pointer", letterSpacing: .3, display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#000", display: "inline-block" }} />
-            LIVE REPORTS
-          </button>
+          {/* 🆕 2026-06-30 (Khushi) — LIVE REPORTS button REMOVED from Bar Mode;
+              the bar report now lives in Boss Mode → Sales → 🍸 Bar Reports. */}
           <button onClick={onLogout}
             style={{ padding: "6px 10px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
             Logout
@@ -3772,7 +3815,6 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
         </div>
       )}
       {billDueOpen && <BillDueModal rows={billDueRows} staffName={staffName} onClose={() => setBillDueOpen(false)} />}
-      {reportsOpen && <BarReportsModal onClose={() => setReportsOpen(false)} />}
     </div>
   );
 }
@@ -3801,10 +3843,11 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
 //         + NC comp. v3.225: switched off "base + SC + tax" so GROSS no
 //         longer collapses onto NET when SC/tax weren't persisted on old bills.
 // ─────────────────────────────────────────────────────────────────────
-function BarReportsModal({ onClose }: { onClose: () => void }) {
+export function BarReportsModal({ onClose, embedded }: { onClose: () => void; embedded?: boolean }) {
   const MENU_ITEMS = useEffectiveMenu();
   const [nightDate, setNightDate] = useState<string>(() => getOperationalNightStr());
   const [covers, setCovers] = useState<HodCover[]>([]);
+  const [bookings, setBookings] = useState<HodBooking[]>([]);
   const [ncRows, setNcRows] = useState<BillDueDoc[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -3815,6 +3858,18 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
     try {
       unsub = subscribeToCoversForNight(nightDate, (cs) => { setCovers(cs || []); setLoading(false); });
     } catch { setCovers([]); setLoading(false); } // 🛟 fail-open
+    return () => { try { unsub && unsub(); } catch {} };
+  }, [nightDate]);
+
+  // 🆕 2026-06-30 (Khushi) — door PAID ENTRY money lives in `bookings` (NOT
+  // covers/tables), so the bar report subscribes to tonight's bookings ONLY
+  // while this modal is open (30s-poll shared listener → cheap, gated). Used
+  // for the TOTAL EARNINGS "+ PAID ENTRY" line below. Fail-open to [].
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    try {
+      unsub = subscribeToBookingsForNights([nightDate], (bs) => setBookings(bs || []));
+    } catch { setBookings([]); }
     return () => { try { unsub && unsub(); } catch {} };
   }, [nightDate]);
 
@@ -3873,6 +3928,18 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   const barTotalCollected = barInitialCollected + barRecharges;
   const barRedeemed = sumRedeemed(activated);
   const barNotRedeemed = activated.reduce((s, c) => s + Math.max(0, c.coverBalance || 0), 0);
+
+  // 🆕 2026-06-30 (Khushi) — split recharges into ONLINE customer self-top-ups
+  // (the customer recharges their own wallet from the website/QR → the webhook
+  // writes a transaction with type 'online_topup' AND bumps topUpTotal) vs
+  // STAFF-entered recharges at the bar. barRecharges (topUpTotal) ALREADY
+  // includes both, so staff = total − customer-self. Fail-open: a cover with no
+  // transactions[] array contributes 0 customer-self.
+  const barCustomerRecharges = activated.reduce((s, c) => {
+    const txns = (((c as any).transactions || []) as Array<{ type?: string; amount?: number }>);
+    return s + txns.reduce((t, tx) => t + (tx.type === "online_topup" ? (Number(tx.amount) || 0) : 0), 0);
+  }, 0);
+  const barStaffRecharges = Math.max(0, barRecharges - barCustomerRecharges);
 
   // ── SALES + TOP ITEMS from tabRounds ──────────────────────────────
   // 🆕 2026-06-05 v3.225 (Khushi) — FOOD/DRINK CLASSIFICATION FIX.
@@ -4032,6 +4099,19 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // Settled, non-waived rows only; waived collects ₹0.
   const ncCollectedRows = ncClearedRows.filter((r) => r.paymentMethod !== "waived");
   const ncCollectedCount = ncCollectedRows.length;
+  // 🆕 2026-06-30 (Khushi) — PAYMENT METHODS COLLECTED for bar/cashier: how the
+  // money the bar took in was actually paid. Initial cover loads + recharges
+  // (bucketed per-tx), PLUS NC settled-after-payment rows. Reconciles to
+  // TOTAL COLLECTED incl NC (barTotalCollected + ncCollected).
+  const barTender = (() => {
+    const mix = zeroTenderMix();
+    for (const c of activated) addCoverTender(mix, c as any);
+    for (const r of ncCollectedRows) {
+      const amt = typeof (r as any).finalAmount === "number" ? (r as any).finalAmount : ((r as any).amountDue || 0);
+      if (amt > 0) mix[bucketTender((r as any).paymentMethod)] += amt;
+    }
+    return mix;
+  })();
   const ncCollected = ncCollectedRows.reduce(
     (s, r) => s + (typeof r.finalAmount === "number" ? r.finalAmount : (r.amountDue || 0)), 0);
   // NC WAIVED (manager wrote off) = bill due (after comp) on waived rows.
@@ -4070,7 +4150,12 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   // EXCLUDES service charge & GST (those sit in GROSS) — it's "F&B revenue +
   // free money from expired wallets". barNotRedeemed is the unspent balance on
   // activated covers (walk-ins net to ~0, so it's effectively unspent recharge).
-  const barProfit = netSales + barNotRedeemed;
+  // 🆕 2026-06-30 (Khushi) — door PAID ENTRY (entry-pass money from `bookings`,
+  // mirrors DoorMode's ENTRY COLLECTED) is real cash the house keeps, so it
+  // belongs in TOTAL EARNINGS alongside F&B net + expired-wallet breakage.
+  // Distinct revenue line — NEVER folded into NET/GROSS (those are F&B only).
+  const paidEntry = sumPaidEntryCollected(bookings.filter((b) => (b.date || "").slice(0, 10) === nightDate));
+  const barProfit = netSales + barNotRedeemed + paidEntry;
 
   // ── CSV export (mirrors Door Mode) ────────────────────────────────
   const downloadCsv = () => {
@@ -4085,7 +4170,9 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Walk-ins — redeemed", Math.round(sumRedeemed(walkins))],
       ["Total collected (wallet + walk-in)", Math.round(sumCollected(activated))],
       ["Collected at bar (initial)", Math.round(barInitialCollected)],
-      ["Recharges by customers", Math.round(barRecharges)],
+      ["Recharges — staff-entered at bar", Math.round(barStaffRecharges)],
+      ["TOP UP RECHARGES BY CUSTOMER (online self top-up)", Math.round(barCustomerRecharges)],
+      ["Recharges — total", Math.round(barRecharges)],
       ["TOTAL AMOUNT COLLECTED", Math.round(barTotalCollected)],
       ["TOTAL AMOUNT REDEEMED (wallet spend)", Math.round(barRedeemed)],
       ["TOTAL NOT REDEEMED (balance in wallets)", Math.round(barNotRedeemed)],
@@ -4099,6 +4186,13 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["Bills generated — TOTAL (amount)", Math.round(barRedeemed + ncChargeGross)],
       ["NC collected after payment (settled)", Math.round(ncCollected)],
       ["TOTAL collected incl NC (cash taken)", Math.round(barTotalCollected + ncCollected)],
+      ["Payment method — Cash", Math.round(barTender.cash)],
+      ["Payment method — UPI", Math.round(barTender.upi)],
+      ["Payment method — Card", Math.round(barTender.card)],
+      ["Payment method — Split", Math.round(barTender.split)],
+      ["Payment method — TOP UPS", Math.round(barTender.online)],
+      ["Payment method — Others", Math.round(barTender.other)],
+      ["Payment method — TOTAL", Math.round(tenderMixTotal(barTender))],
       ["NC total (count)", ncCount],
       ["NC given away — total (comp + waived + discount)", Math.round(ncGivenTotal)],
       ["NC given away — waived", Math.round(ncWaived)],
@@ -4121,7 +4215,8 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
       ["— of which NC chargeable service charge", Math.round(ncChargeSC)],
       ["— of which NC chargeable taxes", Math.round(ncChargeTax)],
       ["Leftover wallet balance (expired = profit)", Math.round(barNotRedeemed)],
-      ["TOTAL EARNINGS (NET sales + leftover wallet)", Math.round(barProfit)],
+      ["PAID ENTRY collected at door (entry passes)", Math.round(paidEntry)],
+      ["TOTAL EARNINGS (NET sales + leftover wallet + paid entry)", Math.round(barProfit)],
     ];
     topDrinks.forEach(([n, q], i) => rows.push([`Top drink #${i + 1}`, `${n} x${q}`]));
     topFood.forEach(([n, q], i) => rows.push([`Top food #${i + 1}`, `${n} x${q}`]));
@@ -4191,15 +4286,21 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <div onClick={closeOnBackdrop(onClose)}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 100010, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "32px 14px", overflowY: "auto" }}>
+    <div onClick={embedded ? undefined : closeOnBackdrop(onClose)}
+      style={embedded
+        ? { fontFamily: "'Space Grotesk', sans-serif", color: "#000" }
+        : { position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", zIndex: 100010, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "32px 14px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "100%", maxWidth: 980, background: "#F4F4F0", border: "2px solid #000", borderRadius: 16, padding: 20, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "none" }}>
+        style={embedded
+          ? { width: "100%", background: "#F4F4F0", fontFamily: "'Space Grotesk', sans-serif" }
+          : { width: "100%", maxWidth: 980, background: "#F4F4F0", border: "2px solid #000", borderRadius: 16, padding: 20, fontFamily: "'Space Grotesk', sans-serif", boxShadow: "none" }}>
         {/* HEADER */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 6 }}>
           <div style={{ fontSize: 20, fontWeight: 900, color: "#000", letterSpacing: 0.4 }}>📊 BAR / CASHIER — LIVE REPORTS</div>
+          {!embedded && (
           <button onClick={onClose}
             style={{ width: 38, height: 38, borderRadius: 10, background: "#000", border: "2px solid #000", color: "#fff", fontSize: 20, fontWeight: 900, cursor: "pointer", flexShrink: 0 }}>×</button>
+          )}
         </div>
         <div style={{ fontSize: 12, color: "#6B6B6B", fontWeight: 700, marginBottom: 14 }}>
           Whole operational night · bar &amp; cashier only (table covers are in Captain Mode).
@@ -4279,18 +4380,20 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
             {/* 🆕 TOTAL EARNINGS = NET sales + leftover (expired, non-refundable) wallet balance */}
             {SHOW_BAR_PROFIT_TILE && (
             <div style={{ background: "#C8F7DC", border: "2px solid #000", borderRadius: 10, padding: "16px 18px", marginBottom: 12 }}>
-              <div style={{ fontSize: 11, color: "#0A3D26", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL EARNINGS <span style={{ color: "#3A6B52", fontWeight: 700 }}>(incl. leftover wallet)</span></div>
+              <div style={{ fontSize: 11, color: "#0A3D26", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>TOTAL EARNINGS <span style={{ color: "#3A6B52", fontWeight: 700 }}>(incl. leftover wallet + paid entry)</span></div>
               <div style={{ fontSize: 34, fontWeight: 900, color: "#0A3D26", marginTop: 4, fontFamily: NUM_FONT, letterSpacing: 0.3, lineHeight: 1.1 }}>{fmtRs(barProfit)}</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 12px", marginTop: 12, fontSize: 14, color: "#0A3D26" }}>
                 <div>NET sales <span style={{ color: "#3A6B52" }}>(food + drink, after discount)</span></div>
                 <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(netSales)}</div>
                 <div>+ Leftover wallet balance <span style={{ color: "#3A6B52" }}>(expired, non-refundable)</span></div>
                 <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(barNotRedeemed)}</div>
+                <div>+ Paid entry <span style={{ color: "#3A6B52" }}>(door entry passes collected)</span></div>
+                <div style={{ fontFamily: NUM_FONT, fontWeight: 800, textAlign: "right" }}>{fmtRs(paidEntry)}</div>
                 <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontWeight: 900 }}>= TOTAL EARNINGS</div>
                 <div style={{ borderTop: "2px solid #0A3D26", paddingTop: 6, fontFamily: NUM_FONT, fontWeight: 900, textAlign: "right" }}>{fmtRs(barProfit)}</div>
               </div>
               <div style={{ fontSize: 11.5, color: "#3A6B52", marginTop: 10, lineHeight: 1.5 }}>
-                Wallets are non-refundable and expire after the event, so unspent recharges (the leftover balance) are kept by the house. This adds that money on top of your food &amp; drink sales. Excludes the 10% service charge &amp; GST (service charge has its own tile; GST is paid to the government).
+                Wallets are non-refundable and expire after the event, so unspent recharges (the leftover balance) are kept by the house. Paid entry is the door entry-pass money collected tonight. Together these add on top of your food &amp; drink sales. Excludes the 10% service charge &amp; GST (service charge has its own tile; GST is paid to the government).
               </div>
             </div>
             )}
@@ -4303,6 +4406,20 @@ function BarReportsModal({ onClose }: { onClose: () => void }) {
                 rows={[["Total Collected", fmtRs(sumCollected(walkins))], ["Total Redeemed", fmtRs(sumRedeemed(walkins))]]} />
               <StatTable label="TOTAL COLLECTED" count={activated.length + ncCollectedCount}
                 rows={[["Wallet + Walk-in", fmtRs(barTotalCollected)], ["NC (after payment)", fmtRs(ncCollected)], ["Total", fmtRs(barTotalCollected + ncCollected)]]} />
+            </div>
+
+            {/* 🆕 PAYMENT METHODS COLLECTED — how the bar's money was paid */}
+            <div style={{ background: "#fff", border: "2px solid #000", borderRadius: 10, padding: "14px 16px", marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: "#6B6B6B", letterSpacing: 1, fontWeight: 800, textTransform: "uppercase" }}>PAYMENT METHODS COLLECTED</div>
+              <div style={{ fontSize: 11.5, color: "#6B6B6B", fontWeight: 700, marginTop: 2 }}>Cover loads + recharges + NC, by how they were paid (Split = paid via 2+ methods · TOP UPS = online wallet top-ups · Others = comp / other).</div>
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr auto", gap: "8px 16px", fontSize: 15, maxWidth: 360 }}>
+                {TENDER_BUCKETS.flatMap((b) => [
+                  <div key={b + "-l"} style={{ fontWeight: 800, color: "#000" }}>{TENDER_LABELS[b]}</div>,
+                  <div key={b + "-v"} style={{ fontFamily: NUM_FONT, fontWeight: 900, color: "#000", textAlign: "right" }}>{fmtRs(barTender[b])}</div>,
+                ])}
+                <div style={{ borderTop: "2px solid #000", paddingTop: 6, fontWeight: 900, color: "#000" }}>TOTAL</div>
+                <div style={{ borderTop: "2px solid #000", paddingTop: 6, fontFamily: NUM_FONT, fontWeight: 900, color: "#000", textAlign: "right" }}>{fmtRs(tenderMixTotal(barTender))}</div>
+              </div>
             </div>
 
             {/* SALES */}

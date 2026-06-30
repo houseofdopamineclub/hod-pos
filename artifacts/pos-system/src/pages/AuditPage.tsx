@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { ArrowLeft, RefreshCw, Download } from "lucide-react";
 import {
   getRecentBillPrints, getRecentKotPrints, getBillKotPrintsByRange,
+  isHodItemGstExempt,
   type BillAuditRow, type HodOrderItem,
 } from "@/lib/firestore-hod";
 import { getOperationalNightStr } from "@/lib/utils-pos";
@@ -288,9 +289,15 @@ export default function AuditPage({ embedded = false }: { embedded?: boolean } =
         const [date, time] = dt(b.at);
         for (const it of b.items) {
           billItemRows++;
+          // Use the SAME exemption precedence as the bill engine (food→taxed
+          // first, then alcohol, then tobacco-by-name) so report labels never
+          // drift from how the invoice was actually taxed.
+          const exempt = isHodItemGstExempt(it);
           const isAlc = it.alc === true || (it.t === "drink" && it.alc !== false);
+          const isTobacco = exempt && !isAlc && it.t !== "food";
+          const gstTreat = !exempt ? "GST 5% (food)" : isAlc ? "Non-GST (alcohol)" : "Non-GST (tobacco)";
           L.push(row([date, time, b.billNumber, b.tableId, b.customerName, it.n, it.qty, r2(it.p), r2(it.p * it.qty),
-            it.t === "food" ? "Food" : it.t === "drink" ? "Drink" : "—", isAlc ? "Non-GST (alcohol)" : "GST 5% (food)"]));
+            it.t === "food" ? "Food" : isTobacco ? "Tobacco" : it.t === "drink" ? "Drink" : "—", gstTreat]));
         }
       }
       if (billItemRows === 0) L.push("(bills in this range did not save line items — see KOT REGISTER below for the itemised orders)");
