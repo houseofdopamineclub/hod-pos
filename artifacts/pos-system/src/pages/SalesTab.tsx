@@ -8,15 +8,17 @@
 //  + BarMode to the rupee). Gumroad theme, fail-open.
 // ─────────────────────────────────────────────────────────────────────────
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { getOperationalNightStr } from "@/lib/utils-pos";
 import { useEffectiveMenu } from "@/lib/use-effective-menu";
 import {
-  getVenueSalesCached,
+  getVenueSalesCached, fetchVenueRange, buildSalesTickets,
   type VenueSalesResult, type VenueSales, type PaymentMix,
 } from "@/lib/venue-sales";
+import { resetTonightData, sha256, type ResetTonightReport } from "@/lib/firestore-hod";
 import {
   subscribeOpenNc, fetchNcForRange, type BillDueDoc,
 } from "@/lib/bill-due";
@@ -31,6 +33,16 @@ import { BarReportsModal } from "./BarMode";
 const C = { ink: "#000", grey: "#6B6B6B", bg: "#F4F4F0", card: "#fff", accent: "#23A094", pink: "#FF90E8" };
 const NUM_FONT = "'Space Grotesk', sans-serif";
 const SHADOW_SM = "2px 2px 0px #000";
+
+// ── 🧨 RESET TONIGHT guard ──
+// Manager PIN hash = sha256("8888") — the SAME manager PIN used by Bar/Captain
+// modes (BAR_MANAGER_HASH). A typed "RESET" + this PIN gates the destructive wipe.
+const RESET_MANAGER_HASH = "2926a2731f4b312c08982cacf8061eb14bf65c1a87cc5d70e864e079c6220731";
+const RESET_LABELS: Record<string, string> = {
+  covers: "Wallets", tableReservations: "Live tables", tableHistory: "Closed tables",
+  bookings: "Door entries", billDue: "NC tabs",
+  posKOTs: "Bills / KOTs", posAuditLog: "Audit log",
+};
 
 const inr = (n: number) => `₹${Math.round(n || 0).toLocaleString("en-IN")}`;
 const fmt = (dt: Date) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
@@ -99,8 +111,44 @@ export default function SalesTab() {
   // changing the inputs WITHOUT tapping LOAD never triggers an off-range fetch.
   const [loadedBounds, setLoadedBounds] = useState<{ s: string; e: string } | null>(null);
   const [cacheNote, setCacheNote] = useState("");
+  const [ticketBusy, setTicketBusy] = useState(false);
   const autoLoaded = useRef(false);
   const [subTab, setSubTab] = useState<"venue" | "nc" | "door" | "bar" | "captain">("venue");
+
+  // ── 🧨 RESET TONIGHT — destructive Boss-mode wipe of tonight's data ──
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetWord, setResetWord] = useState("");
+  const [resetPin, setResetPin] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetErr, setResetErr] = useState("");
+  const [resetReport, setResetReport] = useState<ResetTonightReport | null>(null);
+  const closeReset = () => {
+    if (resetBusy) return;
+    setResetOpen(false); setResetWord(""); setResetPin(""); setResetErr(""); setResetReport(null);
+  };
+  const openReset = () => {
+    setResetReport(null); setResetErr(""); setResetWord(""); setResetPin(""); setResetOpen(true);
+  };
+  const runReset = async () => {
+    if (resetBusy) return;
+    if (resetWord.trim().toUpperCase() !== "RESET") { setResetErr("Type the word RESET to confirm."); return; }
+    let ok = false;
+    try { ok = (await sha256(resetPin.trim())) === RESET_MANAGER_HASH; } catch { ok = false; }
+    if (!ok) { setResetErr("WRONG MANAGER PIN"); setResetPin(""); return; }
+    setResetErr(""); setResetBusy(true);
+    try {
+      // recompute the operational night at CLICK time (the Boss tab may have been
+      // open across the 7AM rollover, which would make the mount-time `today` stale)
+      const night = getOperationalNightStr();
+      const rep = await resetTonightData(night);
+      setResetReport(rep);
+      await load(); // refresh the dashboard so the owner sees 0 immediately
+    } catch {
+      setResetErr("Reset failed. Please try again.");
+    } finally {
+      setResetBusy(false);
+    }
+  };
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -196,6 +244,62 @@ export default function SalesTab() {
     a.href = url; a.download = `HOD_VenueSales_${start}_to_${end}.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // ── PER-TICKET SALES REPORT (Digitory-style) — one-shot range fetch on tap ──
+  // A SETTLEMENT view: one row per fully-settled F&B bill (tables + bar covers),
+  // tender columns sum to each Total. Re-fetches raw docs on demand (same cheap
+  // one-shot getDocs the dashboard uses); idle Boss Mode pays zero extra reads.
+  const downloadTicketCsv = async () => {
+    if (ticketBusy) return;
+    let s = start, e = end;
+    if (s > e) { const tmp = s; s = e; e = tmp; }
+    setTicketBusy(true); setErr("");
+    try {
+      const raw = await fetchVenueRange(s, e);
+      const tickets = buildSalesTickets(raw);
+      const esc = (v: unknown) => { const str = v == null ? "" : String(v); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; };
+      const money = (n: number) => (!n ? "" : n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })); // blank on 0 (matches Digitory)
+      const moneyT = (n: number) => n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });            // totals always show
+      const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const dt = (iso: string) => { const d = new Date(iso || 0); if (isNaN(d.getTime())) return ""; const p = (x: number) => String(x).padStart(2, "0"); return `${p(d.getDate())}-${MON[d.getMonth()]}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+      const HEADERS = ["Ticket No", "Total Checks", "Guest Count", "Close Date Time", "Base Price", "Discount", "Net Sales", "Total Charge", "Total Tax", "Round Off", "Total", "Cash", "SWIGGY", "ZOMATO", "Token", "Card", "Due Payment", "UPI", "Prepaid"];
+      const sum = tickets.reduce((a, r) => {
+        a.guests += r.guests; a.basePrice += r.basePrice; a.discount += r.discount; a.netSales += r.netSales;
+        a.serviceCharge += r.serviceCharge; a.tax += r.tax; a.roundOff += r.roundOff; a.total += r.total;
+        a.cash += r.cash; a.swiggy += r.swiggy; a.zomato += r.zomato; a.token += r.token;
+        a.card += r.card; a.due += r.due; a.upi += r.upi; a.prepaid += r.prepaid;
+        return a;
+      }, { guests: 0, basePrice: 0, discount: 0, netSales: 0, serviceCharge: 0, tax: 0, roundOff: 0, total: 0, cash: 0, swiggy: 0, zomato: 0, token: 0, card: 0, due: 0, upi: 0, prepaid: 0 });
+      const totalRow = (label: string) => [
+        label, tickets.length, sum.guests, "",
+        moneyT(sum.basePrice), moneyT(sum.discount), moneyT(sum.netSales), moneyT(sum.serviceCharge), moneyT(sum.tax), moneyT(sum.roundOff), moneyT(sum.total),
+        money(sum.cash), money(sum.swiggy), money(sum.zomato), money(sum.token), money(sum.card), money(sum.due), money(sum.upi), money(sum.prepaid),
+      ].map(esc).join(",");
+      const L: string[] = [];
+      L.push(["Sales Report", "House of Dopamine", `From : ${s}  To : ${e}`].map(esc).join(","));
+      L.push("");
+      L.push(HEADERS.map(esc).join(","));
+      L.push(totalRow("House of Dopamine"));
+      for (const r of tickets) {
+        L.push([
+          r.ticketNo, 1, r.guests, dt(r.closeAt),
+          moneyT(r.basePrice), money(r.discount), moneyT(r.netSales), money(r.serviceCharge), money(r.tax), money(r.roundOff), moneyT(r.total),
+          money(r.cash), money(r.swiggy), money(r.zomato), money(r.token), money(r.card), money(r.due), money(r.upi), money(r.prepaid),
+        ].map(esc).join(","));
+      }
+      L.push(totalRow("Total"));
+      const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `HOD_SalesReport_${s}_to_${e}.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      setErr("Could not build the sales report. Please try again.");
+    } finally {
+      setTicketBusy(false);
+    }
   };
 
   // ── small components ──
@@ -411,13 +515,96 @@ export default function SalesTab() {
             </div>
           ) : null}
 
-          <button onClick={downloadCsv}
-            style={{ padding: "11px 22px", borderRadius: 8, background: C.ink, border: `2px solid ${C.ink}`, color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer" }}>
-            ⬇ DOWNLOAD CSV (Excel)
-          </button>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={downloadCsv}
+              style={{ padding: "11px 22px", borderRadius: 8, background: C.ink, border: `2px solid ${C.ink}`, color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer" }}>
+              ⬇ DOWNLOAD CSV (Excel)
+            </button>
+            <button onClick={downloadTicketCsv} disabled={ticketBusy}
+              style={{ padding: "11px 22px", borderRadius: 8, background: ticketBusy ? C.grey : C.accent, border: `2px solid ${C.ink}`, color: "#fff", fontSize: 13, fontWeight: 900, letterSpacing: 0.6, cursor: ticketBusy ? "wait" : "pointer", boxShadow: SHADOW_SM }}>
+              {ticketBusy ? "BUILDING…" : "🧾 SALES REPORT (per-ticket)"}
+            </button>
+          </div>
         </>
       ) : null}
+
+      {/* 🧨 RESET TONIGHT — DANGER ZONE (Khushi 2026-06-30). One-tap zero-out of
+          everything that feeds tonight's sales: wallets, tables, door entries, NC.
+          Always visible in the Venue tab (works even before LOAD). Gated by a
+          typed "RESET" + Manager PIN, then deletes tonight's docs. */}
+      <div style={{ marginTop: 30, padding: 18, borderRadius: 14, border: "2px dashed #B91C1C", background: "#FEF2F2" }}>
+        <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: "#7F1D1D" }}>⚠️ Danger Zone</div>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#7F1D1D", marginTop: 5, marginBottom: 13, lineHeight: 1.5 }}>
+          Permanently deletes ALL of tonight's wallets, tables, door entries, NC tabs, bills &amp; audit records (<b>{today}</b>) so Sales <i>and</i> Live Monitor reset to zero. Wallet money is gone for good. This cannot be undone — use it only to clear a test night.
+        </div>
+        <button onClick={openReset}
+          style={{ padding: "12px 24px", borderRadius: 10, background: "#B91C1C", border: "2px solid #000", color: "#fff", fontSize: 14, fontWeight: 900, letterSpacing: 0.6, cursor: "pointer", boxShadow: SHADOW_SM }}>
+          🧨 RESET TONIGHT
+        </button>
+      </div>
       </>)}
+
+      {resetOpen && createPortal(
+        <div onClick={closeReset} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99999, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", border: "3px solid #000", borderRadius: 16, padding: 24, maxWidth: 440, width: "100%", boxShadow: "6px 6px 0 #000", fontFamily: "Inter, sans-serif", color: C.ink }}>
+            {!resetReport ? (<>
+              <div style={{ fontSize: 21, fontWeight: 900, color: "#7F1D1D" }}>🧨 Reset Tonight?</div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 8, lineHeight: 1.5 }}>
+                This permanently deletes <b>everything from tonight ({today})</b>:
+                <ul style={{ margin: "8px 0 0 18px", padding: 0 }}>
+                  <li>All wallets (loaded money is gone)</li>
+                  <li>All tables (live &amp; closed)</li>
+                  <li>All door entries &amp; guestlist</li>
+                  <li>All NC tabs</li>
+                  <li>All bills, KOTs &amp; audit records</li>
+                </ul>
+                <div style={{ marginTop: 9, color: "#7F1D1D", fontWeight: 900 }}>This cannot be undone.</div>
+              </div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 800, color: C.grey, marginTop: 16 }}>Type RESET to confirm</label>
+              <input value={resetWord} onChange={(e) => setResetWord(e.target.value)} autoCapitalize="characters" placeholder="RESET"
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `2px solid ${C.ink}`, fontSize: 15, fontWeight: 800, marginTop: 4, boxSizing: "border-box" }} />
+              <label style={{ display: "block", fontSize: 12, fontWeight: 800, color: C.grey, marginTop: 12 }}>Manager PIN</label>
+              <input value={resetPin} onChange={(e) => setResetPin(e.target.value)} type="password" inputMode="numeric" placeholder="••••"
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `2px solid ${C.ink}`, fontSize: 15, fontWeight: 800, marginTop: 4, boxSizing: "border-box" }} />
+              {resetErr ? <div style={{ marginTop: 10, color: "#B91C1C", fontWeight: 800, fontSize: 13 }}>{resetErr}</div> : null}
+              <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                <button onClick={closeReset} disabled={resetBusy}
+                  style={{ flex: 1, padding: 12, borderRadius: 10, background: "#fff", border: `2px solid ${C.ink}`, color: C.ink, fontSize: 14, fontWeight: 900, cursor: resetBusy ? "default" : "pointer" }}>CANCEL</button>
+                <button onClick={runReset} disabled={resetBusy}
+                  style={{ flex: 1, padding: 12, borderRadius: 10, background: resetBusy ? C.grey : "#B91C1C", border: "2px solid #000", color: "#fff", fontSize: 14, fontWeight: 900, cursor: resetBusy ? "wait" : "pointer", boxShadow: SHADOW_SM }}>
+                  {resetBusy ? "WIPING…" : "DELETE TONIGHT"}
+                </button>
+              </div>
+            </>) : (<>
+              <div style={{ fontSize: 21, fontWeight: 900, color: (resetReport.totalFailed || resetReport.anyQueryFailed || resetReport.totalSkipped) ? "#B45309" : C.accent }}>
+                {(resetReport.totalFailed || resetReport.anyQueryFailed) ? "⚠️ Partly done" : "✅ Tonight reset"}
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 10, lineHeight: 1.6 }}>
+                Deleted <b>{resetReport.totalDeleted}</b> of {resetReport.totalFound} record{resetReport.totalFound === 1 ? "" : "s"} for {resetReport.night}.
+                <div style={{ marginTop: 10, borderTop: `1px dashed ${C.grey}`, paddingTop: 10 }}>
+                  {Object.entries(resetReport.perCollection).map(([col, s]) => {
+                    const notes = [
+                      s.failed ? `${s.failed} blocked` : "",
+                      s.skipped ? `${s.skipped} kept` : "",
+                      s.queryFailed ? "couldn't read" : "",
+                    ].filter(Boolean).join(" · ");
+                    return (
+                      <div key={col} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, padding: "2px 0" }}>
+                        <span>{RESET_LABELS[col] || col}</span>
+                        <span style={{ color: (s.failed || s.queryFailed || s.skipped) ? "#B45309" : C.grey }}>{s.deleted}/{s.found}{notes ? ` · ${notes}` : ""}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {resetReport.totalFailed ? <div style={{ marginTop: 12, color: "#B45309", fontWeight: 800 }}>{resetReport.totalFailed} record(s) couldn't be deleted (permissions). Tell your developer.</div> : null}
+                {resetReport.anyQueryFailed ? <div style={{ marginTop: 8, color: "#B45309", fontWeight: 800 }}>Some data couldn't be read — tonight may not be fully cleared. Try again, or tell your developer.</div> : null}
+                {resetReport.totalSkipped ? <div style={{ marginTop: 8, color: "#B45309", fontWeight: 800 }}>{resetReport.totalSkipped} NC running tab(s) kept (they span other nights too, so deleting them would erase that history).</div> : null}
+              </div>
+              <button onClick={closeReset}
+                style={{ marginTop: 18, width: "100%", padding: 12, borderRadius: 10, background: C.ink, border: `2px solid ${C.ink}`, color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer" }}>DONE</button>
+            </>)}
+          </div>
+        </div>, document.body)}
     </div>
   );
 }

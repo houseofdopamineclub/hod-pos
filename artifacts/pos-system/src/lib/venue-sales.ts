@@ -622,6 +622,156 @@ export function aggregateVenueSales(raw: VenueRaw, foodNames?: Set<string>): Ven
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+//  PER-TICKET SALES REPORT  —  Digitory-style CSV export (Khushi 2026-06-30)
+// ─────────────────────────────────────────────────────────────────────────
+//  ONE row per SETTLED F&B bill (table reservations ∪ released history ∪ bar
+//  covers). Each row's TENDER columns sum EXACTLY to its Total, so the grand
+//  tender total reconciles to the grand Total — the way her old Digitory
+//  "Sales Report" did. This is a SETTLEMENT view (how each bill was PAID),
+//  DISTINCT from the whole-venue ACCRUAL dashboard above:
+//    • Prepaid       = paid from a pre-loaded wallet (every bar-cover bill, plus
+//                      any table slice covered by wallet redemption).
+//    • Cash/Card/UPI = fresh tender collected at settle time.
+//    • SWIGGY/ZOMATO = aggregator NET received (unknown aggregators → UPI).
+//    • Due Payment   = credit / salary / pay-later.
+//    • Token         = always 0 (HOD has no token tender; column kept for parity).
+//  EXCLUDED (no clean single-bill tender → would break the reconciliation):
+//  complimentary bills + ALL NC (comp / owner / bill-due) — those live in the
+//  separate NC dashboard. So this report = real, fully-settled sales only.
+export interface SalesTicketRow {
+  ticketNo: string;
+  guests: number;
+  closeAt: string;       // ISO settle time
+  basePrice: number;     // subtotal, before discount + tax
+  discount: number;
+  netSales: number;      // basePrice − discount
+  serviceCharge: number;
+  tax: number;
+  roundOff: number;
+  total: number;
+  // tender split (sums to `total`)
+  cash: number; swiggy: number; zomato: number; token: number;
+  card: number; due: number; upi: number; prepaid: number;
+}
+
+type TenderCol = "cash" | "swiggy" | "zomato" | "token" | "card" | "due" | "upi" | "prepaid";
+
+/** Bucket a payment-method string into one of the Digitory tender columns. */
+const ticketTenderOf = (method: string): TenderCol => {
+  const m = (method || "").toLowerCase();
+  if (m.includes("wallet") || m.includes("prepaid")) return "prepaid";
+  if (m.includes("cash")) return "cash";
+  if (m.includes("card")) return "card";
+  if (m.includes("upi")) return "upi";
+  if (m.includes("due") || m.includes("credit") || m.includes("later") || m.includes("salary")) return "due";
+  if (m.includes("online") || m.includes("razorpay") || m.includes("paid_online")) return "upi"; // razorpay ≈ UPI
+  if (m.includes("swiggy")) return "swiggy";
+  if (m.includes("zomato")) return "zomato";
+  return "cash"; // unknown small remainder → cash
+};
+
+/** Build the per-ticket Sales Report rows from a raw range fetch. */
+export function buildSalesTickets(raw: VenueRaw): SalesTicketRow[] {
+  const rows: SalesTicketRow[] = [];
+  const seen = new Set<string>();
+
+  // ── TABLES (live ∪ released, deduped exactly like aggregateNight.processRes) ──
+  const pushTable = (r: HodTableReservation) => {
+    if ((r.status || "").toLowerCase() === "cancelled") return;
+    const dedupeKey = r.bookingRef
+      ? `ref:${r.bookingRef}`
+      : `cmp:${(r.tableId || "").toUpperCase()}|${r.bookedAt || ""}|${num(r.amountPaid)}|${r.arrivalTime || ""}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    if ((r.paymentStatus || "").toLowerCase() !== "paid") return;     // settled only
+    if ((r as { complimentary?: boolean }).complimentary) return;     // comp → NC dashboard
+
+    const items = (r.tabRounds || []).flatMap((rd) => rd.items || []);
+    const bd = computeHodBreakdown(items);
+    const subtotal = bd.subtotal;
+    const sc = num((r as { serviceChargeAmount?: number }).serviceChargeAmount);
+    const tax = num(r.taxAmount);
+    const disc = num(r.discountAmount);
+    const net = Math.max(0, subtotal - disc);
+    const billFinal = Math.max(0, subtotal + sc + tax - disc);
+    // Aggregator bills realise NET received (commission-adjusted), mirroring the
+    // dashboard's aggNet; inhouse bills realise amountPaid. Either way Total is
+    // what actually came in, so the tender split reconciles to it.
+    const inhouse = isInhouse(r);
+    const aggNet = (r as { aggregatorNetAmount?: number }).aggregatorNetAmount ?? r.amountPaid ?? billFinal;
+    const total = Math.round(inhouse ? (num(r.amountPaid) || billFinal) : num(aggNet));
+    if (total <= 0) return;
+    const roundOff = total - (net + sc + tax); // forces net+sc+tax+roundOff === total
+
+    const row: SalesTicketRow = {
+      ticketNo: String((r as { invoiceNumber?: string }).invoiceNumber || r.bookingRef || (r as { billNumber?: string }).billNumber || r.tableId || ""),
+      guests: num(r.partySize),
+      closeAt: String((r as { paidAt?: string }).paidAt || r.bookedAt || ""),
+      basePrice: subtotal, discount: disc, netSales: net,
+      serviceCharge: sc, tax, roundOff, total,
+      cash: 0, swiggy: 0, zomato: 0, token: 0, card: 0, due: 0, upi: 0, prepaid: 0,
+    };
+
+    if (!inhouse) {
+      // aggregator bill — the whole NET total lands under its platform column
+      const s = ((r.aggregator || r.source || "") + "").toLowerCase();
+      const col: TenderCol = s.includes("zomato") ? "zomato" : s.includes("swiggy") ? "swiggy" : "upi";
+      row[col] += total;
+    } else {
+      const prepaid = Math.min(total, Math.max(0, Math.round(num((r as { walletPaidAmount?: number }).walletPaidAmount))));
+      row.prepaid += prepaid;
+      const remainder = total - prepaid;
+      if (remainder > 0) {
+        const splits = (r as { paymentSplits?: Array<{ method: string; amount: number }> }).paymentSplits;
+        if (splits && splits.length) {
+          const sumSp = splits.reduce((s, sp) => s + num(sp.amount), 0);
+          const f = sumSp > 0 ? remainder / sumSp : 0;
+          let assigned = 0;
+          splits.forEach((sp, i) => {
+            const amt = i === splits.length - 1 ? remainder - assigned : Math.round(num(sp.amount) * f);
+            assigned += amt;
+            row[ticketTenderOf(sp.method)] += amt;
+          });
+        } else {
+          row[ticketTenderOf(String(r.paymentMode || ""))] += remainder;
+        }
+      }
+    }
+    rows.push(row);
+  };
+  for (const r of raw.reservations) pushTable(r);
+  for (const r of raw.history) pushTable(r);
+
+  // ── BAR covers (settled from the pre-loaded wallet → Prepaid column) ──
+  for (const c of raw.covers) {
+    if (c.isTableBooking || (c.tableId || "").toUpperCase() === "NC") continue;
+    const log = (c.walletBillPrintLog || []).filter((b) => !b.isDuplicate);
+    if (log.length === 0) continue;
+    const atMs = (b: { at?: string }) => { const t = new Date(b?.at || 0).getTime(); return isNaN(t) ? 0 : t; };
+    const last = log.reduce((a, b) => (atMs(b) >= atMs(a) ? b : a)); // final cumulative bill
+    const total = Math.round(num(last.total));
+    if (total <= 0) continue;
+    const sc = num(last.serviceCharge);
+    const tax = num(last.tax);
+    const disc = num(last.discount);
+    const subtotal = num(last.subtotal) || Math.max(0, total - sc - tax + disc);
+    const net = Math.max(0, subtotal - disc);
+    const roundOff = total - (net + sc + tax);
+    rows.push({
+      ticketNo: String(last.billNumber || (c as { ref?: string }).ref || c.tableId || ""),
+      guests: num((c as { partySize?: number }).partySize) || num((c as { guests?: number }).guests) || 1,
+      closeAt: String(last.at || ""),
+      basePrice: subtotal, discount: disc, netSales: net,
+      serviceCharge: sc, tax, roundOff, total,
+      cash: 0, swiggy: 0, zomato: 0, token: 0, card: 0, due: 0, upi: 0, prepaid: total,
+    });
+  }
+
+  rows.sort((a, b) => new Date(a.closeAt || 0).getTime() - new Date(b.closeAt || 0).getTime());
+  return rows;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 //  LAZY AUTO-CACHE  —  daily_summaries (one tiny doc per operational night)
 // ─────────────────────────────────────────────────────────────────────────
 //  Reading a month/year of RAW reservations + covers + NC ledgers costs one

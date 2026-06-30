@@ -165,10 +165,21 @@ export function isHodItemGstExempt(it: { t?: string; alc?: boolean; n?: string }
   if (it.alc !== false) return true;                 // alcohol (default for drinks) — exempt
   return /\bcig|tobacco|\bpaan\b/i.test(String(it.n || "")); // tobacco (cigarettes/paan) — exempt
 }
+// 🆕 2026-06-30 (Khushi) — CIGARETTES / tobacco get NEITHER service charge NOR
+// GST (they're a pass-through retail sale, not a served item). They live on the
+// customer "smoke" tab (t:'drink', alc:false), so the only reliable signal on a
+// STORED round item is the name/category — matched here so the rule applies
+// retroactively to already-saved bills. Fail-safe: a tobacco item that doesn't
+// match falls through to the taxed buckets (never under-charges by accident).
+const HOD_TOBACCO_RE = /\bcig|cigar|cigarette|tobacco|\bpaan\b|hookah|hooka|sheesha|shisha|\bvape\b|smoke/i;
+export function isHodItemTobacco(it: { n?: string; cat?: string }): boolean {
+  return HOD_TOBACCO_RE.test(String(it.n || "") + " " + String(it.cat || ""));
+}
 export interface HodCartBreakdown {
   foodSubtotal: number;
   alcSubtotal: number;
   nonAlcSubtotal: number;
+  cigSubtotal: number;
   drinkSubtotal: number;
   subtotal: number;
   serviceCharge: number;
@@ -180,23 +191,26 @@ export interface HodCartBreakdown {
 }
 /** Single source of truth for tax math — mirrors index.html hodComputeBreakdown. */
 export function computeHodBreakdown(items: HodOrderItem[]): HodCartBreakdown {
-  let foodSub = 0, alcSub = 0, nonAlcSub = 0;
+  let foodSub = 0, alcSub = 0, nonAlcSub = 0, cigSub = 0;
   for (const it of items || []) {
     const line = (it.p || 0) * (it.qty || 0);
     const t = it.t || "drink";
     if (t === "food") foodSub += line;
-    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol OR tobacco → GST-exempt bucket
+    else if (isHodItemTobacco(it)) cigSub += line; // cigarettes/tobacco → NO SC, NO GST
+    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol → GST-exempt (SC still applies)
     else nonAlcSub += line;
   }
-  const subtotal = foodSub + alcSub + nonAlcSub;
-  const sc = Math.round(subtotal * HOD_SC_RATE * 100) / 100;
-  // 🆕 2026-06-30 (Khushi BUGFIX) — the service charge sitting on ALCOHOL is
-  // GST-exempt too, so apportion the SC by the taxable (food+non-alc) fraction.
-  // Pure-alcohol bill → taxable fraction 0 → ZERO GST (incl. on its SC);
-  // pure-food bill → fraction 1 → SC fully taxed (unchanged).
+  const subtotal = foodSub + alcSub + nonAlcSub + cigSub;
+  // 🆕 2026-06-30 (Khushi) — cigarettes/tobacco are EXCLUDED from the service
+  // charge base (no SC) — only food + alcohol + non-alcohol drinks incur SC.
+  const scBase = foodSub + alcSub + nonAlcSub;
+  const sc = Math.round(scBase * HOD_SC_RATE * 100) / 100;
+  // only the ALCOHOL ITEM VALUE is GST-exempt; the SERVICE CHARGE is a taxable
+  // service, so 5% GST applies to the FULL service charge even on a pure-alcohol
+  // bill (beer ₹450 → SC ₹45 → GST ₹2.25). Cigarettes carry no SC and no GST, so
+  // only food + non-alcohol item value joins the SC in the GST base.
   const taxableSub = foodSub + nonAlcSub;
-  const scTaxable = subtotal > 0 ? Math.round(sc * (taxableSub / subtotal) * 100) / 100 : 0;
-  const gstBase = taxableSub + scTaxable;
+  const gstBase = taxableSub + sc; // alcohol value exempt; full service charge taxed
   const gst = Math.round(gstBase * HOD_GST_RATE * 100) / 100;
   const cgst = Math.round(gst * 50) / 100;
   const sgst = Math.round((gst - cgst) * 100) / 100;
@@ -204,7 +218,7 @@ export function computeHodBreakdown(items: HodOrderItem[]): HodCartBreakdown {
   const grandTotal = Math.round(raw);
   const roundOff = Math.round((grandTotal - raw) * 100) / 100;
   return { foodSubtotal: foodSub, alcSubtotal: alcSub, nonAlcSubtotal: nonAlcSub,
-           drinkSubtotal: alcSub + nonAlcSub, subtotal,
+           cigSubtotal: cigSub, drinkSubtotal: alcSub + nonAlcSub + cigSub, subtotal,
            serviceCharge: sc, gst, cgst, sgst, roundOff, grandTotal };
 }
 
@@ -226,26 +240,29 @@ export interface HodCartBreakdownAdjusted extends HodCartBreakdown {
 export function computeHodBreakdownAdjusted(
   items: HodOrderItem[], discPct: number = 0, scOn: boolean = true,
 ): HodCartBreakdownAdjusted {
-  let foodSub = 0, alcSub = 0, nonAlcSub = 0;
+  let foodSub = 0, alcSub = 0, nonAlcSub = 0, cigSub = 0;
   for (const it of items || []) {
     const line = (it.p || 0) * (it.qty || 0);
     const t = it.t || "drink";
     if (t === "food") foodSub += line;
-    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol OR tobacco → GST-exempt bucket
+    else if (isHodItemTobacco(it)) cigSub += line; // cigarettes/tobacco → NO SC, NO GST
+    else if (isHodItemGstExempt(it)) alcSub += line; // alcohol → GST-exempt (SC still applies)
     else nonAlcSub += line;
   }
-  const subtotal = foodSub + alcSub + nonAlcSub;
+  const subtotal = foodSub + alcSub + nonAlcSub + cigSub;
   const pct = Math.min(100, Math.max(0, discPct || 0));
   const factor = (100 - pct) / 100;
-  const dFood = foodSub * factor, dAlc = alcSub * factor, dNonAlc = nonAlcSub * factor;
-  const discountedSub = dFood + dAlc + dNonAlc;
+  const dFood = foodSub * factor, dAlc = alcSub * factor, dNonAlc = nonAlcSub * factor, dCig = cigSub * factor;
+  const discountedSub = dFood + dAlc + dNonAlc + dCig;
   const discount = Math.round((subtotal - discountedSub) * 100) / 100;
-  const sc = scOn ? Math.round(discountedSub * HOD_SC_RATE * 100) / 100 : 0;
-  // 🆕 2026-06-30 (Khushi BUGFIX) — SC on alcohol is GST-exempt too → apportion
-  // the SC by the taxable (food+non-alc) fraction of the discounted subtotal.
+  // 🆕 2026-06-30 (Khushi) — cigarettes/tobacco carry NO service charge, so the
+  // SC base excludes them (food + alcohol + non-alc only).
+  const scBase = dFood + dAlc + dNonAlc;
+  const sc = scOn ? Math.round(scBase * HOD_SC_RATE * 100) / 100 : 0;
+  // only the ALCOHOL ITEM VALUE is GST-exempt; the SERVICE CHARGE is a taxable
+  // service → 5% GST on the FULL service charge. Cigarettes carry no SC and no GST.
   const taxableSub = dFood + dNonAlc;
-  const scTaxable = discountedSub > 0 ? Math.round(sc * (taxableSub / discountedSub) * 100) / 100 : 0;
-  const gstBase = taxableSub + scTaxable; // alcohol (and the SC on it) is GST-exempt
+  const gstBase = taxableSub + sc; // alcohol value exempt; full service charge taxed
   const gst = Math.round(gstBase * HOD_GST_RATE * 100) / 100;
   const cgst = Math.round(gst * 50) / 100;
   const sgst = Math.round((gst - cgst) * 100) / 100;
@@ -253,7 +270,7 @@ export function computeHodBreakdownAdjusted(
   const grandTotal = Math.round(raw);
   const roundOff = Math.round((grandTotal - raw) * 100) / 100;
   return { foodSubtotal: foodSub, alcSubtotal: alcSub, nonAlcSubtotal: nonAlcSub,
-           drinkSubtotal: alcSub + nonAlcSub, subtotal,
+           cigSubtotal: cigSub, drinkSubtotal: alcSub + nonAlcSub + cigSub, subtotal,
            serviceCharge: sc, gst, cgst, sgst, roundOff, grandTotal,
            discount, discountPct: pct };
 }
@@ -2103,6 +2120,154 @@ export function subscribeToHodReservationsScoped(
     });
     cb(filtered);
   });
+}
+
+// ── 🧨 RESET TONIGHT (Boss-mode "zero out tonight") ──────────────────────────
+//  2026-06-30 (Khushi) — one-tap wipe of EVERYTHING that feeds tonight's sales
+//  dashboard AND the Boss Live Monitor, so a test/false night reads 0. Targets:
+//    • the five money collections venue-sales.ts reads — covers /
+//      tableReservations / tableHistory / bookings by `date`, billDue by
+//      `operationalNight` (+ the cross-day roundNights/paymentNights path) — AND
+//    • posKOTs + posAuditLog, which feed the Live Monitor's DUPLICATE BILLS tile
+//      and audit feed. These have no date-string field, so they're scoped by
+//      their timestamp the SAME way LiveMonitor reads them (posKOTs.createdAt /
+//      posAuditLog.timestamp) within the night's 7AM operational window.
+//  DESTRUCTIVE + irreversible (deleting a cover deletes a real wallet balance).
+//  The Boss-mode UI gates this behind a typed "RESET" + Manager PIN.
+//  Fail-open per-doc: a delete blocked by rules/network is counted in `failed`,
+//  never thrown, so a partial wipe still reports what got through.
+//  ⚠️ NEEDS a TEMPORARY Firestore RULES v9 publish — delete must be allowed on
+//  covers / tableHistory / bookings / billDue / posKOTs / posAuditLog. Under
+//  live v8 those deletes are `if false`, so a reset reports everything
+//  "blocked". RESET is a ONE-TIME pre-launch cleanup, so the owner publishes v9
+//  ONLY to run the reset, then re-publishes v8 to lock deletes back down (rules
+//  cannot enforce the in-app PIN, so v9 must NOT stay live).
+//  See hodclub-patched/HOD-FIRESTORE-RULES-v9-2026-06-30.txt.
+export interface ResetTonightStat {
+  found: number;     // docs matched for tonight
+  deleted: number;   // successfully deleted
+  failed: number;    // delete attempted but blocked (rules/network)
+  skipped: number;   // matched but DELIBERATELY left alone (multi-night NC tab)
+  queryFailed: boolean; // a whole-collection query failed — possible silent no-op
+}
+export interface ResetTonightReport {
+  night: string;
+  perCollection: Record<string, ResetTonightStat>;
+  totalFound: number;
+  totalDeleted: number;
+  totalFailed: number;
+  totalSkipped: number;
+  anyQueryFailed: boolean;
+}
+export async function resetTonightData(night: string): Promise<ResetTonightReport> {
+  const mkStat = (): ResetTonightStat => ({ found: 0, deleted: 0, failed: 0, skipped: 0, queryFailed: false });
+  const report: ResetTonightReport = {
+    night, perCollection: {}, totalFound: 0, totalDeleted: 0, totalFailed: 0, totalSkipped: 0, anyQueryFailed: false,
+  };
+  const del = async (col: string, id: string, stat: ResetTonightStat) => {
+    try { await deleteDoc(doc(db, col, id)); stat.deleted++; }
+    catch { stat.failed++; }
+  };
+
+  // ── Simple `date == night` collections (1:1 with what the dashboard reads) ──
+  const simple: Array<{ col: string; field: string }> = [
+    { col: COVERS_COL, field: "date" },        // wallets
+    { col: TABLE_RES_COL, field: "date" },     // live tables
+    { col: TABLE_HISTORY_COL, field: "date" }, // closed / released tables
+    { col: BOOKINGS_COL, field: "date" },      // door / entry / guestlist
+  ];
+  for (const t of simple) {
+    const stat = mkStat();
+    try {
+      const snap = await getDocs(query(collection(db, t.col), where(t.field, "==", night)));
+      stat.found = snap.size;
+      for (const d of snap.docs) await del(t.col, d.id, stat);
+    } catch {
+      stat.queryFailed = true; // fail-open, but make the no-op VISIBLE in the report
+    }
+    report.perCollection[t.col] = stat;
+  }
+
+  // ── NC tabs (billDue) — mirrors venue-sales' two read paths exactly ──
+  //  Created-tonight tabs (operationalNight == night) → delete fully.
+  //  Cross-day tabs (a round/payment stamped tonight via roundNights /
+  //  paymentNights but CREATED on another night) → delete ONLY if ALL their
+  //  activity is tonight (a single-night tab mis-created earlier). A genuine
+  //  multi-night running tab is SKIPPED — deleting the whole doc would erase
+  //  other nights' history (money-safety). Skipped tabs are reported so the
+  //  owner knows tonight isn't 100% zero if such a tab exists.
+  {
+    const stat = mkStat();
+    const candidates = new Map<string, { createdTonight: boolean; data: Record<string, unknown> }>();
+    try {
+      const s1 = await getDocs(query(collection(db, "billDue"), where("operationalNight", "==", night)));
+      s1.docs.forEach((d) => candidates.set(d.id, { createdTonight: true, data: d.data() as Record<string, unknown> }));
+    } catch { stat.queryFailed = true; }
+    for (const field of ["roundNights", "paymentNights"] as const) {
+      try {
+        const s = await getDocs(query(collection(db, "billDue"), where(field, "array-contains", night)));
+        s.docs.forEach((d) => { if (!candidates.has(d.id)) candidates.set(d.id, { createdTonight: false, data: d.data() as Record<string, unknown> }); });
+      } catch { stat.queryFailed = true; }
+    }
+    stat.found = candidates.size;
+    for (const [id, c] of candidates) {
+      let deletable = c.createdTonight;
+      if (!deletable) {
+        const rn = Array.isArray(c.data.roundNights) ? (c.data.roundNights as unknown[]) : [];
+        const pn = Array.isArray(c.data.paymentNights) ? (c.data.paymentNights as unknown[]) : [];
+        const all = [...rn, ...pn];
+        deletable = all.length > 0 && all.every((n) => n === night); // single-night tab
+      }
+      if (deletable) await del("billDue", id, stat);
+      else stat.skipped++;
+    }
+    report.perCollection["billDue"] = stat;
+  }
+
+  // ── posKOTs + posAuditLog — Live Monitor's DUPLICATE BILLS tile + audit feed ──
+  //  No date-string field; scoped by timestamp EXACTLY like LiveMonitor reads
+  //  them. Bound to the night's [07:00, +24h) operational window so only
+  //  tonight's records go (matches getOperationalNightStr's 7AM cutoff). On a
+  //  venue tablet (IST) `${night}T07:00:00` parses as local IST. Legacy docs
+  //  storing the field as a plain number won't match a Timestamp range — but
+  //  neither does the dashboard, so the report stays consistent.
+  {
+    const startMs = new Date(`${night}T07:00:00`).getTime();
+    const endMs = startMs + 24 * 60 * 60 * 1000;
+    const tsCols: Array<{ col: string; field: string }> = [
+      { col: "posKOTs", field: "createdAt" },     // DUPLICATE BILLS tile + KOT/bill log
+      { col: "posAuditLog", field: "timestamp" }, // admin-action audit feed
+    ];
+    for (const t of tsCols) {
+      const stat = mkStat();
+      if (Number.isFinite(startMs)) {
+        try {
+          const snap = await getDocs(query(
+            collection(db, t.col),
+            where(t.field, ">=", Timestamp.fromMillis(startMs)),
+            where(t.field, "<", Timestamp.fromMillis(endMs)),
+          ));
+          stat.found = snap.size;
+          for (const d of snap.docs) await del(t.col, d.id, stat);
+        } catch {
+          stat.queryFailed = true; // fail-open, but make the no-op VISIBLE
+        }
+      } else {
+        stat.queryFailed = true; // unparseable night string — never silently no-op
+      }
+      report.perCollection[t.col] = stat;
+    }
+  }
+
+  for (const k of Object.keys(report.perCollection)) {
+    const s = report.perCollection[k];
+    report.totalFound += s.found;
+    report.totalDeleted += s.deleted;
+    report.totalFailed += s.failed;
+    report.totalSkipped += s.skipped;
+    if (s.queryFailed) report.anyQueryFailed = true;
+  }
+  return report;
 }
 
 // 2026-05-16 one-shot diagnostic — fetches ALL tableReservations and groups by
