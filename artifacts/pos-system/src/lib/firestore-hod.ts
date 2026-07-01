@@ -6359,6 +6359,11 @@ export async function printBill(data: {
   /** Optional pairing token — printed alongside the bill so cashier can
    *  match it to the KOT chit(s) carrying the same token. */
   token?: string;
+  /** 🆕 2026-07-01 (Khushi) — for a COMPLIMENTARY / BILL DUE bill: who approved
+   *  it + the free-text note the captain entered. Printed on the paper bill
+   *  (print-server formatBill) as "Approved by:" + "Notes:". Optional. */
+  approvedBy?: string;
+  notes?: string;
 }): Promise<boolean> {
   try {
     const tabletFloor = data.tabletFloor ?? getTabletFloor();
@@ -6396,6 +6401,8 @@ export async function printBill(data: {
       prints,
       status: "pending",
       token: data.token || null,
+      approvedBy: data.approvedBy || null,
+      notes: data.notes || null,
       createdAt: serverTimestamp(),
     });
     return true;

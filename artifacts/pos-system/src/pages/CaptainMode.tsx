@@ -1560,6 +1560,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // tab id we already created so a RETRY reuses it (markTablePaid only) instead of
   // creating a DUPLICATE tab → no double liability, no double-count.
   const billDueTabRef = useRef<string | null>(null);
+  // 🆕 2026-07-01 (Khushi) — the comments + approved-by the captain enters for a
+  // BILL DUE must land on the NC tab AND the printed paper trail. Captured once
+  // (with the manager approval) and reused across retries so we never re-prompt.
+  const billDueNoteRef = useRef<string>("");
+  const billDueApproverRef = useRef<string>("");
 
   // 🔴 2026-05-12 — Aggregator bills no longer have the discount baked into
   // the printed customer bill. The customer already saw the discount on
@@ -1794,6 +1799,8 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 discountPct,
               },
               paymentMethod: "COMPLIMENTARY",
+              approvedBy: compApprovedBy.trim(),
+              notes: compReason.trim(),
               billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
             }).catch((e) => console.warn("[comp settle print] failed", e));
           }
@@ -1814,9 +1821,23 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
       if (walletPaidSoFar > 0) { setError("Undo the wallet redemption(s) before moving this bill to BILL DUE."); return; }
       const empId = currentStaff?.id || "";
       if (!billDueApproved) {
+        // Capture the comments + who approved BEFORE the manager gate so both
+        // appear in the approval prompt AND land on the tab + printed bill.
+        const noteInput = window.prompt(
+          "BILL DUE — comments (who it's for / why). Optional:",
+          billDueNoteRef.current || "",
+        );
+        billDueNoteRef.current = (noteInput || "").trim();
+        const approverInput = window.prompt(
+          "BILL DUE — approved by (manager name):",
+          billDueApproverRef.current || "",
+        );
+        billDueApproverRef.current = (approverInput || "").trim();
         const ok = await requireManagerApproval(
           `BILL DUE — move the WHOLE ₹${finalAmount} bill to a staff running tab.\n` +
           `Logged under: ${captainName}${empId ? ` (${empId})` : ""}\n` +
+          (billDueApproverRef.current ? `Approved by: ${billDueApproverRef.current}\n` : "") +
+          (billDueNoteRef.current ? `Notes: ${billDueNoteRef.current}\n` : "") +
           `Settled later via SALARY deduction.\n\n` +
           `Manager OTP/PIN required for a staff BILL DUE.`,
           { by: captainName, tableId: reservation.tableId, amount: finalAmount },
@@ -1824,6 +1845,9 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         if (!ok) { setError("Manager approval required for a BILL DUE."); return; }
         setBillDueApproved(true);
       }
+      // Resolved once — reused for the tab write AND the printed bill below.
+      const billDueApprover = billDueApproverRef.current || "Manager (OTP/PIN)";
+      const billDueNote = billDueNoteRef.current;
       setSaving(true);
       try {
         // Move the table's consumption onto a NC billdue tab (full SC+GST, cross-
@@ -1839,10 +1863,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           const tab = await upsertOpenBillDueRound(
             {
               name: captainName, phone: "", role: "OTHER",
-              approvedBy: "Manager (OTP/PIN)", staff: captainName, employeeId: empId,
+              approvedBy: billDueApprover, staff: captainName, employeeId: empId,
             },
             billDueItems,
-            `Staff friends & family · ${captainName}${empId ? ` (${empId})` : ""} · Table ${reservation.tableId}`,
+            `Staff friends & family · ${captainName}${empId ? ` (${empId})` : ""} · Table ${reservation.tableId}` +
+              (billDueNote ? ` · ${billDueNote}` : ""),
           );
           tabId = tab.id;
           billDueTabRef.current = tabId;
@@ -1893,6 +1918,8 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                 discountPct,
               },
               paymentMethod: "BILL DUE",
+              approvedBy: billDueApprover,
+              notes: billDueNote,
               billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
             }).catch((e) => console.warn("[billdue settle print] failed", e));
           }
