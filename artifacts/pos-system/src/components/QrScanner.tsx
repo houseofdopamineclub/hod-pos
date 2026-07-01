@@ -273,6 +273,17 @@ export function QrScanner({ onResult, onClose, brutalist = false }: { onResult: 
           rafRef.current = requestAnimationFrame(tick);
         };
         rafRef.current = requestAnimationFrame(tick);
+        // 🆕 2026-06-30 (Khushi) — WATCHDOG. A built detector (esp. the WASM
+        // ponyfill) can SILENTLY return zero codes forever when its binary
+        // 404s / is CSP-blocked / never finishes compiling — it does NOT throw,
+        // so the `fails >= 8` demotion above never fires and the scanner "opens
+        // but never decodes" on every device. If nothing has decoded within
+        // 3.5s, ALSO start the jsQR safety net in parallel (startJsqr self-
+        // guards via canvasRef so this can never double-start). Whichever path
+        // decodes first flips scanRef and wins; the loser no-ops.
+        setTimeout(() => {
+          if (scanRef.current && !canvasRef.current) startJsqr();
+        }, 3500);
         return;
       }
 

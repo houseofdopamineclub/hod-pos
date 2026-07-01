@@ -29,8 +29,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStaff } from "@/lib/staff-context";
 import {
-  subscribeToCoversForNight, subscribeToHodReservations,
-  computeHodBreakdownAdjusted,
+  subscribeToCoversForNight, subscribeToHodReservations, subscribeToTableHistory,
+  computeHodBreakdown, computeHodBreakdownAdjusted,
   type HodCover, type HodTableReservation,
 } from "@/lib/firestore-hod";
 import { subscribeBillDue, fetchBillDueForNight, type BillDueDoc } from "@/lib/bill-due";
@@ -39,6 +39,16 @@ import { getOperationalNightStr } from "@/lib/utils-pos";
 // ── helpers ───────────────────────────────────────────────────────────
 const fmtRs = (n: number) => "₹" + Math.round(n || 0).toLocaleString("en-IN");
 const fmtN = (n: number) => (n || 0).toLocaleString("en-IN");
+// 🆕 2026-07-01 (Khushi) — compact duration for the captain "Avg Settle" col.
+const fmtDur = (ms: number) => {
+  if (!ms || ms < 0 || !isFinite(ms)) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), ss = s % 60;
+  if (m < 60) return ss ? `${m}m ${ss}s` : `${m}m`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  return `${h}h ${mm}m`;
+};
 // Normalize an actor name for grouping: drop a trailing "(...)" suffix
 // (e.g. "Aman (bar wallet open)") and collapse whitespace.
 const normName = (s?: string) => (s || "").replace(/\s*\(.*?\)\s*$/, "").replace(/\s+/g, " ").trim();
@@ -75,15 +85,61 @@ interface BarAgg {
   voidCount: number; voidAmt: number;
 }
 interface CapAgg {
+  // #1 tables handled (every non-cancelled deduped table with this captainName).
   handled: number;
+  // #4/#7 BILLED = settled AT THE TABLE. Excludes bill-due ₹0 moves + comps so
+  // the ₹ is real money the captain actually collected.
   billCount: number; billAmt: number;
+  // #3 AMOUNT SPENT (gross consumption = subtotal+SC+tax) + #5 NET (subtotal−disc).
+  // Mirrors venue-sales tableGross / tableNet so Agents reconciles with the Boss
+  // Sales dashboard. Accrues on every non-cancelled table (settled or open).
+  grossAmt: number; netAmt: number;
+  // #2 DISCOUNT split — IN-HOUSE vs AGGREGATOR, each with a ₹ value AND an
+  // effective % (amt / base × 100, base = the gross the discount applied to).
+  discInAmt: number; discInBase: number;
+  discAggAmt: number; discAggBase: number;
+  // Legacy combined discount count/₹ (kept for continuity; = in-house + comp).
   discCount: number; discAmt: number;
   sc: number; tax: number;
+  // #6 PAID BY tender — cash / card / UPI actually collected at the table
+  // (in-house, non-comp only; wallet slice excluded — see walletAmt).
+  cashAmt: number; cardAmt: number; upiAmt: number;
+  // #8 UNBILLED — tables still OPEN (handled, not settled, not cancelled); ₹ is
+  // the estimated running bill (subtotal+SC+tax−disc).
+  unbilledCount: number; unbilledAmt: number;
+  // #10 BILL DUE — settled by moving to a staff friends&family tab (movedToBillDue,
+  // settled later via salary); kept OUT of billCount/billAmt so table money is clean.
+  billDueCount: number; billDueAmt: number;
+  // #11 WALLET REDEEMED — the pre-loaded cover slice used on this table's bill.
+  walletCount: number; walletAmt: number;
+  // #9 voids (whole-bill + item-level) …
   voidCount: number; voidAmt: number;
+  // 🆕 2026-07-01 (Khushi) — LEAKAGE: whole-bill voids ONLY (kind "bill-void" —
+  // a printed bill the customer refused to pay / was written off). Distinct from
+  // voidCount/voidAmt above which ALSO folds in item-level voids. This is the
+  // pure money-lost figure Khushi asked to surface per captain.
+  leakCount: number; leakAmt: number;
+  // 🆕 2026-07-01 (Khushi) — #12 settle SPEED: how long from a guest requesting
+  // the bill (billRequestedAt, stamped when the customer taps "Call Captain to
+  // Settle") to the captain actually marking it paid (paidAt). Averaged per
+  // captain across their settled tables that carry BOTH timestamps.
+  settleMsSum: number; settleCount: number;
 }
 const zeroDoor = (): DoorAgg => ({ scanned: 0, covCount: 0, covAmt: 0, tables: 0, wTable: 0, wAggr: 0, wCorp: 0, cancCount: 0, cancAmt: 0 });
 const zeroBar = (): BarAgg => ({ rcCount: 0, rcAmt: 0, rdCount: 0, rdAmt: 0, wiCount: 0, wiAmt: 0, reprints: 0, discCount: 0, discAmt: 0, voidCount: 0, voidAmt: 0 });
-const zeroCap = (): CapAgg => ({ handled: 0, billCount: 0, billAmt: 0, discCount: 0, discAmt: 0, sc: 0, tax: 0, voidCount: 0, voidAmt: 0 });
+const zeroCap = (): CapAgg => ({ handled: 0, billCount: 0, billAmt: 0, grossAmt: 0, netAmt: 0, discInAmt: 0, discInBase: 0, discAggAmt: 0, discAggBase: 0, discCount: 0, discAmt: 0, sc: 0, tax: 0, cashAmt: 0, cardAmt: 0, upiAmt: 0, unbilledCount: 0, unbilledAmt: 0, billDueCount: 0, billDueAmt: 0, walletCount: 0, walletAmt: 0, voidCount: 0, voidAmt: 0, leakCount: 0, leakAmt: 0, settleMsSum: 0, settleCount: 0 });
+
+// #6 tender bucketing (mirrors venue-sales tenderKey) — cash / card / UPI only;
+// 'other' (online/razorpay etc.) is not shown in the per-captain tender cols.
+const addCapTender = (v: CapAgg, method: string, amt: number) => {
+  if (!(amt > 0)) return;
+  const m = (method || "").toLowerCase();
+  if (m.includes("cash")) v.cashAmt += amt;
+  else if (m.includes("card")) v.cardAmt += amt;
+  else if (m.includes("upi")) v.upiAmt += amt;
+};
+// Effective discount % for a value/base pair.
+const fmtPct = (amt: number, base: number) => (base > 0 ? `${(amt / base * 100).toFixed(1)}%` : "0%");
 
 function ensure<T>(map: Map<string, { name: string; v: T }>, name: string, zero: () => T) {
   const k = keyName(name);
@@ -100,6 +156,17 @@ const isAggregatorRes = (r: HodTableReservation) =>
 const isCorporateRes = (r: HodTableReservation) =>
   (r.source || "").toLowerCase() === "corporate" || !!(r.companyName && r.companyName.trim());
 
+// Mirror venue-sales.isInhouse EXACTLY so the captain money split (discount +
+// tender) reconciles with the Boss → Sales dashboard. A booking is IN-HOUSE
+// unless its aggregator/source names a platform or is an unknown non-empty
+// source. (Do NOT reuse isAggregatorRes here — that classifies unknown sources
+// as in-house, the OPPOSITE of the dashboard, and would skew the split.)
+const isInhouseRes = (r: HodTableReservation): boolean => {
+  const s = (((r as any).aggregator || r.source || "") + "").toLowerCase();
+  if (/swiggy|zomato|eazydiner|eazydinner/.test(s)) return false;
+  return s === "" || s === "inhouse" || s === "in-house" || s === "corporate" || s === "walkin" || s === "walk-in";
+};
+
 const isWalkinBarCover = (c: HodCover) =>
   String((c as any).source || "").toLowerCase().startsWith("walkin_bar") ||
   String((c as any).paymentId || "").toLowerCase().startsWith("walkin_bar");
@@ -109,6 +176,12 @@ export default function AgentsReport() {
   const [night, setNight] = useState<string>(() => getOperationalNightStr());
   const [covers, setCovers] = useState<HodCover[]>([]);
   const [reservations, setReservations] = useState<HodTableReservation[]>([]);
+  // 🆕 2026-07-01 (Khushi) — RELEASED tables. releaseTable() archives a settled
+  // table to `tableHistory` and DELETES the live doc, so a report reading only
+  // live `tableReservations` LOSES every captain's settled bills the moment the
+  // table is released — the "data not replicating" bug. Read history too and
+  // merge (deduped) into the captain aggregation, exactly like venue-sales.
+  const [history, setHistory] = useState<HodTableReservation[]>([]);
   const [ncRows, setNcRows] = useState<BillDueDoc[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -172,6 +245,18 @@ export default function AgentsReport() {
       u1 = subscribeToHodReservations(night, (r) => { a = r || []; apply(); });
       u2 = subscribeToHodReservations(nextDay, (r) => { b = r || []; apply(); });
     } catch { setReservations([]); }
+    return () => { try { u1 && u1(); } catch {} try { u2 && u2(); } catch {} };
+  }, [night, nextDay]);
+
+  // Released tables (tableHistory, night + nextDay) — same shape as reservations.
+  useEffect(() => {
+    let a: HodTableReservation[] = [], b: HodTableReservation[] = [];
+    const apply = () => setHistory(mergeById(a, b));
+    let u1: (() => void) | undefined, u2: (() => void) | undefined;
+    try {
+      u1 = subscribeToTableHistory(night, (r) => { a = r || []; apply(); });
+      u2 = subscribeToTableHistory(nextDay, (r) => { b = r || []; apply(); });
+    } catch { setHistory([]); }
     return () => { try { u1 && u1(); } catch {} try { u2 && u2(); } catch {} };
   }, [night, nextDay]);
 
@@ -333,49 +418,149 @@ export default function AgentsReport() {
         }
       }
 
-      // CAPTAIN: handled / billed / discount / SC / tax (by captainName).
-      const cn = r.captainName;
-      if (cn) {
-        const v = ensure(cap, cn, zeroCap);
-        if (v) {
-          v.handled += 1;
-          if ((r.paymentStatus || "").toLowerCase() === "paid") {
-            v.billCount += 1;
-            v.billAmt += r.amountPaid || 0;
-          }
-          if ((r.discountAmount || 0) > 0) { v.discCount += 1; v.discAmt += r.discountAmount || 0; }
-          // 🆕 2026-06-30 (Khushi) — a comp-to-₹0 is a 100% discount: amountPaid
-          // is 0 and the reduced value lives in complimentaryValue (markTablePaid
-          // with method "complimentary"). Without this it showed as a ₹0 bill and
-          // the captain's discount column missed the comp entirely. Count it as a
-          // discount so EVERY reduction a captain gives is reported.
-          if (((r as any).complimentaryValue || 0) > 0) { v.discCount += 1; v.discAmt += (r as any).complimentaryValue || 0; }
-          v.sc += (r as any).serviceChargeAmount || 0;
-          v.tax += r.taxAmount || 0;
-        }
-      }
-
       // (Cancellations are reported ONCE — under DOOR, by cancelledBy. A single
       // cancel event has a single canceller, so attributing it to both DOOR and
       // CAPTAIN would double-show the same event; DOOR owns bookings/cancels.)
+    }
 
-      // CAPTAIN: voids — both whole-bill voids (kind "bill-void") AND item-level
-      // voids after a KOT already fired (kind "items-void", via voidTableItems).
-      // Both remove value from a live tab, so both are attributed to the captain
-      // who performed them. (2026-06-30 Khushi: item voids were previously
-      // invisible here — only full-bill voids showed.)
+    // ---- CAPTAIN — the full per-captain money breakdown (by captainName) ----
+    // Runs over LIVE reservations ∪ RELEASED history, DEDUPED exactly like
+    // venue-sales.processRes so a released table never double-counts and a
+    // settled+released table is not lost. All bill math mirrors venue-sales so
+    // the Agents figures reconcile with the Boss Sales dashboard. READ-ONLY.
+    const seenCap = new Set<string>();
+    for (const r of [...reservations, ...history]) {
+      const isCancelled = (r.status || "").toLowerCase() === "cancelled";
+      if (isCancelled) continue;
+      const dedupeKey = r.bookingRef
+        ? `ref:${r.bookingRef}`
+        : `cmp:${(r.tableId || "").toUpperCase()}|${(r as any).bookedAt || ""}|${r.amountPaid || 0}|${r.arrivalTime || ""}`;
+      if (seenCap.has(dedupeKey)) continue;
+      seenCap.add(dedupeKey);
+
+      // CAPTAIN voids — whole-bill (kind "bill-void") AND item-level (kind
+      // "items-void") voids. Attributed to whoever performed them (e.by), which
+      // may differ from captainName; independent of the handled/billed block.
       for (const e of ((r as any).voidLog || [])) {
         if (e && (e.kind === "bill-void" || e.kind === "items-void") && e.by) {
-          const v = ensure(cap, e.by, zeroCap);
-          if (v) { v.voidCount += 1; v.voidAmt += e.valueLost || 0; }
+          const vv = ensure(cap, e.by, zeroCap);
+          if (vv) {
+            vv.voidCount += 1; vv.voidAmt += e.valueLost || 0;
+            // A whole-bill void is pure LEAKAGE (customer refused / written off).
+            if (e.kind === "bill-void") { vv.leakCount += 1; vv.leakAmt += e.valueLost || 0; }
+          }
         }
+      }
+
+      const cn = r.captainName;
+      if (!cn) continue;
+      const v = ensure(cap, cn, zeroCap);
+      if (!v) continue;
+
+      // #1 TABLES HANDLED (every non-cancelled deduped table with this captain).
+      v.handled += 1;
+
+      // Shared bill math — mirrors venue-sales.processRes EXACTLY.
+      const items = (r.tabRounds || []).flatMap((rd) => rd.items || []);
+      const bd = computeHodBreakdown(items);
+      const subtotal = bd.subtotal;
+      const isPaid = (r.paymentStatus || "").toLowerCase() === "paid";
+      const isBillDue = !!(r as any).movedToBillDue;
+      const inhouse = isInhouseRes(r);       // SAME predicate as venue-sales
+      const comp = !!(r as any).complimentary;
+      let sc: number, tax: number, disc: number;
+      if (isPaid) {
+        sc = (r as any).serviceChargeAmount || 0;
+        tax = r.taxAmount || 0;
+        disc = r.discountAmount || 0;
+      } else {
+        sc = bd.serviceCharge; tax = bd.gst;
+        disc = (r.discountAmount || 0) > 0 ? (r.discountAmount || 0) : subtotal * ((r.discountPercent || 0) / 100);
+      }
+      const billFinal = Math.max(0, subtotal + sc + tax - disc);
+
+      // #10 BILL DUE — table moved to a staff friends&family tab (settle via
+      // salary). venue-sales EXCLUDES movedToBillDue from table Net/Gross (its
+      // consumption accrues on the NC billdue tab instead), so to RECONCILE we
+      // record ONLY the captain-only bill-due KPI here and skip all other
+      // accrual (gross/net/discount/tender). handled++ already counted it.
+      if (isBillDue) {
+        v.billDueCount += 1;
+        v.billDueAmt += (r as any).billDueValue || billFinal;
+        continue;
+      }
+
+      // #3 AMOUNT SPENT (gross) + #5 NET — accrual value (mirrors tableGross/Net).
+      v.grossAmt += subtotal + sc + tax;
+      v.netAmt += Math.max(0, subtotal - disc);
+      // #(SC/tax) — use the SAME paid-vs-open branch value as venue-sales, not
+      // the persisted field only (open tables have no persisted SC/tax yet).
+      v.sc += sc;
+      v.tax += tax;
+
+      // #2 DISCOUNT split — IN-HOUSE vs AGGREGATOR (value + base for the %).
+      if (!inhouse) {
+        let aggDisc = disc;
+        let aggBase = subtotal + sc + tax;
+        if (isPaid) {
+          const aggGross = (r as any).aggregatorGrossAmount || ((r.amountPaid || 0) || billFinal);
+          const aggNet = (r as any).aggregatorNetAmount ?? (r.amountPaid ?? aggGross);
+          aggDisc = Math.max(0, aggGross - aggNet);
+          aggBase = aggGross;
+        }
+        if (aggDisc > 0) { v.discAggAmt += aggDisc; v.discAggBase += aggBase; }
+      } else {
+        // in-house discount = explicit discount + comp-to-₹0 (a 100% discount).
+        const compVal = (r as any).complimentaryValue || 0;
+        const inDisc = disc + compVal;
+        if (inDisc > 0) { v.discInAmt += inDisc; v.discInBase += subtotal + sc + tax; }
+      }
+      // Legacy combined discount count/₹ (continuity with the old column).
+      if ((r.discountAmount || 0) > 0) { v.discCount += 1; v.discAmt += r.discountAmount || 0; }
+      if (((r as any).complimentaryValue || 0) > 0) { v.discCount += 1; v.discAmt += (r as any).complimentaryValue || 0; }
+
+      // Settlement buckets.
+      if (isPaid) {
+        // #4/#7 BILLED / SETTLED at the table (real money collected). Mirror
+        // venue-sales `realized = amountPaid || billFinal`; a comp bill collects
+        // ₹0 at the table (its written-off value shows under discount).
+        v.billCount += 1;
+        v.billAmt += comp ? 0 : ((r.amountPaid || 0) || billFinal);
+        // #12 settle SPEED — needs BOTH billRequestedAt (guest asked) and paidAt.
+        const reqStr = (r as any).billRequestedAt, paidStr = (r as any).paidAt;
+        if (reqStr && paidStr) {
+          const reqMs = new Date(reqStr).getTime(), paidMs = new Date(paidStr).getTime();
+          if (isFinite(reqMs) && isFinite(paidMs) && paidMs > reqMs) { v.settleMsSum += (paidMs - reqMs); v.settleCount += 1; }
+        }
+        // #11 WALLET REDEEMED — the pre-loaded cover slice used on this bill.
+        const wal = (r as any).walletPaidAmount ||
+          (Array.isArray((r as any).walletRedemptions) ? (r as any).walletRedemptions.reduce((s: number, x: any) => s + (x?.amount || 0), 0) : 0);
+        if (wal > 0) { v.walletCount += 1; v.walletAmt += wal; }
+        // #6 CASH / CARD / UPI — in-house, non-comp fresh tender only (mirror
+        // venue-sales: aggregator + comp settle elsewhere; wallet slice was
+        // already tendered at wallet-LOADING time, so only `direct` is fresh).
+        if (!comp && inhouse) {
+          const walletSlice = (r as any).walletPaidAmount || 0;
+          const direct = Math.max(0, (r.amountPaid || 0) - walletSlice);
+          const splits = (r as any).paymentSplits as Array<{ method: string; amount: number }> | undefined;
+          if (splits && splits.length) {
+            const sum = splits.reduce((s, sp) => s + (sp.amount || 0), 0);
+            const f = sum > 0 ? direct / sum : 0;
+            for (const sp of splits) addCapTender(v, sp.method, (sp.amount || 0) * f);
+          } else if (direct > 0) {
+            addCapTender(v, r.paymentMode || "", direct);
+          }
+        }
+      } else {
+        // #8 UNBILLED — table still OPEN (handled, not settled).
+        if (subtotal > 0 || billFinal > 0) { v.unbilledCount += 1; v.unbilledAmt += billFinal; }
       }
     }
 
     const sortRows = <T,>(m: Map<string, { name: string; v: T }>) =>
       Array.from(m.values()).sort((a, b) => a.name.localeCompare(b.name));
     return { doorRows: sortRows(door), barRows: sortRows(bar), capRows: sortRows(cap) };
-  }, [covers, reservations, ncRows, night, rolesByName]);
+  }, [covers, reservations, history, ncRows, night, rolesByName]);
 
   // ── CSV ─────────────────────────────────────────────────────────────
   const downloadCsv = () => {
@@ -392,8 +577,34 @@ export default function AgentsReport() {
     for (const { name, v } of barRows) lines.push([labelFor(name), v.rcCount, Math.round(v.rcAmt), v.rdCount, Math.round(v.rdAmt), v.wiCount, Math.round(v.wiAmt), v.reprints, v.discCount, Math.round(v.discAmt), v.voidCount, Math.round(v.voidAmt)].map(esc).join(","));
     lines.push("");
     lines.push("CAPTAIN AGENTS");
-    lines.push(["Employee", "Tables Handled", "Billed (#)", "Billed (Rs)", "Discount + Comp (#)", "Discount + Comp (Rs)", "Service Charge (Rs)", "Tax (Rs)", "Voids (#)", "Voids (Rs)"].join(","));
-    for (const { name, v } of capRows) lines.push([labelFor(name), v.handled, v.billCount, Math.round(v.billAmt), v.discCount, Math.round(v.discAmt), Math.round(v.sc), Math.round(v.tax), v.voidCount, Math.round(v.voidAmt)].map(esc).join(","));
+    lines.push([
+      "Employee", "Tables Handled",
+      "Amount Spent / Gross (Rs)", "Net Amount (Rs)",
+      "Billed / Settled (#)", "Billed / Settled (Rs)",
+      "Unbilled / Open (#)", "Unbilled / Open (Rs)",
+      "Bill Due — Staff Tab (#)", "Bill Due — Staff Tab (Rs)",
+      "Wallet Redeemed (#)", "Wallet Redeemed (Rs)",
+      "Cash (Rs)", "Card (Rs)", "UPI (Rs)",
+      "In-house Discount (Rs)", "In-house Discount (%)",
+      "Aggregator Discount (Rs)", "Aggregator Discount (%)",
+      "Service Charge (Rs)", "Tax (Rs)",
+      "Voids (#)", "Voids (Rs)", "Voided Bills (#)", "Leakage (Rs)",
+      "Avg Settle Time", "Settle Samples (#)",
+    ].join(","));
+    for (const { name, v } of capRows) lines.push([
+      labelFor(name), v.handled,
+      Math.round(v.grossAmt), Math.round(v.netAmt),
+      v.billCount, Math.round(v.billAmt),
+      v.unbilledCount, Math.round(v.unbilledAmt),
+      v.billDueCount, Math.round(v.billDueAmt),
+      v.walletCount, Math.round(v.walletAmt),
+      Math.round(v.cashAmt), Math.round(v.cardAmt), Math.round(v.upiAmt),
+      Math.round(v.discInAmt), fmtPct(v.discInAmt, v.discInBase),
+      Math.round(v.discAggAmt), fmtPct(v.discAggAmt, v.discAggBase),
+      Math.round(v.sc), Math.round(v.tax),
+      v.voidCount, Math.round(v.voidAmt), v.leakCount, Math.round(v.leakAmt),
+      v.settleCount > 0 ? fmtDur(v.settleMsSum / v.settleCount) : "", v.settleCount,
+    ].map(esc).join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -498,22 +709,36 @@ export default function AgentsReport() {
           </Section>
 
           {/* CAPTAIN */}
-          <Section title="🧑‍🍳 CAPTAIN AGENTS" hint="Tables handled · billed · discount (incl. complimentary / comp-to-₹0) · service charge · tax · voids (whole bill + item-level) — attributed to the final captain on the table.">
-            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 760 }}>
+          <Section title="🧑‍🍳 CAPTAIN AGENTS" hint="Full per-captain breakdown — tables handled · amount spent (gross) · net · billed/settled · unbilled (open) · bill due (staff tab) · wallet redeemed · cash/card/UPI · in-house vs aggregator discount (₹ + %) · SC · tax · voids · leakage · settle speed. Includes RELEASED tables. Scroll sideways for all columns →">
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1680 }}>
               <thead><tr style={{ background: C.bg }}>
-                <Th>Employee</Th><Th>Handled</Th><Th>Billed</Th><Th>Discount + Comp</Th>
-                <Th>Service Charge</Th><Th>Tax</Th><Th>Voids</Th>
+                <Th>Employee</Th><Th>Handled</Th><Th>Amount Spent</Th><Th>Net</Th>
+                <Th>Billed / Settled</Th><Th>Unbilled (Open)</Th><Th>Bill Due (Staff)</Th><Th>Wallet Redeemed</Th>
+                <Th>Cash</Th><Th>Card</Th><Th>UPI</Th>
+                <Th>In-house Disc</Th><Th>Aggregator Disc</Th>
+                <Th>Service Charge</Th><Th>Tax</Th><Th>Voids</Th><Th>Voided Bills · Leakage</Th><Th>Avg Settle</Th>
               </tr></thead>
               <tbody>
-                {capRows.length === 0 ? <EmptyRow cols={7} /> : capRows.map(({ name, v }) => (
+                {capRows.length === 0 ? <EmptyRow cols={18} /> : capRows.map(({ name, v }) => (
                   <tr key={name}>
                     <Cell bold>{labelFor(name)}</Cell>
                     <Cell num bold>{fmtN(v.handled)}</Cell>
-                    <Cell num>{fmtN(v.billCount)} · {fmtRs(v.billAmt)}</Cell>
-                    <Cell num>{fmtN(v.discCount)} · {fmtRs(v.discAmt)}</Cell>
+                    <Cell num>{fmtRs(v.grossAmt)}</Cell>
+                    <Cell num>{fmtRs(v.netAmt)}</Cell>
+                    <Cell num bold>{fmtN(v.billCount)} · {fmtRs(v.billAmt)}</Cell>
+                    <Cell num>{v.unbilledCount > 0 ? <span style={{ color: "#B36B00", fontWeight: 900 }}>{fmtN(v.unbilledCount)} · {fmtRs(v.unbilledAmt)}</span> : <span>{fmtN(0)} · {fmtRs(0)}</span>}</Cell>
+                    <Cell num>{fmtN(v.billDueCount)} · {fmtRs(v.billDueAmt)}</Cell>
+                    <Cell num>{fmtN(v.walletCount)} · {fmtRs(v.walletAmt)}</Cell>
+                    <Cell num>{fmtRs(v.cashAmt)}</Cell>
+                    <Cell num>{fmtRs(v.cardAmt)}</Cell>
+                    <Cell num>{fmtRs(v.upiAmt)}</Cell>
+                    <Cell num>{fmtRs(v.discInAmt)} · {fmtPct(v.discInAmt, v.discInBase)}</Cell>
+                    <Cell num>{fmtRs(v.discAggAmt)} · {fmtPct(v.discAggAmt, v.discAggBase)}</Cell>
                     <Cell num>{fmtRs(v.sc)}</Cell>
                     <Cell num>{fmtRs(v.tax)}</Cell>
                     <Cell num>{fmtN(v.voidCount)} · {fmtRs(v.voidAmt)}</Cell>
+                    <Cell num>{v.leakCount > 0 ? <span style={{ color: "#FF5733", fontWeight: 900 }}>{fmtN(v.leakCount)} · {fmtRs(v.leakAmt)}</span> : <span>{fmtN(0)} · {fmtRs(0)}</span>}</Cell>
+                    <Cell num>{v.settleCount > 0 ? `${fmtDur(v.settleMsSum / v.settleCount)} (${fmtN(v.settleCount)})` : "—"}</Cell>
                   </tr>
                 ))}
               </tbody>
@@ -521,9 +746,10 @@ export default function AgentsReport() {
           </Section>
 
           <div style={{ fontSize: 11, color: C.grey, fontWeight: 600, lineHeight: 1.5, marginTop: 4 }}>
-            Note: "Discount + Comp" includes complimentary bills (a comp-to-₹0 counts as a full discount). "Voids" includes both whole-bill voids and item-level voids done after a KOT fired.
-            Discount / service-charge / tax persist from v3.224 onward — bills printed before that show ₹0 in those columns.
-            A table that changed captains mid-shift credits only the final captain on record.
+            Note: this report now includes RELEASED tables (a table archived to history the moment the captain frees it) so past nights and freed tonight-tables no longer disappear.
+            "Amount Spent" = gross consumption (items + service charge + tax, before discount); "Net" = items after discount — both reconcile with the Boss → Sales dashboard. "Billed / Settled" = money actually collected at the table; "Unbilled (Open)" = tables still running (estimated); "Bill Due (Staff)" = tables moved to a staff friends-&-family tab (settled later via salary, kept out of Billed). "Wallet Redeemed" = the pre-loaded cover money used on the bill (its cash/card/UPI is counted when the wallet was loaded, so it is NOT re-counted under Cash/Card/UPI here). "Cash / Card / UPI" = fresh tender collected at the table only.
+            "In-house Disc" and "Aggregator Disc" each show ₹ and the effective % (aggregator % = the platform's commission, gross − net). "Voids" = whole-bill + item-level voids; "Voided Bills · Leakage" = whole-bill write-offs only (pure money lost).
+            Discount / service-charge / tax persist from v3.224 onward — bills printed before that show ₹0 in those columns. "Avg Settle" = average time from a guest tapping "Call Captain to Settle Bill" to the captain marking it paid (sample count in brackets); only in-app bill requests count, so it can be blank. A table that changed captains mid-shift credits only the final captain on record.
           </div>
         </>
       )}

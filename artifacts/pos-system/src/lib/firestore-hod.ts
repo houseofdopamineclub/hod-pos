@@ -2743,6 +2743,42 @@ export async function findCoverForRedemption(
     const best = pickBest(withBal) || pickBest(unique);
     if (best) return { ok: true, cover: best };
   }
+  // 3. BOOKING/TICKET fallback (2026-07-01 Khushi live-bug). The scanned needle
+  //    may be a BOOKING ref (e.g. an entry-only "HODENT…" pass) whose wallet,
+  //    if any, is keyed by the booking id (UUID) rather than the ref field —
+  //    so the covers-by-ref query above misses it. Mirror what the customer
+  //    wallet does: resolve the booking, then its linked cover. This BOTH
+  //    (a) recovers a real wallet the ref query missed, AND (b) lets us tell
+  //    the captain clearly when a scanned pass simply has NO wallet (an
+  //    entry-only ticket) instead of the confusing generic "not found".
+  if (/^[A-Z0-9_-]{4,}$/i.test(upper)) {
+    try {
+      const bq = query(collection(db, BOOKINGS_COL), where("ref", "==", upper), limit(1));
+      const bsnap = await getDocs(bq);
+      if (!bsnap.empty) {
+        const b: Record<string, unknown> = { id: bsnap.docs[0].id, ...(bsnap.docs[0].data() as Record<string, unknown>) };
+        const linkCandidates = Array.from(new Set(
+          [b["linkedCoverRef"], b["linkedCoverDocId"], b["ref"], b.id]
+            .filter((v): v is string => typeof v === "string" && v.length > 0)
+        ));
+        let anyCover: HodCover | null = null;
+        for (const cand of linkCandidates) {
+          const cover = await getCoverForBooking(cand);
+          if (cover) {
+            anyCover = anyCover || cover;
+            if ((cover.coverBalance || 0) > 0) return { ok: true, cover };
+          }
+        }
+        // A cover doc exists but is empty → return it so the modal's own
+        // pre-flight shows the precise "zero balance" message.
+        if (anyCover) return { ok: true, cover: anyCover };
+        // No cover at all → this is an entry-only ticket, not a scan failure.
+        return { ok: false, reason: `🎟️ ${probe} is an entry pass / ticket — it has no wallet balance to redeem here.` };
+      }
+    } catch (e) {
+      console.warn("[findCoverForRedemption] booking fallback failed", e);
+    }
+  }
   return { ok: false, reason: "No wallet found for that QR / phone / ref" };
 }
 
@@ -2951,6 +2987,23 @@ export async function undoWalletRedemption(
   });
 }
 
+/**
+ * 🆕 2026-07-01 (Khushi) — stamp the moment a table's bill was first REQUESTED
+ * (customer taps "Call Captain to Settle" on the customer site → paymentStatus
+ * flips to "bill_requested"). The customer site does NOT record a timestamp, so
+ * the POS captures it the first time any tablet observes the transition. Used by
+ * the Agents report to show a per-captain average SETTLE SPEED (request → paid).
+ * Fully fail-open (never blocks the floor); caller must guard on !billRequestedAt
+ * so this fires once per table.
+ */
+export async function stampBillRequestedAt(docId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, TABLE_RES_COL, docId), { billRequestedAt: new Date().toISOString() });
+  } catch (e) {
+    console.warn("[stampBillRequestedAt] fail-open", e);
+  }
+}
+
 export async function markTablePaid(
   docId: string,
   payment: {
@@ -2997,6 +3050,19 @@ export async function markTablePaid(
     complimentaryReason?: string;
     complimentaryApprovedBy?: string;
     complimentaryValue?: number;
+    /** 🆕 2026-07-01 (Khushi) — BILL DUE (staff friends & family). The table's
+     *  consumption is moved to a cross-day NC "billdue" running tab (settled later
+     *  via SALARY deduction), so NOTHING is collected now: `amount` is 0 and
+     *  `movedToBillDue` is stamped so venue-sales EXCLUDES this table from Net/
+     *  Gross (the NC billdue tab accrues the sale on its round night — counting
+     *  the table too would double-count). `billDueValue` = the owed gross,
+     *  `billDueTabId` links the NC ledger doc, `billDueEmployeeId` = the settling
+     *  captain's employee id for salary attribution. Requires a manager OTP/PIN
+     *  (gated client-side, same as complimentary). */
+    billDue?: boolean;
+    billDueValue?: number;
+    billDueTabId?: string;
+    billDueEmployeeId?: string;
   },
   bookingRef?: string
 ): Promise<void> {
@@ -3009,6 +3075,15 @@ export async function markTablePaid(
     upd.complimentaryReason = payment.complimentaryReason || "";
     upd.complimentaryApprovedBy = payment.complimentaryApprovedBy || "";
     if (payment.complimentaryValue !== undefined) upd.complimentaryValue = payment.complimentaryValue;
+  }
+  // 🆕 2026-07-01 (Khushi) — BILL DUE settle: mark the table as moved to an NC
+  // billdue running tab. `movedToBillDue` is the flag venue-sales reads to EXCLUDE
+  // this table from Net/Gross (the NC tab accrues the sale) so it's counted once.
+  if (payment.billDue) {
+    upd.movedToBillDue = true;
+    if (payment.billDueValue !== undefined) upd.billDueValue = payment.billDueValue;
+    if (payment.billDueTabId) upd.billDueTabId = payment.billDueTabId;
+    if (payment.billDueEmployeeId) upd.billDueEmployeeId = payment.billDueEmployeeId;
   }
   if (payment.walletPaidAmount !== undefined && payment.walletPaidAmount > 0) {
     upd.walletPaidAmount = payment.walletPaidAmount;

@@ -459,7 +459,21 @@ function WalletOverlay({ cover, staffName, onClose, openNonce }: {
   useEffect(() => {
     setBarDiscPct(0);
     setScOn(true);
-    setRoundNote("");
+    // 🆕 2026-06-30 (Khushi) — PREFILL the bartender's kitchen-note box with any
+    // note the CUSTOMER typed on their own bar self-order (parked as a
+    // 'preparing' round on the cover). Without this the customer's "extra spicy"
+    // note never reached activateCoverOrder roundMeta.note → the KOT. Skip TABLE
+    // self-orders (source 'customer_self_order' — captain owns those). Newest
+    // preparing round wins; falls back to empty. Fail-open.
+    let pre = "";
+    try {
+      const rounds = (cover?.tabRounds || []) as any[];
+      for (let i = rounds.length - 1; i >= 0; i--) {
+        const rd = rounds[i];
+        if (rd && rd.status === "preparing" && rd.source !== "customer_self_order" && rd.note) { pre = String(rd.note); break; }
+      }
+    } catch {}
+    setRoundNote(pre);
   }, [cover?.id, openNonce]);
   // Per-session token for KOT↔Bill pairing. Fresh per print. Displayed in
   // the success overlay so bartender can call it out to the runner / cashier.

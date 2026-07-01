@@ -133,6 +133,18 @@ export interface PaymentMix {
   other: number;
 }
 
+// 🆕 2026-06-30 (Khushi) — per-platform aggregator settlement, so Boss Reports
+// can split the single "Aggregator" tender line into Zomato / Swiggy / EazyDiner.
+// gross = full bill printed to the guest; net = what the venue actually received
+// after the platform discount. (discount = gross − net.)
+export interface AggPlatformAmt { gross: number; net: number; }
+export interface AggByPlatform {
+  zomato: AggPlatformAmt;
+  swiggy: AggPlatformAmt;
+  eazydiner: AggPlatformAmt;
+  other: AggPlatformAmt;
+}
+
 export interface VenueSales {
   night: string;            // "" for a range total
 
@@ -176,6 +188,9 @@ export interface VenueSales {
 
   // ── settlement-tender split (whole venue) ──
   pay: PaymentMix;
+
+  // ── per-platform aggregator settlement (subset of pay.aggregator) ──
+  aggByPlatform: AggByPlatform;
 }
 
 const zeroPay = (): PaymentMix => ({
@@ -194,7 +209,26 @@ const zeroSales = (night: string): VenueSales => ({
   ncComp: 0, ncDiscount: 0, ncWaived: 0, ncDue: 0,
   ncOwner: 0, ncBillDueBilled: 0, ncBillDueOutstanding: 0,
   pay: zeroPay(),
+  aggByPlatform: zeroAggByPlatform(),
 });
+
+// 🆕 2026-06-30 — per-platform aggregator settlement accumulator.
+const zeroAggByPlatform = (): AggByPlatform => ({
+  zomato: { gross: 0, net: 0 },
+  swiggy: { gross: 0, net: 0 },
+  eazydiner: { gross: 0, net: 0 },
+  other: { gross: 0, net: 0 },
+});
+
+// Bucket a platform name into one of the 4 aggByPlatform keys. Mirrors isInhouse's
+// substring matching so the split agrees with the headline aggregator tender total.
+const aggPlatformKey = (name: string): keyof AggByPlatform => {
+  const s = (name || "").toLowerCase();
+  if (s.includes("zomato")) return "zomato";
+  if (s.includes("swiggy")) return "swiggy";
+  if (s.includes("eazydiner") || s.includes("eazy")) return "eazydiner";
+  return "other";
+};
 
 // ── helpers ───────────────────────────────────────────────────────────────
 const num = (v: unknown): number => (typeof v === "number" && isFinite(v) ? v : 0);
@@ -266,6 +300,11 @@ export function aggregateNight(
   const seen = new Set<string>();
   const processRes = (r: HodTableReservation) => {
     if ((r.status || "").toLowerCase() === "cancelled") return;
+    // 🆕 2026-07-01 (Khushi) — a table SETTLED as a staff BILL DUE was moved to an
+    // NC "billdue" running tab (kind="billdue"), which accrues its Net/Gross/SC/GST
+    // on the round night (see ncBillDueRows below). Counting the table here too
+    // would DOUBLE-count the same consumption, so exclude the moved table.
+    if ((r as { movedToBillDue?: boolean }).movedToBillDue) return;
     const dedupeKey = r.bookingRef
       ? `ref:${r.bookingRef}`
       : `cmp:${(r.tableId || "").toUpperCase()}|${r.bookedAt || ""}|${num(r.amountPaid)}|${r.arrivalTime || ""}`;
@@ -324,6 +363,12 @@ export function aggregateNight(
         const aggGross = num((r as { aggregatorGrossAmount?: number }).aggregatorGrossAmount) || (num(r.amountPaid) || billFinal);
         const aggNet = (r as { aggregatorNetAmount?: number }).aggregatorNetAmount ?? (r.amountPaid ?? aggGross);
         out.pay.aggregator += num(aggNet);
+        // 🆕 2026-06-30 — split that net + gross into its platform bucket so Boss
+        // Reports can break the single Aggregator tender line into Zomato/Swiggy/
+        // EazyDiner. Key off the same name isInhouse matched on (aggregator||source).
+        const pk = aggPlatformKey((r.aggregator || r.source || "") + "");
+        out.aggByPlatform[pk].gross += aggGross;
+        out.aggByPlatform[pk].net += num(aggNet);
       } else {
         // walletSlice = the part paid from a pre-loaded cover. We do NOT add it
         // to pay.wallet — that money's real tender (cash/card/upi) is counted at
@@ -580,6 +625,10 @@ function sumSales(nights: VenueSales[]): VenueSales {
     t.pay.wallet += n.pay.wallet; t.pay.cash += n.pay.cash; t.pay.card += n.pay.card;
     t.pay.upi += n.pay.upi; t.pay.online += n.pay.online; t.pay.aggregator += n.pay.aggregator;
     t.pay.comp += n.pay.comp; t.pay.other += n.pay.other;
+    for (const k of ["zomato", "swiggy", "eazydiner", "other"] as const) {
+      t.aggByPlatform[k].gross += n.aggByPlatform[k].gross;
+      t.aggByPlatform[k].net += n.aggByPlatform[k].net;
+    }
   }
   return t;
 }
@@ -792,7 +841,7 @@ export function buildSalesTickets(raw: VenueRaw): SalesTicketRow[] {
 //  Bump SUMMARY_SCHEMA whenever the aggregation MATH changes so stale cached
 //  summaries are ignored and recomputed (old docs with a lower _schema = miss).
 // ─────────────────────────────────────────────────────────────────────────
-export const SUMMARY_SCHEMA = 4;
+export const SUMMARY_SCHEMA = 5;
 const SUMMARY_COL = "daily_summaries";
 
 /** Inclusive list of YYYY-MM-DD nights from `start` to `end` (calendar days). */
@@ -837,7 +886,19 @@ function summaryFromDoc(night: string, data: Record<string, unknown>): VenueSale
       wallet: num(p.wallet), cash: num(p.cash), card: num(p.card), upi: num(p.upi),
       online: num(p.online), aggregator: num(p.aggregator), comp: num(p.comp), other: num(p.other),
     },
+    aggByPlatform: aggByPlatformFromDoc(data.aggByPlatform),
   };
+}
+
+// 🆕 2026-06-30 — rebuild the per-platform split from a cached doc, defaulting
+// every bucket so a legacy/partial doc never NaNs the dashboard.
+function aggByPlatformFromDoc(raw: unknown): AggByPlatform {
+  const src = (raw || {}) as Record<string, unknown>;
+  const one = (k: string): AggPlatformAmt => {
+    const v = (src[k] || {}) as Record<string, unknown>;
+    return { gross: num(v.gross), net: num(v.net) };
+  };
+  return { zomato: one("zomato"), swiggy: one("swiggy"), eazydiner: one("eazydiner"), other: one("other") };
 }
 
 /** Read cached summaries for [start,end] whose schema matches. Fail-open → {}. */

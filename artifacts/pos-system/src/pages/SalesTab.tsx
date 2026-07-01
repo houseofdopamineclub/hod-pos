@@ -45,6 +45,21 @@ const RESET_LABELS: Record<string, string> = {
 };
 
 const inr = (n: number) => `₹${Math.round(n || 0).toLocaleString("en-IN")}`;
+// 🆕 2026-07-01 (Khushi) — human duration for the NC bill-due LIFETIME column
+// (how long a running tab has been open, or how long a settled one took to
+// clear). Compact: "3d 4h" / "5h 12m" / "42m" / "just now".
+const fmtDur = (ms: number) => {
+  if (!ms || ms < 0 || !isFinite(ms)) return "—";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${mm}m`;
+  return `${mm}m`;
+};
+// createdAt is a Firestore Timestamp {seconds}; clearedAt is an ISO string.
+const createdMs = (d: BillDueDoc) => (d.createdAt?.seconds || 0) * 1000;
+const clearedMs = (d: BillDueDoc) => { const t = d.clearedAt ? new Date(d.clearedAt).getTime() : 0; return isNaN(t) ? 0 : t; };
 const fmt = (dt: Date) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 const parse = (night: string) => { const [y, m, d] = night.split("-").map(Number); return new Date(y, (m || 1) - 1, d || 1); };
 const shiftDays = (night: string, delta: number) => { const dt = parse(night); dt.setDate(dt.getDate() + delta); return fmt(dt); };
@@ -230,6 +245,16 @@ export default function SalesTab() {
     L.push("PAYMENT METHODS (real tender collected - cash/card/UPI into the drawer)");
     L.push("Method,Amount Rs");
     for (const m of PAY_META) L.push([m.label, Math.round(t.pay[m.key])].map(esc).join(","));
+    if (t.pay.aggregator > 0) {
+      L.push("");
+      L.push("AGGREGATOR PAYMENTS (paid via food app - net = received after platform cut; excluded from in-house Net/Gross)");
+      L.push("Platform,Gross Printed Rs,Discount Rs,Net Received Rs");
+      for (const [key, label] of [["zomato", "Zomato"], ["swiggy", "Swiggy"], ["eazydiner", "EazyDiner"], ["other", "Other"]] as const) {
+        const a = t.aggByPlatform[key];
+        if (a.gross <= 0 && a.net <= 0) continue;
+        L.push([label, Math.round(a.gross), Math.round(Math.max(0, a.gross - a.net)), Math.round(a.net)].map(esc).join(","));
+      }
+    }
     L.push("");
     L.push("DAILY BREAKDOWN");
     L.push(["Night", "Net", "Gross", "Orders", "Guests", "Service Charge", "Tax", "Discount", "Recharges", "Redeemed", "Not Redeemed"].join(","));
@@ -485,6 +510,51 @@ export default function SalesTab() {
             ) : null}
           </div>
 
+          {/* 🆕 2026-06-30 (Khushi) — AGGREGATOR PAYMENTS split. Breaks the single
+              "Aggregator" tender line into per-platform rows (Zomato / Swiggy /
+              EazyDiner / Other) showing the GROSS bill printed for the guest and the
+              NET the venue actually received after each platform's discount. Includes
+              in-house bills a captain settled via a food-app tender. */}
+          {t.pay.aggregator > 0 ? (
+            <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, marginBottom: 16, overflowX: "auto" }}>
+              <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 2 }}>Aggregator Payments</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.grey, marginBottom: 10 }}>Bills paid via a food app — net is what the venue received after the platform's cut. Excluded from in-house Net / Gross.</div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead><tr style={{ background: C.bg }}>
+                  {["Platform", "Gross (printed)", "Discount", "Net (received)"].map((h, i) => (
+                    <th key={h} style={{ padding: "8px 10px", fontWeight: 900, fontSize: 11, letterSpacing: 0.4, textTransform: "uppercase", textAlign: i === 0 ? "left" : "right", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {([
+                    { key: "zomato", label: "Zomato" },
+                    { key: "swiggy", label: "Swiggy" },
+                    { key: "eazydiner", label: "EazyDiner" },
+                    { key: "other", label: "Other" },
+                  ] as const)
+                    .map((p) => ({ ...p, amt: t.aggByPlatform[p.key] }))
+                    .filter((p) => p.amt.gross > 0 || p.amt.net > 0)
+                    .map((p) => (
+                      <tr key={p.key} style={{ borderTop: "1px solid #E5E5E5" }}>
+                        <td style={{ padding: "8px 10px", fontWeight: 800 }}>{p.label}</td>
+                        <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT }}>{inr(p.amt.gross)}</td>
+                        <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT, color: "#B45309" }}>{inr(Math.max(0, p.amt.gross - p.amt.net))}</td>
+                        <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT, fontWeight: 900 }}>{inr(p.amt.net)}</td>
+                      </tr>
+                    ))}
+                  <tr style={{ borderTop: `2px solid ${C.ink}`, background: C.bg }}>
+                    <td style={{ padding: "8px 10px", fontWeight: 900 }}>Total</td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT, fontWeight: 900 }}>
+                      {inr(t.aggByPlatform.zomato.gross + t.aggByPlatform.swiggy.gross + t.aggByPlatform.eazydiner.gross + t.aggByPlatform.other.gross)}
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT, fontWeight: 900, color: "#B45309" }}>{inr(t.aggregatorDiscount)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: NUM_FONT, fontWeight: 900 }}>{inr(t.pay.aggregator)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
           {/* DAILY TABLE (multi-night only) */}
           {result.perNight.length > 1 ? (
             <div style={{ background: C.card, border: `2px solid ${C.ink}`, borderRadius: 14, padding: 16, marginBottom: 16, overflowX: "auto" }}>
@@ -656,6 +726,15 @@ function NcDashboard({
       .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)),
     [rangeDocs],
   );
+  // 🆕 2026-07-01 (Khushi) — settled (cleared) bill-due tabs in the loaded range,
+  // most-recently-cleared first, for the "tab lifetime" (opened → settled) view.
+  // Reuses the existing one-shot range fetch → zero extra reads.
+  const settledBillDue = useMemo(
+    () => rangeDocs
+      .filter((d) => d.kind === "billdue" && d.status === "cleared")
+      .sort((a, b) => clearedMs(b) - clearedMs(a)),
+    [rangeDocs],
+  );
 
   const compValue = (d: BillDueDoc) => Math.round(d.compApplied ?? d.amountDue ?? 0);
   const billedOf = (d: BillDueDoc) =>
@@ -687,7 +766,7 @@ function NcDashboard({
           <Empty>No open NC bill-due tabs. 🎉</Empty>
         ) : (
           <NcTable
-            head={["Person", "Role", "Billed", "Paid", "Balance", "Rounds", "Payments"]}
+            head={["Person", "Role", "Billed", "Paid", "Balance", "Rounds", "Payments", "Open For"]}
             rows={openBillDue.map((d) => [
               d.customerName || "—",
               d.role || "—",
@@ -696,8 +775,39 @@ function NcDashboard({
               inr(Math.round(d.balanceDue ?? 0)),
               String((d.rounds || []).length),
               String((d.payments || []).length),
+              createdMs(d) ? fmtDur(Date.now() - createdMs(d)) : "—",
             ])}
             highlightCol={4}
+          />
+        )}
+      </Section>
+
+      {/* ── SETTLED NC BILL DUE (range fetch) — how long each tab took to clear ── */}
+      <Section title="✅ Settled NC Bill Due — Tab Lifetime (in range)">
+        {!loaded ? (
+          <Empty>
+            <button onClick={onLoad} disabled={loading}
+              style={{ padding: "10px 22px", borderRadius: 8, background: loading ? C.grey : C.pink, border: `2px solid ${C.ink}`, color: C.ink, fontSize: 14, fontWeight: 900, letterSpacing: 0.6, cursor: loading ? "default" : "pointer", boxShadow: SHADOW_SM }}>
+              {loading ? "LOADING…" : "LOAD RANGE"}
+            </button>
+            <div style={{ marginTop: 8 }}>Pick a date range under VENUE SALES, then LOAD to see settled bill-due tabs and how long each ran.</div>
+          </Empty>
+        ) : fetching ? (
+          <Empty>Loading settled tabs…</Empty>
+        ) : settledBillDue.length === 0 ? (
+          <Empty>No settled NC bill-due tabs in {loadedRange || "this range"}.</Empty>
+        ) : (
+          <NcTable
+            head={["Person", "Role", "Billed", "Opened", "Settled", "Lifetime"]}
+            rows={settledBillDue.map((d) => [
+              d.customerName || "—",
+              d.role || "—",
+              inr(billedOf(d)),
+              createdMs(d) ? new Date(createdMs(d)).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—",
+              clearedMs(d) ? new Date(clearedMs(d)).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—",
+              createdMs(d) && clearedMs(d) ? fmtDur(clearedMs(d) - createdMs(d)) : "—",
+            ])}
+            highlightCol={5}
           />
         )}
       </Section>

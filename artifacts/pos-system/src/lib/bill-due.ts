@@ -96,6 +96,10 @@ export interface BillDueDoc {
   /** Sum of NON-FREE items only (the amount actually owed). */
   amountDue: number;
   staff: string;
+  /** 🆕 2026-07-01 (Khushi) — employee id of the logged-in staff who opened a
+   *  captain BILL DUE (staff friends & family) tab, for salary-deduction
+   *  attribution. Null/absent on bar-NC-opened rows. */
+  staffEmployeeId?: string | null;
   status: "open" | "cleared" | "voided";
   createdAt?: { seconds: number; nanoseconds: number } | null;
   clearedAt?: string | null;
@@ -363,7 +367,7 @@ const _uniqPush = (arr: string[] | null | undefined, v: string): string[] => {
  *  any mismatch it FAILS OPEN to creating a brand-new tab so a round is never
  *  lost or merged into the wrong/closed tab. Returns the tab id + new balance. */
 export async function upsertOpenBillDueRound(
-  person: { name: string; phone: string; role: NcRole; approvedBy: string; staff: string },
+  person: { name: string; phone: string; role: NcRole; approvedBy: string; staff: string; employeeId?: string },
   roundItems: BillDueItem[],
   note?: string,
   existingOpenId?: string,
@@ -427,6 +431,11 @@ export async function upsertOpenBillDueRound(
     role: person.role,
     approvedBy: person.approvedBy || "",
     staff: person.staff || "",
+    // 🆕 2026-07-01 (Khushi) — logged-in staff EMPLOYEE ID for a captain BILL DUE
+    // (staff friends & family). Stamped so the salary-deduction settlement + Boss
+    // NC dashboard can attribute the tab to the exact staff member. Null on rows
+    // opened from the bar NC flow (no employee id passed).
+    staffEmployeeId: person.employeeId || null,
     items: roundItems,
     rounds: [round],
     roundNights: [night],

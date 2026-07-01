@@ -597,7 +597,7 @@ function CoverActivationModal({ booking, agentName, onClose }: { booking: HodBoo
                 (e.g. ₹2,000 instead of ₹1,000) zero + EXPIRE the wallet now,
                 manager-gated. Re-activate the correct amount right after. */}
             <button onClick={startVoid}
-              style={{ width: "100%", padding: 14, borderRadius: 6, background: "#fff", border: "2px solid #FF5733", color: "#FF5733", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer", marginBottom: 4 }}>
+              style={{ width: "100%", padding: 14, borderRadius: 6, background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 15, fontWeight: 900, letterSpacing: 1, cursor: "pointer", marginBottom: 4 }}>
               🚫 VOID COVER &amp; EXPIRE
             </button>
             <div style={{ fontSize: 11, color: "#6B6B6B", textAlign: "center" }}>
@@ -2848,14 +2848,21 @@ function BookingDetailModal({
               📲 SEND WALLET LINK
             </button>
           )}
-          <button onClick={() => onShowQr({
-            bookingRef: booking.ref || booking.id,
-            walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent(booking.ref || booking.id)}`,
-            customerName: booking.name || "Guest",
-            reason: "Show this QR — guest scans to open their wallet & menu instantly.",
-          })}
+          <button onClick={async () => {
+            // 🆕 2026-07-01 (Khushi) — SHOW WALLET QR is Manager-PIN gated here
+            // too (same as the walk-in flow), so the door team can't reveal a
+            // guest's wallet QR without a manager present.
+            const ok = await requireDoorManagerPin("Show the wallet QR to the guest.");
+            if (!ok) return;
+            onShowQr({
+              bookingRef: booking.ref || booking.id,
+              walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent(booking.ref || booking.id)}`,
+              customerName: booking.name || "Guest",
+              reason: "Show this QR — guest scans to open their wallet & menu instantly.",
+            });
+          }}
             style={{ padding: "16px 12px", borderRadius: 6, background: "#FFD700", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
-            📱 SHOW WALLET QR
+            🔒 SHOW WALLET QR
           </button>
           {phoneClean && (
             <a href={`tel:${phoneClean}`}
@@ -2869,7 +2876,7 @@ function BookingDetailModal({
               correct amount right after (ACTIVATE COVER reappears). */}
           {Number(modalCover?.coverActivated || 0) > 0 && (
             <button onClick={startVoid}
-              style={{ gridColumn: "1 / -1", padding: "16px 12px", borderRadius: 6, background: "#fff", border: "2px solid #FF5733", color: "#FF5733", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
+              style={{ gridColumn: "1 / -1", padding: "16px 12px", borderRadius: 6, background: "#FF5733", border: "2px solid #000", color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
               🚫 VOID COVER &amp; EXPIRE
             </button>
           )}
@@ -3535,14 +3542,20 @@ function GuestlistTab({ agentName, query, eventId, eventDate, onCover, onShowQr,
                 style={{ padding: "16px 12px", borderRadius: 6, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
                 📲 SEND WALLET LINK
               </button>
-              <button onClick={() => onShowQr({
-                bookingRef: detailGuest.id,
-                walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent((detailGuest as any).ref || detailGuest.id)}`,
-                customerName: detailGuest.name || "Guest",
-                reason: "Show this QR — guest scans to open their guest-list pass instantly.",
-              })}
+              <button onClick={async () => {
+                // 🆕 2026-07-01 (Khushi) — Manager-PIN gated (same as walk-in +
+                // booking-detail QR) so the QR can't be revealed unsupervised.
+                const ok = await requireDoorManagerPin("Show the wallet QR to the guest.");
+                if (!ok) return;
+                onShowQr({
+                  bookingRef: detailGuest.id,
+                  walletUrl: `https://hodclub.in/?wallet=${encodeURIComponent((detailGuest as any).ref || detailGuest.id)}`,
+                  customerName: detailGuest.name || "Guest",
+                  reason: "Show this QR — guest scans to open their guest-list pass instantly.",
+                });
+              }}
                 style={{ padding: "16px 12px", borderRadius: 6, background: "#FFD700", border: "2px solid #000", color: "#000", fontSize: 14, fontWeight: 900, cursor: "pointer", letterSpacing: .4 }}>
-                📱 SHOW WALLET QR
+                🔒 SHOW WALLET QR
               </button>
               {phoneClean && (
                 <a href={`tel:${phoneClean}`}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactElement, type CSSProperties } from "react";
 import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
+import { upsertOpenBillDueRound } from "@/lib/bill-due";
 import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeToTableHistory, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
@@ -34,6 +35,9 @@ import {
   writeKDSItemsFromKOT, subscribeToReadyKDSItems, markKDSPickedUp, type HodKDSItem,
   // 2026-05-18 — Live menu category filtering (admin Menu CRM controls visibility + discount)
   subscribeToLiveMenuCategories, filterMenuByLiveCategories, type MenuCategory,
+  // 🆕 2026-07-01 (Khushi) — record the moment a bill was first requested so the
+  // Agents report can show a per-captain average settle speed (request → paid).
+  stampBillRequestedAt,
 } from "@/lib/firestore-hod";
 // 🆕 2026-05-20 (Khushi) — Floor-plan dashboard replaces the list view. The
 // HOD_TABLES const is ported from hodclub-patched/index.html so what captain
@@ -222,6 +226,28 @@ function clampCaptainDiscount(raw: number): number | null {
  *  2026-05-26 — uses centeredPinPrompt + centeredAlert (HOD-branded modal,
  *  no ugly browser popups). Fail-open: if DOM helpers throw, the helper
  *  itself falls back to window.prompt. */
+// 🆕 2026-06-30 (Khushi) — brand label for an aggregator platform value. Shared
+// by aggregator-BOOKING settles AND in-house bills paid via an app tender
+// (Zomato / Swiggy / EazyDiner buttons next to Cash/Card/UPI).
+function aggBrandLabel(name: string): string {
+  const n = (name || "").toLowerCase();
+  if (n.includes("swiggy")) return "Swiggy";
+  if (n.includes("zomato") || n.includes("district")) return "Zomato";
+  if (n.includes("eazy")) return "EazyDiner";
+  if (n.includes("magicpin") || n.includes("magic")) return "Magicpin";
+  return AGGREGATOR_OPTIONS.find((a) => a.value === name)?.label || "Aggregator";
+}
+
+// 🆕 2026-06-30 (Khushi) — the three in-house aggregator tenders. The `value`
+// MUST contain a keyword the reporting layer's isInhouse() regex matches
+// (swiggy|zomato|eazydiner) so an in-house bill settled here is reclassified as
+// aggregator (EXCLUDED from in-house Net/Gross, reported as paid-by-platform).
+const INHOUSE_AGG_TENDERS: Array<{ value: string; label: string }> = [
+  { value: "zomato", label: "🍅 Zomato" },
+  { value: "swiggy-dineout", label: "🛵 Swiggy" },
+  { value: "eazydiner", label: "🍽 EazyDiner" },
+];
+
 async function requireManagerPin(reason: string): Promise<boolean> {
   const pin = await centeredPinPrompt(reason, true);
   if (!pin) return false;
@@ -1466,22 +1492,19 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const isAggregator = aggName !== "inhouse";
   // 🆕 2026-06-25 (Khushi) — short platform name for the "Paid by …" button on
   // aggregator bills (the customer settled on the platform, not at the venue).
-  const aggShortName = (() => {
-    // 🔴 2026-06-25 (Khushi) — match by KEYWORD, not an exact value, so EVERY
-    // platform variant maps to its brand name: plain "swiggy", "swiggy-dineout",
-    // "swiggy-scenes" → Swiggy; "zomato"/"zomato-district" → Zomato; etc. The
-    // booking's source can be the bare brand ("swiggy") which no exact case
-    // caught, so it fell back to the generic "Aggregator". Khushi: show the
-    // actual brand (Swiggy/Zomato/...) on the "Paid by …" button, never "Aggregator".
-    const n = (aggName || "").toLowerCase();
-    if (n.includes("swiggy")) return "Swiggy";
-    if (n.includes("zomato") || n.includes("district")) return "Zomato";
-    if (n.includes("eazy")) return "EazyDiner";
-    if (n.includes("magicpin") || n.includes("magic")) return "Magicpin";
-    return AGGREGATOR_OPTIONS.find((a) => a.value === aggName)?.label || "Aggregator";
-  })();
+  const aggShortName = aggBrandLabel(aggName);
+
+  // 🆕 2026-07-01 (Khushi) — logged-in staff identity for a BILL DUE (staff
+  // friends & family) settle: the cross-day running tab is logged under this
+  // captain's name + employee id so it can be settled later via salary deduction.
+  const { currentStaff } = useStaff();
 
   const [payMethod, setPayMethod] = useState<string>(isAggregator ? "aggregator" : "cash");
+  // 🆕 2026-06-30 (Khushi) — when an IN-HOUSE bill is settled via an app tender
+  // (Zomato/Swiggy/EazyDiner) we set payMethod="aggregator" AND stash the chosen
+  // platform here. For aggregator BOOKINGS this stays "" (the platform comes from
+  // the booking's aggName). effAggName/effAggShort below pick the right one.
+  const [tenderAgg, setTenderAgg] = useState<string>("");
   // Pre-fill manual discount with whatever the captain set on the table card (Apply panel),
   // so a custom discount applied at the table flows into Cash/Card/UPI bill calc.
   const [manualDiscount, setManualDiscount] = useState<number>(isAggregator ? 0 : (aggDiscount || 0));
@@ -1525,6 +1548,15 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const [compReason, setCompReason] = useState("");
   const [compApprovedBy, setCompApprovedBy] = useState("");
   const [compApproved, setCompApproved] = useState(false);
+  // 🆕 2026-07-01 (Khushi) — BILL DUE (staff friends & family) manager approval.
+  // Set true only after a successful Manager OTP/PIN; confirm() refuses to write
+  // a bill-due tab without it (OTP is MANDATORY, never bypassable).
+  const [billDueApproved, setBillDueApproved] = useState(false);
+  // 🆕 2026-07-01 (Khushi) — MONEY-SAFETY: the BILL DUE settle is a two-step write
+  // (create NC tab → markTablePaid movedToBillDue). If step 2 fails, remember the
+  // tab id we already created so a RETRY reuses it (markTablePaid only) instead of
+  // creating a DUPLICATE tab → no double liability, no double-count.
+  const billDueTabRef = useRef<string | null>(null);
 
   // 🔴 2026-05-12 — Aggregator bills no longer have the discount baked into
   // the printed customer bill. The customer already saw the discount on
@@ -1561,6 +1593,14 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     ? Math.round(finalAmount * (1 - (aggEditDiscount || 0) / 100))
     : undefined;
 
+  // 🆕 2026-06-30 (Khushi) — the EFFECTIVE aggregator platform for this settle.
+  // Aggregator BOOKING → the booking's platform (aggName). IN-HOUSE bill paid via
+  // an app tender → the captain's chosen platform (tenderAgg). Used everywhere the
+  // settle path needs the platform name/label/published-discount.
+  const effAggName = isAggregator ? aggName : (tenderAgg || "inhouse");
+  const effAggShort = isAggregator ? aggShortName : aggBrandLabel(tenderAgg);
+  const effAggDefault = isAggregator ? aggDiscount : getAggregatorDiscount(tenderAgg);
+
   // ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ──
   // walletRedemptions live on the reservation doc (written atomically by
   // redeemFromWalletAtTable). We READ them straight from the prop so the
@@ -1577,7 +1617,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // selected, drop back to a normal method (complimentary can't mix with
   // wallet) so confirm() can't get stuck on the "undo wallet" error.
   useEffect(() => {
-    if (walletPaidSoFar > 0 && payMethod === "complimentary") {
+    if (walletPaidSoFar > 0 && (payMethod === "complimentary" || payMethod === "billdue")) {
       setPayMethod(isAggregator ? "aggregator" : "cash");
     }
   }, [walletPaidSoFar, payMethod, isAggregator]);
@@ -1761,6 +1801,105 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
       setSaving(false);
       return;
     }
+    // 🆕 2026-07-01 (Khushi) — BILL DUE (staff friends & family). OTP-GATED: moves
+    // the WHOLE bill onto a fresh cross-day NC "billdue" running tab logged under
+    // the logged-in captain (name + employee id), settled later via SALARY
+    // deduction. Manager OTP/PIN is MANDATORY — without a successful approval
+    // NOTHING is written. The table is settled as movedToBillDue (₹0 collected
+    // now) so it's EXCLUDED from Net/Gross (the NC tab accrues the sale instead).
+    if (payMethod === "billdue") {
+      if (walletPaidSoFar > 0) { setError("Undo the wallet redemption(s) before moving this bill to BILL DUE."); return; }
+      const empId = currentStaff?.id || "";
+      if (!billDueApproved) {
+        const ok = await requireManagerApproval(
+          `BILL DUE — move the WHOLE ₹${finalAmount} bill to a staff running tab.\n` +
+          `Logged under: ${captainName}${empId ? ` (${empId})` : ""}\n` +
+          `Settled later via SALARY deduction.\n\n` +
+          `Manager OTP/PIN required for a staff BILL DUE.`,
+          { by: captainName, tableId: reservation.tableId, amount: finalAmount },
+        );
+        if (!ok) { setError("Manager approval required for a BILL DUE."); return; }
+        setBillDueApproved(true);
+      }
+      setSaving(true);
+      try {
+        // Move the table's consumption onto a NC billdue tab (full SC+GST, cross-
+        // day, salary-payable). MONEY-SAFETY: only create the tab ONCE — if a prior
+        // attempt already created it (markTablePaid then failed), reuse that id so a
+        // retry never mints a DUPLICATE tab. computeChargeBill inside upsert adds
+        // SC+GST. No existingOpenId → per-settle tab; no extra reads/subscriptions.
+        let tabId = billDueTabRef.current;
+        if (!tabId) {
+          const billDueItems = allItems
+            .filter((it) => it && (it.qty || 0) > 0)
+            .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0, t: (it.t === "food" ? "food" : "drink") as "food" | "drink" }));
+          const tab = await upsertOpenBillDueRound(
+            {
+              name: captainName, phone: "", role: "OTHER",
+              approvedBy: "Manager (OTP/PIN)", staff: captainName, employeeId: empId,
+            },
+            billDueItems,
+            `Staff friends & family · ${captainName}${empId ? ` (${empId})` : ""} · Table ${reservation.tableId}`,
+          );
+          tabId = tab.id;
+          billDueTabRef.current = tabId;
+        }
+        // Settle the table as moved-to-bill-due: nothing collected now (amount 0),
+        // owed value + tab link + employee id stamped; venue-sales EXCLUDES it from
+        // Net/Gross (the NC billdue tab accrues the sale on its round night).
+        await markTablePaid(reservation._docId, {
+          amount: 0,
+          method: "billdue",
+          captainName,
+          billDue: true,
+          billDueValue: finalAmount,
+          billDueTabId: tabId,
+          billDueEmployeeId: empId,
+          serviceChargeAmount: scAmt || undefined,
+          serviceChargeApplied: serviceCharge,
+          taxAmount: taxAmt || undefined,
+        }, reservation.bookingRef);
+        // Best-effort BILL DUE chit so the captain keeps a paper record. Fire-and-
+        // forget — the tab is already saved, a printer failure must not block.
+        try {
+          const printItems = allItems
+            .filter((it) => it && (it.qty || 0) > 0)
+            .map((it) => ({ n: it.n, p: it.p || 0, qty: it.qty || 0, t: it.t, alc: it.alc }));
+          if (printItems.length > 0) {
+            const id = (reservation.tableId || "").toUpperCase();
+            let floor: TabletFloor = "first";
+            if (id.startsWith("C")) floor = "ground";
+            else if (id.startsWith("T")) floor = "rooftop";
+            else if (id.startsWith("FD") || id.startsWith("SMK")) floor = "first";
+            const sBillBase = reservation._docId.slice(-6).toUpperCase();
+            const sPrevCount = reservation.billPrintCount || 0;
+            const { billNumber: sBillNumber, isDuplicate: sIsDuplicate } =
+              await resolveTableInvoiceNumber(
+                reservation._docId, (reservation as any).invoiceNumber,
+                `${sBillBase}-${sPrevCount + 1}`, sPrevCount > 0,
+                { by: captainName, total: finalAmount, discountPct, aggregator: aggName, billNumberBase: sBillBase },
+              );
+            printBill({
+              tableId: reservation.tableId, floorLabel: reservation.floorLabel,
+              customerName: reservation.customerName, partySize: (reservation as any).partySize, staff: captainName,
+              items: printItems,
+              amounts: {
+                subtotal: discBreakdown.subtotal, serviceCharge: scAmt,
+                cgst: discBreakdown.cgst, sgst: discBreakdown.sgst,
+                discount: discountAmt, roundOff: 0, total: finalAmount,
+                discountPct,
+              },
+              paymentMethod: "BILL DUE",
+              billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
+            }).catch((e) => console.warn("[billdue settle print] failed", e));
+          }
+        } catch { /* best-effort — bill-due tab already saved */ }
+        clearSettleRequest(reservation._docId);
+        onClose();
+      } catch (e: any) { setError(e.message || String(e)); }
+      setSaving(false);
+      return;
+    }
     if (splitMode) {
       if (splitTotal !== payable) {
         setError(`Split total ₹${splitTotal} must equal remaining ₹${payable} (off by ₹${Math.abs(splitDiff)}).`);
@@ -1782,7 +1921,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
       setShowAggDiscWarn(true);
       // Persistent inline backup after the popup is dismissed — stays until the
       // captain types a discount (onChange clears it).
-      setError(`⚠ Enter the ${aggShortName} discount % (this table is ${aggDiscount}%) — type ${aggDiscount}, 32, or 0, then Confirm Payment.`);
+      setError(`⚠ Enter the ${effAggShort} discount % (this platform is ${effAggDefault}%) — type ${effAggDefault}, 32, or 0, then Confirm Payment.`);
       return;
     }
     // 🆕 2026-06-26 (Khushi) — AGGREGATOR discount reminder. When a platform
@@ -1793,8 +1932,8 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
     // a confirmation, not an approval.)
     if (payMethod === "aggregator" && (aggEditDiscount || 0) > 0) {
       const proceed = await centeredConfirm(
-        `${aggShortName} ${aggEditDiscount}% discount applied`,
-        `The guest paid ${aggShortName} after a ${aggEditDiscount}% discount.\n` +
+        `${effAggShort} ${aggEditDiscount}% discount applied`,
+        `The guest paid ${effAggShort} after a ${aggEditDiscount}% discount.\n` +
           `Venue collects ₹${aggregatorNetAmount ?? finalAmount} (net) — ₹${finalAmount} is printed for the guest.\n\n` +
           `Are you sure you want to settle this bill?`,
         "✓ Yes, Confirm",
@@ -1802,6 +1941,19 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         true,
       );
       if (!proceed) return;
+    }
+    // 🆕 2026-06-30 (Khushi) — IN-HOUSE bill settled via an app tender
+    // (Zomato/Swiggy/EazyDiner) requires a MANAGER PIN for ALL three platforms.
+    // This re-classifies an in-house bill as aggregator-paid (excluded from the
+    // in-house Net/Gross), so it must be manager-authorised. Aggregator BOOKINGS
+    // skip this — their platform was set at booking time, not chosen at settle.
+    if (payMethod === "aggregator" && !isAggregator) {
+      const ok = await requireManagerPin(
+        `Settle ₹${finalAmount} bill as PAID BY ${effAggShort}\n` +
+        `(${aggEditDiscount}% discount — venue collects ₹${aggregatorNetAmount ?? finalAmount} net)\n\n` +
+        `Manager PIN required to record an in-house bill as ${effAggShort}-paid.`
+      );
+      if (!ok) { setError(`Manager PIN required to settle via ${effAggShort}.`); return; }
     }
     // D1/D2 — Manager-PIN gates for high manual discount and SC waiver. We
     // collect over-threshold actions into overrideEntries so they get logged
@@ -1911,7 +2063,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         ? ""
         : (splits
             ? `split:${splits.map((s) => s.method).join("+")}`
-            : (payMethod === "aggregator" ? aggName : payMethod));
+            : (payMethod === "aggregator" ? effAggName : payMethod));
       const methodLabel = walletPaidSoFar > 0
         ? (cashLabel ? `wallet+${cashLabel}` : "wallet")
         : cashLabel;
@@ -1926,7 +2078,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         // 2026-05-15 — sum of walletRedemptions[].amount; reports subtract this
         // from `amount` to get true cash/card/UPI collected for EOD reconcile.
         walletPaidAmount: walletPaidSoFar > 0 ? walletPaidSoFar : undefined,
-        aggregator: payMethod === "aggregator" ? aggName : undefined,
+        aggregator: payMethod === "aggregator" ? effAggName : undefined,
         aggregatorDiscount: payMethod === "aggregator" ? aggEditDiscount : undefined,
         // 🆕 2026-06-26 — the FULL printed invoice (gross) before the platform
         // discount. amountPaid is now the NET, so reports read this to show what
@@ -1973,7 +2125,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             await resolveTableInvoiceNumber(
               reservation._docId, (reservation as any).invoiceNumber,
               `${sBillBase}-${sPrevCount + 1}`, sPrevCount > 0,
-              { by: captainName, total: finalAmount, discountPct, aggregator: aggName, billNumberBase: sBillBase },
+              { by: captainName, total: finalAmount, discountPct, aggregator: effAggName, billNumberBase: sBillBase },
             );
           // ⚡ 2026-06-25 — FIRE-AND-FORGET (see confirmAndPrint note). Don't block
           // settlement-complete on the print job's SERVER ack; the job is queued
@@ -2003,7 +2155,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   };
 
   const methods = payMethod === "aggregator"
-    ? [{ key: "aggregator", label: `💼 Paid by ${aggShortName}` }]
+    ? [{ key: "aggregator", label: `💼 Paid by ${effAggShort}` }]
     : [{ key: "cash", label: "💵 Cash" }, { key: "card", label: "💳 Card" }, { key: "upi", label: "📱 UPI" }];
 
   return (
@@ -2227,28 +2379,42 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </span>
         </div>
 
-        {isAggregator && (
+        {(isAggregator || payMethod === "aggregator") && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 8 }}>Payment Channel</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              {["aggregator", "inhouse"].map((ch) => (
-                <button key={ch} onClick={() => setPayMethod(ch === "inhouse" ? "cash" : "aggregator")}
-                  style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", border: "1px solid",
-                    background: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#FBF3D6" : "#fff",
-                    borderColor: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B",
-                    color: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B" }}>
-                  {ch === "aggregator" ? `💼 Paid by ${aggShortName}` : "Pay In-House"}
+            {isAggregator ? (
+              <>
+                <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 8 }}>Payment Channel</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {["aggregator", "inhouse"].map((ch) => (
+                    <button key={ch} onClick={() => setPayMethod(ch === "inhouse" ? "cash" : "aggregator")}
+                      style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", border: "1px solid",
+                        background: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#FBF3D6" : "#fff",
+                        borderColor: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B",
+                        color: (ch === "aggregator" ? payMethod === "aggregator" : payMethod !== "aggregator") ? "#000" : "#6B6B6B" }}>
+                      {ch === "aggregator" ? `💼 Paid by ${aggShortName}` : "Pay In-House"}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              // 🆕 2026-06-30 (Khushi) — IN-HOUSE bill paid via an app tender. Show
+              // which platform is selected + a BACK button to return to Cash/Card/UPI.
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ fontSize: 15, fontWeight: 800, color: "#000" }}>💼 Paid by {effAggShort}</span>
+                <button onClick={() => { setPayMethod("cash"); setTenderAgg(""); setError(""); }}
+                  style={{ padding: "6px 12px", borderRadius: 8, fontSize: 13, fontWeight: 800, cursor: "pointer", background: "#fff", border: "1px solid #000", color: "#000" }}>
+                  ← Pay at venue
                 </button>
-              ))}
-            </div>
+              </div>
+            )}
             {/* 🆕 2026-06-26 (Khushi) — EDITABLE aggregator discount. Prefilled with
-                the platform's published rate; the captain can change it freely (no
-                Manager PIN). The guest's printed bill stays at full price; the venue
-                COLLECTS gross − this %. Net shown live below. */}
+                the platform's published rate; the captain can change it freely. The
+                guest's printed bill stays at full price; the venue COLLECTS gross −
+                this %. Net shown live below. */}
             {payMethod === "aggregator" && (
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontSize: 13, color: "#6B6B6B", marginBottom: 6, fontWeight: 700 }}>
-                  {aggShortName} discount % <span style={{ color: "#6B6B6B", fontWeight: 600, fontSize: 11 }}>· venue collects the net</span>
+                  {effAggShort} discount % <span style={{ color: "#6B6B6B", fontWeight: 600, fontSize: 11 }}>· venue collects the net</span>
                 </div>
                 {/* 🔴 2026-06-26 (Khushi) — onWheel blur: a focused number input
                     changes its value on trackpad/mouse scroll, so the discount
@@ -2283,7 +2449,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                     setAggEditDiscount(n);
                     if (error) setError("");
                   }}
-                  placeholder={`e.g. ${aggDiscount}`} min={0} max={CAPTAIN_DISCOUNT_MAX}
+                  placeholder={`e.g. ${effAggDefault}`} min={0} max={CAPTAIN_DISCOUNT_MAX}
                   style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 17, fontWeight: 800, outline: "none", boxSizing: "border-box", fontFamily: "'Manrope','Space Grotesk',sans-serif" }} />
                 <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "#E6F5F2", border: "2px solid #23A094", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
                   <span style={{ fontSize: 12, fontWeight: 800, color: "#23A094", letterSpacing: 0.3 }}>VENUE COLLECTS (NET)</span>
@@ -2297,7 +2463,7 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           </div>
         )}
 
-        {payMethod !== "aggregator" && payMethod !== "complimentary" && payable > 0 && (
+        {payMethod !== "aggregator" && payMethod !== "complimentary" && payMethod !== "billdue" && payable > 0 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ fontSize: 13, color: "#6B6B6B" }}>Payment Method · ₹{payable} owed</span>
@@ -2320,6 +2486,35 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                     {m.label}
                   </button>
                 ))}
+              </div>
+            )}
+            {/* 🆕 2026-06-30 (Khushi) — IN-HOUSE guest paying via a food app.
+                Tapping a platform flips to the aggregator settle path (net = gross −
+                the platform %), prefills that platform's published discount, and (at
+                Confirm) asks for a Manager PIN. Reported as "Paid by <platform>",
+                EXCLUDED from in-house Net/Gross. Hidden in split mode. */}
+            {!splitMode && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, color: "#6B6B6B", marginBottom: 6, fontWeight: 600 }}>
+                  …or guest paid via a food app (manager PIN):
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {INHOUSE_AGG_TENDERS.map((a) => (
+                    <button key={a.value} onClick={() => {
+                      setTenderAgg(a.value);
+                      setPayMethod("aggregator");
+                      const d = getAggregatorDiscount(a.value) || 0;
+                      setAggEditDiscount(d);
+                      setAggDiscRaw(String(d));
+                      setDiscountApprovedPct(null);
+                      setError("");
+                    }}
+                      style={{ flex: 1, padding: 10, borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                        background: "#fff", border: "1px solid #6B6B6B", color: "#000" }}>
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {splitMode && (
@@ -2410,6 +2605,42 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
                   placeholder="manager name"
                   style={{ width: "100%", padding: "10px 12px", borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 15, outline: "none", boxSizing: "border-box" }} />
                 {compApproved && (
+                  <div style={{ marginTop: 12, padding: "6px 10px", borderRadius: 8, background: "#E6F5F2", border: "2px solid #23A094", fontSize: 12, fontWeight: 900, color: "#23A094", textAlign: "center" }}>
+                    ✅ MANAGER APPROVED
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 🆕 2026-07-01 (Khushi) — BILL DUE (staff friends & family). OTP-gated:
+            moves the WHOLE bill onto a cross-day running tab under the logged-in
+            captain, settled later via SALARY deduction. Hidden once a wallet
+            redemption is on the bill (undo it first). */}
+        {walletPaidSoFar === 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <button onClick={() => {
+                if (payMethod === "billdue") { setPayMethod(isAggregator ? "aggregator" : "cash"); setError(""); return; }
+                setPayMethod("billdue"); setSplitMode(false); setError("");
+              }}
+              style={{ width: "100%", padding: 12, borderRadius: 12, fontSize: 15, fontWeight: 900, cursor: "pointer",
+                background: payMethod === "billdue" ? "#FFC900" : "#fff",
+                border: "2px solid #000", color: "#000", letterSpacing: 0.3 }}>
+              🧾 {payMethod === "billdue" ? "BILL DUE — SELECTED" : "BILL DUE (STAFF F&F)"}
+            </button>
+            {payMethod === "billdue" && (
+              <div style={{ marginTop: 10, padding: 14, borderRadius: 12, background: "#FFFBEA", border: "2px solid #FFC900" }}>
+                <div style={{ fontSize: 13, fontWeight: 900, color: "#000", marginBottom: 4, letterSpacing: 0.4 }}>
+                  STAFF RUNNING TAB · {formatINR(finalAmount)} DUE
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#000", marginBottom: 4 }}>
+                  Logged under: {captainName}{currentStaff?.id ? ` (${currentStaff.id})` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "#6B6B6B", fontWeight: 600, marginBottom: billDueApproved ? 12 : 0 }}>
+                  Carries to the next day · settled later via SALARY deduction. Manager OTP/PIN required before confirming.
+                </div>
+                {billDueApproved && (
                   <div style={{ marginTop: 12, padding: "6px 10px", borderRadius: 8, background: "#E6F5F2", border: "2px solid #23A094", fontSize: 12, fontWeight: 900, color: "#23A094", textAlign: "center" }}>
                     ✅ MANAGER APPROVED
                   </div>
@@ -3574,6 +3805,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     setBusy("");
   };
 
+  // 🆕 2026-06-30 (Khushi) — UNDO MARK SERVED. A captain who taps "Mark Served"
+  // too early (food not actually out yet) had no way back — the round was stuck
+  // on "served". This flips it back served → activated (Ready to Serve) by
+  // reusing markRoundActivated (the SAME flip Print KOT uses), which mirrors to
+  // the customer wallet too. Display-only (no money / no reprint). Fail-open.
+  const handleUndoMarkServed = async (roundIdx: number) => {
+    setBusy(`undo-served-${roundIdx}`);
+    try { await markRoundActivated(r._docId, roundIdx, captainName, r.bookingRef); } catch {}
+    setBusy("");
+  };
+
   const handleServe = async (roundIdx: number) => {
     if (isPastDate) { setKotNotice({ kind: "warn", title: "⏪ Past night", lines: ["Can't print KOT on a past night.", "Switch the date to tonight first."] }); return; }
     // ⚡ 2026-06-25 — FULLY OPTIMISTIC KOT. The round we're printing is already in
@@ -4646,6 +4888,18 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
                       </button>
                     </div>
                   )}
+                  {/* 🆕 2026-06-30 (Khushi) — UNDO MARK SERVED. Lets a captain who
+                      flipped a round to "served" too early put it back to Ready to
+                      Serve. Subtle outline button so it never competes with the
+                      primary actions. Display-only (no reprint / no money). */}
+                  {!coverOnly && isServed && (
+                    <div style={{ marginTop: 8 }}>
+                      <button onClick={() => handleUndoMarkServed(idx)} disabled={busy === `undo-served-${idx}`}
+                        style={{ width: "100%", padding: 8, borderRadius: 8, background: "#fff", border: "2px solid #000", color: "#000", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "'Manrope','Space Grotesk',sans-serif", letterSpacing: ".4px", textTransform: "uppercase" }}>
+                        {busy === `undo-served-${idx}` ? "..." : "↩️ Undo Mark Served"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -4930,7 +5184,19 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
                 }
               } catch (e) { console.warn("[void-cap] increment failed", e); }
               setShowVoidBill(false);
-              alert(`✅ BILL VOIDED — ${r.tableId}\n\n₹${Math.round(billTotal)} logged as leakage.\nReason: ${reason}\n\nTable now shows 🚫 VOIDED. Tap "🔓 Release Table" when guests leave.${suspendNote}`);
+              // 🆕 2026-07-01 (Khushi) — in-app Gumroad notice, NOT the native
+              // browser alert() (ugly "embedded page says…" popup). Reuses the
+              // shared kotNotice modal. suspendNote (if any) becomes its own line.
+              setKotNotice({
+                kind: "warn",
+                title: `🚫 BILL VOIDED — ${r.tableId}`,
+                lines: [
+                  `₹${Math.round(billTotal)} logged as leakage.`,
+                  `Reason: ${reason}`,
+                  `Table now shows 🚫 VOIDED. Tap "🔓 Release Table" when guests leave.`,
+                  ...(suspendNote ? suspendNote.split("\n").map((s) => s.trim()).filter(Boolean) : []),
+                ],
+              });
             }}
           />
         );
@@ -6199,6 +6465,10 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // tile + auto-jump to that table. Without this, the red banner only shows
   // INSIDE the opened card — captain never sees it from the dashboard view.
   const prevSnapshot = useRef<Record<string, { rounds: number; status: string; calling: boolean }>>({});
+  // 🆕 2026-07-01 (Khushi) — tables this tablet has already tried to stamp a
+  // billRequestedAt on, so we attempt the fail-open write once per table (not on
+  // every snapshot). Guarded ALSO by !r.billRequestedAt so no double-stamp.
+  const billStampedRef = useRef<Set<string>>(new Set());
   const playAlert = useAudioAlert();
   const pendingCountRef = useRef(0);
   const billCountRef = useRef(0);
@@ -6347,6 +6617,21 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
             setTimeout(() => setAlertBadge({ text: "● LIVE", color: "#000", bg: "#FBF3D6" }), 8000);
           }
         }
+        // 🆕 2026-07-01 (Khushi) — SETTLE SPEED: record the moment a bill is first
+        // requested (customer site flips paymentStatus→"bill_requested" but writes
+        // no timestamp). Stamp once per table (ref-guarded) and only if the doc
+        // doesn't already carry one — the Agents report later diffs paidAt −
+        // billRequestedAt for a per-captain average. Independent of `prev` so a
+        // freshly-loaded tablet still stamps a table that was already requested.
+        if (
+          r.paymentStatus === "bill_requested" &&
+          String(r.tableId || "").trim() &&
+          !(r as { billRequestedAt?: string }).billRequestedAt &&
+          !billStampedRef.current.has(r._docId)
+        ) {
+          billStampedRef.current.add(r._docId);
+          void stampBillRequestedAt(r._docId);
+        }
         prevSnapshot.current[r._docId] = curr;
       });
 
@@ -6430,7 +6715,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     return () => { unsub(); };
   }, [txOpen, date]);
   // 🆕 2026-06-12 v3.268 (Khushi) — OPEN / CLEARED tables filter for the panel.
-  const [txFilter, setTxFilter] = useState<"all" | "open" | "cleared">("all");
+  const [txFilter, setTxFilter] = useState<"all" | "open" | "cleared" | "voided" | "aggregator" | "complimentary">("all");
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
   // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
   // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
@@ -6625,6 +6910,20 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
         estimated = true;
         override = false;
       }
+      // 🆕 2026-07-01 (Khushi) — a table settled via BILL DUE (staff F&F tab)
+      // collected ₹0 AT THE TABLE (amountPaid=0) — the full value was MOVED to a
+      // running staff tab (billDueValue) to be settled later via salary. Showing
+      // it as "✅ PAID · billed ₹0" was confusing. Surface the moved value + a
+      // distinct "BILL DUE · STAFF TAB" label instead. Breakdown from std so the
+      // line items still render (persisted SC/tax = the ₹0-collected bill, not the
+      // moved value, so we can't use them here).
+      const _bd = r as { movedToBillDue?: boolean; billDueValue?: number };
+      const isBillDue = !!_bd.movedToBillDue;
+      if (isBillDue) {
+        billed = Math.round(_bd.billDueValue ?? std.grandTotal);
+        subtotal = std.subtotal; discount = std.discount; serviceCharge = std.serviceCharge; tax = std.gst;
+        estimated = false; override = false;
+      }
       // 🆕 2026-06-12 v3.267 (Khushi) — flag an IN-HOUSE discount applied to an
       // AGGREGATOR booking (unusual; aggregator bills normally print full price).
       // discount>0 on an aggregator table = a house ₹-off was applied (e.g. FD7
@@ -6644,9 +6943,19 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       // A RELEASED table is settled+closed and off the floor → it always counts
       // as CLEARED (never OPEN), regardless of any odd archived paymentStatus.
       const cleared = isPaid || released;
+      // 🆕 2026-07-01 (Khushi) — VOIDED / AGGREGATOR / COMPLIMENTARY sub-filters
+      // for the TABLE TRANSACTIONS panel. A voided table carries a top-level
+      // status:"voided" (voidBill). Aggregator = a platform booking OR a bill
+      // settled via an app tender (paymentMode). Complimentary = comped whole bill.
+      const _payMode = (r.paymentMode || "").toLowerCase();
+      const isVoided = (r.paymentStatus || "").toLowerCase() === "voided" || (r as { status?: string }).status === "voided" || !!(r as { voided?: boolean }).voided;
+      const isAgg = _isAggBooking || /swiggy|zomato|eazydiner|eazydinner|payeazy|aggregator/.test(_payMode);
+      const _rComp = r as { complimentary?: boolean; complimentaryValue?: number };
+      const isComp = !!_rComp.complimentary || _payMode === "complimentary" || (_rComp.complimentaryValue || 0) > 0;
       return {
         r, rounds, allItems, billed, subtotal, discount, discountPct, serviceCharge, tax,
         isPaid, amountPaid, walletPaid, estimated, override, inhouseDiscOnAgg, released, cleared,
+        isVoided, isAgg, isComp, isBillDue,
         status: r.paymentStatus || "open", ms,
       };
     })
@@ -6659,9 +6968,15 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   // chosen we show ALL of them (no 10-row cap) so the list is complete.
   const txOpenCount = txRows.filter((r) => !r.cleared).length;
   const txClearedCount = txRows.filter((r) => r.cleared).length;
+  const txVoidedCount = txRows.filter((r) => r.isVoided).length;
+  const txAggCount = txRows.filter((r) => r.isAgg).length;
+  const txCompCount = txRows.filter((r) => r.isComp).length;
   const txFiltered =
     txFilter === "open" ? txRows.filter((r) => !r.cleared)
     : txFilter === "cleared" ? txRows.filter((r) => r.cleared)
+    : txFilter === "voided" ? txRows.filter((r) => r.isVoided)
+    : txFilter === "aggregator" ? txRows.filter((r) => r.isAgg)
+    : txFilter === "complimentary" ? txRows.filter((r) => r.isComp)
     : txRows;
   const txShown = (txFull || txFilter !== "all") ? txFiltered : txFiltered.slice(0, 10);
   const _txStatusPill = (status: string, mode?: string) => {
@@ -6682,8 +6997,8 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       L.push([
         _txTime(row.ms), r.tableId || "", r.floorLabel || r.floor || "", r.customerName || "", r.phone || "", r.bookingRef || "",
         Math.round(row.subtotal), Math.round(row.discount), Math.round(row.serviceCharge), Math.round(row.tax), Math.round(row.billed),
-        row.isPaid ? Math.round(row.amountPaid) : "", Math.round(row.walletPaid), r.paymentMode || "",
-        row.released ? `${row.status} (released)` : row.estimated ? `${row.status} (estimated)` : row.override ? `${row.status} (SC waiver/adjusted)` : row.status, items,
+        row.isBillDue ? "" : row.isPaid ? Math.round(row.amountPaid) : "", Math.round(row.walletPaid), row.isBillDue ? "billdue" : (r.paymentMode || ""),
+        row.isBillDue ? `${row.status} (bill due / staff tab)` : row.released ? `${row.status} (released)` : row.estimated ? `${row.status} (estimated)` : row.override ? `${row.status} (SC waiver/adjusted)` : row.status, items,
       ].map(esc).join(","));
     }
     const blob = new Blob(["\uFEFF" + L.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -7124,6 +7439,9 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                     <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B" }}>
                       {txFilter === "open" ? `${txFiltered.length} OPEN table${txFiltered.length === 1 ? "" : "s"}`
                         : txFilter === "cleared" ? `${txFiltered.length} CLEARED table${txFiltered.length === 1 ? "" : "s"}`
+                        : txFilter === "voided" ? `${txFiltered.length} VOIDED table${txFiltered.length === 1 ? "" : "s"}`
+                        : txFilter === "aggregator" ? `${txFiltered.length} AGGREGATOR table${txFiltered.length === 1 ? "" : "s"}`
+                        : txFilter === "complimentary" ? `${txFiltered.length} COMPLIMENTARY table${txFiltered.length === 1 ? "" : "s"}`
                         : txFull ? `All ${txRows.length} tonight`
                         : `Showing latest ${Math.min(10, txRows.length)} of ${txRows.length}`}
                     </div>
@@ -7139,16 +7457,19 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                   {/* 🆕 2026-06-12 v3.268 (Khushi) — OPEN / CLEARED tables tabs.
                       OPEN = tables still running (not settled); CLEARED = settled
                       (paid) tables. Tap a tab to see that complete list. */}
-                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
                     {([
                       { key: "all", label: `ALL (${txRows.length})` },
                       { key: "open", label: `🟡 OPEN (${txOpenCount})` },
                       { key: "cleared", label: `✅ CLEARED (${txClearedCount})` },
+                      { key: "voided", label: `🚫 VOIDED (${txVoidedCount})` },
+                      { key: "aggregator", label: `📦 AGGREGATOR (${txAggCount})` },
+                      { key: "complimentary", label: `🎁 COMP (${txCompCount})` },
                     ] as const).map((t) => {
                       const active = txFilter === t.key;
                       return (
                         <button key={t.key} onClick={() => { setTxFilter(t.key); setTxFull(false); }}
-                          style={{ flex: 1, padding: "9px 6px", borderRadius: 9, border: "2px solid #000", cursor: "pointer",
+                          style={{ flex: "1 1 30%", minWidth: 92, padding: "9px 6px", borderRadius: 9, border: "2px solid #000", cursor: "pointer",
                             background: active ? "#FF90E8" : "#fff", color: "#000",
                             fontSize: 12, fontWeight: 900, letterSpacing: 0.2, whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
                           {t.label}
@@ -7159,14 +7480,21 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
 
                   {txShown.length === 0 && (
                     <div style={{ padding: "16px 8px", textAlign: "center", fontSize: 13, color: "#6B6B6B", fontWeight: 700 }}>
-                      {txFilter === "open" ? "No open tables right now." : txFilter === "cleared" ? "No cleared tables yet tonight." : "No table transactions yet tonight."}
+                      {txFilter === "open" ? "No open tables right now."
+                        : txFilter === "cleared" ? "No cleared tables yet tonight."
+                        : txFilter === "voided" ? "No voided tables tonight."
+                        : txFilter === "aggregator" ? "No aggregator tables tonight."
+                        : txFilter === "complimentary" ? "No complimentary tables tonight."
+                        : "No table transactions yet tonight."}
                     </div>
                   )}
 
                   {txShown.map((row) => {
                     const r = row.r;
                     const open = !!txExpanded[r._docId];
-                    const pill = _txStatusPill(row.status, r.paymentMode);
+                    const pill = row.isBillDue
+                      ? { label: "🧾 BILL DUE · STAFF TAB", bg: "#B45309", fg: "#fff" }
+                      : _txStatusPill(row.status, r.paymentMode);
                     return (
                       <div key={r._docId} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 12, overflow: "hidden", borderLeft: open ? "5px solid #FF90E8" : "1.5px solid #000", boxShadow: "3px 3px 0px #000" }}>
                         <button onClick={() => setTxExpanded((m) => ({ ...m, [r._docId]: !m[r._docId] }))}
@@ -7183,6 +7511,21 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                               <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: pill.bg, color: pill.fg }}>
                                 {pill.label}
                               </span>
+                              {row.isVoided && (
+                                <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#FF5733", color: "#fff" }}>
+                                  🚫 VOIDED
+                                </span>
+                              )}
+                              {row.isComp && (
+                                <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#FF90E8", color: "#000" }}>
+                                  🎁 COMPLIMENTARY
+                                </span>
+                              )}
+                              {row.isAgg && (
+                                <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#000", color: "#fff" }}>
+                                  📦 AGGREGATOR
+                                </span>
+                              )}
                               {row.released && (
                                 <span title="This table was settled and then RELEASED off the floor. It still counts in the night's takings."
                                   style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#B45309", color: "#fff" }}>
@@ -7248,7 +7591,11 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                                 <span>Wallet redeemed</span><span>₹{Math.round(row.walletPaid)}</span>
                               </div>
                             )}
-                            {row.isPaid && (
+                            {row.isBillDue ? (
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 900, color: "#B45309", marginTop: 4 }}>
+                                <span>🧾 Moved to staff tab (settle via salary)</span><span>₹{Math.round(row.billed)}</span>
+                              </div>
+                            ) : row.isPaid && (
                               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 900, color: "#23A094", marginTop: 4 }}>
                                 <span>✅ Paid{r.paymentMode ? ` · ${r.paymentMode}` : ""}</span><span>₹{Math.round(row.amountPaid)}</span>
                               </div>
