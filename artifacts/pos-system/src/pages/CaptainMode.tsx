@@ -1586,19 +1586,30 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const scAmt = discBreakdown.serviceCharge;
   const taxAmt = discBreakdown.gst;
   const finalAmount = discBreakdown.grandTotal;
+  // ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ──
+  // walletRedemptions live on the reservation doc (written atomically by
+  // redeemFromWalletAtTable). READ straight from the prop so the Firestore
+  // subscription auto-refreshes the modal after each redeem/undo. Hoisted here
+  // (above the aggregator-net base) so a mixed wallet+aggregator settle can
+  // subtract the already-redeemed wallet portion.
+  const walletRedemptions: WalletRedemption[] = reservation.walletRedemptions || [];
+  const walletPaidSoFar = walletRedemptions.reduce((s, r) => s + (r.amount || 0), 0);
+  // payable = what's still owed via cash/card/UPI/split/aggregator AFTER wallet.
+  const payable = Math.max(0, Math.round((finalAmount - walletPaidSoFar) * 100) / 100);
   // 🔴 2026-05-12 — Aggregator-net (what the venue actually nets after the
   // platform's commission/discount) — used for reports only, NOT for the
-  // customer bill. MUST be computed off `finalAmount` (subtotal + SC + GST),
-  // because the customer pays the aggregator the FULL invoice and the
-  // platform's commission is taken off that full amount — not off the bare
-  // food/drink subtotal. (Earlier version used `subtotal` and underreported
-  // venue-net by ~SC+GST × discount.)
-  // 🆕 2026-06-26 (Khushi) — the venue NET = full bill (finalAmount/gross) minus
-  // the EDITABLE aggregator discount the captain confirms at settle. This is the
-  // amount actually COLLECTED and recorded as amountPaid; the gross is kept
-  // separately (aggregatorGrossAmount) so Reports can show billed vs received.
+  // customer bill. Computed off the aggregator-covered base (SC + GST included).
+  // 🆕 2026-06-26 (Khushi) — the venue NET = covered base minus the EDITABLE
+  // aggregator discount the captain confirms at settle. Recorded as amountPaid;
+  // the covered gross is kept separately (aggregatorGrossAmount).
+  // 🆕 2026-07-01 (Khushi) — MIXED wallet + aggregator: if the guest already
+  // redeemed wallet, the platform (Zomato/Swiggy/…) only covers the REMAINING
+  // `payable`, so net/discount compute off `payable`, NOT the full bill — else the
+  // wallet ₹ (already counted at wallet-load) is double-counted in the agg net.
+  // Zero wallet → aggBase === finalAmount (unchanged behaviour).
+  const aggBase = walletPaidSoFar > 0 ? payable : finalAmount;
   const aggregatorNetAmount = payMethod === "aggregator"
-    ? Math.round(finalAmount * (1 - (aggEditDiscount || 0) / 100))
+    ? Math.round(aggBase * (1 - (aggEditDiscount || 0) / 100))
     : undefined;
 
   // 🆕 2026-06-30 (Khushi) — the EFFECTIVE aggregator platform for this settle.
@@ -1609,16 +1620,8 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   const effAggShort = isAggregator ? aggShortName : aggBrandLabel(tenderAgg);
   const effAggDefault = isAggregator ? aggDiscount : getAggregatorDiscount(tenderAgg);
 
-  // ── 2026-05-15 — Khushi: Captain × Cover wallet redemption ──
-  // walletRedemptions live on the reservation doc (written atomically by
-  // redeemFromWalletAtTable). We READ them straight from the prop so the
-  // Firestore subscription auto-refreshes the modal after each redeem/undo
-  // — no local copy to drift out of sync.
-  const walletRedemptions: WalletRedemption[] = reservation.walletRedemptions || [];
-  const walletPaidSoFar = walletRedemptions.reduce((s, r) => s + (r.amount || 0), 0);
-  // payable = what's still owed via cash/card/UPI/split AFTER wallet hits.
-  // Zero = fully covered by wallet, payment buttons are hidden.
-  const payable = Math.max(0, Math.round((finalAmount - walletPaidSoFar) * 100) / 100);
+  // (walletRedemptions / walletPaidSoFar / payable are hoisted above — right
+  // after finalAmount — so the aggregator-net base can subtract the wallet.)
   const [showWalletScan, setShowWalletScan] = useState(false);
   const [undoBusy, setUndoBusy] = useState<string | null>(null);
   // 🆕 2026-06-25 — if a wallet redemption lands while Complimentary is
@@ -1635,7 +1638,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
   // platform). Source-level check (not just payMethod) so a captain switching
   // payChannel from aggregator → in-house can't bypass the block. Hoisted
   // above the linked-wallet block (2026-05-20) so showOneTap can read it.
-  const walletAllowed = !isAggregator && payMethod !== "aggregator";
+  // 🆕 2026-07-01 (Khushi) — allow wallet redemption on an IN-HOUSE table even
+  // when the balance is settled via an aggregator tender (wallet + Zomato mix).
+  // A true aggregator BOOKING (isAggregator) still blocks wallet — the platform
+  // already collected from the guest, so mixing would be separate accounting.
+  const walletAllowed = !isAggregator;
   // ── 2026-05-20 — COVER+TABLE LINKED WALLET 1-TAP REDEEM (Khushi spec) ──
   // Live-subscribe to the linked cover doc so the button shows the CURRENT
   // balance (auto-refreshes if customer also spent at the bar between
@@ -1938,9 +1945,13 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
       const nonZero = [splitCash, splitCard, splitUpi].filter((n) => n > 0).length;
       if (nonZero < 2) { setError("Split needs at least 2 non-zero amounts. Use single payment instead."); return; }
     }
-    // 2026-05-15 — Q6: aggregator + wallet must NOT mix (separate accounting).
-    if (payMethod === "aggregator" && walletPaidSoFar > 0) {
-      setError("Aggregator payments can't combine with wallet redemption. Undo the wallet redemption(s) first or switch to In-House.");
+    // 2026-05-15 / 2026-07-01 — wallet + aggregator: only a true aggregator
+    // BOOKING blocks wallet (the platform already collected from the guest). An
+    // IN-HOUSE table may redeem wallet AND settle the balance via an aggregator
+    // tender — the platform then only covers the remaining `payable` (aggBase),
+    // so the wallet is never double-counted.
+    if (isAggregator && walletPaidSoFar > 0) {
+      setError("This is an aggregator booking — the platform already collected from the guest, so wallet redemption can't be combined. Undo the wallet redemption(s) first.");
       return;
     }
     // 🔴 2026-06-26 (Khushi) — BLANK aggregator discount guard. If the captain
@@ -2113,7 +2124,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
         // 🆕 2026-06-26 — the FULL printed invoice (gross) before the platform
         // discount. amountPaid is now the NET, so reports read this to show what
         // was BILLED to the guest vs what the venue RECEIVED.
-        aggregatorGrossAmount: payMethod === "aggregator" ? finalAmount : undefined,
+        // 🆕 2026-07-01 — GROSS = the aggregator-covered base: finalAmount normally,
+        // or the wallet-reduced `payable` (aggBase) on a mixed settle. Reports read
+        // this as billed-vs-net, so gross−net stays the real platform commission and
+        // the wallet portion (already counted at load) is not double-counted here.
+        aggregatorGrossAmount: payMethod === "aggregator" ? aggBase : undefined,
         // 🔴 Net amount the venue receives from the aggregator after their
         // platform discount is settled. Reports show this side-by-side with
         // the gross so admin can reconcile what was billed vs what was paid.
@@ -2168,9 +2183,16 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
           // the standalone "PRINT BILL" preview is untouched (still a full invoice).
           const isAggPay = payMethod === "aggregator";
           const settleDiscPct = isAggPay ? (aggEditDiscount || 0) : discountPct;
-          const settleTotal = isAggPay ? (aggregatorNetAmount ?? finalAmount) : finalAmount;
+          // 🆕 2026-07-01 — on a MIXED wallet+aggregator settle the paper TOTAL =
+          // what the venue actually realised = wallet redeemed + aggregator net.
+          // (No wallet → just the net; in-house → finalAmount, wallet already
+          // included in it.) The platform discount is off the covered base (aggBase),
+          // so gross-components − discount = total and the tender lines reconcile.
+          const settleTotal = isAggPay
+            ? (aggregatorNetAmount ?? aggBase) + walletPaidSoFar
+            : finalAmount;
           const settleDiscVal = isAggPay
-            ? Math.max(0, Math.round(finalAmount - (aggregatorNetAmount ?? finalAmount)))
+            ? Math.max(0, Math.round(aggBase - (aggregatorNetAmount ?? aggBase)))
             : discountAmt;
           // 🆕 2026-07-01 (Khushi) — per-tender "Paid by CASH/CARD/UPI" breakdown at the
           // bill bottom. Mirrors methodLabel: wallet redemption (if any) + the cash side
@@ -7147,10 +7169,14 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       const isAgg = _isAggBooking || /swiggy|zomato|eazydiner|eazydinner|payeazy|aggregator/.test(_payMode);
       const _rComp = r as { complimentary?: boolean; complimentaryValue?: number };
       const isComp = !!_rComp.complimentary || _payMode === "complimentary" || (_rComp.complimentaryValue || 0) > 0;
+      // 🆕 2026-07-01 (Khushi) — the CAPTAIN handling this table, so the panel logs
+      // "who is doing what". `captainName` is stamped when set; else fall back to
+      // `createdBy` (the staff who created/opened the table on the floor).
+      const _captain = ((r.captainName || (r as { createdBy?: string }).createdBy || "") as string).trim();
       return {
         r, rounds, allItems, billed, subtotal, discount, discountPct, serviceCharge, tax,
         isPaid, amountPaid, walletPaid, estimated, override, inhouseDiscOnAgg, released, cleared,
-        isVoided, isAgg, isComp, isBillDue,
+        isVoided, isAgg, isComp, isBillDue, captain: _captain,
         status: r.paymentStatus || "open", ms,
       };
     })
@@ -7185,12 +7211,12 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
     const L: string[] = [];
     L.push(`HOD Table Transactions,${esc(night)}`);
     L.push("");
-    L.push(["Date & Time", "Table", "Floor", "Customer", "Phone", "Ref", "Subtotal Rs", "Discount Rs", "Service Charge Rs", "GST Tax Rs", "Bill Total Rs", "Amount Paid Rs", "Wallet Redeemed Rs", "Payment Mode", "Status", "Items Ordered"].join(","));
+    L.push(["Date & Time", "Table", "Floor", "Captain", "Customer", "Phone", "Ref", "Subtotal Rs", "Discount Rs", "Service Charge Rs", "GST Tax Rs", "Bill Total Rs", "Amount Paid Rs", "Wallet Redeemed Rs", "Payment Mode", "Status", "Items Ordered"].join(","));
     for (const row of txRows) {
       const r = row.r;
       const items = row.rounds.flatMap((rd) => (rd.items || []).map((it) => `${it.qty}x ${it.n}`)).join("; ");
       L.push([
-        _txTime(row.ms), r.tableId || "", r.floorLabel || r.floor || "", r.customerName || "", r.phone || "", r.bookingRef || "",
+        _txTime(row.ms), r.tableId || "", r.floorLabel || r.floor || "", row.captain || "", r.customerName || "", r.phone || "", r.bookingRef || "",
         Math.round(row.subtotal), Math.round(row.discount), Math.round(row.serviceCharge), Math.round(row.tax), Math.round(row.billed),
         row.isBillDue ? "" : row.isPaid ? Math.round(row.amountPaid) : "", Math.round(row.walletPaid), row.isBillDue ? "billdue" : (r.paymentMode || ""),
         row.isBillDue ? `${row.status} (bill due / staff tab)` : row.released ? `${row.status} (released)` : row.estimated ? `${row.status} (estimated)` : row.override ? `${row.status} (SC waiver/adjusted)` : row.status, items,
@@ -7866,6 +7892,11 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
                             </div>
                             <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, marginTop: 3 }}>
                               {r.phone || "—"}{r.bookingRef ? ` · ${shortRef(r.bookingRef)}` : ""}
+                            </div>
+                            {/* 🆕 2026-07-01 (Khushi) — captain handling this table, so
+                                the log shows who is doing what. */}
+                            <div style={{ fontSize: 13, color: "#23A094", fontWeight: 800, marginTop: 2 }}>
+                              👤 {row.captain || "—"}
                             </div>
                             <div style={{ fontSize: 13, color: "#6B6B6B", marginTop: 2 }}>{_txTime(row.ms)}</div>
                             <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 5 }}>
