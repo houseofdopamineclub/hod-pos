@@ -3045,7 +3045,10 @@ function BarMain({ staffName, onLogout }: { staffName: string; onLogout: () => v
   // LIVE REPORTS moved to Boss Mode → Sales → Bar Reports (2026-06-30).
   const [billDueRows, setBillDueRows] = useState<BillDueDoc[]>([]);
   useEffect(() => subscribeBillDue(setBillDueRows), []);
-  const openBillDueCount = billDueRows.filter((r) => r.status === "open").length;
+  // 🆕 2026-07-01 (Khushi) — CAPTAIN staff friends&family bill-due tabs
+  // (staffEmployeeId set) are now settled from Captain mode's own "CAPTAIN
+  // BILL DUE" tab, so they must NOT inflate the bar/cashier badge here.
+  const openBillDueCount = billDueRows.filter((r) => r.status === "open" && !(r.kind === "billdue" && r.staffEmployeeId)).length;
   const [searchQ, setSearchQ] = useState("");
   const [results, setResults] = useState<HodCover[]>([]);
   const [guestHits, setGuestHits] = useState<HodGuestSearchHit[]>([]);
@@ -5185,7 +5188,10 @@ function BillDueModal({ rows, staffName, onClose }: { rows: BillDueDoc[]; staffN
   const open = rows.filter((r) => r.status === "open" && (r.amountDue || 0) > 0 && !r.kind);
   const cleared = rows.filter((r) => r.status !== "open" && (r.amountDue || 0) > 0 && !r.kind);
   const billdueRows = rows
-    .filter((r) => r.kind === "billdue" && r.status === "open" && (r.balanceDue ?? r.amountDue ?? 0) > 0.5)
+    // 🆕 2026-07-01 (Khushi) — CAPTAIN staff friends & family tabs (staffEmployeeId
+    // set) are settled from Captain mode's own "CAPTAIN BILL DUE" tab, NOT here.
+    // Exclude them so the bar/cashier NC list only shows guest running tabs.
+    .filter((r) => r.kind === "billdue" && r.status === "open" && !r.staffEmployeeId && (r.balanceDue ?? r.amountDue ?? 0) > 0.5)
     .sort((a, b) => (b.lastRoundNight || "").localeCompare(a.lastRoundNight || ""));
   const ownerRows = rows
     .filter((r) => r.kind === "owner" && r.status === "open" && !r.waived && (r.amountDue ?? 0) > 0)

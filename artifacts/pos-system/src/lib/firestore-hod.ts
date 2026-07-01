@@ -2675,9 +2675,15 @@ export async function findCoverForRedemption(
 ): Promise<{ ok: true; cover: HodCover } | { ok: false; reason: string }> {
   const raw = String(needle || "").trim();
   if (!raw) return { ok: false, reason: "Empty input" };
-  // Strip URL wrapper if QR was https://hodclub.in/?wallet=HOD-XXX
+  // Strip URL wrapper. The customer QR can encode ANY of the three deep-link
+  // params — hodclub.in/?wallet=HOD-XXX (wallet), ?verify=HODENT… (entry pass)
+  // or ?topup=… (recharge). Previously we only stripped `wallet=`, so a scan of
+  // a `?verify=`/`?topup=` QR left `probe` = the FULL URL → matched no cover and
+  // never reached the booking/entry-pass fallback (Khushi live-bug 2026-07-01:
+  // scanning ?verify=HODENT569019 showed "No wallet found for the whole URL").
+  // Underscore is allowed too (some refs contain `_`).
   let probe = raw;
-  const urlMatch = raw.match(/wallet=([A-Za-z0-9-]+)/i);
+  const urlMatch = raw.match(/[?&](?:wallet|verify|topup)=([A-Za-z0-9_-]+)/i);
   if (urlMatch) probe = urlMatch[1];
   const upper = probe.toUpperCase();
 
@@ -2711,6 +2717,21 @@ export async function findCoverForRedemption(
       const direct = await getDoc(doc(db, COVERS_COL, upper));
       if (direct.exists()) candidates.push({ id: direct.id, ...(direct.data() as Omit<HodCover, "id">) });
     } catch { /* ignore */ }
+    // 2026-07-01 (Khushi live-bug "still can't scan wallet") — a WALK-IN / door-
+    // linked cover can be keyed by its bookingId with a `ref` FIELD that differs
+    // from the scanned value (and with NO bookings doc), so both the ref-field
+    // query and the doc-id lookup above miss it. Only when nothing matched yet,
+    // fall back to the `bookingId` field so these covers resolve too. Gated on
+    // `candidates.length===0` so a normal ref scan pays ZERO extra reads.
+    if (!candidates.length && /[A-Z]/.test(upper)) {
+      try {
+        const q2 = query(collection(db, COVERS_COL), where("bookingId", "==", upper), limit(5));
+        const s2 = await getDocs(q2);
+        s2.docs.forEach((d) => candidates.push({ id: d.id, ...(d.data() as Omit<HodCover, "id">) }));
+      } catch (e) {
+        console.warn("[findCoverForRedemption] bookingId query failed", e);
+      }
+    }
     // Dedupe by doc id.
     const seen = new Set<string>();
     const unique = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
@@ -2779,7 +2800,14 @@ export async function findCoverForRedemption(
       console.warn("[findCoverForRedemption] booking fallback failed", e);
     }
   }
-  return { ok: false, reason: "No wallet found for that QR / phone / ref" };
+  // Nothing matched anywhere. Surface WHAT we searched for (the URL-stripped
+  // probe) so the captain can read it back / verify it against Reports and we
+  // can diagnose a mismatch instantly instead of a blind "not found".
+  console.warn("[findCoverForRedemption] no match", { raw, probe, upper, digits });
+  return {
+    ok: false,
+    reason: `No wallet found for "${probe}". Check it exists in Reports → Wallets, or type the customer's phone number instead.`,
+  };
 }
 
 /** Captain Mode: redeem `requested` ₹ from a customer wallet (cover) against

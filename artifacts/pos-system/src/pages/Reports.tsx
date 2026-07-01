@@ -159,6 +159,18 @@ interface WalletRow {
   // = total rupees discounted across all recharges (gross − net).
   rechargeGross: number;
   rechargeDiscount: number;
+  // 🆕 2026-07-01 (Khushi) — per-TENDER breakdown of how this wallet was funded.
+  // Every rupee loaded (initial DOOR activation + every recharge) is bucketed by
+  // the tender it came in on, so the accountant sees CASH / CARD / UPI / WALLET
+  // (online-app top-up) / OTHERS separately per row. The five buckets sum to
+  // `coverActivated` (= Cover ₹ + Recharged ₹) so they reconcile by construction.
+  loadedCash: number;
+  loadedCard: number;
+  loadedUpi: number;
+  loadedWallet: number;
+  loadedOther: number;
+  // Human note: "Activated at door ₹800 by CASH" (initial cover activation only).
+  activationNote: string;
 }
 
 function fmtTime(iso?: string): string {
@@ -184,6 +196,38 @@ function downloadCSV(filename: string, rows: Array<Record<string, any>>): void {
   const a = document.createElement("a"); a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// 🔴 2026-07-01 (Khushi — "show ONLY the selected night, the event is over"):
+// the subscription fetches TWO calendar days (events straddle midnight), so the
+// next night's early rows can leak into a report that keys off the raw `date`
+// string alone (some rows are stamped with the event's LATER calendar date even
+// though the night is earlier). A row truly belongs to operational night D if
+// its REAL timestamp falls in [D 07:00 IST → D+1 07:00 IST) — same −7h cutoff as
+// getOperationalNightStr. Compute that night from the best timestamp we have.
+function opNightOf(ms: number): string {
+  return new Date(ms - 7 * 60 * 60 * 1000).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+}
+function tsToMs(v: any): number {
+  if (v === null || v === undefined || v === "") return NaN;
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Date.parse(v);
+  if (typeof v?.toMillis === "function") return v.toMillis();
+  if (typeof v?.seconds === "number") return v.seconds * 1000;
+  return NaN;
+}
+// Operational night of a reservation from its SERVICE-time timestamp — when the
+// guest was actually at the venue. Deliberately does NOT use bookedAt/createdAt
+// (booking-CREATION time, often days before the service night — that would drop a
+// pre-booked open table for tonight). Returns null if no service-time field
+// parses, so the caller FAILS OPEN to the raw `date` string and a real table is
+// NEVER hidden; a parseable other-night row is dropped.
+function resOpNight(r: any): string | null {
+  const cands = [r.actualArrivalTime,
+    (r.arrivalTime && r.date) ? `${r.date}T${r.arrivalTime}` : null,
+    r.paidAt];
+  for (const c of cands) { const t = tsToMs(c); if (!isNaN(t)) return opNightOf(t); }
+  return null;
 }
 
 function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>): TableRow {
@@ -219,11 +263,21 @@ function buildTableRow(r: HodTableReservation, orphanByPhone: Map<string, any>):
   }
 
   // Payment method + aggregator-paid amount
-  const isAggregatorSrc = aggName !== "inhouse";
+  // 🔴 2026-07-01 (Khushi — PAY METHOD must be 100% accurate): a REAL aggregator
+  // is ONLY Zomato / Swiggy / EazyDiner (mirrors venue-sales `isInhouse`). Sources
+  // like "corporate", "walk-in", "guestlist" are IN-HOUSE — they must NOT show up
+  // as a fake payment method. And an UNPAID table has NO tender yet, so its Pay
+  // Method stays blank until it is actually settled (was wrongly showing the
+  // booking source, e.g. "CORPORATE", on open tables).
+  const isAggregatorSrc = /swiggy|zomato|eazydiner|eazydinner/.test(aggName.toLowerCase());
   const orphan = orphanByPhone.get((r.phone || "").replace(/\D/g, "").slice(-10));
-  const paymentMethod = (r as any).paymentMethod || (r as any).paymentMode || (orphan?.paymentChannel || (isAggregatorSrc ? aggName : ""));
+  const isPaidRow = r.paymentStatus === "paid";
+  const rawTender = String((r as any).paymentMethod || (r as any).paymentMode || orphan?.paymentChannel || "");
+  const paymentMethod = isPaidRow
+    ? (rawTender || (isAggregatorSrc ? aggName : ""))
+    : (isAggregatorSrc ? `${aggName} (pending)` : rawTender);
   const aggregatorPaidAmount = orphan ? Number(orphan.paidAmount || 0) :
-    (isAggregatorSrc && r.paymentStatus === "paid" ? total : 0);
+    (isAggregatorSrc && isPaidRow ? total : 0);
   // Variance: only compute when we actually have an orphan-payment match for an aggregator tab.
   // Otherwise we'd just be subtracting total from itself.
   const aggregatorVariance = (orphan && isAggregatorSrc) ? (Number(orphan.paidAmount || 0) - total) : null;
@@ -459,6 +513,59 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
       resolvedPaymentMethod = payChannel;
     }
   }
+  // 🆕 2026-07-01 (Khushi) — bucket EVERY rupee loaded into this wallet by the
+  // tender it came in on: CASH / CARD / UPI / WALLET (online-app top-up) /
+  // OTHERS. Two money-in sources: (1) the initial DOOR activation
+  // (coverActivated − topUpTotal, since rechargeCover also increments
+  // coverActivated) bucketed by the cover's activation paymentMethod, and
+  // (2) every recharge transaction bucketed by its tx.type (split_topup fans
+  // out into its cash/upi/card parts). The five buckets sum to coverActivated
+  // (= "Cover ₹" + "Recharged ₹"), so they reconcile by construction. Fail-open:
+  // anything unrecognised falls into OTHERS so no rupee is ever hidden.
+  const loaded = { cash: 0, card: 0, upi: 0, wallet: 0, other: 0 };
+  const initialActivation = Math.max(0, activated - recharged);
+  const actMethod = String(c.paymentMethod || "").toLowerCase();
+  if (initialActivation > 0) {
+    if (actMethod === "cash") loaded.cash += initialActivation;
+    else if (actMethod === "upi") loaded.upi += initialActivation;
+    else if (actMethod === "card") loaded.card += initialActivation;
+    else if (actMethod === "paid_online" || actMethod === "online") loaded.wallet += initialActivation;
+    else loaded.other += initialActivation;
+  }
+  for (const t of ((c.transactions || []) as Array<{ type?: string; amount?: number; split?: { cash?: number; upi?: number; card?: number } }>)) {
+    const ty = String(t.type || "").toLowerCase();
+    if (!ty.includes("topup")) continue;
+    const amt = Number(t.amount || 0);
+    if (amt <= 0) continue;
+    if (ty.startsWith("split")) {
+      // A split recharge is written with its parts summing to the tx amount
+      // (rechargeCover validates this at write time). Guard against a malformed/
+      // legacy payload where the parts DON'T sum to the amount: only trust the
+      // parts when they fit within the amount, else drop the whole tx into
+      // OTHERS. Either way this branch contributes EXACTLY `amt` to the buckets,
+      // so the per-tender split can never overcount vs the recharge total.
+      const s = t.split || {};
+      const sc = Math.max(0, Number(s.cash || 0)), su = Math.max(0, Number(s.upi || 0)), sk = Math.max(0, Number(s.card || 0));
+      const partsSum = sc + su + sk;
+      if (partsSum > 0 && partsSum <= amt) {
+        loaded.cash += sc; loaded.upi += su; loaded.card += sk;
+        const rest = amt - partsSum;
+        if (rest > 0) loaded.other += rest; // unaccounted remainder → OTHERS
+      } else {
+        loaded.other += amt; // malformed/absent split breakdown → whole amt to OTHERS
+      }
+    } else if (ty.startsWith("cash")) loaded.cash += amt;
+    else if (ty.startsWith("upi")) loaded.upi += amt;
+    else if (ty.startsWith("card")) loaded.card += amt;
+    else if (ty.startsWith("online")) loaded.wallet += amt;
+    else loaded.other += amt;
+  }
+  const actLabel = actMethod === "cash" ? "CASH" : actMethod === "upi" ? "UPI"
+    : actMethod === "card" ? "CARD" : (actMethod === "paid_online" || actMethod === "online") ? "ONLINE"
+    : actMethod === "split" ? "SPLIT" : actMethod ? actMethod.toUpperCase() : "";
+  const activationNote = initialActivation > 0
+    ? `Activated at door ₹${initialActivation.toLocaleString()}${actLabel ? ` by ${actLabel}` : ""}`
+    : "";
   return {
     coverId: c.id, ref: c.ref || "",
     name: c.name || "",
@@ -476,6 +583,8 @@ function buildWalletRow(c: HodCover & { id: string }, bookings: Map<string, HodB
     arrival: c.actualArrivalTime || "",
     coverActivated: activated, topUpTotal: recharged, coverUsed: used, coverBalance: balance,
     rechargeGross, rechargeDiscount,
+    loadedCash: loaded.cash, loadedCard: loaded.card, loadedUpi: loaded.upi,
+    loadedWallet: loaded.wallet, loadedOther: loaded.other, activationNote,
     paymentMethod: resolvedPaymentMethod,
     tableId: c.tableId || "",
     walletBillPrints: c.walletBillPrintCount || 0,
@@ -720,7 +829,16 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
   // but tomorrow's genuine bookings were leaking into today's report. Filter to
   // today's date only so the count matches Live Reports.
   const tableRows = useMemo(() => reservations
-    .filter(r => !today || !(r.date) || (r.date as string).slice(0, 10) === today)
+    .filter(r => {
+      if (!today) return true;
+      const n = resOpNight(r);
+      // Fail-open: no parseable timestamp → fall back to the raw date string so a
+      // legit table is NEVER hidden; a parseable OTHER-night row is dropped (kills
+      // the adjacent-day leak Khushi saw after the event was over).
+      return n === null
+        ? (!(r.date) || (r.date as string).slice(0, 10) === today)
+        : n === today;
+    })
     .map(r => buildTableRow(r, orphanByPhone)), [reservations, orphanByPhone, today]);
   const bookingsById = useMemo(() => { const m = new Map<string, HodBooking>(); for (const b of bookings) m.set(b.id, b); return m; }, [bookings]);
   const guestByName = useMemo(() => { const m = new Map<string, HodGuestlistEntry>(); for (const g of guestlist) m.set((g.name || "").toLowerCase().trim(), g); return m; }, [guestlist]);
@@ -783,7 +901,18 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
       .filter(w => !isTableCover(w, coverById.get(w.coverId)!))
       .filter(w => !isGhostCover(w))
       .filter(w => !isEmptyWalkin(w))
-      .filter(w => !today || !w.date || w.date === today || w.date === nextDay);
+      // 🔴 2026-07-01 (Khushi — show ONLY the selected night): classify each cover
+      // by operational night from its SERVICE-time (activation/check-in) timestamp;
+      // drop the adjacent-day leak (was explicitly keeping `nextDay`). Deliberately
+      // NOT createdAt (cover-creation time — a pre-booked cover for tonight is made
+      // earlier and must not be dropped). Fail-open to the raw date string when no
+      // activation timestamp parses so a real cover is never hidden.
+      .filter(w => {
+        if (!today) return true;
+        const tA = tsToMs((w as any).activatedAt);
+        if (!isNaN(tA)) return opNightOf(tA) === today;
+        return !w.date || w.date === today;
+      });
     // ── BUGFIX 2026-05-08: synthesize guestlist rows for entries that never
     // had a cover wallet activated. Without this, guestlist-typed bookings
     // (entryType starts with "guestlist_") and raw guestlist entries that
@@ -838,6 +967,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         checkedIn: !!b.checkedIn, arrival: "",
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
         rechargeGross: 0, rechargeDiscount: 0,
+        loadedCash: 0, loadedCard: 0, loadedUpi: 0, loadedWallet: 0, loadedOther: 0, activationNote: "",
         paymentMethod: (b as any).paymentMethod || (b.paymentId ? "online" : ""),
         tableId: "", walletBillPrints: 0, lastBillAt: "",
         billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
@@ -855,6 +985,7 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
         activatedAt: "", checkedIn: !!g.checkedIn, arrival: "",
         coverActivated: 0, topUpTotal: 0, coverUsed: 0, coverBalance: 0,
         rechargeGross: 0, rechargeDiscount: 0,
+        loadedCash: 0, loadedCard: 0, loadedUpi: 0, loadedWallet: 0, loadedOther: 0, activationNote: "",
         paymentMethod: "", tableId: "", walletBillPrints: 0, lastBillAt: "",
         billTotal: 0, billSubtotal: 0, billDiscount: 0, billServiceCharge: 0, billTax: 0, billNumber: "",
       });
@@ -1070,6 +1201,13 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
       "Arrival Time": w.arrival,
       "Cover Activated ₹": w.coverActivated,
       "Recharged ₹": w.topUpTotal,
+      // 🆕 2026-07-01 (Khushi) — per-tender funding breakdown + door-activation note.
+      "Door Activation": w.activationNote,
+      "Loaded Cash ₹": w.loadedCash,
+      "Loaded Card ₹": w.loadedCard,
+      "Loaded UPI ₹": w.loadedUpi,
+      "Loaded Wallet ₹ (online)": w.loadedWallet,
+      "Loaded Others ₹": w.loadedOther,
       // 🆕 2026-06-24 (Khushi) — per-recharge discount reconciliation from the
       // immutable tx stamps (NOT the single overwriteable billDiscountPct field).
       "Recharge Gross ₹ (pre-discount)": w.rechargeGross,
@@ -1466,14 +1604,14 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           <table className="hod-rpt-grid" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
             <thead>
               <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Bill ₹ (Full)", "Net ₹ (After Disc)", "Disc Δ ₹", "Disc%", "Status", "Pay Method", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
+                {["", "Table", "Source", "Customer", "Phone", "Email", "Captain", "Party", "Arrival", "Min", "Bill ₹ (Full)", "Net ₹ (After Disc)", "Disc Δ ₹", "Disc%", "Status", "Pay Method", "Wallet ₹", "Collected ₹", "Agg Paid ₹", "Agg Var ₹", "Bill ×", "Flags"].map((h) => (
                   <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredTables.length === 0 ? (
-                <tr><td colSpan={20} style={{ padding: 24, textAlign: "center", color: "#888" }}>No tables match filters.</td></tr>
+                <tr><td colSpan={22} style={{ padding: 24, textAlign: "center", color: "#888" }}>No tables match filters.</td></tr>
               ) : filteredTables.map((r) => (
                 <tr key={r.reservationId} style={{ borderBottom: "1px solid #eee" }}>
                   <td style={{ padding: "6px 6px" }}>{dot(r.ambiguity)}</td>
@@ -1513,6 +1651,17 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                     {r.paymentStatus === "paid" ? "✅ paid" : r.paymentStatus === "bill_requested" ? "🧾 bill due" : "open"}
                   </td>
                   <td style={{ padding: "6px 6px", textTransform: "uppercase", fontSize: 10 }}>{r.paymentMethod || "—"}</td>
+                  {/* 🔴 2026-07-01 (Khushi) — scanned WALLET redemption on this bill,
+                      and the FRESH cash/card/UPI collected at the table (paid − wallet).
+                      Both were CSV-only before; now visible on-screen. */}
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800, color: r.walletPaidAmount ? "#a855f7" : "#ccc" }}
+                    title="Scanned wallet redemption applied to this bill">
+                    {r.walletPaidAmount ? `₹${r.walletPaidAmount.toLocaleString()}` : "—"}
+                  </td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", fontWeight: 800, color: (r.amountPaid - r.walletPaidAmount) > 0 ? GREEN : "#ccc" }}
+                    title="Fresh cash / card / UPI collected at the table (amount paid − wallet redeemed)">
+                    {(() => { const c = Math.max(0, (r.amountPaid || 0) - (r.walletPaidAmount || 0)); return c > 0 ? `₹${c.toLocaleString()}` : "—"; })()}
+                  </td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: r.aggregatorPaidAmount ? "#a855f7" : "#ccc" }}>
                     {r.aggregatorPaidAmount ? `₹${r.aggregatorPaidAmount.toLocaleString()}` : "—"}
                   </td>
@@ -1546,14 +1695,14 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
           <table className="hod-rpt-grid" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#000" }}>
             <thead>
               <tr style={{ background: "#F2C744", color: "#000", fontSize: 10, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                {["Source", "Pay Channel", "Name", "Phone", "Email", "Event", "Agent", "Activated", "✓In", "Cover ₹", "Recharged ₹", "Redeemed ₹", "Balance ₹", "Pay", "Bill ×", "Bill ₹"].map((h) => (
+                {["Source", "Pay Channel", "Name", "Phone", "Email", "Event", "Agent", "Activated", "✓In", "Cover ₹", "Recharged ₹", "Door Activation", "Cash ₹", "Card ₹", "UPI ₹", "Wallet ₹", "Others ₹", "Redeemed ₹", "Balance ₹", "Pay", "Bill ×", "Bill ₹"].map((h) => (
                   <th key={h} style={{ padding: "8px 6px", textAlign: "left", borderBottom: "2px solid #000" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredWallets.length === 0 ? (
-                <tr><td colSpan={15} style={{ padding: 24, textAlign: "center", color: "#888" }}>No wallet/guestlist entries for this date.</td></tr>
+                <tr><td colSpan={22} style={{ padding: 24, textAlign: "center", color: "#888" }}>No wallet/guestlist entries for this date.</td></tr>
               ) : filteredWallets.map((w) => {
                 // 🔴 UX 2026-05-10 — color chip per category (matches hodclub.in flows)
                 const sourceColor = w.source === "guestlist" ? "#a855f7"
@@ -1616,6 +1765,12 @@ export default function Reports({ embedded = false }: { embedded?: boolean } = {
                       title={w.rechargeDiscount > 0 ? `Recharge gross ₹${w.rechargeGross.toLocaleString()} · discount given ₹${w.rechargeDiscount.toLocaleString()} (per-transaction, never overwritten)` : "No recharge discount given"}>
                     {w.topUpTotal > 0 ? `₹${w.topUpTotal.toLocaleString()}` : "—"}{w.rechargeDiscount > 0 ? <span style={{ color: GREEN, fontSize: 10, fontWeight: 800 }}> −₹{w.rechargeDiscount.toLocaleString()}</span> : null}
                   </td>
+                  <td style={{ padding: "6px 6px", fontSize: 10, color: w.activationNote ? "#555" : "#ccc", whiteSpace: "nowrap" }}>{w.activationNote || "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.loadedCash > 0 ? "#F59E0B" : "#ccc" }}>{w.loadedCash > 0 ? `₹${w.loadedCash.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.loadedCard > 0 ? GREEN : "#ccc" }}>{w.loadedCard > 0 ? `₹${w.loadedCard.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.loadedUpi > 0 ? "#3b82f6" : "#ccc" }}>{w.loadedUpi > 0 ? `₹${w.loadedUpi.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.loadedWallet > 0 ? "#a855f7" : "#ccc" }} title="Loaded via online / app payment (Razorpay)">{w.loadedWallet > 0 ? `₹${w.loadedWallet.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "6px 6px", textAlign: "right", color: w.loadedOther > 0 ? "#666" : "#ccc" }} title="Split remainder, aggregator, comp or any tender that isn't cash/card/UPI/online">{w.loadedOther > 0 ? `₹${w.loadedOther.toLocaleString()}` : "—"}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right" }}>₹{w.coverUsed.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", textAlign: "right", color: w.coverBalance > 0 ? GREEN : "#ccc", fontWeight: 800 }}>₹{w.coverBalance.toLocaleString()}</td>
                   <td style={{ padding: "6px 6px", fontSize: 10, textTransform: "uppercase" }}>{w.paymentMethod || "—"}</td>

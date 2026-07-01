@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactElement, type CSSProperties } from "react";
 import { Link } from "wouter";
 import { useStaff } from "@/lib/staff-context";
-import { upsertOpenBillDueRound } from "@/lib/bill-due";
+import {
+  upsertOpenBillDueRound, addBillDuePayment, subscribeOpenNc,
+  type BillDueDoc, type NcPaymentMethod,
+} from "@/lib/bill-due";
 import { StaffLogin } from "@/components/StaffLogin";
 import {
   sha256, subscribeToHodReservations, subscribeToHodReservationsScoped, subscribeToTableHistory, subscribeActiveWaiterCalls, markGuestArrived, markRoundServed, markRoundActivated,
@@ -3624,7 +3627,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
   // no audit row. CONFIRM → existing recordBillPrint + printBill flow.
   const [previewBill, setPreviewBill] = useState<null | {
     items: HodOrderItem[]; subtotal: number; discountPct: number; discountAmt: number;
-    afterDiscount: number; scAmt: number; cgst: number; sgst: number; taxAmt: number;
+    afterDiscount: number; scAmt: number; scOn: boolean; cgst: number; sgst: number; taxAmt: number;
     finalAmount: number; aggName: string; floor: TabletFloor; isReprint: boolean;
     reprintNumber: number; stale: boolean;
   }>(null);
@@ -3640,6 +3643,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
   // prints on THIS tablet and treat it as "bill printed" alongside billPrintCount.
   const [justPrintedBill, setJustPrintedBill] = useState(false);
   const lastPrintAtRef = useRef(0);
+  // 🆕 (Khushi) — Service Charge toggle on the PRINT BILL preview. Defaults ON
+  // (prior behavior: the print path always applied SC). Captain can waive SC
+  // before the chit fires; the preview totals + printed paper recompute live.
+  // Paper-only — the Settle Bill (Mark Paid) modal keeps its OWN SC toggle where
+  // the money is actually collected/gated, so waiving here does not settle money.
+  const [printScOn, setPrintScOn] = useState(true);
   const [qrFallback, setQrFallback] = useState<{ url: string; reason: string } | null>(null);
   // 🍳 2026-05-21 — KDS ready items for THIS table. Chef bumps in Kitchen Mode
   // → these populate within 1s → green banner below pulses with chime so
@@ -4017,7 +4026,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
   // 🛟 FALLBACK: if the preview modal crashes for any reason, captain still has the
   // "🖨 PRINT WITHOUT PREVIEW" link inside the modal that bypasses preview and prints
   // directly (same as old behavior).
-  const computeBillSnapshot = () => {
+  const computeBillSnapshot = (scOnOverride?: boolean) => {
     const allItems: HodOrderItem[] = ((r.tabRounds || []).flatMap((rd) => rd.items || []) as HodOrderItem[])
       .filter((it) => it && it.qty > 0);
     if (allItems.length === 0) return null;
@@ -4038,9 +4047,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       ? 0
       : ((r as any).aggregatorDiscount ?? getAggregatorDiscount(aggName) ?? 0);
     // 🆕 2026-06-08 — canonical single-final-round grand (see Mark-Paid note) so the
-    // PRINTED bill total === the customer wallet === Mark Paid, to the rupee. Print
-    // always applies SC (there is no waiver toggle on the print path).
-    const bd = computeHodBreakdownAdjusted(allItems, discountPct, true);
+    // PRINTED bill total === the customer wallet === Mark Paid, to the rupee.
+    // 🆕 (Khushi) — SC is now toggleable on the print preview (printScOn); defaults
+    // ON. scOnOverride lets the toggle recompute the snapshot synchronously before
+    // the printScOn state settles.
+    const scOn = scOnOverride ?? printScOn;
+    const bd = computeHodBreakdownAdjusted(allItems, discountPct, scOn);
     const discountAmt = Math.round(bd.discount);
     const afterDiscount = subtotal - bd.discount;
     const scAmt = bd.serviceCharge;
@@ -4051,7 +4063,7 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
     const prevCount = r.billPrintCount || 0;
     return {
       items: allItems, subtotal, discountPct, discountAmt, afterDiscount,
-      scAmt, cgst, sgst, taxAmt, finalAmount, aggName, floor,
+      scAmt, scOn, cgst, sgst, taxAmt, finalAmount, aggName, floor,
       isReprint: prevCount > 0, reprintNumber: prevCount + 1, stale: !!r.billStale,
     };
   };
@@ -5088,6 +5100,12 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
       {previewBill && (
         <BillPreviewModal
           r={r} captainName={captainName} snap={previewBill} busy={busy === "printbill"}
+          onToggleSc={() => {
+            const next = !printScOn;
+            setPrintScOn(next);
+            const re = computeBillSnapshot(next);
+            if (re) setPreviewBill(re);
+          }}
           onCancel={() => setPreviewBill(null)}
           onConfirm={confirmAndPrint}
         />
@@ -5211,16 +5229,17 @@ function TableCard({ r, captainName, playAlert, existingTables, allReservations,
 // CANCEL → nothing happens (no bill # consumed, no audit row).
 // 🛟 FALLBACK: "PRINT WITHOUT PREVIEW" link bypasses the modal — fires the
 // same confirm path directly. Use if the preview ever looks wrong.
-function BillPreviewModal({ r, captainName, snap, busy, onCancel, onConfirm }: {
+function BillPreviewModal({ r, captainName, snap, busy, onToggleSc, onCancel, onConfirm }: {
   r: HodTableReservation;
   captainName: string;
   snap: {
     items: HodOrderItem[]; subtotal: number; discountPct: number; discountAmt: number;
-    afterDiscount: number; scAmt: number; cgst: number; sgst: number; taxAmt: number;
+    afterDiscount: number; scAmt: number; scOn: boolean; cgst: number; sgst: number; taxAmt: number;
     finalAmount: number; aggName: string; floor: TabletFloor; isReprint: boolean;
     reprintNumber: number; stale: boolean;
   };
   busy: boolean;
+  onToggleSc: () => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -5291,7 +5310,25 @@ function BillPreviewModal({ r, captainName, snap, busy, onCancel, onConfirm }: {
           <div style={{ border: "1px solid #000", borderRadius: 10, padding: "8px 14px", background: "#fff" }}>
             {row("Subtotal", `₹${Math.round(snap.subtotal)}`)}
             {snap.discountAmt > 0 && row(`Discount (${snap.discountPct}%)`, `−₹${Math.round(snap.discountAmt)}`)}
-            {row("Service Charge (10%)", `₹${snap.scAmt}`)}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0" }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 600, color: "#000" }}>
+                Service Charge (10%)
+                <button onClick={() => { if (!busy) onToggleSc(); }} disabled={busy}
+                  data-testid="button-toggle-print-sc"
+                  title="Toggle service charge on this printed bill"
+                  style={{ position: "relative", width: 42, height: 24, borderRadius: 999, border: "2px solid #000",
+                    background: snap.scOn ? "#23A094" : "#fff", cursor: busy ? "wait" : "pointer", padding: 0, transition: "background .2s" }}>
+                  <span style={{ position: "absolute", top: 1, left: snap.scOn ? 20 : 2, width: 16, height: 16, borderRadius: "50%", background: "#000", transition: "left .2s" }} />
+                </button>
+                {!snap.scOn && <span style={{ color: "#FF5733", fontWeight: 800, fontSize: 11 }}>· WAIVED</span>}
+              </span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#000" }}>₹{snap.scAmt}</span>
+            </div>
+            {!snap.scOn && (
+              <div style={{ fontSize: 10.5, color: "#8A3B2E", fontWeight: 600, marginTop: -2, marginBottom: 2 }}>
+                ⚠ Also waive SC on the Settle Bill screen to match this printed bill.
+              </div>
+            )}
             {row("CGST", `₹${snap.cgst.toFixed(2)}`)}
             {row("SGST", `₹${snap.sgst.toFixed(2)}`)}
             <div style={{ height: 1, background: "#000", margin: "8px 0" }} />
@@ -6716,6 +6753,70 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
   }, [txOpen, date]);
   // 🆕 2026-06-12 v3.268 (Khushi) — OPEN / CLEARED tables filter for the panel.
   const [txFilter, setTxFilter] = useState<"all" | "open" | "cleared" | "voided" | "aggregator" | "complimentary">("all");
+
+  // 🆕 2026-07-01 (Khushi) — CAPTAIN BILL DUE panel. Staff friends & family tabs
+  // (opened via the captain settle "BILL DUE (STAFF F&F)" option — identified by
+  // a non-empty staffEmployeeId) are now HIDDEN from the bar/cashier NC list and
+  // settled HERE instead. The open-NC feed is read ONLY while the panel is open
+  // so an idle tablet pays ZERO extra Firestore reads (fail-open). These tabs are
+  // cross-day (NOT night-scoped) — they carry until settled.
+  const [capBillOpen, setCapBillOpen] = useState(false);
+  const [capNcRows, setCapNcRows] = useState<BillDueDoc[]>([]);
+  useEffect(() => {
+    if (!capBillOpen) { setCapNcRows([]); return; }
+    const unsub = subscribeOpenNc((rows) => setCapNcRows(rows || []));
+    return () => { unsub(); };
+  }, [capBillOpen]);
+  const [capExpanded, setCapExpanded] = useState<Record<string, boolean>>({});
+  const captainBillDue = capNcRows
+    .filter((r) => r.kind === "billdue" && r.status === "open" && !!r.staffEmployeeId && (r.balanceDue ?? r.amountDue ?? 0) > 0.5)
+    .sort((a, b) => (b.lastRoundNight || "").localeCompare(a.lastRoundNight || ""));
+  const capBillDueTotal = captainBillDue.reduce((s, r) => s + (r.balanceDue ?? r.amountDue ?? 0), 0);
+  // Settle-modal state: the tab being settled + typed amount + chosen method.
+  const [capPayTarget, setCapPayTarget] = useState<BillDueDoc | null>(null);
+  const [capPayAmt, setCapPayAmt] = useState<string>("");
+  const [capPayMethod, setCapPayMethod] = useState<NcPaymentMethod | null>(null);
+  const [capPayBusy, setCapPayBusy] = useState(false);
+  const openCapPay = (r: BillDueDoc) => {
+    setCapPayTarget(r);
+    setCapPayAmt(String(Math.round(r.balanceDue ?? r.amountDue ?? 0)));
+    setCapPayMethod(null);
+  };
+  // 🆕 2026-07-01 — settle a captain staff BILL DUE tab. Manager-OTP/PIN gated
+  // (mirrors the bar NC settle). SALARY = "settle later, end of month, via salary
+  // deduction". A partial amount carries a balance; a full amount auto-clears the
+  // tab (handled inside addBillDuePayment). Fail-open on every path.
+  const settleCapBillDue = async (r: BillDueDoc, amountInput: number, method: NcPaymentMethod) => {
+    if (!r.id || capPayBusy) return;
+    const bal = r.balanceDue ?? r.amountDue ?? 0;
+    const amt = Math.max(0, Math.min(amountInput, bal));
+    if (amt <= 0) { await centeredAlert("ENTER AMOUNT", "Type how much is being settled.", "error", true); return; }
+    const later = method === "salary";
+    const ok = await requireManagerApproval(
+      `CAPTAIN BILL DUE — ${later ? "settle LATER via SALARY (end of month)" : `collect ₹${amt.toLocaleString("en-IN")} (${method.toUpperCase()})`} for ${r.customerName || "staff"} · balance ₹${bal.toLocaleString("en-IN")}`,
+      { by: captainName, tableId: `nc-${r.id}`, amount: Math.round(amt) },
+    );
+    if (!ok) return;
+    setCapPayBusy(true);
+    try {
+      const res = await addBillDuePayment(r.id, amt, method, captainName);
+      if (!res.ok) { await centeredAlert("FAILED", "Could not record settlement. Try again.", "error", true); }
+      else {
+        setCapPayTarget(null);
+        const left = res.balanceDue ?? 0;
+        await centeredAlert(
+          left <= 0.5 ? "✅ TAB SETTLED" : "✅ PAYMENT TAKEN",
+          left <= 0.5
+            ? `${r.customerName || "Staff"} fully settled (${method.toUpperCase()}).`
+            : `Recorded ₹${(res.applied ?? amt).toLocaleString("en-IN")} (${method.toUpperCase()}). Balance ₹${left.toLocaleString("en-IN")} carries.`,
+          "success", true,
+        );
+      }
+    } catch (e: any) {
+      await centeredAlert("FAILED", e?.message || "Could not record settlement.", "error", true);
+    }
+    setCapPayBusy(false);
+  };
   const prevTableCallIdsRef = useRef<Set<string>>(new Set());
   // 🔴 Architect-fix: separate "hydrated" flag from "prev set size". If the
   // initial snapshot is empty (no pending calls at mount), the OLD `size>0`
@@ -7407,6 +7508,172 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
           </div>
         )}
       </div>
+
+      {/* 🆕 2026-07-01 (Khushi) — CAPTAIN BILL DUE panel. Staff friends & family
+          tabs opened via the captain settle "BILL DUE (STAFF F&F)" option live
+          HERE (they're hidden from the bar/cashier NC list). Shows the FULL bill;
+          tap SETTLE BILL to collect now (Cash/UPI/Card) or settle LATER via
+          SALARY (end of month). Manager OTP/PIN gated. The open-NC feed is read
+          only while the panel is open → an idle tablet pays zero extra reads. */}
+      <div style={{ padding: "10px 16px 0" }}>
+        <div style={{ border: "2px solid #000", borderRadius: 12, overflow: "hidden" }}>
+          <button onClick={() => setCapBillOpen((v) => !v)}
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: capBillOpen ? "#000" : "#fff", border: "none", cursor: "pointer" }}>
+            <span style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.4, color: capBillOpen ? "#fff" : "#000", fontFamily: "'Space Grotesk',sans-serif" }}>
+              🎖️ CAPTAIN BILL DUE{capBillOpen && captainBillDue.length > 0 ? ` · ${captainBillDue.length} · ₹${Math.round(capBillDueTotal).toLocaleString("en-IN")}` : ""}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 800, color: capBillOpen ? "#FF90E8" : "#6B6B6B" }}>
+              {capBillOpen ? "▲ HIDE" : "▼ TAP TO VIEW"}
+            </span>
+          </button>
+
+          {capBillOpen && (
+            <div style={{ padding: 12, background: "#fff" }}>
+              <div style={{ fontSize: 12, fontWeight: 900, color: "#000", background: "#FFF4E5", border: "1.5px solid #000", borderRadius: 8, padding: "9px 11px", marginBottom: 10, lineHeight: 1.5 }}>
+                🧾 Staff friends &amp; family tabs. Settle now (Cash/UPI/Card) or later via SALARY (end of month). Manager PIN required.
+              </div>
+              {captainBillDue.length === 0 ? (
+                <div style={{ padding: "18px 8px", textAlign: "center", fontSize: 13, color: "#6B6B6B", fontWeight: 700 }}>
+                  No staff bill-due tabs open.
+                </div>
+              ) : captainBillDue.map((r) => {
+                const bal = r.balanceDue ?? r.amountDue ?? 0;
+                const paid = r.amountPaid ?? 0;
+                const total = r.totalBill ?? bal;
+                const rowOpen = !!capExpanded[r.id!];
+                return (
+                  <div key={r.id} style={{ border: "1.5px solid #000", borderRadius: 10, marginBottom: 12, overflow: "hidden", borderLeft: rowOpen ? "5px solid #FF90E8" : "1.5px solid #000", boxShadow: "3px 3px 0px #000" }}>
+                    <button onClick={() => setCapExpanded((m) => ({ ...m, [r.id!]: !m[r.id!] }))}
+                      style={{ width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, padding: "12px 14px", background: rowOpen ? "#FFEAF7" : "#fff", border: "none", cursor: "pointer" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 17, fontWeight: 900, color: "#000", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          🎖️ {r.customerName || "Staff"}
+                        </div>
+                        <div style={{ fontSize: 13, color: "#6B6B6B", fontWeight: 700, marginTop: 3 }}>
+                          {r.staff || "—"}{r.staffEmployeeId ? ` · ${r.staffEmployeeId}` : ""}
+                        </div>
+                        <div style={{ marginTop: 6 }}>
+                          <span style={{ display: "inline-block", fontSize: 10, fontWeight: 900, letterSpacing: 0.4, padding: "3px 8px", borderRadius: 6, background: "#B45309", color: "#fff" }}>
+                            🧾 STAFF F&amp;F · SALARY-PAYABLE
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: "#6B6B6B", letterSpacing: 0.3 }}>BALANCE</div>
+                        <div style={{ fontSize: 22, fontWeight: 900, color: "#000" }}>₹{Math.round(bal).toLocaleString("en-IN")}</div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: "#23A094", marginTop: 2 }}>{rowOpen ? "▲" : "▼ details"}</div>
+                      </div>
+                    </button>
+
+                    {rowOpen && (
+                      <div style={{ padding: "12px 14px", background: "#F4F4F0", borderTop: "1.5px solid #000" }}>
+                        <div style={{ fontSize: 13, fontWeight: 900, color: "#000", letterSpacing: 0.4, marginBottom: 6 }}>ITEMS ORDERED</div>
+                        {(r.items || []).length === 0 ? (
+                          <div style={{ fontSize: 14, color: "#6B6B6B", fontWeight: 700 }}>No items on this tab.</div>
+                        ) : (
+                          <div style={{ marginBottom: 4 }}>
+                            {(r.items || []).map((it, i) => (
+                              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#000", fontWeight: 700, padding: "3px 0" }}>
+                                <span>{it.qty}× {it.n}</span>
+                                <span>₹{Math.round((it.p || 0) * (it.qty || 0))}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed #000" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                            <span>Subtotal</span><span>₹{Math.round(r.subtotal ?? 0).toLocaleString("en-IN")}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                            <span>Service charge (10%)</span><span>₹{Math.round(r.serviceCharge ?? 0).toLocaleString("en-IN")}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: "#3A3A3A", fontWeight: 700, padding: "3px 0" }}>
+                            <span>GST / tax</span><span>₹{Math.round(r.tax ?? 0).toLocaleString("en-IN")}</span>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#000", marginTop: 6, paddingTop: 6, borderTop: "1px solid #000" }}>
+                          <span>Total bill</span><span>₹{Math.round(total).toLocaleString("en-IN")}</span>
+                        </div>
+                        {paid > 0 && (
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#23A094", marginTop: 4 }}>
+                            <span>Paid so far</span><span>₹{Math.round(paid).toLocaleString("en-IN")}</span>
+                          </div>
+                        )}
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 900, color: "#B45309", marginTop: 4 }}>
+                          <span>Balance due</span><span>₹{Math.round(bal).toLocaleString("en-IN")}</span>
+                        </div>
+                        <button onClick={() => openCapPay(r)}
+                          style={{ width: "100%", marginTop: 12, padding: 13, borderRadius: 10, background: "#23A094", border: "2px solid #000", color: "#fff", fontSize: 15, fontWeight: 900, cursor: "pointer", boxShadow: "3px 3px 0px #000" }}>
+                          💵 SETTLE BILL
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 🆕 2026-07-01 (Khushi) — CAPTAIN BILL DUE settle overlay. Type the amount
+          (defaults to the full balance; type less for a partial), pick how it's
+          settled (Cash/UPI/Card now, or SALARY = later/end of month), CONFIRM.
+          Manager OTP/PIN gated inside settleCapBillDue. Full pay auto-clears. */}
+      {capPayTarget && (() => {
+        const r = capPayTarget;
+        const bal = r.balanceDue ?? r.amountDue ?? 0;
+        const typed = Math.max(0, Math.min(Number(capPayAmt) || 0, bal));
+        const methods: { k: NcPaymentMethod; label: string }[] = [
+          { k: "cash", label: "💵 CASH" },
+          { k: "upi", label: "📲 UPI" },
+          { k: "card", label: "💳 CARD" },
+          { k: "salary", label: "🗓 SALARY (end of month)" },
+        ];
+        const disabled = !capPayMethod || capPayBusy || typed <= 0;
+        return (
+          <div onClick={(e) => { if (e.target === e.currentTarget && !capPayBusy) setCapPayTarget(null); }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <div style={{ background: "#fff", border: "3px solid #000", borderRadius: 16, boxShadow: "6px 6px 0px #000", width: "100%", maxWidth: 420, maxHeight: "90vh", overflowY: "auto", padding: 18 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 17, fontWeight: 900, color: "#000", fontFamily: "'Space Grotesk',sans-serif" }}>🧾 SETTLE CAPTAIN BILL</div>
+                <button onClick={() => { if (!capPayBusy) setCapPayTarget(null); }}
+                  style={{ background: "#F0F0F0", border: "2px solid #000", borderRadius: 10, width: 36, height: 36, fontSize: 18, cursor: "pointer", fontWeight: 900 }}>✕</button>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 900, color: "#000", marginBottom: 2 }}>{r.customerName || "Staff"}</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#6B6B6B", marginBottom: 10 }}>{r.staff || "—"}{r.staffEmployeeId ? ` · ${r.staffEmployeeId}` : ""}</div>
+              <div style={{ fontSize: 13, fontWeight: 900, color: "#B45309", background: "#FFF4E5", border: "1.5px solid #000", borderRadius: 8, padding: "9px 11px", marginBottom: 12 }}>
+                Balance due: ₹{Math.round(bal).toLocaleString("en-IN")}
+              </div>
+              <label style={{ fontSize: 12, fontWeight: 900, color: "#000", display: "block", marginBottom: 4 }}>AMOUNT TO SETTLE (₹)</label>
+              <input type="number" inputMode="numeric" value={capPayAmt} onChange={(e) => setCapPayAmt(e.target.value)}
+                style={{ width: "100%", padding: "11px 12px", fontSize: 16, fontWeight: 800, border: "2px solid #000", borderRadius: 10, marginBottom: 4, boxSizing: "border-box" }} />
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#6B6B6B", marginBottom: 12 }}>Defaults to the full balance. Type less for a partial payment (the rest carries).</div>
+              <label style={{ fontSize: 12, fontWeight: 900, color: "#000", display: "block", marginBottom: 6 }}>HOW IS IT BEING SETTLED?</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                {methods.map((m) => {
+                  const active = capPayMethod === m.k;
+                  return (
+                    <button key={m.k} onClick={() => setCapPayMethod(m.k)}
+                      style={{ flex: "1 1 42%", minWidth: 120, padding: "11px 8px", borderRadius: 10, border: "2px solid #000", cursor: "pointer",
+                        background: active ? "#FF90E8" : "#fff", color: "#000", fontSize: 13, fontWeight: 900, whiteSpace: "nowrap", fontFamily: "'Space Grotesk',sans-serif" }}>
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button disabled={disabled}
+                onClick={() => capPayMethod && settleCapBillDue(r, typed, capPayMethod)}
+                style={{ width: "100%", padding: 14, borderRadius: 12, border: "2px solid #000",
+                  background: disabled ? "#CFCFCF" : "#23A094", color: disabled ? "#6B6B6B" : "#fff",
+                  fontSize: 15, fontWeight: 900, cursor: disabled ? "not-allowed" : "pointer",
+                  boxShadow: disabled ? "none" : "3px 3px 0px #000" }}>
+                {capPayBusy ? "SETTLING…" : capPayMethod === "salary" ? "✅ CONFIRM — SETTLE VIA SALARY" : "✅ CONFIRM SETTLE BILL"}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 🆕 2026-06-12 v3.266 (Khushi) — TABLE TRANSACTIONS panel. Mirror of Bar
           Mode's RECENT TRANSACTIONS, in the white area below the search box.
