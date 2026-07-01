@@ -2130,6 +2130,44 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
               `${sBillBase}-${sPrevCount + 1}`, sPrevCount > 0,
               { by: captainName, total: finalAmount, discountPct, aggregator: effAggName, billNumberBase: sBillBase },
             );
+          // 🆕 2026-07-01 (Khushi) — the SETTLE receipt must ALWAYS print the discount
+          // the captain applied at settle, with its % AND value, for BOTH in-house and
+          // aggregator. In-house already flows (discBreakdown/discountAmt off the
+          // subtotal; total already net). For AGGREGATOR the printed bill otherwise
+          // showed the FULL invoice because discountPct is forced to 0 (line ~1571):
+          // here we print the platform % + value (gross − net; the platform discount is
+          // taken off the WHOLE bill) and the NET as the printed TOTAL — matching what
+          // the venue actually collected (amountPaid). Only the SETTLE receipt changes;
+          // the standalone "PRINT BILL" preview is untouched (still a full invoice).
+          const isAggPay = payMethod === "aggregator";
+          const settleDiscPct = isAggPay ? (aggEditDiscount || 0) : discountPct;
+          const settleTotal = isAggPay ? (aggregatorNetAmount ?? finalAmount) : finalAmount;
+          const settleDiscVal = isAggPay
+            ? Math.max(0, Math.round(finalAmount - (aggregatorNetAmount ?? finalAmount)))
+            : discountAmt;
+          // 🆕 2026-07-01 (Khushi) — per-tender "Paid by CASH/CARD/UPI" breakdown at the
+          // bill bottom. Mirrors methodLabel: wallet redemption (if any) + the cash side
+          // (split parts / single method / aggregator platform net). Sums to the printed
+          // TOTAL. Omitted when empty → the chit falls back to the single "Paid via" line.
+          const printTenders: Array<{ method: string; amount: number }> = [];
+          if (walletPaidSoFar > 0) printTenders.push({ method: "WALLET", amount: Math.round(walletPaidSoFar) });
+          if (payable > 0) {
+            if (splits) {
+              for (const s of splits) printTenders.push({ method: s.method.toUpperCase(), amount: Math.round(s.amount) });
+            } else if (isAggPay) {
+              printTenders.push({ method: effAggName.toUpperCase(), amount: Math.round(aggregatorNetAmount ?? payable) });
+            } else {
+              printTenders.push({ method: payMethod.toUpperCase(), amount: Math.round(payable) });
+            }
+          }
+          // Rounding insurance — make the tender lines sum EXACTLY to the printed
+          // TOTAL (wallet paise can otherwise drift one line by ≤₹1). Absorb any
+          // residual on the LAST tender; delta is ≤₹1 so this never invents/hides money.
+          if (printTenders.length > 0) {
+            const tSum = printTenders.reduce((s, t) => s + t.amount, 0);
+            const delta = Math.round(settleTotal) - tSum;
+            if (delta !== 0) printTenders[printTenders.length - 1].amount += delta;
+          }
           // ⚡ 2026-06-25 — FIRE-AND-FORGET (see confirmAndPrint note). Don't block
           // settlement-complete on the print job's SERVER ack; the job is queued
           // durably the instant we call printBill. Settlement money is already saved.
@@ -2140,10 +2178,11 @@ function MarkPaidModal({ reservation, captainName, onClose }: {
             amounts: {
               subtotal: discBreakdown.subtotal, serviceCharge: scAmt,
               cgst: discBreakdown.cgst, sgst: discBreakdown.sgst,
-              discount: discountAmt, roundOff: 0, total: finalAmount,
-              discountPct,
+              discount: settleDiscVal, roundOff: 0, total: settleTotal,
+              discountPct: settleDiscPct,
             },
             paymentMethod: methodLabel,
+            tenders: printTenders.length > 0 ? printTenders : undefined,
             billNumber: sBillNumber, isDuplicate: sIsDuplicate, tabletFloor: floor,
           }).catch((e) => console.warn("[settle auto-print] bill print failed", e));
         }
@@ -2801,7 +2840,10 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
   const [countryCode, setCountryCode] = useState("91");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
-  const [partySize, setPartySize] = useState(2);
+  // number | "" — allow the field to go EMPTY while typing (Khushi 2026-07-01:
+  // the old `Number(v)||2` snapped a cleared field back to 2 so the captain could
+  // never delete the default and type their own count). Coerced to a number at submit.
+  const [partySize, setPartySize] = useState<number | "">(2);
   // 🆕 2026-05-20 (Khushi) — arrival time captured up-front (defaults to "now"
   // in IST HH:MM). Captain can edit if the guest is being seated late.
   const [arrivalTime, setArrivalTime] = useState(() => {
@@ -2916,19 +2958,22 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
     }
     setSaving(true);
     try {
+      // Coerce the (possibly-empty) guests field to a real number for every write
+      // path + the WhatsApp message; an empty/invalid field falls back to 2.
+      const partySizeNum = typeof partySize === "number" && partySize > 0 ? partySize : 2;
       let createdRef = "";
       if (isProxy) {
         const floorOpt = TABLE_OPTIONS.find(g => g.floor === proxyFloor);
         createdRef = await createProxyTable(
           proxyTableId, proxyFloor, floorOpt?.label || proxyFloor,
-          customerName.trim(), fullPhone, partySize, captainName,
+          customerName.trim(), fullPhone, partySizeNum, captainName,
           aggValue, discountPct, email.trim(), arrivalTime.trim()
         );
       } else {
         const opt = TABLE_OPTIONS.find((g) => g.tables.includes(selectedTable));
         createdRef = await createWalkInTable(
           selectedTable, opt?.floor || "", opt?.label || "",
-          customerName.trim(), fullPhone, partySize, captainName,
+          customerName.trim(), fullPhone, partySizeNum, captainName,
           aggValue, discountPct, email.trim(), arrivalTime.trim()
         );
       }
@@ -2975,7 +3020,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           `📅 Date: ${dateNice}\n` +
           `🕘 Arrival: ${arr12}\n` +
           `🪑 Table: ${tableLabel}${floorLabel ? ` · ${floorLabel}` : ""}\n` +
-          `👥 Guests: ${partySize}\n\n` +
+          `👥 Guests: ${partySizeNum}\n\n` +
           `Show your QR at the door — we will have your table ready.\n\n` +
           `View reservation: ${walletUrl}\n\n` +
           `See you tonight!\n\n` +
@@ -2988,7 +3033,7 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
           template: {
             name: "table_confirmed",
             language: "en",
-            params: [customerName.trim(), dateNice, arr12, tableLabel, floorLabel || "your floor", String(partySize), walletUrl],
+            params: [customerName.trim(), dateNice, arr12, tableLabel, floorLabel || "your floor", String(partySizeNum), walletUrl],
           },
           fallbackText: waText,
         });
@@ -3133,8 +3178,9 @@ function WalkInModal({ captainName, existingTables, allReservations, isPastDate,
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 10, marginBottom: 12 }}>
           <div>
             <div style={fieldLabel}>Guests *</div>
-            <input type="number" value={partySize} onChange={(e) => setPartySize(Number(e.target.value) || 2)} min={1} max={20}
-              style={fieldInput} />
+            <input type="number" value={partySize}
+              onChange={(e) => { const v = e.target.value; setPartySize(v === "" ? "" : Math.max(1, Math.min(20, Number(v) || 1))); }}
+              min={1} max={20} style={fieldInput} />
           </div>
           <div>
             <div style={fieldLabel}>Arrival Time *</div>
@@ -7033,6 +7079,27 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       const _aggNm = (r.aggregator || r.source || "inhouse").toLowerCase();
       const _isAggBooking = /swiggy|zomato|eazydiner|eazydinner|payeazy/.test(_aggNm);
       const inhouseDiscOnAgg = _isAggBooking && (discount > 0 || ((r.discountPercent || 0) > 0 && !!r.discountModifiedByCaptain) || (r.paymentStatus === "paid" && (r.discountAmount || 0) > 0));
+      // 🆕 2026-07-01 (Khushi) — an AGGREGATOR bill settled via the platform tender
+      // collects the NET (the platform discount is taken off the WHOLE gross bill).
+      // The panel otherwise showed the full gross with NO discount line. Surface the
+      // platform discount (% + value = gross − net) and keep the NET as the amount
+      // billed so TABLE TRANSACTIONS matches the settle receipt. subtotal/SC/GST stay
+      // GROSS so (gross components − discount) reconciles to the net collected.
+      // Computed AFTER inhouseDiscOnAgg so that flag still reflects the in-house disc.
+      const _aggGross = (r as { aggregatorGrossAmount?: number }).aggregatorGrossAmount;
+      const _aggNet = (r as { aggregatorNetAmount?: number }).aggregatorNetAmount;
+      const isAggSettled = isPaid && typeof _aggGross === "number" && typeof _aggNet === "number" && _aggGross > _aggNet + 0.5;
+      let _aggDiscPct = 0;
+      if (isAggSettled) {
+        serviceCharge = r.serviceChargeAmount !== undefined ? r.serviceChargeAmount : std.serviceCharge;
+        tax = r.taxAmount !== undefined ? r.taxAmount : std.gst;
+        subtotal = Math.max(0, Math.round((_aggGross as number) - serviceCharge - tax));
+        discount = Math.round((_aggGross as number) - (_aggNet as number));
+        billed = Math.round(_aggNet as number);
+        _aggDiscPct = (r as { aggregatorDiscount?: number }).aggregatorDiscount
+          || ((_aggGross as number) > 0 ? Math.round((discount / (_aggGross as number)) * 100) : 0);
+        estimated = false; override = false;
+      }
       let ms = 0;
       const bump = (iso?: string) => { if (iso) { const t = new Date(iso).getTime(); if (!isNaN(t) && t > ms) ms = t; } };
       bump(r.bookedAt); bump(r.actualArrivalTime); bump(r.paidAt); bump(r.advancePaidAt); bump(r.lastBillPrintedAt); bump(r.billFirstPrintedAt);
@@ -7040,7 +7107,7 @@ function CaptainDashboard({ captainName }: { captainName: string }) {
       // 🆕 2026-06-12 v3.268 (Khushi) — discount % for the breakdown label
       // ("Discount (10%) −₹104"). Derived from the ₹ discount vs the pre-discount
       // subtotal so it is correct regardless of source (captain or aggregator).
-      const discountPct = subtotal > 0 && discount > 0 ? Math.round((discount / subtotal) * 100) : 0;
+      const discountPct = isAggSettled ? _aggDiscPct : (subtotal > 0 && discount > 0 ? Math.round((discount / subtotal) * 100) : 0);
       // A RELEASED table is settled+closed and off the floor → it always counts
       // as CLEARED (never OPEN), regardless of any odd archived paymentStatus.
       const cleared = isPaid || released;

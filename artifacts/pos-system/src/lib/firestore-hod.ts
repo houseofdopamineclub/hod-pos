@@ -6348,6 +6348,11 @@ export async function printBill(data: {
     discount: number; roundOff: number; total: number; happyHourDiscount?: number; discountPct?: number;
   };
   paymentMethod?: string;
+  /** 🆕 2026-07-01 (Khushi) — per-tender settlement breakdown printed at the
+   *  bottom of the bill ("Paid by CASH ₹X / CARD ₹Y / UPI ₹Z / WALLET ₹W").
+   *  Sums to `amounts.total`. Omitted → the chit falls back to the single
+   *  "Paid via" label from `paymentMethod`. */
+  tenders?: Array<{ method: string; amount: number }>;
   billNumber?: string;
   isDuplicate?: boolean;
   tabletFloor?: TabletFloor | null;
@@ -6381,6 +6386,7 @@ export async function printBill(data: {
       paperItems: paperItemsTagged,
       paperAmounts: data.paperAmounts || null,
       paymentMethod: data.paymentMethod || null,
+      tenders: Array.isArray(data.tenders) && data.tenders.length > 0 ? data.tenders : null,
       billNumber: data.billNumber || null,
       isDuplicate: !!data.isDuplicate,
       gstin: "29AARFH2309E1ZC",
