@@ -740,17 +740,33 @@ export function buildSalesTickets(raw: VenueRaw): SalesTicketRow[] {
     const subtotal = bd.subtotal;
     const sc = num((r as { serviceChargeAmount?: number }).serviceChargeAmount);
     const tax = num(r.taxAmount);
-    const disc = num(r.discountAmount);
-    const net = Math.max(0, subtotal - disc);
-    const billFinal = Math.max(0, subtotal + sc + tax - disc);
-    // Aggregator bills realise NET received (commission-adjusted), mirroring the
-    // dashboard's aggNet; inhouse bills realise amountPaid. Either way Total is
-    // what actually came in, so the tender split reconciles to it.
     const inhouse = isInhouse(r);
-    const aggNet = (r as { aggregatorNetAmount?: number }).aggregatorNetAmount ?? r.amountPaid ?? billFinal;
-    const total = Math.round(inhouse ? (num(r.amountPaid) || billFinal) : num(aggNet));
+    const grossWithTax = subtotal + sc + tax; // full taxed bill BEFORE any post-tax platform discount
+    // Discount handling differs by channel:
+    //  • IN-HOUSE   — discount is PRE-tax (discountAmount): SC/GST were charged on
+    //    the discounted subtotal → netSales = subtotal − discount.
+    //  • AGGREGATOR — the platform discount (Zomato/Swiggy/EazyDiner) is POST-tax:
+    //    it is taken off the WHOLE taxed bill, so it NEVER touched discountAmount and
+    //    SC/GST stayed on the gross. The reduction = grossWithTax − (wallet + agg-net)
+    //    and MUST appear in the Discount column. Previously it was silently absorbed
+    //    into Round Off (that is why Round Off ballooned to a huge negative). GST is
+    //    left exactly as computed (on the gross) — this only re-labels discount vs
+    //    round-off, it does not change any tax figure.
+    let disc: number, net: number, total: number, walletPaid = 0;
+    if (inhouse) {
+      disc = num(r.discountAmount);
+      net = Math.max(0, subtotal - disc);
+      const billFinal = Math.max(0, grossWithTax - disc);
+      total = Math.round(num(r.amountPaid) || billFinal);
+    } else {
+      const aggNet = Math.round(num((r as { aggregatorNetAmount?: number }).aggregatorNetAmount ?? r.amountPaid ?? grossWithTax));
+      walletPaid = Math.max(0, Math.round(num((r as { walletPaidAmount?: number }).walletPaidAmount))); // wallet redeemed on the same bill (prepaid)
+      total = walletPaid + aggNet; // money that actually satisfied the bill
+      disc = Math.max(0, Math.round((grossWithTax - total) * 100) / 100); // platform (post-tax) reduction
+      net = Math.round((subtotal - disc) * 100) / 100;
+    }
     if (total <= 0) return;
-    const roundOff = total - (net + sc + tax); // forces net+sc+tax+roundOff === total
+    const roundOff = Math.round((total - (net + sc + tax)) * 100) / 100; // net+sc+tax+roundOff === total
 
     const row: SalesTicketRow = {
       ticketNo: String((r as { invoiceNumber?: string }).invoiceNumber || r.bookingRef || (r as { billNumber?: string }).billNumber || r.tableId || ""),
@@ -762,10 +778,11 @@ export function buildSalesTickets(raw: VenueRaw): SalesTicketRow[] {
     };
 
     if (!inhouse) {
-      // aggregator bill — the whole NET total lands under its platform column
+      // aggregator bill — wallet portion → Prepaid, platform net → its platform column
       const s = ((r.aggregator || r.source || "") + "").toLowerCase();
       const col: TenderCol = s.includes("zomato") ? "zomato" : s.includes("swiggy") ? "swiggy" : "upi";
-      row[col] += total;
+      row.prepaid += walletPaid;
+      row[col] += (total - walletPaid);
     } else {
       const prepaid = Math.min(total, Math.max(0, Math.round(num((r as { walletPaidAmount?: number }).walletPaidAmount))));
       row.prepaid += prepaid;
@@ -805,7 +822,7 @@ export function buildSalesTickets(raw: VenueRaw): SalesTicketRow[] {
     const disc = num(last.discount);
     const subtotal = num(last.subtotal) || Math.max(0, total - sc - tax + disc);
     const net = Math.max(0, subtotal - disc);
-    const roundOff = total - (net + sc + tax);
+    const roundOff = Math.round((total - (net + sc + tax)) * 100) / 100;
     rows.push({
       ticketNo: String(last.billNumber || (c as { ref?: string }).ref || c.tableId || ""),
       guests: num((c as { partySize?: number }).partySize) || num((c as { guests?: number }).guests) || 1,
